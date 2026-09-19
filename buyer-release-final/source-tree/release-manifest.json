@@ -1,0 +1,116 @@
+{
+  "manifest_version": 1,
+  "product": "sniper-suite",
+  "description": "Modular crypto trading suite: 5 modules (sniper, copy, polymarket, staking program, telegram control) + Axum control plane + distributed execution ownership",
+  "version": "0.1.0",
+  "license": "MIT",
+  "notes": [
+    "Machine-readable delivery manifest. Authoritative sources: VERSION (version), Cargo.lock + programs/staking-suite/Cargo.lock (dependency graph), AUDIT.md (evidence trail), docs/HANDOVER.md (verification taxonomy).",
+    "No build timestamp is included (reproducibility). The release commit hash is deliberately NOT embedded: this file is part of the commit it would describe; the authoritative commit/tag is recorded in git history and the release notes.",
+    "scripts/release-check.sh fails the release if this file is missing or its version disagrees with VERSION / Cargo.toml."
+  ],
+  "components": {
+    "workspace_members": [
+      "crates/core (bot-core)",
+      "crates/solana-kit",
+      "crates/module-sniper",
+      "crates/module-copy",
+      "crates/module-polymarket",
+      "crates/module-telegram",
+      "crates/server (sniper-suite binary)"
+    ],
+    "standalone_programs": [
+      "programs/staking-suite (native Solana program, own lockfile, built with cargo build-sbf / agave 2.1.21)"
+    ],
+    "database_migrations": {
+      "count": 11,
+      "high_water_mark": "0011",
+      "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)"
+    },
+    "api_endpoints_documented": 28,
+    "docs_count": 47
+  },
+  "toolchain": {
+    "rust": "1.98.1",
+    "rust_pin_enforced_by": [
+      "rust-toolchain.toml",
+      "Dockerfile (rust:1.98.1-bookworm)",
+      ".github/workflows/ci.yml (program job dtolnay/rust-toolchain@1.98.1)",
+      "scripts/release-check.sh gate"
+    ],
+    "solana_program_toolchain": "agave 2.1.21 / platform-tools v1.43 / sbf rustc 1.79.0 \u2014 cargo build-sbf EXECUTED on the audit-pass source (hardening pass 2026-09-18); incremental rebuild after touching the source with freshly-installed platform-tools produced a BYTE-IDENTICAL .so",
+    "solana_cli": "solana-cli 2.1.21 (src:8a085eeb; feat:1416569292) \u2014 official anza-xyz/agave release tarball, SHA-256 5da3359e296f1e6c13522b874317cb4cfe33e73301a9dc60b1e1435cc133b397"
+  },
+  "test_counts": {
+    "workspace_total": 537,
+    "workspace_total_at_freeze_0e139c3": 521,
+    "workspace_gated_integration_executed": 38,
+    "db_integration": 23,
+    "redis_integration": 10,
+    "distributed_integration": 4,
+    "two_replica_mirror": 1,
+    "staking_host": 71,
+    "staking_host_at_freeze_0e139c3": 48,
+    "release_check_gates": {
+      "pass": 20,
+      "fail": 0,
+      "skip": 0
+    },
+    "failures": 0,
+    "staking_validator_e2e_executed_passed": 3,
+    "staking_validator_e2e_run": "hardening pass 2026-09-18: STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1 \u2192 3 passed / 0 failed in 160.72s on solana-test-validator 2.1.21 (metadata e2e against the real mainnet-cloned mpl-token-metadata)",
+    "workspace_total_all_features": 537
+  },
+  "verification_status": {
+    "verified_final_pass": [
+      "AUDIT PASS 2026-09-18 (current tree): cargo fmt --check / cargo check --workspace --all-targets / cargo clippy --workspace --all-targets --all-features -D warnings \u2014 all clean",
+      "cargo test --workspace -- --test-threads=1 (537/537, gated suites executed against real PostgreSQL 17.11 + Redis 8.0.2; the freeze-gate run was 521/521 against PG 16.4 + Redis 7.2.10)",
+      "db_integration 23/23, redis_integration 10/10, distributed_integration 4/4, two_replica_mirror 1/1",
+      "staking fmt + clippy --all-targets -D warnings + host tests 71/71 (was 48/48 at freeze)",
+      "cargo audit (both lockfiles, 0 errors, 9 pre-existing allow-listed warnings), cargo deny check (advisories/bans/licenses/sources ok); Cargo.lock package counts unchanged (706/580) \u2014 no dependency drift",
+      "audit-chain tamper evidence: modification, reorder, missing, duplicate detection + linear chain under 8 concurrent appenders (advisory-lock serialization) \u2014 inside db_integration",
+      "telegram bot-token redaction in all API error paths (closed-port regression test)",
+      "secret scan + TODO/stub-marker scan clean; migrations monotonic 0001-0011; version + toolchain-pin consistency (release-check.sh)",
+      "HARDENING PASS 2026-09-18: cargo build-sbf on the audit-pass source \u2192 187,504-byte staking_suite.so (SHA-256 57a890fa\u2026), byte-identical on incremental rebuild with fresh platform-tools",
+      "HARDENING PASS: ALL 3 staking validator e2e EXECUTED + PASSED (solana-test-validator 2.1.21; governance lifecycle, funded stake\u2192reward\u2192unstake lifecycle, max-supply cap + metadata against the REAL mainnet-cloned mpl-token-metadata via --clone-upgradeable-program) \u2014 found and fixed two real defects (mpl discriminant 19\u219233; harness clone flag)",
+      "HARDENING PASS: cargo test --workspace 537/537 exit 0 AND cargo test --workspace --all-features 537/537 exit 0 (real PG 17.11 + Redis 8.0.2)",
+      "HARDENING PASS: pg_dump\u2192restore round-trip RE-EXECUTED on PostgreSQL 17.11 (dump SHA-256 5989ecf1\u2026, tables/migrations/rowcounts identical, db_integration 23/23 against the restored DB, app startup + /health + /ready + /api/status(paper, live_allowed=false) + /api/audit/verify + clean SIGTERM shutdown against the restored DB)",
+      "HARDENING PASS: latency_bench network benches executed against public devnet (read-only + simulate; no broadcasts): getSlot p50=65ms/p95=211ms n=30, getLatestBlockhash p50=65ms/p95=67ms n=30, simulateTransaction p50=66ms/p95=275ms n=10 \u2014 sandbox-network figures, NOT product guarantees",
+      "HARDENING PASS: scripts/staking-identity.sh verify/set-id/deploy guards tested (set-id round-trip tree-hash identical; deploy refuses keypair\u2260declare_id mismatch and placeholder-on-public-cluster)"
+    ],
+    "previously_verified_identical_source": [
+      "recon_crash_e2e against a local solana-test-validator",
+      "devnet_e2e read-only against public devnet",
+      "latency_bench local-pipeline benchmarks (the network-gated benches WERE executed in the hardening pass \u2014 see verified_final_pass)",
+      "deterministic ledger replay"
+    ],
+    "not_executed_environment_blocked": [
+      "funded live trading / devnet broadcasts (landing_rate bench, canary transactions) \u2014 requires operator-funded keys + explicit approval",
+      "docker build + container smoke (no Docker daemon in the sandbox; native-equivalent app startup/health/shutdown WAS executed \u2014 see verified_final_pass)",
+      "GitHub Actions CI run (no CI runner; every CI gate has a recorded local-equivalent execution \u2014 see docs/CI-LOCAL-EQUIVALENCE.md mapping in the evidence package)",
+      "Polymarket live-read validation against Polygon mainnet (module is mock-tested 66+5; operator procedure in docs/LIVE-VALIDATION.md)",
+      "cargo cyclonedx / cargo spdx formatted SBOM (tools not installed; cargo tree + both Cargo.lock files + cargo audit/deny outputs are recorded as the dependency evidence)",
+      "external security audit / penetration test / formal verification (none performed \u2014 do not claim 'audited')"
+    ]
+  },
+  "external_handover_blockers": [
+    "Insert the legal copyright holder into LICENSE (currently the generic 'sniper-suite authors')",
+    "Publish a real security contact (root SECURITY.md points at the repository owner's contact)",
+    "Set the real repository URL in Cargo.toml when published (placeholder was removed)",
+    "Generate the final program keypair and run scripts/staking-identity.sh set-id + deploy (declare_id! is still the pre-deployment placeholder; the identity script refuses mismatched/placeholder deployments)",
+    "Commission an independent external security audit before any mainnet deployment of the staking program",
+    "Provide production infrastructure: PostgreSQL >= 16, Redis 7, funded keys, RPC/WS providers",
+    "Execute Docker image build + GitHub Actions CI on real runners (local-equivalent evidence recorded; container/runner execution is not)",
+    "Funded live-trading validation under operator supervision (paper mode is the default; docs/LIVE-VALIDATION.md)"
+  ],
+  "staking_program": {
+    "so_path": "programs/staking-suite/target/deploy/staking_suite.so (build artifact; not committed)",
+    "so_bytes": 187504,
+    "so_sha256": "57a890fae273f2c569fc814c43f0645311b6983dd30782126a9844ee193b5564",
+    "built_from": "audit-pass + hardening-fix source (mpl CPI discriminant 33); tree inventory evidence/source-inventory.json",
+    "built_with": "cargo build-sbf, agave 2.1.21, platform-tools v1.43 (sbf rustc 1.79.0), host cargo 1.98.1",
+    "determinism": "rebuild after `touch src/lib.rs` with freshly installed platform-tools \u2192 identical SHA-256 (bit-for-bit on same toolchain/OS; cross-OS reproducibility NOT claimed)",
+    "program_id": "3vEEMMFmdA88n8ApgZ3b9L3BXEh75yCeMbHbmUjR9mfy \u2014 PRE-DEPLOYMENT PLACEHOLDER (no keypair exists for it). Final identity is an operator action: solana-keygen new \u2192 scripts/staking-identity.sh set-id <kp> \u2192 deploy. scripts/staking-identity.sh verify/deploy refuse mismatches and refuse deploying the placeholder to public clusters.",
+    "superseded_artifacts": "the freeze-era 5,440-byte .so and the pre-fix 9e113678\u2026 .so are superseded and MUST NOT be deployed"
+  }
+}

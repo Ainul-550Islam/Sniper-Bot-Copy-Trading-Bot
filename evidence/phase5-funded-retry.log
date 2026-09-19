@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.25s
+     Running tests/validator_e2e.rs (target/debug/deps/validator_e2e-c0ccdc1a04eb1021)
+
+running 1 test
+test validator_e2e_funded_staking_lifecycle ... 
+thread 'validator_e2e_funded_staking_lifecycle' (126791) panicked at tests/validator_e2e.rs:1113:6:
+unstake must confirm: Error { request: Some(GetLatestBlockhash), kind: Reqwest(reqwest::Error { kind: Request, url: "http://127.0.0.1:36113/", source: TimedOut }) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    validator_e2e_funded_staking_lifecycle
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 392.76s
+
+error: test failed, to rerun pass `--test validator_e2e`

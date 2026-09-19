@@ -1,0 +1,714 @@
+adler2 v2.0.1
+aead v0.5.2
+aes v0.8.4
+aes-gcm-siv v0.11.1
+agave-feature-set v2.3.13
+ahash v0.8.12
+ahash v0.8.12 (*)
+aho-corasick v1.1.5
+aho-corasick v1.1.5 (*)
+alloc-no-stdlib v2.0.4
+alloc-stdlib v0.2.4
+alloc-stdlib v0.2.4 (*)
+anyhow v1.0.104
+ark-bn254 v0.4.0
+ark-ec v0.4.2
+ark-ec v0.4.2 (*)
+ark-ff v0.4.2
+ark-ff v0.4.2 (*)
+ark-ff-asm v0.4.2 (proc-macro)
+ark-ff-macros v0.4.2 (proc-macro)
+ark-poly v0.4.2
+ark-serialize v0.4.2
+ark-serialize v0.4.2 (*)
+ark-serialize-derive v0.4.2 (proc-macro)
+ark-std v0.4.0
+ark-std v0.4.0 (*)
+arrayref v0.3.9
+arrayvec v0.7.8
+asn1-rs v0.5.2
+asn1-rs v0.5.2 (*)
+asn1-rs-derive v0.4.0 (proc-macro)
+asn1-rs-impl v0.1.0 (proc-macro)
+assert_matches v1.5.0
+async-channel v1.9.0
+async-compression v0.4.36
+async-lock v3.4.1
+async-trait v0.1.92 (proc-macro)
+async-trait v0.1.92 (proc-macro) (*)
+atomic-waker v1.1.2
+atty v0.2.14
+autocfg v1.5.1
+base64 v0.12.3
+base64 v0.13.1
+base64 v0.22.1
+bincode v1.3.3
+bincode v1.3.3 (*)
+bitflags v2.13.2
+bitflags v2.13.2 (*)
+blake3 v1.5.5
+blake3 v1.5.5 (*)
+block-buffer v0.10.4
+block-buffer v0.9.0
+borsh v0.10.4
+borsh v0.10.4 (*)
+borsh v1.5.7
+borsh v1.5.7 (*)
+borsh-derive v0.10.4 (proc-macro)
+borsh-derive v1.5.7 (proc-macro)
+borsh-derive-internal v0.10.4
+borsh-schema-derive-internal v0.10.4
+brotli v8.0.4
+brotli-decompressor v5.0.3
+bs58 v0.5.1
+bv v0.11.1
+bv v0.11.1 (*)
+bytemuck v1.23.1
+bytemuck v1.23.1 (*)
+bytemuck_derive v1.8.1 (proc-macro)
+bytemuck_derive v1.8.1 (proc-macro) (*)
+byteorder v1.5.0
+bytes v1.12.1
+bytes v1.12.1 (*)
+caps v0.5.6
+cc v1.4.6
+cc v1.4.6 (*)
+cfg-if v1.0.4
+cfg_aliases v0.2.2
+cfg_eval v0.1.2 (proc-macro)
+chrono v0.4.45
+cipher v0.4.4
+cipher v0.4.4 (*)
+compression-codecs v0.4.42
+compression-core v0.4.33
+concurrent-queue v2.5.0
+console v0.15.11
+constant_time_eq v0.3.1
+cpufeatures v0.2.17
+crc32fast v1.5.2
+crossbeam-channel v0.5.17
+crossbeam-channel v0.5.17 (*)
+crossbeam-deque v0.8.8
+crossbeam-epoch v0.9.21
+crossbeam-utils v0.8.23
+crunchy v0.2.4
+crypto-common v0.1.7
+crypto-common v0.1.7 (*)
+crypto-mac v0.8.0
+ctr v0.9.2
+curve25519-dalek v3.2.0
+curve25519-dalek v4.1.3
+curve25519-dalek v4.1.3 (*)
+curve25519-dalek-derive v0.1.1 (proc-macro)
+darling v0.21.3
+darling_core v0.21.3
+darling_core v0.21.3 (*)
+darling_macro v0.21.3 (proc-macro)
+dashmap v5.5.3
+dashmap v5.5.3 (*)
+data-encoding v2.11.1
+der-parser v8.2.0
+deranged v0.5.8
+derivation-path v0.2.0
+derivative v2.2.0 (proc-macro)
+derivative v2.2.0 (proc-macro) (*)
+digest v0.10.7
+digest v0.10.7 (*)
+digest v0.9.0
+digest v0.9.0 (*)
+displaydoc v0.2.7 (proc-macro)
+displaydoc v0.2.7 (proc-macro) (*)
+dlopen2 v0.5.0
+dlopen2_derive v0.3.0 (proc-macro)
+ed25519 v1.5.3
+ed25519-dalek v1.0.1
+ed25519-dalek v1.0.1 (*)
+ed25519-dalek-bip32 v0.2.0
+either v1.18.0
+env_logger v0.9.3
+equivalent v1.0.2
+errno v0.3.14
+event-listener v2.5.3
+event-listener v5.4.2
+event-listener v5.4.2 (*)
+event-listener-strategy v0.5.4
+fastbloom v0.14.1
+feature-probe v0.1.1
+find-msvc-tools v0.1.12
+five8 v0.2.1
+five8 v0.2.1 (*)
+five8_const v0.1.4
+five8_core v0.1.2
+flate2 v1.1.10
+fnv v1.0.7
+foreign-types v0.3.2
+foreign-types-shared v0.1.1
+form_urlencoded v1.2.2
+form_urlencoded v1.2.2 (*)
+futures v0.3.34
+futures v0.3.34 (*)
+futures-channel v0.3.34
+futures-channel v0.3.34 (*)
+futures-core v0.3.34
+futures-executor v0.3.34
+futures-executor v0.3.34 (*)
+futures-io v0.3.34
+futures-macro v0.3.34 (proc-macro)
+futures-sink v0.3.34
+futures-task v0.3.34
+futures-timer v3.0.4
+futures-util v0.3.34
+futures-util v0.3.34 (*)
+generic-array v0.14.7
+generic-array v0.14.7 (*)
+gethostname v0.2.3
+getrandom v0.1.16
+getrandom v0.1.16 (*)
+getrandom v0.2.17
+getrandom v0.2.17 (*)
+getrandom v0.3.4
+getrandom v0.3.4 (*)
+governor v0.6.3
+hashbrown v0.13.2
+hashbrown v0.13.2 (*)
+hashbrown v0.14.5
+hashbrown v0.15.5
+histogram v0.6.9
+hmac v0.12.1
+hmac v0.12.1 (*)
+hmac v0.8.1
+hmac-drbg v0.3.0
+http v0.2.12
+http v0.2.12 (*)
+http v1.5.0
+http v1.5.0 (*)
+http-body v1.1.0
+http-body v1.1.0 (*)
+http-body-util v0.1.5
+http-body-util v0.1.5 (*)
+httparse v1.10.1
+humantime v2.4.0
+hyper v1.11.1
+hyper v1.11.1 (*)
+hyper-rustls v0.27.7
+hyper-util v0.1.20
+hyper-util v0.1.20 (*)
+icu_collections v1.5.0
+icu_collections v1.5.0 (*)
+icu_locid v1.5.0
+icu_locid v1.5.0 (*)
+icu_locid_transform v1.5.0
+icu_locid_transform_data v1.5.1
+icu_normalizer v1.5.0
+icu_normalizer_data v1.5.1
+icu_properties v1.5.1
+icu_properties v1.5.1 (*)
+icu_properties_data v1.5.1
+icu_provider v1.5.0
+icu_provider v1.5.0 (*)
+icu_provider_macros v1.5.0 (proc-macro)
+ident_case v1.0.1
+idna v1.1.0
+idna_adapter v1.2.0
+indexmap v2.9.0
+indexmap v2.9.0 (*)
+indicatif v0.17.11
+indicatif v0.17.11 (*)
+inout v0.1.4
+ipnet v2.12.2
+itertools v0.10.5
+itertools v0.10.5 (*)
+itertools v0.12.1
+itertools v0.12.1 (*)
+itoa v1.0.18
+jobserver v0.1.34
+jsonrpc-core v18.0.0
+keccak v0.1.6
+lazy_static v1.5.0
+libc v0.2.189
+libm v0.2.16
+libsecp256k1 v0.6.0
+libsecp256k1 v0.6.0 (*)
+libsecp256k1-core v0.2.2
+libsecp256k1-core v0.2.2 (*)
+libsecp256k1-gen-ecmult v0.2.1
+libsecp256k1-gen-genmult v0.2.1
+litemap v0.7.4
+lock_api v0.4.14
+lock_api v0.4.14 (*)
+log v0.4.34
+lru-slab v0.1.3
+memchr v2.8.3
+memmap2 v0.5.10
+memoffset v0.9.1
+memoffset v0.9.1 (*)
+merlin v3.0.0
+minimal-lexical v0.2.1
+miniz_oxide v0.9.1
+mio v1.2.3
+nix v0.30.1
+nix v0.30.1 (*)
+no-std-compat v0.4.1
+nom v7.1.3
+nom v7.1.3 (*)
+nonzero_ext v0.3.0
+num v0.2.1
+num-bigint v0.2.6
+num-bigint v0.2.6 (*)
+num-bigint v0.4.8
+num-bigint v0.4.8 (*)
+num-complex v0.2.4
+num-conv v0.2.2
+num-derive v0.4.2 (proc-macro)
+num-derive v0.4.2 (proc-macro) (*)
+num-integer v0.1.47
+num-integer v0.1.47 (*)
+num-iter v0.1.46
+num-rational v0.2.4
+num-traits v0.2.19
+num-traits v0.2.19 (*)
+num_cpus v1.17.0
+num_enum v0.7.6
+num_enum v0.7.6 (*)
+num_enum_derive v0.7.6 (proc-macro)
+number_prefix v0.4.0
+oid-registry v0.6.1
+once_cell v1.21.4
+opaque-debug v0.3.1
+openssl v0.10.78
+openssl-macros v0.1.1 (proc-macro)
+openssl-probe v0.2.1
+openssl-sys v0.9.114
+parking v2.2.1
+parking_lot v0.12.5
+parking_lot v0.12.5 (*)
+parking_lot_core v0.9.12
+parking_lot_core v0.9.12 (*)
+paste v1.0.15 (proc-macro)
+pbkdf2 v0.11.0
+pem v1.1.1
+percent-encoding v2.3.2
+percentage v0.1.0
+pin-project-lite v0.2.17
+pkg-config v0.3.34
+polyval v0.6.2
+portable-atomic v1.15.0
+powerfmt v0.2.0
+ppv-lite86 v0.2.21
+ppv-lite86 v0.2.21 (*)
+proc-macro-crate v0.1.5
+proc-macro-crate v3.2.0
+proc-macro-crate v3.2.0 (*)
+proc-macro2 v1.0.107
+proc-macro2 v1.0.107 (*)
+qstring v0.7.2
+quanta v0.12.6
+quinn v0.11.9
+quinn v0.11.9 (*)
+quinn-proto v0.11.15
+quinn-proto v0.11.15 (*)
+quinn-udp v0.5.14
+quote v1.0.47
+quote v1.0.47 (*)
+rand v0.7.3
+rand v0.7.3 (*)
+rand v0.8.8
+rand v0.8.8 (*)
+rand v0.9.5
+rand v0.9.5 (*)
+rand_chacha v0.2.2
+rand_chacha v0.3.1
+rand_chacha v0.9.0
+rand_core v0.5.1
+rand_core v0.5.1 (*)
+rand_core v0.6.4
+rand_core v0.6.4 (*)
+rand_core v0.9.5
+rand_core v0.9.5 (*)
+raw-cpuid v11.6.0
+rayon v1.10.0
+rayon v1.10.0 (*)
+rayon-core v1.12.1
+regex v1.13.1
+regex-automata v0.4.18
+regex-syntax v0.8.11
+reqwest v0.12.28
+reqwest v0.12.28 (*)
+reqwest-middleware v0.4.2
+reqwest-middleware v0.4.2 (*)
+ring v0.17.14
+ring v0.17.14 (*)
+rustc-hash v2.1.3
+rustc_version v0.4.1
+rustc_version v0.4.1 (*)
+rusticata-macros v4.1.0
+rusticata-macros v4.1.0 (*)
+rustls v0.21.12
+rustls v0.21.12 (*)
+rustls v0.23.45
+rustls v0.23.45 (*)
+rustls-native-certs v0.8.4
+rustls-pki-types v1.15.1
+rustls-pki-types v1.15.1 (*)
+rustls-platform-verifier v0.6.2
+rustls-webpki v0.101.7
+rustls-webpki v0.101.7 (*)
+rustls-webpki v0.103.15
+rustls-webpki v0.103.15 (*)
+rustversion v1.0.23 (proc-macro)
+ryu v1.0.23
+scopeguard v1.2.0
+sct v0.7.1
+semver v1.0.28
+serde v1.0.229
+serde v1.0.229 (*)
+serde-big-array v0.5.1
+serde_bytes v0.11.19
+serde_bytes v0.11.19 (*)
+serde_core v1.0.229
+serde_derive v1.0.229 (proc-macro)
+serde_derive v1.0.229 (proc-macro) (*)
+serde_json v1.0.151
+serde_json v1.0.151 (*)
+serde_urlencoded v0.7.1
+serde_with v3.16.1
+serde_with_macros v3.16.1 (proc-macro)
+sha1 v0.10.7
+sha2 v0.10.9
+sha2 v0.10.9 (*)
+sha2 v0.9.9
+sha2 v0.9.9 (*)
+sha3 v0.10.9
+sha3 v0.10.9 (*)
+shlex v2.0.1
+signal-hook v0.3.18
+signal-hook-registry v1.4.8
+signal-hook-registry v1.4.8 (*)
+signature v1.6.4
+simd-adler32 v0.3.10
+siphasher v0.3.11
+siphasher v1.0.3
+slab v0.4.12
+smallvec v1.16.1
+socket2 v0.5.10
+socket2 v0.5.10 (*)
+socket2 v0.6.5
+socket2 v0.6.5 (*)
+solana-account v2.2.1
+solana-account v2.2.1 (*)
+solana-account-decoder-client-types v2.3.13
+solana-account-decoder-client-types v2.3.13 (*)
+solana-account-info v2.3.0
+solana-account-info v2.3.0 (*)
+solana-address-lookup-table-interface v2.2.2
+solana-address-lookup-table-interface v2.2.2 (*)
+solana-atomic-u64 v2.2.1
+solana-big-mod-exp v2.2.1
+solana-bincode v2.2.1
+solana-bincode v2.2.1 (*)
+solana-blake3-hasher v2.2.1
+solana-bn254 v2.2.2
+solana-borsh v2.2.1
+solana-client v2.3.13
+solana-client-traits v2.2.1
+solana-client-traits v2.2.1 (*)
+solana-clock v2.2.3
+solana-clock v2.2.3 (*)
+solana-cluster-type v2.2.1
+solana-cluster-type v2.2.1 (*)
+solana-commitment-config v2.2.1
+solana-commitment-config v2.2.1 (*)
+solana-compute-budget-interface v2.2.2
+solana-connection-cache v2.3.13
+solana-connection-cache v2.3.13 (*)
+solana-cpi v2.2.1
+solana-cpi v2.2.1 (*)
+solana-curve25519 v2.2.20
+solana-decode-error v2.3.0
+solana-decode-error v2.3.0 (*)
+solana-define-syscall v2.3.0
+solana-derivation-path v2.2.1
+solana-derivation-path v2.2.1 (*)
+solana-ed25519-program v2.2.3
+solana-ed25519-program v2.2.3 (*)
+solana-epoch-info v2.2.1
+solana-epoch-info v2.2.1 (*)
+solana-epoch-rewards v2.2.1
+solana-epoch-rewards v2.2.1 (*)
+solana-epoch-rewards-hasher v2.2.1
+solana-epoch-schedule v2.2.1
+solana-epoch-schedule v2.2.1 (*)
+solana-example-mocks v2.2.1
+solana-feature-gate-interface v2.2.2
+solana-feature-gate-interface v2.2.2 (*)
+solana-feature-set v2.2.5
+solana-feature-set v2.2.5 (*)
+solana-fee-calculator v2.2.1
+solana-fee-calculator v2.2.1 (*)
+solana-fee-structure v2.3.0
+solana-genesis-config v2.3.0
+solana-genesis-config v2.3.0 (*)
+solana-hard-forks v2.2.1
+solana-hard-forks v2.2.1 (*)
+solana-hash v2.3.0
+solana-hash v2.3.0 (*)
+solana-inflation v2.2.1
+solana-inflation v2.2.1 (*)
+solana-instruction v2.3.3
+solana-instruction v2.3.3 (*)
+solana-instructions-sysvar v2.2.2
+solana-instructions-sysvar v2.2.2 (*)
+solana-keccak-hasher v2.2.1
+solana-keccak-hasher v2.2.1 (*)
+solana-keypair v2.2.3
+solana-keypair v2.2.3 (*)
+solana-last-restart-slot v2.2.1
+solana-last-restart-slot v2.2.1 (*)
+solana-loader-v2-interface v2.2.1
+solana-loader-v3-interface v5.0.0
+solana-loader-v4-interface v2.2.1
+solana-logger v2.3.1
+solana-measure v2.3.13
+solana-message v2.4.0
+solana-message v2.4.0 (*)
+solana-metrics v2.3.13
+solana-metrics v2.3.13 (*)
+solana-msg v2.2.1
+solana-native-token v2.3.0
+solana-net-utils v2.3.13
+solana-net-utils v2.3.13 (*)
+solana-nonce v2.2.1
+solana-nonce v2.2.1 (*)
+solana-nonce-account v2.2.1
+solana-offchain-message v2.2.1
+solana-packet v2.2.1
+solana-packet v2.2.1 (*)
+solana-perf v2.3.13
+solana-perf v2.3.13 (*)
+solana-poh-config v2.2.1
+solana-poh-config v2.2.1 (*)
+solana-precompile-error v2.2.2
+solana-precompile-error v2.2.2 (*)
+solana-precompiles v2.2.2
+solana-precompiles v2.2.2 (*)
+solana-presigner v2.2.1
+solana-program v2.3.0
+solana-program v2.3.0 (*)
+solana-program-entrypoint v2.3.0
+solana-program-entrypoint v2.3.0 (*)
+solana-program-error v2.2.2
+solana-program-error v2.2.2 (*)
+solana-program-memory v2.3.1
+solana-program-option v2.2.1
+solana-program-pack v2.2.1
+solana-pubkey v2.4.0
+solana-pubkey v2.4.0 (*)
+solana-pubsub-client v2.3.13
+solana-pubsub-client v2.3.13 (*)
+solana-quic-client v2.3.13
+solana-quic-definitions v2.3.1
+solana-quic-definitions v2.3.1 (*)
+solana-rayon-threadlimit v2.3.13
+solana-rent v2.2.1
+solana-rent v2.2.1 (*)
+solana-rent-collector v2.3.0
+solana-rent-debits v2.2.1
+solana-reserved-account-keys v2.2.2
+solana-reward-info v2.2.1
+solana-reward-info v2.2.1 (*)
+solana-rpc-client v2.3.13
+solana-rpc-client v2.3.13 (*)
+solana-rpc-client-api v2.3.13
+solana-rpc-client-api v2.3.13 (*)
+solana-rpc-client-nonce-utils v2.3.13
+solana-rpc-client-types v2.3.13
+solana-rpc-client-types v2.3.13 (*)
+solana-sanitize v2.2.1
+solana-sdk v2.3.1
+solana-sdk-ids v2.2.1
+solana-sdk-ids v2.2.1 (*)
+solana-sdk-macro v2.2.1 (proc-macro)
+solana-sdk-macro v2.2.1 (proc-macro) (*)
+solana-secp256k1-program v2.2.3
+solana-secp256k1-program v2.2.3 (*)
+solana-secp256k1-recover v2.2.1
+solana-secp256k1-recover v2.2.1 (*)
+solana-secp256r1-program v2.2.4
+solana-secp256r1-program v2.2.4 (*)
+solana-security-txt v1.1.3
+solana-seed-derivable v2.2.1
+solana-seed-derivable v2.2.1 (*)
+solana-seed-phrase v2.2.1
+solana-seed-phrase v2.2.1 (*)
+solana-serde v2.2.1
+solana-serde v2.2.1 (*)
+solana-serde-varint v2.2.2
+solana-serde-varint v2.2.2 (*)
+solana-serialize-utils v2.2.1
+solana-serialize-utils v2.2.1 (*)
+solana-sha256-hasher v2.3.0
+solana-sha256-hasher v2.3.0 (*)
+solana-short-vec v2.2.1
+solana-short-vec v2.2.1 (*)
+solana-shred-version v2.2.1
+solana-shred-version v2.2.1 (*)
+solana-signature v2.3.0
+solana-signature v2.3.0 (*)
+solana-signer v2.2.1
+solana-signer v2.2.1 (*)
+solana-slot-hashes v2.2.1
+solana-slot-hashes v2.2.1 (*)
+solana-slot-history v2.2.1
+solana-slot-history v2.2.1 (*)
+solana-stable-layout v2.2.1
+solana-stake-interface v1.2.1
+solana-stake-interface v1.2.1 (*)
+solana-streamer v2.3.13
+solana-streamer v2.3.13 (*)
+solana-svm-feature-set v2.3.13
+solana-system-interface v1.0.0
+solana-system-interface v1.0.0 (*)
+solana-system-transaction v2.2.1
+solana-sysvar v2.3.0
+solana-sysvar v2.3.0 (*)
+solana-sysvar-id v2.2.1
+solana-sysvar-id v2.2.1 (*)
+solana-thin-client v2.3.13
+solana-time-utils v2.2.1
+solana-tls-utils v2.3.13
+solana-tls-utils v2.3.13 (*)
+solana-tpu-client v2.3.13
+solana-transaction v2.2.3
+solana-transaction v2.2.3 (*)
+solana-transaction-context v2.3.13
+solana-transaction-context v2.3.13 (*)
+solana-transaction-error v2.2.1
+solana-transaction-error v2.2.1 (*)
+solana-transaction-metrics-tracker v2.3.13
+solana-transaction-status-client-types v2.3.13
+solana-transaction-status-client-types v2.3.13 (*)
+solana-udp-client v2.3.13
+solana-validator-exit v2.2.1
+solana-version v2.3.13
+solana-version v2.3.13 (*)
+solana-vote-interface v2.2.6
+solana-vote-interface v2.2.6 (*)
+solana-zk-token-sdk v2.2.20
+solana-zk-token-sdk v2.2.20 (*)
+spinning_top v0.3.0
+spl-associated-token-account v4.0.0
+spl-discriminator v0.3.0
+spl-discriminator v0.3.0 (*)
+spl-discriminator-derive v0.2.0 (proc-macro)
+spl-discriminator-syn v0.2.1
+spl-generic-token v1.0.1
+spl-memo v5.0.0
+spl-pod v0.3.1
+spl-pod v0.3.1 (*)
+spl-program-error v0.5.0
+spl-program-error v0.5.0 (*)
+spl-program-error-derive v0.4.1 (proc-macro)
+spl-tlv-account-resolution v0.7.0
+spl-token v6.0.0
+spl-token v6.0.0 (*)
+spl-token-2022 v4.0.1
+spl-token-group-interface v0.3.0
+spl-token-metadata-interface v0.4.0
+spl-transfer-hook-interface v0.7.0
+spl-type-length-value v0.5.0
+spl-type-length-value v0.5.0 (*)
+stable_deref_trait v1.2.1
+staking-suite v0.1.0 (/home/user/sniper-suite/programs/staking-suite)
+strsim v0.11.1
+subtle v2.6.1
+syn v1.0.109
+syn v1.0.109 (*)
+syn v2.0.119
+syn v2.0.119 (*)
+syn v3.0.5
+syn v3.0.5 (*)
+sync_wrapper v1.0.2
+sync_wrapper v1.0.2 (*)
+synstructure v0.12.6
+synstructure v0.13.2
+synstructure v0.14.0
+termcolor v1.4.1
+thiserror v1.0.69
+thiserror v1.0.69 (*)
+thiserror v2.0.20
+thiserror v2.0.20 (*)
+thiserror-impl v1.0.69 (proc-macro)
+thiserror-impl v2.0.20 (proc-macro)
+time v0.3.47
+time v0.3.47 (*)
+time-core v0.1.8
+time-macros v0.2.27 (proc-macro)
+tinystr v0.7.6
+tinystr v0.7.6 (*)
+tinyvec v1.13.3
+tokio v1.53.1
+tokio v1.53.1 (*)
+tokio-macros v2.7.2 (proc-macro)
+tokio-rustls v0.24.1
+tokio-rustls v0.26.5
+tokio-rustls v0.26.5 (*)
+tokio-stream v0.1.19
+tokio-tungstenite v0.20.1
+tokio-util v0.7.19
+tokio-util v0.7.19 (*)
+toml v0.5.11
+toml_datetime v0.6.11
+toml_edit v0.22.27
+toml_write v0.1.2
+tower v0.5.3
+tower v0.5.3 (*)
+tower-http v0.6.11
+tower-layer v0.3.3
+tower-service v0.3.3
+tracing v0.1.44
+tracing v0.1.44 (*)
+tracing-core v0.1.36
+try-lock v0.2.5
+tungstenite v0.20.1
+tungstenite v0.20.1 (*)
+typenum v1.20.1
+unicode-ident v1.0.24
+unicode-width v0.2.2
+unicode-xid v0.2.6
+universal-hash v0.5.1
+untrusted v0.9.0
+uriparse v0.6.4
+url v2.5.8
+url v2.5.8 (*)
+utf-8 v0.7.6
+utf16_iter v1.0.5
+utf8_iter v1.0.4
+vcpkg v0.2.15
+version_check v0.9.5
+want v0.3.1
+webpki-roots v0.24.0
+webpki-roots v0.25.4
+webpki-roots v1.0.9
+webpki-roots v1.0.9 (*)
+winnow v0.7.15
+write16 v1.0.0
+writeable v0.5.5
+x509-parser v0.14.0
+x509-parser v0.14.0 (*)
+yoke v0.7.5
+yoke v0.7.5 (*)
+yoke-derive v0.7.5 (proc-macro)
+zerocopy v0.8.57
+zerofrom v0.1.8
+zerofrom v0.1.8 (*)
+zerofrom-derive v0.1.8 (proc-macro)
+zeroize v1.8.2
+zeroize v1.8.2 (*)
+zeroize_derive v1.4.3 (proc-macro)
+zerovec v0.10.4
+zerovec v0.10.4 (*)
+zerovec-derive v0.10.4 (proc-macro)
+zmij v1.0.23
+zstd v0.13.3
+zstd-safe v7.3.0
+zstd-sys v2.1.0+zstd.1.5.7

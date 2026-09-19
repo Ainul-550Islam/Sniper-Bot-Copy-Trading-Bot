@@ -1,0 +1,79 @@
+# Production-shaped local stack: bot + PostgreSQL (durable state) + Redis
+# (dedup/rate-limit L2, runtime cache). NOTHING sensitive is baked in — all
+# secrets come from the environment (see .env.template).
+#
+#   cp .env.template .env && $EDITOR .env
+#   docker compose up --build
+#
+# Notes:
+# * The bot only starts after both datastores report healthy.
+# * Postgres data and the journal directory live in named/host volumes so a
+#   `compose down` (without -v) keeps all financial state.
+# * Durable financial state lives in Postgres — Redis is deliberately ONLY a
+#   cache/dedup layer (losing it must never lose money-relevant data).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sniper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sniper}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sniper} -d ${POSTGRES_DB:-sniper}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # Not published by default: nothing outside the compose network needs
+    # direct DB access. Uncomment for local debugging:
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # ports:
+    #   - "127.0.0.1:6379:6379"
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      CONFIG_PATH: /app/config.toml
+      RUST_LOG: ${RUST_LOG:-info}
+      POSTGRES_URL: postgres://${POSTGRES_USER:-sniper}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-sniper}
+      REDIS_URL: redis://redis:6379
+      # Wallet keypair is mounted read-only from the host, never baked in:
+      SOLANA_KEYPAIR: /run/secrets/solana_keypair.json
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ${SOLANA_KEYPAIR_HOST_PATH:-./keys/solana.json}:/run/secrets/solana_keypair.json:ro
+      - journaldata:/app/data
+    ports:
+      # Bind the control API to loopback by default; put a reverse proxy
+      # with TLS in front of it if you need remote access. The server refuses
+      # to expose a non-loopback bind without API auth configured anyway.
+      - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-8080}:8080"
+
+volumes:
+  pgdata:
+  redisdata:
+  journaldata:

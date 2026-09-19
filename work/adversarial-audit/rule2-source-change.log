@@ -1,0 +1,27 @@
+=== RULE 2: SOURCE CHANGE VERIFICATION 2026-09-19T08:25:43Z ===
+old inventory: 175 files | new inventory: 183 files
+
+ADDED (8):
+  + docs/BUYER-REPRODUCTION-GUIDE.md
+  + docs/FEATURE-TRACEABILITY.md
+  + docs/FINAL-INCIDENT-RUNBOOK.md
+  + docs/FINAL-IP-AND-THIRD-PARTY-INVENTORY.md
+  + docs/FINAL-KNOWN-LIMITATIONS.md
+  + docs/FINAL-OPERATIONS-HANDOVER.md
+  + docs/FINAL-RELEASE-AUDIT.md
+  + docs/SECURITY-BOUNDARY-MAP.md
+REMOVED (0):
+  (none)
+CHANGED (7):
+  * CHANGELOG.md (14955->16552 B)
+  * README.md (32199->32317 B)
+  * docs/BUYER-ACCEPTANCE-TEST.md (13618->17932 B)
+  * docs/DELIVERY-MANIFEST.md (10739->11209 B)
+  * docs/REPOSITORY-MAP.md (13533->14317 B)
+  * release-manifest.json (9462->9462 B)
+  * scripts/staking-identity.sh (8715->9291 B)
+
+RUST-source files among added/changed/removed: 0 
+independent re-hash of current tree vs new inventory CSV: 183/183 verified, 0 mismatch []
+files byte-identical between hardening tree and current tree: 168/175
+=== RULE 2 END ===

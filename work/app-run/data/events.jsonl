@@ -1,0 +1,3 @@
+{"kind":"lifecycle","ts":"2026-09-18T15:54:53.529274850Z","message":"sniper-suite starting in paper mode"}
+{"kind":"audit","ts":"2026-09-18T15:54:53.529324217Z","actor":"system","action":"startup","target":"paper","outcome":"success"}
+{"kind":"audit","ts":"2026-09-18T15:54:53.576431978Z","actor":"api:owner:legacy-api-key","action":"audit_verify","target":null,"outcome":"success"}

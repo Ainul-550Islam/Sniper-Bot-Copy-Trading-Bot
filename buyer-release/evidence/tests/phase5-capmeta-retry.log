@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.78s
+     Running tests/validator_e2e.rs (target/debug/deps/validator_e2e-c0ccdc1a04eb1021)
+
+running 1 test
+test validator_e2e_max_supply_cap_and_metadata ... 
+thread 'validator_e2e_max_supply_cap_and_metadata' (127619) panicked at tests/validator_e2e.rs:1282:6:
+metadata creation must confirm against the real mpl program: Error { request: Some(SendTransaction), kind: RpcError(RpcResponseError { code: -32002, message: "Transaction simulation failed: Error processing Instruction 0: invalid account data for instruction", data: SendTransactionPreflightFailure(RpcSimulateTransactionResult { err: Some(InstructionError(0, InvalidAccountData)), logs: Some(["Program 3vEEMMFmdA88n8ApgZ3b9L3BXEh75yCeMbHbmUjR9mfy invoke [1]", "Program metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s invoke [2]", "Program is not deployed", "Program metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s failed: invalid account data for instruction", "Program 3vEEMMFmdA88n8ApgZ3b9L3BXEh75yCeMbHbmUjR9mfy consumed 19527 of 200000 compute units", "Program 3vEEMMFmdA88n8ApgZ3b9L3BXEh75yCeMbHbmUjR9mfy failed: invalid account data for instruction"]), accounts: None, units_consumed: Some(19527), loaded_accounts_data_size: None, return_data: None, inner_instructions: None, replacement_blockhash: None }) }) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    validator_e2e_max_supply_cap_and_metadata
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.23s
+
+error: test failed, to rerun pass `--test validator_e2e`

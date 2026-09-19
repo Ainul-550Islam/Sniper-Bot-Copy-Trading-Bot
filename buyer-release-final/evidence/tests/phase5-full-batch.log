@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running tests/validator_e2e.rs (target/debug/deps/validator_e2e-c0ccdc1a04eb1021)
+
+running 3 tests
+test validator_e2e_full_governance_lifecycle ... ok
+test validator_e2e_funded_staking_lifecycle ... ok
+test validator_e2e_max_supply_cap_and_metadata ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 160.72s
+

@@ -1,0 +1,385 @@
+# ============================================================================
+# sniper-suite — example configuration
+# ----------------------------------------------------------------------------
+# Copy to `config.toml` (or point CONFIG_PATH at it) and edit. Every key below
+# is optional: the binary falls back to built-in defaults, and any value can be
+# overridden by an environment variable (see README "Environment overrides").
+#
+# SAFETY: the suite defaults to PAPER trading. Nothing is broadcast on-chain or
+# to Polymarket until BOTH:
+#   [execution] mode = "live"   AND   allow_live_trading = true
+# The config loader rejects unknown keys (deny_unknown_fields), so keep names
+# exactly as shown.
+# ============================================================================
+
+# --- Solana RPC / WebSocket --------------------------------------------------
+[network]
+cluster = "mainnet-beta"                    # "mainnet-beta" | "devnet"
+rpc_url = "https://api.mainnet-beta.solana.com"
+rpc_url_fallbacks = [
+    "https://solana-api.projectserum.com",
+    "https://rpc.ankr.com/solana",
+]
+ws_url = ""                                  # blank => derived from rpc_url (https→wss)
+# geyser_ws_url = "wss://..."               # Yellowstone/Triton/Helius for transactionSubscribe
+commitment = "confirmed"
+account_cache_ttl_ms = 30000                 # warm-cache age for semi-static accounts (0 = cache off)
+account_cache_max_entries = 5000             # warm-cache capacity (FIFO eviction)
+request_timeout_ms = 10000
+max_retries = 3
+
+# --- Execution / safety ------------------------------------------------------
+[execution]
+mode = "paper"                               # "paper" | "simulate" | "live"
+allow_live_trading = false                   # HARD gate: live orders need this true too
+use_jito = false                             # route Solana txs through a Jito bundle
+jito_block_engine_url = "https://mainnet.block-engine.jito.wtf"
+jito_tip_lamports = 1000000
+priority_fee_micro_lamports = 250000
+compute_unit_limit = 400000
+confirm_timeout_ms = 60000
+confirm_poll_ms = 1000
+send_retries = 2
+simulate_first = true                        # simulate before broadcasting (simulate/live modes)
+abort_on_simulation_failure = true           # drop the trade when simulation fails
+broadcast_fanout = false                     # race the send across primary + fallbacks (first accept wins)
+
+# --- Risk engine (shared by all trading modules) -----------------------------
+[risk]
+kill_switch = false
+max_open_positions = 8
+max_position_fraction = 0.1                  # max 10% of balance per position
+max_position_quote = 0.5                     # max 0.5 SOL per position
+daily_loss_limit_quote = 2.0                 # halt for the day after -2 SOL realized
+max_consecutive_failures = 5
+default_stop_loss_pct = 0.3                  # fraction below entry
+default_take_profit_pct = 1.0                # fraction above entry
+trailing_stop_pct = 0.25                     # fraction below high-water mark
+max_hold_secs = 3600
+max_slippage_bps = 3000
+min_sol_reserve = 0.05                       # never spend below this SOL balance
+block_repeat_offender_creators = true
+min_socials = 0                              # require N socials on a launch (0 = off)
+min_creator_buy_sol = 0.0
+max_launch_market_cap_sol = 100.0
+reentry_cooldown_secs = 600
+copy_cooldown_secs = 120
+poly_min_liquidity_usd = 1000.0
+poly_min_edge = 0.03
+poly_price_floor = 0.02
+poly_price_ceiling = 0.98
+
+# --- Module 1: pump.fun sniper ----------------------------------------------
+[sniper]
+enabled = false
+buy_sol = 0.01                               # SOL per snipe (before risk sizing)
+slippage_pct = 15.0                          # PERCENT (15 = 15%)
+use_pumpportal = true                        # PumpPortal launch feed
+pumpportal_ws_url = "wss://pumpportal.fun/api/data"
+# pumpportal_api_key = "..."                 # optional; raises rate limits only
+use_log_subscription = true                  # also watch pump logsSubscribe (redundant feed)
+use_transaction_subscribe = false            # Geyser push feed (needs network.geyser_ws_url); lowest latency
+trade_pumpswap = true                        # allow graduated PumpSwap routing
+trade_raydium = true                         # allow Raydium routing
+use_jupiter_fallback = true                  # route graduated tokens via Jupiter
+take_profit_pct = 1.0                        # FRACTION (1.0 = +100%)
+stop_loss_pct = 0.3                          # FRACTION (0.3 = -30%)
+trailing_stop_pct = 0.25
+max_hold_secs = 3600
+take_profit_sell_fraction = 1.0              # sell all at TP; 0.5 = half
+monitor_positions = true
+pump_extra_accounts = []
+pump_append_bonding_curve_v2 = true
+pump_learn_account_layout = true             # learn the buy/sell account layout from chain
+pump_layout_file = "data/pump_account_layout.json"
+max_entry_latency_ms = 1000                  # skip launches older than this end-to-end
+max_launch_age_secs = 30
+creator_denylist = []
+keyword_denylist = ["rug", "scam", "honeypot", "test"]
+
+# --- Module 2: copy trading --------------------------------------------------
+[copy]
+enabled = false
+feed = "pumpportal"                          # "pumpportal" | "logs_poll" | "transaction_subscribe"
+poll_interval_ms = 2000
+poll_signature_limit = 25
+slippage_pct = 20.0
+mirror_exits = true                          # sell when a copied whale sells
+full_exit_on_their_exit = true
+skip_if_sniper_holds = false
+decode_pumpfun = true
+decode_pumpswap = true
+decode_raydium = true
+decode_jupiter = true
+# max_token_age_secs = 600
+
+# Tracked wallets. Each entry sizes its own mirrors:
+#   fixed_sol              -> spend this much SOL per copy (ignores fraction)
+#   fraction_of_their_size -> else mirror this fraction of their SOL
+#   max_sol                -> ceiling for the proportional size
+#   min_sol                -> ignore their buys smaller than this
+#   buys_only              -> only mirror buys (never their sells)
+#   slippage_pct           -> per-wallet slippage override
+#   max_staleness_secs     -> skip trades we see later than this
+# [[copy.wallets]]
+# address = "WHALE_PUBKEY_BASE58"
+# label = "smart-money-1"
+# fraction_of_their_size = 0.05
+# max_sol = 0.25
+# min_sol = 0.5
+# buys_only = true
+# max_staleness_secs = 30
+
+# --- Module 3: Polymarket ----------------------------------------------------
+[polymarket]
+enabled = false
+clob_url = "https://clob.polymarket.com"
+gamma_url = "https://gamma-api.polymarket.com"
+data_url = "https://data-api.polymarket.com"
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/"
+chain_id = 137
+exchange_domain_version = "2"                # CLOB V2 EIP-712 domain version
+exchange_address = "0xE111180000d2663C0091e4f400237545B87B996B"
+neg_risk_exchange_address = "0xe2222d279d744050d28e00520010520000310F59"
+# ERC-20 the CLOB settles in (pUSD proxy). LIVE order sizing reads this
+# token's on-chain balanceOf/decimals for the funder wallet, and live orders
+# additionally require the settling exchange to hold an ERC-20 allowance for
+# the approved notional (signature_type = 0 / EOA). If the balance or
+# allowance cannot be verified, live entries are REJECTED — the demo balance
+# is only ever used in paper/simulate mode.
+collateral_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+conditional_tokens_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+# Polygon JSON-RPC used for on-chain reads: CTF (ERC-1155) balances behind
+# reconciliation ("matched" order + tokens actually held) AND the collateral
+# (ERC-20) balance/decimals/allowance reads that live sizing depends on.
+# Empty = disabled: reconciliation says "not configured" and LIVE polymarket
+# entries reject (never fall back to a paper balance).
+ctf_rpc_url = "https://polygon-rpc.com"
+signature_type = 0                           # 0 EOA | 1 proxy | 2 safe | 3 deposit wallet
+# funder_address = "0x..."                   # wallet holding USDC (proxy/safe/deposit)
+order_type = "GTC"                           # "GTC" | "GTD" | "FOK" | "FAK"
+stake_usd = 5.0                              # USDC notional per order
+expiration_secs = 3600                       # used only for GTD
+strategy = "value"                           # "value" (basket edge) | "search" (keywords)
+min_edge = 0.03
+scan_interval_secs = 60
+max_open_markets = 5
+use_websocket = true
+heartbeat = true
+heartbeat_interval_secs = 10
+# builder_code = "0x..32 bytes.."
+watch_keywords = []                          # used by the "search" strategy
+
+# --- Module 4: staking program (on-chain; managed off-process) ---------------
+[contract]
+# program_id = "YOUR_DEPLOYED_PROGRAM_ID"
+# token_mint = "MINT_CREATED_BY_initialize"
+token_name = "Sniper Suite Token"
+token_symbol = "SNPR"
+token_decimals = 9
+# Intended total supply (raw units). Informational for the app: the BINDING
+# value is the on-chain `max_supply` parameter passed to the program's
+# `initialize` instruction — it is immutable there and enforced against every
+# mint (genesis + rewards). Deploy the program with this same number.
+token_supply = 1000000000
+fee_bps = 100                                # deposit fee taken by the program
+# fee_treasury = "TREASURY_TOKEN_ACCOUNT"
+reward_apy_bps = 1000                        # 1000 == 10% APY
+min_stake_amount = 1
+unstake_delay_secs = 86400
+# admin_pubkey = "ADMIN_PUBKEY"
+dry_run = true
+
+# --- Module 5: Telegram control ---------------------------------------------
+[telegram]
+enabled = false
+bot_token_env = "TELEGRAM_BOT_TOKEN"         # env var NAME that holds the token
+allowed_chat_ids = []                        # chats allowed to send commands (deny if empty)
+allowed_user_ids = []                        # users allowed to send commands
+# Role split (optional). When owner_user_ids is EMPTY, allowed users/chats
+# keep full control (backward compatible). When owners exist, allowed users
+# become operators (control, but no /mode live) and readonly_user_ids can
+# only run read commands (/status /positions /trades /pnl /balance /config).
+owner_user_ids = []                          # full rights incl. /mode live
+readonly_user_ids = []                       # read-only commands
+# alert_chat_id = 123456789                  # defaults to first allowed_chat_id
+poll_interval_secs = 2
+parse_mode = "HTML"
+alert_cooldown_secs = 5
+max_alerts_per_minute = 20
+alert_on_fill = true
+alert_on_risk_reject = true
+alert_on_disconnect = true
+alert_on_loss_limit = true
+hourly_summary = true
+prefix = ""                                  # require this text prefix before commands
+
+# --- Control-plane API + dashboard -------------------------------------------
+[api]
+enabled = true
+# Safe default: loopback only. To expose on a reachable interface (e.g. in a
+# container) set bind_host = "0.0.0.0" AND provide an API key — the server
+# refuses to start if a non-loopback bind has no key.
+bind_host = "127.0.0.1"
+bind_port = 8080
+api_key_env = "API_KEY"                       # env var NAME for the x-api-key on mutating routes + event WS
+cors_origins = ["*"]                          # lock this down to your dashboard origin in production
+serve_dashboard = true
+
+# --- Persistence -------------------------------------------------------------
+[storage]
+data_dir = "data"
+trades_file = "trades.jsonl"
+positions_file = "positions.jsonl"
+events_file = "events.jsonl"
+flush_interval_ms = 1000
+max_events_in_memory = 2000
+max_trades_in_memory = 1000
+# Hard cap on the in-memory de-dup sets / cooldown maps (seen launches, seen
+# signatures, last-exit & last-copy timestamps). Oldest entries are evicted once
+# exceeded, so memory stays bounded on long runs. Raise for very high throughput.
+max_dedup_entries = 100000
+
+# --- Observability (logging, metrics, health probes) ------------------------
+# RUST_LOG (env) always overrides log_level. LOG_FORMAT / METRICS_ENABLED /
+# SAMPLE_INTERVAL_MS env vars override the values below.
+[observability]
+# Base log level: "error" | "warn" | "info" | "debug" | "trace" | "off".
+log_level = "info"
+# "text" = human-readable (development), "json" = structured (production log
+# pipelines; each line is one JSON event including span fields like request_id).
+log_format = "text"
+# Serves GET /metrics (Prometheus text format 0.0.4) and records HTTP request
+# metrics. Event/RPC/state instrumentation is always on (cheap atomics); this
+# flag only controls the exposition surface. Set false to 404 /metrics.
+metrics_enabled = true
+# How often gauges and health components are refreshed from app state (>= 100).
+sample_interval_ms = 5000
+
+# --- PostgreSQL (durable state: orders, trades, positions, audit, recon) -----
+# The URL is a SECRET (embeds credentials) and is read from the env var named
+# by url_env — never put the URL itself in this file. When enabled=false the
+# whole DB layer stays off and the bot runs on memory + JSONL journal.
+# Reconciliation & crash recovery (Prompt 2 §H). On startup the recovery
+# worker resolves pending reconciliation claims BEFORE trading modules spawn;
+# env overrides: RECOVERY_STARTUP_RECONCILE_SECS, RECOVERY_STARTUP_BATCH,
+# RECOVERY_BLOCK_MODULES_ON_UNRESOLVED.
+[recovery]
+# Seconds to reconcile pending claims before modules start (0 = don't wait;
+# the blocking rule below still applies to whatever stays unresolved).
+startup_reconcile_secs = 30
+# Claims processed per worker pass during the startup window.
+startup_batch = 64
+# Disable trading modules with actively unresolved claims (pending /
+# in_progress) until an operator re-enables them. Claims already parked for
+# operators (failed after max attempts) do not re-block on restart.
+block_modules_on_unresolved = true
+# How often open LIVE Solana positions are re-verified against their
+# aggregated on-chain balance (env: RECOVERY_POSITION_RECHECK_SECS, floor 30).
+position_recheck_interval_secs = 300
+# Write-ahead intent journal (env: RECOVERY_INTENT_JOURNAL): a durable intent
+# row is recorded BEFORE every Solana broadcast and linked to its signature
+# after. Orphans (crash between broadcast and any trace) are reconciled at
+# startup and gate their symbol — never resubmitted. One extra local INSERT
+# per execution; default on (safety over sub-millisecond latency).
+intent_journal = true
+
+# Multi-replica / HA (Prompt 3). Distributed execution ownership: every
+# money-moving execution is claimed under a stable logical execution id
+# (e.g. "snipe:<mint>", "copy:<wallet>:<mint>", "exit:<position>:<rule>",
+# "poly:entry:<token>") before broadcast; leases fence stale owners; the
+# kill switch and module flags propagate across replicas. Postgres is the
+# authoritative claim store when [database] is enabled; Redis is used when
+# it is not; with neither, claims are process-local (single instance only).
+[ha]
+# Empty = generated "{hostname}-{pid}-{random}" at startup (restart = new
+# replica identity; old claims expire by lease and are taken over).
+replica_id = ""
+# Lease per claim; renewed every lease/3 while working (floor 5 s).
+claim_lease_secs = 45
+# A claim that ended AMBIGUOUSLY (SendUnknown) blocks re-acquisition of the
+# same logical execution for this long — reconciliation owns the outcome
+# (floor 60 s).
+claim_handoff_grace_secs = 900
+# Kill-switch / module-flag propagation interval across replicas (floor 1 s).
+flag_sync_secs = 5
+# Position-book refresh from the shared DB so risk capacity converges
+# across replicas (floor 5 s).
+book_sync_secs = 30
+
+[database]
+enabled = false
+url_env = "POSTGRES_URL"
+required = false                             # true => fail startup when unreachable
+auto_migrate = true                          # run embedded migrations on connect
+max_connections = 8
+min_connections = 0
+acquire_timeout_ms = 5000
+statement_timeout_ms = 10000                 # server-side per statement
+query_timeout_ms = 5000                      # client-side per operation
+
+# --- Redis (cache / coordination ONLY — durable state never lives here) ------
+# Used for dedup L2 windows and short-lived coordination. Losing Redis must
+# never lose money-relevant data: dedup degrades to its in-process L1 and
+# records the degradation as a metric.
+[redis]
+enabled = false
+url_env = "REDIS_URL"
+required = false
+connect_timeout_ms = 3000
+operation_timeout_ms = 1000
+dedup_ttl_secs = 86400
+
+# --- Control-plane API principals (role-aware auth) ---------------------------
+# Each principal reads its plaintext key from the env var named by key_env at
+# startup; only the sha256 digest is kept in memory/DB. Roles:
+#   owner    — everything (keys, /mode live, journal rotate)
+#   operator — runtime controls (kill/resume, module toggles, non-live mode)
+#   readonly — all GET endpoints
+# The legacy [api].api_key_env single key still works and maps to owner.
+[auth]
+keys = []
+# [[auth.keys]]
+# label = "ops-primary"
+# key_env = "API_KEY_OWNER"
+# role = "owner"
+# [[auth.keys]]
+# label = "monitoring"
+# key_env = "API_KEY_RO"
+# role = "readonly"
+
+# --- Signing / key custody -----------------------------------------------------
+# provider selects the signing backend. Only "local" (keypair material via
+# env/file, the existing wallet path) is implemented in this build; selecting
+# "vault", "kms" or "hsm" FAILS STARTUP with UnsupportedBackend — the app
+# never silently falls back to local keys.
+#
+# Named signer identities extend the registry beyond the primary trading
+# wallet (always registered as "primary_trading" from SOLANA_KEYPAIR).
+# Exactly one source per identity:
+#   alias        — share an already-registered identity's signer
+#   keypair_env  — env var holding a keypair spec (path | base58 | JSON array)
+#   keypair_path — filesystem path to a keypair file
+# Conventional names: "sniper", "copy_trading", "treasury", "staking_admin".
+[signing]
+provider = "local"
+
+# [[signing.identities]]
+# name = "sniper"
+# alias = "primary_trading"          # same wallet, distinct logical identity
+#
+# [[signing.identities]]
+# name = "treasury"
+# keypair_env = "TREASURY_KEYPAIR"   # dedicated wallet for treasury operations
+
+# --- Secrets (prefer environment variables over putting these in a file) -----
+# The server also injects these into the environment for modules that read
+# their key material from env (telegram token, polygon key).
+[secrets]
+# solana_keypair = "/run/secrets/id.json"     # path | base58 secret | JSON byte array
+# polygon_private_key = "0x..."               # Polygon key for Polymarket order signing
+# telegram_bot_token = "123456:ABC..."
+# api_key = "change-me"                       # x-api-key for mutating REST routes
+# poly_api_key = "..."                        # pre-derived CLOB L2 creds (skip L1 derive)
+# poly_api_secret = "..."
+# poly_api_passphrase = "..."

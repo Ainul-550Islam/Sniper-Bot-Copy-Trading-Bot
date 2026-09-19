@@ -1,0 +1,24 @@
+[2m2026-09-18T15:54:53.528364Z[0m [33m WARN[0m no Solana keypair configured — generating an ephemeral wallet (paper only)
+[2m2026-09-18T15:54:53.528571Z[0m [33m WARN[0m generated an ephemeral wallet — it holds no funds [3mpubkey[0m[2m=[0m22J2bdfBvJgd8oiygWdnmxzVmcSHa5FfoB6ieEmCYtAX
+[2m2026-09-18T15:54:53.528615Z[0m [32m INFO[0m signer registered [3midentity[0m[2m=[0mprimary_trading [3mpubkey[0m[2m=[0m22J2bdfBvJgd8oiygWdnmxzVmcSHa5FfoB6ieEmCYtAX
+[2m2026-09-18T15:54:53.528679Z[0m [33m WARN[0m no shared ownership backend ([database] and [redis] both off) — using PROCESS-LOCAL              execution claims; run EXACTLY ONE replica in this configuration
+[2m2026-09-18T15:54:53.528718Z[0m [32m INFO[0m execution ownership registry ready [3mreplica[0m[2m=[0m"host-156617-ecda49f3" [3mbackend[0m[2m=[0m"memory" [3mlease_secs[0m[2m=[0m45 [3mhandoff_grace_secs[0m[2m=[0m900
+[2m2026-09-18T15:54:53.528793Z[0m [32m INFO[0m authenticator initialised [3mkeys[0m[2m=[0m1
+[2m2026-09-18T15:54:53.529230Z[0m [32m INFO[0m starting sniper-suite [3mmode[0m[2m=[0mpaper [3mlive_allowed[0m[2m=[0mfalse [3mcluster[0m[2m=[0mmainnet-beta [3mwallet[0m[2m=[0m22J2bdfBvJgd8oiygWdnmxzVmcSHa5FfoB6ieEmCYtAX [3mdatabase[0m[2m=[0m"none" [3mredis[0m[2m=[0m"off" [3mdedup[0m[2m=[0m"memory" [3mauth_keys[0m[2m=[0m"on"
+[2m2026-09-18T15:54:53.529259Z[0m [32m INFO[0m jsonl journal pump started [3mdir[0m[2m=[0mdata
+[2m2026-09-18T15:54:53.530281Z[0m [32m INFO[0m control API + dashboard listening (role keys required for mutating routes and the event stream) [3maddr[0m[2m=[0m127.0.0.1:8080
+[2m2026-09-18T15:54:53.542701Z[0m [32m INFO[0m http request [3mrequest_id[0m[2m=[0mreq-1 [3mmethod[0m[2m=[0mGET [3mroute[0m[2m=[0m/health [3mstatus[0m[2m=[0m200 [3mduration_ms[0m[2m=[0m0
+[2m2026-09-18T15:54:53.550418Z[0m [32m INFO[0m http request [3mrequest_id[0m[2m=[0mreq-2 [3mmethod[0m[2m=[0mGET [3mroute[0m[2m=[0m/health [3mstatus[0m[2m=[0m200 [3mduration_ms[0m[2m=[0m0
+[2m2026-09-18T15:54:53.557136Z[0m [32m INFO[0m http request [3mrequest_id[0m[2m=[0mreq-3 [3mmethod[0m[2m=[0mGET [3mroute[0m[2m=[0m/ready [3mstatus[0m[2m=[0m200 [3mduration_ms[0m[2m=[0m0
+[2m2026-09-18T15:54:53.563576Z[0m [32m INFO[0m http request [3mrequest_id[0m[2m=[0mreq-4 [3mmethod[0m[2m=[0mGET [3mroute[0m[2m=[0m/api/health [3mstatus[0m[2m=[0m200 [3mduration_ms[0m[2m=[0m0
+[2m2026-09-18T15:54:53.570091Z[0m [32m INFO[0m http request [3mrequest_id[0m[2m=[0mreq-5 [3mmethod[0m[2m=[0mGET [3mroute[0m[2m=[0m/api/status [3mstatus[0m[2m=[0m200 [3mduration_ms[0m[2m=[0m0
+[2m2026-09-18T15:54:53.576547Z[0m [32m INFO[0m http request [3mrequest_id[0m[2m=[0mreq-6 [3mmethod[0m[2m=[0mGET [3mroute[0m[2m=[0m/api/audit/verify [3mstatus[0m[2m=[0m200 [3mduration_ms[0m[2m=[0m0
+[2m2026-09-18T15:54:53.583602Z[0m [32m INFO[0m http request [3mrequest_id[0m[2m=[0mreq-7 [3mmethod[0m[2m=[0mGET [3mroute[0m[2m=[0m/metrics [3mstatus[0m[2m=[0m200 [3mduration_ms[0m[2m=[0m0
+[2m2026-09-18T15:55:35.338872Z[0m [32m INFO[0m shutdown requested [3mreason[0m[2m=[0mSIGTERM
+[2m2026-09-18T15:55:35.339042Z[0m [32m INFO[0m runtime-flag sync stopped
+[2m2026-09-18T15:55:35.339104Z[0m [32m INFO[0m sniper-suite shutting down [3mreason[0m[2m=[0mSIGTERM
+[2m2026-09-18T15:55:35.339263Z[0m [32m INFO[0m journal pump stopped (shutdown)
+[2m2026-09-18T15:55:35.339384Z[0m [32m INFO[0m shutdown phase complete [3mphase[0m[2m=[0m"http-drain"
+[2m2026-09-18T15:55:35.339417Z[0m [32m INFO[0m shutdown phase complete [3mphase[0m[2m=[0m"module-drain"
+[2m2026-09-18T15:55:35.339432Z[0m [32m INFO[0m shutdown phase complete [3mphase[0m[2m=[0m"pump-flush"
+[2m2026-09-18T15:55:35.339441Z[0m [32m INFO[0m sniper-suite stopped cleanly

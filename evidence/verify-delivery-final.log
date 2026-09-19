@@ -1,0 +1,10 @@
+PASS  required files present (58 checked)
+PASS  migrations 0001-0011 present
+PASS  version identity: VERSION == release-manifest.json == Cargo.toml (0.1.0)
+PASS  manifest docs_count (39) == actual docs/*.md (39)
+PASS  hygiene: no .env / target/ / build/ / logs / dumps / keypairs / pem files
+PASS  all relative markdown links resolve (README.md + docs/*.md)
+PASS  no zero-width / bidi-override characters in markdown
+----------------------------------------
+tree: 175 files (excluding .git), 3194670 bytes
+verify-delivery: 7 PASS / 0 FAIL

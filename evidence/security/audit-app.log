@@ -1,0 +1,85 @@
+=== tool versions ===
+cargo-audit-audit 0.22.2
+cargo-deny 0.18.9
+rustc 1.98.1 (48a229cea 2026-09-01)
+cargo 1.98.1 (797e8a9bc 2026-08-05)
+
+=== cargo audit (app lockfile) 2026-09-18T16:16:36Z ===
+    Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+      Loaded 1251 security advisories (from /home/user/.cargo/advisory-db)
+    Updating crates.io index
+    Scanning Cargo.lock for vulnerabilities (706 crate dependencies)
+Crate:     atty
+Version:   0.2.14
+Warning:   unmaintained
+Title:     `atty` is unmaintained
+Date:      2024-09-25
+ID:        RUSTSEC-2024-0375
+URL:       https://rustsec.org/advisories/RUSTSEC-2024-0375
+
+Crate:     bincode
+Version:   1.3.3
+Warning:   unmaintained
+Title:     Bincode is unmaintained
+Date:      2025-12-16
+ID:        RUSTSEC-2025-0141
+URL:       https://rustsec.org/advisories/RUSTSEC-2025-0141
+
+Crate:     derivative
+Version:   2.2.0
+Warning:   unmaintained
+Title:     `derivative` is unmaintained; consider using an alternative
+Date:      2024-06-26
+ID:        RUSTSEC-2024-0388
+URL:       https://rustsec.org/advisories/RUSTSEC-2024-0388
+
+Crate:     libsecp256k1
+Version:   0.6.0
+Warning:   unmaintained
+Title:     libsecp256k1 is unmaintained
+Date:      2025-01-14
+ID:        RUSTSEC-2025-0161
+URL:       https://rustsec.org/advisories/RUSTSEC-2025-0161
+
+Crate:     number_prefix
+Version:   0.4.0
+Warning:   unmaintained
+Title:     number_prefix crate is unmaintained
+Date:      2025-11-17
+ID:        RUSTSEC-2025-0119
+URL:       https://rustsec.org/advisories/RUSTSEC-2025-0119
+
+Crate:     paste
+Version:   1.0.15
+Warning:   unmaintained
+Title:     paste - no longer maintained
+Date:      2024-10-07
+ID:        RUSTSEC-2024-0436
+URL:       https://rustsec.org/advisories/RUSTSEC-2024-0436
+
+Crate:     atty
+Version:   0.2.14
+Warning:   unsound
+Title:     Potential unaligned read
+Date:      2021-07-04
+ID:        RUSTSEC-2021-0145
+URL:       https://rustsec.org/advisories/RUSTSEC-2021-0145
+
+Crate:     memmap2
+Version:   0.5.10
+Warning:   unsound
+Title:     Unchecked pointer offset in crate `memmap2`
+Date:      2026-06-20
+ID:        RUSTSEC-2026-0186
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0186
+
+Crate:     rand
+Version:   0.7.3
+Warning:   unsound
+Title:     Rand is unsound with a custom logger using `rand::rng()`
+Date:      2026-04-09
+ID:        RUSTSEC-2026-0097
+URL:       https://rustsec.org/advisories/RUSTSEC-2026-0097
+
+warning: 9 allowed warnings found
+APP_AUDIT_EXIT=0

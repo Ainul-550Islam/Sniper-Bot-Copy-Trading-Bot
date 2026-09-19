@@ -1,0 +1,13 @@
+# Pinned toolchain — the single source of truth for local builds and CI.
+#
+# 1.98.1 is the version this codebase is verified against (host build of the
+# app workspace + the staking program, and `cargo build-sbf` for the on-chain
+# binary). Pinning it makes the build reproducible for due-diligence and stops
+# a future stable from silently changing behaviour.
+#
+# `rustfmt` and `clippy` are declared here so `rustup` installs them
+# automatically; CI gates on both (see .github/workflows/ci.yml).
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

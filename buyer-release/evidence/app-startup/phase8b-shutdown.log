@@ -1,0 +1,6 @@
+[2m2026-09-18T15:55:35.339042Z[0m [32m INFO[0m runtime-flag sync stopped
+[2m2026-09-18T15:55:35.339263Z[0m [32m INFO[0m journal pump stopped (shutdown)
+[2m2026-09-18T15:55:35.339384Z[0m [32m INFO[0m shutdown phase complete [3mphase[0m[2m=[0m"http-drain"
+[2m2026-09-18T15:55:35.339417Z[0m [32m INFO[0m shutdown phase complete [3mphase[0m[2m=[0m"module-drain"
+[2m2026-09-18T15:55:35.339432Z[0m [32m INFO[0m shutdown phase complete [3mphase[0m[2m=[0m"pump-flush"
+[2m2026-09-18T15:55:35.339441Z[0m [32m INFO[0m sniper-suite stopped cleanly

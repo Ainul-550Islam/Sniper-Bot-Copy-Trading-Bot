@@ -1,0 +1,81 @@
+TOTAL files inventoried: 992  bytes: 118,209,504
+  CANONICAL-REPO           183 files    3,293,320 B
+  EVIDENCE-VENDOR           55 files    9,007,395 B
+  OTHER                      1 files          421 B
+  PACKAGE-FINAL            328 files   14,093,925 B
+  PACKAGE-HISTORICAL       297 files   13,865,946 B
+  SNAPSHOT-FREEZE-ERA        3 files      801,221 B
+  VENDOR-ROOT-FILE          18 files    4,189,590 B
+  WORKING-TEMP             107 files   72,957,686 B
+duplicate-content groups: 260 (files involved: 872)
+  6c8b81cdb51b… x3 (10,727,850 B): BRF/evidence/inventory/cargo-metadata.json | BR/evidence/inventory/cargo-metadata.json | evidence/cargo-metadata.json
+  ec269724551d… x3 (7,054,143 B): BRF/evidence/gates/release-check-final.log | BR/evidence/gates/release-check-final.log | evidence/release-check-final.log
+  3bc5c5103ee7… x3 (6,641,295 B): BRF/security/deny.log | BR/evidence/security/deny.log | evidence/security/deny.log
+  57a890fae273… x5 (937,520 B): BRF/binaries/staking_suite.so | BRF/staking-program/staking_suite.so | BR/binaries/staking_suite.so | BR/staking-program/staking_suite.so …
+  0022b2973d25… x2 (826,816 B): work/solana-release/bin/perf-libs/cuda-10.0/libcl-crypt.so | work/solana-release/bin/perf-libs/cuda-10.1/libcl-crypt.so
+  bf196d35f18c… x4 (640,608 B): BRF/source-tree/AUDIT.md | BR/docs/AUDIT.md | BR/source-tree/AUDIT.md | sniper-suite/AUDIT.md
+  9740cac2a1fe… x3 (603,441 B): BRF/source-tree/Cargo.lock | BR/source-tree/Cargo.lock | sniper-suite/Cargo.lock
+  2a00d2817f55… x3 (480,729 B): BRF/source-tree/programs/staking-suite/Cargo.lock | BR/source-tree/programs/staking-suite/Cargo.lock | sniper-suite/programs/staking-suite/Cargo.lock
+  740ac8583989… x3 (350,919 B): BRF/database/backup-2026-09-18T15:47:37Z.dump | BR/evidence/db/backup-2026-09-18T15:47:37Z.dump | evidence/backup-2026-09-18T15:47:37Z.dump
+  5989ecf1ff2b… x3 (350,892 B): BRF/database/backup-2026-09-18T15:44:22Z.dump | BR/evidence/db/backup-2026-09-18T15:44:22Z.dump | evidence/backup-2026-09-18T15:44:22Z.dump
+  2091433899b0… x2 (321,448 B): work/idl_try.json | work/pump_amm_idl.json
+  19ce10aabccd… x3 (296,928 B): BRF/source-tree/programs/staking-suite/src/processor.rs | BR/source-tree/programs/staking-suite/src/processor.rs | sniper-suite/programs/staking-suite/src/processor.rs
+CANONICAL REPO (sniper-suite/) classification:
+  D-configuration(build)             9
+  F-documentation(root)              174
+  repo total: 183 files, 3,293,320 B, lines: 86,576
+
+=== CORRECTED canonical-repo classification ===
+  A-production-source            88 files  2,076,991 B  58,918 lines
+  B-tests(integration)           15 files    235,668 B   6,780 lines
+  C-migrations                   11 files     23,443 B     489 lines
+  D-config(build)                 1 files      3,571 B     107 lines
+  D-config(lockfiles)             1 files    201,147 B   8,343 lines
+  D-config/deploy                 8 files     32,469 B     741 lines
+  E-deployment(CI)                1 files      7,600 B     211 lines
+  E-ops-scripts                   3 files     24,440 B     549 lines
+  F-documentation                47 files    463,895 B   7,543 lines
+  F-documentation(root)           8 files    224,096 B   2,895 lines
+  TOTAL 183 files
+
+OTHER-area file: ['.config/solana/install/config.yml']
+VENDOR-ROOT files: ['.profile', '.sudo_as_admin_successful', '.wget-hsts', 'AUDIT_PASS_REPORT.md', 'COMMERCIAL_PACKAGE_REPORT.md', 'FINAL_DELIVERY_REPORT.md', 'FREEZE_REPORT.md', 'HARDENING_REPORT.md', 'RELEASE_REPORT.md', 'assemble_report.py', 'build_report.py', 'build_report2.py', 'build_report3.py', 'build_report4.py', 'doccheck.py', 'release_check_audit2.log', 'release_check_audit3.log', 'rustup-init.sh']
+WORKING-TEMP breakdown:
+  work/solana-release                        66 files   71,691,170 B
+  work/pump_idl.json                          1 files      268,716 B
+  work/probe                                  3 files      180,150 B
+  work/artifacts                              2 files      166,498 B
+  work/idl_try.json                           1 files      160,724 B
+  work/pump_amm_idl.json                      1 files      160,724 B
+  work/ray_proc.rs                            1 files      130,961 B
+  work/adversarial-audit                     15 files       66,226 B
+  work/ray_state.rs                           1 files       51,713 B
+  work/ray_ix.rs                              1 files       42,997 B
+  work/app-run                                2 files       19,045 B
+  work/phase8_backup_restore.sh               1 files        5,605 B
+  work/sbf_determinism_rerun.sh               1 files        3,661 B
+  work/disc                                   3 files        3,419 B
+  work/verify_final_package.sh                1 files        2,805 B
+  work/phase8b_app_startup.sh                 1 files        2,643 B
+  work/cratesrc                               2 files          506 B
+  work/fetch                                  2 files          109 B
+  work/pool_idl.json                          1 files           14 B
+  work/forensic                               1 files            0 B
+
+Production source per crate:
+  crates/core                           26 files  16,398 lines
+  crates/module-copy                     5 files   2,181 lines
+  crates/module-polymarket              12 files   4,628 lines
+  crates/module-sniper                   5 files   2,181 lines
+  crates/module-telegram                 5 files   1,512 lines
+  crates/server                          8 files   5,478 lines
+  crates/solana-kit                     18 files  15,812 lines
+  programs/staking-suite                 9 files  10,728 lines
+
+Integration test files per crate:
+  crates/core                            4 files   2,225 lines
+  crates/module-copy                     3 files     696 lines
+  crates/module-polymarket               1 files     472 lines
+  crates/module-sniper                   2 files     467 lines
+  crates/solana-kit                      4 files   1,516 lines
+  programs/staking-suite                 1 files   1,404 lines

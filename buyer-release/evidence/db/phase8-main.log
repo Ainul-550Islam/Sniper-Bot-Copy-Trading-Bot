@@ -1,0 +1,25 @@
+== phase8 start 2026-09-18T15:47:37Z ==
+== 1. populate SRC via db_integration (applies migrations 0001-0011 + writes real rows) ==
+test transactions_checkpoints_and_misc_repos_work ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.31s
+
+== 2. snapshot SRC state ==
+tables: 24
+total rows: 68
+== 3. pg_dump -Fc ==
+-rw-r--r-- 1 user user 116973 Sep 18 15:47 /home/user/evidence/backup-2026-09-18T15:47:37Z.dump
+740ac85839897d96ae8f8e30c8f5e2372242f6fdd7bf2d97eb9308e03c6629a9  /home/user/evidence/backup-2026-09-18T15:47:37Z.dump
+== 4. restore into fresh DB ==
+restore: no errors
+== 5. compare schema + row counts + migration state ==
+TABLES_IDENTICAL
+MIGRATIONS_IDENTICAL
+ROWCOUNTS_IDENTICAL
+== 6. db_integration re-run AGAINST RESTORED DB (proves schema+data usable, audit chain verifies) ==
+test transactions_checkpoints_and_misc_repos_work ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.29s
+
+== 7. application startup against restored DB (native debug binary; Docker blocked in sandbox) ==
+error: could not compile `solana-kit` (lib) due to 1 previous error

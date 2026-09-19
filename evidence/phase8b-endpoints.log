@@ -1,0 +1,28 @@
+--- GET /health
+{"status":"ok","uptime_s":0,"version":"0.1.0"}
+--- GET /ready (status line + body)
+HTTP/1.1 200 OK
+content-type: application/json
+x-request-id: req-3
+vary: origin, access-control-request-method, access-control-request-headers
+access-control-allow-origin: *
+content-length: 351
+date: Fri, 18 Sep 2026 15:54:53 GMT
+
+{"status":"ok","ready":true,"healthy":true,"uptime_secs":0,"components":[{"name":"copy","healthy":true,"ready":true,"detail":"disabled"},{"name":"polymarket","healthy":true,"ready":true,"detail":"disabled"},{"name":"rpc","healthy":true,"ready":true,"detail":"consecutive_failures=0"},{"name":"sniper","healthy":true,"ready":true,"detail":"disabled"}]}--- GET /api/health
+{"ok":true}
+--- GET /api/status (first 700 bytes)
+{"started_at":"2026-09-18T15:54:53.527145876Z","kill_switch":false,"execution_mode":"paper","live_allowed":false,"cluster":"mainnet-beta","modules":[{"module":"sniper","enabled":false,"running":false,"healthy":false,"connected":false,"events_seen":0,"signals_generated":0,"orders_sent":0,"orders_filled":0,"orders_failed":0,"orders_rejected_by_risk":0,"realized_pnl":0.0,"unrealized_pnl":0.0,"consecutive_errors":0,"last_error":null,"last_heartbeat":null,"last_event":null,"detail":null},{"module":"copy","enabled":false,"running":false,"healthy":false,"connected":false,"events_seen":0,"signals_generated":0,"orders_sent":0,"orders_filled":0,"orders_failed":0,"orders_rejected_by_risk":0,"realized_p
+--- GET /api/audit/verify (x-api-key)
+{"status":"not_chained"}
+--- GET /metrics (bot_ lines)
+bot_build_info{version="0.1.0"} 1
+bot_event_subscribers 1
+bot_events_dropped_total 0
+bot_execution_mode 0
+bot_health_ready 1
+bot_http_request_duration_ms_bucket{le="5",route="/api/audit/verify"} 1
+bot_http_request_duration_ms_bucket{le="10",route="/api/audit/verify"} 1
+bot_http_request_duration_ms_bucket{le="25",route="/api/audit/verify"} 1
+bot_http_request_duration_ms_bucket{le="50",route="/api/audit/verify"} 1
+bot_http_request_duration_ms_bucket{le="100",route="/api/audit/verify"} 1

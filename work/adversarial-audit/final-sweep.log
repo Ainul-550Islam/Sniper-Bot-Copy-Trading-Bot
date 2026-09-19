@@ -1,0 +1,44 @@
+=== FINAL SWEEP 2026-09-19T08:40:41Z ===
+== repo tree identity (183 files, tree 033b582f…) ==
+  OK   repo file count = 183
+  OK   repo tree sha256 = 033b582f… (post adversarial-audit fixes)
+== final package ==
+  OK   package exists with 328 files
+  OK   hidden dirs present in mirror
+  OK   exec bits on 3 mirror scripts
+  OK   sha256sum -c 312/312
+  OK   tarball hash d0ab6a70…
+  OK   .so hash 57a890fa…
+== exec bits in live repo (snapshot restore strips them) ==
+  OK   repo scripts executable
+== historical package untouched ==
+  OK   buyer-release/ still 297 files
+ALL FINAL-PACKAGE CHECKS PASS
+--- '314 files' residue (must be labeled/superseded only):
+/home/user/buyer-release-final/evidence/handover/adversarial-audit/rule1-inventory.log:4:EXISTS  /home/user/buyer-release-final                     di
+/home/user/buyer-release-final/evidence/inventory/ledger.csv:35:EVID-PKG-FINAL-001,../buyer-release-final/,FINAL package built: 314 files (312 hashed 
+/home/user/evidence/ledger.csv:35:EVID-PKG-FINAL-001,../buyer-release-final/,FINAL package built: 314 files (312 hashed + 2 checksum files); sha256sum
+--- independent tree-hash recompute:
+183 033b582f79c5e1d24a301895fa98d37fae1ed01de15f0052a4b2777a6dd06946
+--- exec bits (repo / mirror / deployment):
+755 /home/user/sniper-suite/scripts/release-check.sh
+755 /home/user/sniper-suite/scripts/staking-identity.sh
+755 /home/user/sniper-suite/scripts/verify-delivery.sh
+755 /home/user/buyer-release-final/source-tree/scripts/release-check.sh
+755 /home/user/buyer-release-final/source-tree/scripts/staking-identity.sh
+755 /home/user/buyer-release-final/source-tree/scripts/verify-delivery.sh
+755 /home/user/buyer-release-final/deployment/scripts/release-check.sh
+755 /home/user/buyer-release-final/deployment/scripts/staking-identity.sh
+755 /home/user/buyer-release-final/deployment/scripts/verify-delivery.sh
+--- gates:
+checked 51 markdown files, 62 referenced paths, 183 repo files
+DOC CONSISTENCY: CLEAN
+identity ✓
+--- hidden dirs in mirror:
+/home/user/buyer-release-final/source-tree/.cargo
+/home/user/buyer-release-final/source-tree/.github
+/home/user/buyer-release-final/source-tree/programs/staking-suite/.cargo
+--- final package/SUMS state:
+328
+326
+=== SWEEP END ===
