@@ -672,6 +672,172 @@ pub fn token_account_mint(data: &[u8]) -> Option<Pubkey> {
     Some(Pubkey::new_from_array(b))
 }
 
+// --------------------------------------------------------------------------
+// Pool initialisation (launch detection)
+// --------------------------------------------------------------------------
+
+/// `initialize2` account positions (`raydium-io/raydium-amm` →
+/// `program/src/instruction.rs`, `AmmInstruction::Initialize2`).
+const INIT2_ACC_AMM: usize = 4;
+const INIT2_ACC_LP_MINT: usize = 7;
+const INIT2_ACC_COIN_MINT: usize = 8;
+const INIT2_ACC_PC_MINT: usize = 9;
+const INIT2_ACC_COIN_VAULT: usize = 10;
+const INIT2_ACC_PC_VAULT: usize = 11;
+const INIT2_ACC_MARKET: usize = 16;
+const INIT2_ACC_USER_WALLET: usize = 17;
+/// `initialize2` needs at least the accounts up to the user wallet.
+const INIT2_MIN_ACCOUNTS: usize = INIT2_ACC_USER_WALLET + 1;
+/// `tag(1) nonce(1) open_time(8) init_pc_amount(8) init_coin_amount(8)`.
+const INIT2_DATA_LEN: usize = 26;
+
+/// A Raydium AMM v4 pool creation, decoded from the `initialize2`
+/// instruction of the creating transaction. This is the launch signal for the
+/// Raydium protocol: the AMM is *not* an Anchor program and emits no
+/// `Program data:` event, so the mints and the initial deposit have to be read
+/// from the instruction itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolInitEvent {
+    pub amm_id: Pubkey,
+    pub lp_mint: Pubkey,
+    pub coin_mint: Pubkey,
+    pub pc_mint: Pubkey,
+    pub coin_vault: Pubkey,
+    pub pc_vault: Pubkey,
+    pub market: Pubkey,
+    /// The wallet that created the pool (fee payer of the deposit).
+    pub creator: Pubkey,
+    pub nonce: u8,
+    /// Unix time from which swaps are accepted; `0` = immediately.
+    pub open_time: u64,
+    pub init_pc_amount: u64,
+    pub init_coin_amount: u64,
+}
+
+impl PoolInitEvent {
+    /// `true` when the quote (pc) side is wrapped SOL — the only pair shape
+    /// the sniper trades.
+    pub fn is_sol_quote(&self) -> bool {
+        self.pc_mint == *WSOL_MINT
+    }
+
+    /// The non-SOL side of a SOL pair (`None` for non-SOL pairs and for the
+    /// degenerate SOL/SOL case).
+    pub fn base_mint(&self) -> Option<Pubkey> {
+        if self.pc_mint == *WSOL_MINT && self.coin_mint != *WSOL_MINT {
+            Some(self.coin_mint)
+        } else if self.coin_mint == *WSOL_MINT && self.pc_mint != *WSOL_MINT {
+            Some(self.pc_mint)
+        } else {
+            None
+        }
+    }
+
+    /// Initial SOL-side deposit in lamports (`None` for non-SOL pairs).
+    pub fn initial_sol_lamports(&self) -> Option<u64> {
+        if self.pc_mint == *WSOL_MINT {
+            Some(self.init_pc_amount)
+        } else if self.coin_mint == *WSOL_MINT {
+            Some(self.init_coin_amount)
+        } else {
+            None
+        }
+    }
+
+    /// Initial base-side deposit in raw token units (`None` for non-SOL pairs).
+    pub fn initial_base_raw(&self) -> Option<u64> {
+        if self.pc_mint == *WSOL_MINT {
+            Some(self.init_coin_amount)
+        } else if self.coin_mint == *WSOL_MINT {
+            Some(self.init_pc_amount)
+        } else {
+            None
+        }
+    }
+
+    /// `true` when the pool accepts swaps at `now_unix` (open time reached).
+    pub fn is_open_at(&self, now_unix: i64) -> bool {
+        self.open_time == 0 || i64::try_from(self.open_time).is_ok_and(|t| t <= now_unix)
+    }
+
+    /// Decode from one resolved instruction. Returns `None` for anything that
+    /// is not a well-formed `initialize2` on the AMM v4 program.
+    pub fn from_instruction(program_id: &Pubkey, accounts: &[Pubkey], data: &[u8]) -> Option<Self> {
+        if *program_id != *RAYDIUM_AMM_V4 {
+            return None;
+        }
+        if data.len() < INIT2_DATA_LEN || data[0] != RAYDIUM_IX_INITIALIZE2 {
+            return None;
+        }
+        if accounts.len() < INIT2_MIN_ACCOUNTS {
+            return None;
+        }
+        let u64_at = |off: usize| -> u64 {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&data[off..off + 8]);
+            u64::from_le_bytes(b)
+        };
+        Some(PoolInitEvent {
+            amm_id: accounts[INIT2_ACC_AMM],
+            lp_mint: accounts[INIT2_ACC_LP_MINT],
+            coin_mint: accounts[INIT2_ACC_COIN_MINT],
+            pc_mint: accounts[INIT2_ACC_PC_MINT],
+            coin_vault: accounts[INIT2_ACC_COIN_VAULT],
+            pc_vault: accounts[INIT2_ACC_PC_VAULT],
+            market: accounts[INIT2_ACC_MARKET],
+            creator: accounts[INIT2_ACC_USER_WALLET],
+            nonce: data[1],
+            open_time: u64_at(2),
+            init_pc_amount: u64_at(10),
+            init_coin_amount: u64_at(18),
+        })
+    }
+
+    /// Find the pool initialisation among a transaction's resolved
+    /// instructions (see [`crate::decode::decode_instructions`]).
+    pub fn find(instructions: &[crate::decode::DecodedInstruction]) -> Option<Self> {
+        instructions
+            .iter()
+            .find_map(|ix| Self::from_instruction(&ix.program_id, &ix.accounts, &ix.data))
+    }
+}
+
+/// The parameters the AMM prints when a pool is initialised, parsed from the
+/// `Program log: initialize2: InitializeInstruction2 { nonce: 254, open_time:
+/// 0, init_pc_amount: …, init_coin_amount: … }` line. A `logsSubscribe` feed
+/// only sees this line (no account keys), so it is used as the cheap trigger
+/// to fetch the full transaction — never as the launch record itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitializeLogParams {
+    pub nonce: u8,
+    pub open_time: u64,
+    pub init_pc_amount: u64,
+    pub init_coin_amount: u64,
+}
+
+/// Parse one log line; `None` when it is not an `initialize2` log.
+pub fn parse_initialize2_log(line: &str) -> Option<InitializeLogParams> {
+    let body = line.trim().strip_prefix("Program log: ")?;
+    let body = body.strip_prefix("initialize2: InitializeInstruction2")?;
+    let field = |name: &str| -> Option<u64> {
+        let start = body.find(name)? + name.len();
+        let rest = body[start..].trim_start_matches([':', ' ']);
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<u64>().ok()
+    };
+    Some(InitializeLogParams {
+        nonce: u8::try_from(field("nonce")?).ok()?,
+        open_time: field("open_time")?,
+        init_pc_amount: field("init_pc_amount")?,
+        init_coin_amount: field("init_coin_amount")?,
+    })
+}
+
+/// Scan a transaction's log lines for the AMM v4 pool-initialisation log.
+pub fn find_initialize2_log(logs: &[String]) -> Option<InitializeLogParams> {
+    logs.iter().find_map(|l| parse_initialize2_log(l))
+}
+
 /// Discover Raydium v4 pools whose quote side is WSOL and whose base side is
 /// `base_mint`. Uses two `memcmp` filters so the RPC does the work.
 pub async fn find_pools_for_mint(rpc: &Rpc, base_mint: &Pubkey) -> BotResult<Vec<Pubkey>> {
@@ -1232,5 +1398,101 @@ mod tests {
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("\"swappable\":true"));
         assert_eq!(summary.quote_reserve, 2.0);
+    }
+
+    /// Byte-accurate `initialize2` data: tag, nonce, open_time, pc, coin.
+    fn init2_data(nonce: u8, open_time: u64, pc: u64, coin: u64) -> Vec<u8> {
+        let mut d = vec![RAYDIUM_IX_INITIALIZE2, nonce];
+        d.extend_from_slice(&open_time.to_le_bytes());
+        d.extend_from_slice(&pc.to_le_bytes());
+        d.extend_from_slice(&coin.to_le_bytes());
+        d
+    }
+
+    fn init2_accounts(coin_mint: Pubkey, pc_mint: Pubkey) -> Vec<Pubkey> {
+        let mut accounts: Vec<Pubkey> = (0..21).map(|_| Pubkey::new_unique()).collect();
+        accounts[INIT2_ACC_COIN_MINT] = coin_mint;
+        accounts[INIT2_ACC_PC_MINT] = pc_mint;
+        accounts
+    }
+
+    #[test]
+    fn pool_init_event_decodes_a_sol_quoted_initialize2() {
+        let base = Pubkey::new_unique();
+        let accounts = init2_accounts(base, *WSOL_MINT);
+        let data = init2_data(254, 0, 5 * maths::LAMPORTS_PER_SOL, 1_000_000_000_000);
+        let ev = PoolInitEvent::from_instruction(&RAYDIUM_AMM_V4, &accounts, &data)
+            .expect("initialize2 decodes");
+        assert_eq!(ev.amm_id, accounts[INIT2_ACC_AMM]);
+        assert_eq!(ev.lp_mint, accounts[INIT2_ACC_LP_MINT]);
+        assert_eq!(ev.coin_vault, accounts[INIT2_ACC_COIN_VAULT]);
+        assert_eq!(ev.pc_vault, accounts[INIT2_ACC_PC_VAULT]);
+        assert_eq!(ev.market, accounts[INIT2_ACC_MARKET]);
+        assert_eq!(ev.creator, accounts[INIT2_ACC_USER_WALLET]);
+        assert_eq!(ev.nonce, 254);
+        assert_eq!(ev.open_time, 0);
+        assert!(ev.is_sol_quote());
+        assert_eq!(ev.base_mint(), Some(base));
+        assert_eq!(ev.initial_sol_lamports(), Some(5 * maths::LAMPORTS_PER_SOL));
+        assert_eq!(ev.initial_base_raw(), Some(1_000_000_000_000));
+        assert!(ev.is_open_at(1));
+    }
+
+    #[test]
+    fn pool_init_event_handles_the_inverted_pair_and_open_time() {
+        // SOL on the coin side: base is the pc mint and the deposits swap.
+        let base = Pubkey::new_unique();
+        let accounts = init2_accounts(*WSOL_MINT, base);
+        let data = init2_data(250, 2_000_000_000, 777, 3 * maths::LAMPORTS_PER_SOL);
+        let ev = PoolInitEvent::from_instruction(&RAYDIUM_AMM_V4, &accounts, &data).unwrap();
+        assert_eq!(ev.base_mint(), Some(base));
+        assert_eq!(ev.initial_sol_lamports(), Some(3 * maths::LAMPORTS_PER_SOL));
+        assert_eq!(ev.initial_base_raw(), Some(777));
+        // Not open yet at t = 1_999_999_999, open at exactly open_time.
+        assert!(!ev.is_open_at(1_999_999_999));
+        assert!(ev.is_open_at(2_000_000_000));
+        // Non-SOL pair: no base, no SOL deposit.
+        let other = init2_accounts(Pubkey::new_unique(), Pubkey::new_unique());
+        let ev = PoolInitEvent::from_instruction(&RAYDIUM_AMM_V4, &other, &data).unwrap();
+        assert!(!ev.is_sol_quote());
+        assert_eq!(ev.base_mint(), None);
+        assert_eq!(ev.initial_sol_lamports(), None);
+    }
+
+    #[test]
+    fn pool_init_event_rejects_malformed_instructions() {
+        let accounts = init2_accounts(Pubkey::new_unique(), *WSOL_MINT);
+        let data = init2_data(254, 0, 1, 1);
+        // Wrong program.
+        assert!(PoolInitEvent::from_instruction(&Pubkey::new_unique(), &accounts, &data).is_none());
+        // Wrong tag (a swap).
+        let mut swap = data.clone();
+        swap[0] = RAYDIUM_IX_SWAP_BASE_IN;
+        assert!(PoolInitEvent::from_instruction(&RAYDIUM_AMM_V4, &accounts, &swap).is_none());
+        // Truncated data.
+        assert!(PoolInitEvent::from_instruction(&RAYDIUM_AMM_V4, &accounts, &data[..20]).is_none());
+        // Too few accounts.
+        assert!(PoolInitEvent::from_instruction(&RAYDIUM_AMM_V4, &accounts[..10], &data).is_none());
+        // Empty data must not panic.
+        assert!(PoolInitEvent::from_instruction(&RAYDIUM_AMM_V4, &accounts, &[]).is_none());
+    }
+
+    #[test]
+    fn initialize2_log_line_parses_and_others_do_not() {
+        let line = "Program log: initialize2: InitializeInstruction2 { nonce: 254, open_time: 1700000000, init_pc_amount: 5000000000, init_coin_amount: 1000000000000 }";
+        let p = parse_initialize2_log(line).expect("parses");
+        assert_eq!(p.nonce, 254);
+        assert_eq!(p.open_time, 1_700_000_000);
+        assert_eq!(p.init_pc_amount, 5_000_000_000);
+        assert_eq!(p.init_coin_amount, 1_000_000_000_000);
+        assert!(parse_initialize2_log("Program log: Instruction: Swap").is_none());
+        assert!(parse_initialize2_log("Program log: initialize2: garbage").is_none());
+        assert!(parse_initialize2_log("").is_none());
+        let logs = vec![
+            "Program 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 invoke [1]".to_string(),
+            line.to_string(),
+        ];
+        assert_eq!(find_initialize2_log(&logs), Some(p));
+        assert!(find_initialize2_log(&logs[..1]).is_none());
     }
 }

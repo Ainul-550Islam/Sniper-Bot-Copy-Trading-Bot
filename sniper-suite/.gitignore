@@ -2,6 +2,7 @@
 /target
 **/target
 **/*.rs.bk
+*.pdb
 
 # Secrets — NEVER commit
 .env
@@ -9,17 +10,34 @@
 !.env.template
 keys/
 *.keypair.json
+# `cargo build-sbf` / `solana-keygen` output: target/deploy/<name>-keypair.json
+*-keypair.json
 id.json
 solana.json
+*.pem
+# The live config may carry an inline [secrets] table; only the annotated
+# example is source. (Anchored: programs/staking-suite/.cargo/config.toml is
+# Cargo's own config and stays tracked.)
+/config.toml
+!config.toml.example
 
 # Runtime data (journal, ledgers, logs)
 /data
+**/data/
 *.jsonl
 *.log
 test-validator-ledger*/
 
+# Docker / compose local overrides
+docker-compose.override.yml
+
 # Editor / OS noise
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
+*.orig
+*.rej

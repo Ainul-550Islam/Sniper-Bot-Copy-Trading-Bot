@@ -2,7 +2,9 @@
 //!
 //! Contains everything that touches the chain:
 //!   * [`consts`]   — program ids, PDA seeds and instruction discriminators
-//!   * [`rpc`]      — thin async RPC wrapper with retries and fallbacks
+//!   * [`provider`] — RPC provider pool: health, breaker, failover, retry policy
+//!   * [`rpc`]      — typed async RPC wrapper over the pool (classified retries)
+//!   * [`fees`]     — priority-fee policy: bounds, escalation, adaptive oracle
 //!   * [`ws`]       — reconnecting websocket client (`logsSubscribe`, …)
 //!   * [`tokens`]   — keypair loading, balances, ATA management
 //!   * [`pump`]     — Pump.fun bonding curve accounts + buy/sell instructions
@@ -25,8 +27,10 @@ pub mod consts;
 pub mod decode;
 pub mod events;
 pub mod execute;
+pub mod fees;
 pub mod jupiter;
 pub mod layout;
+pub mod provider;
 pub mod pump;
 pub mod pumpportal;
 pub mod pumpswap;
@@ -42,7 +46,9 @@ pub use consts::*;
 pub use decode::{DecodedSwap, Side, SwapVenue};
 pub use events::{find_graduation, find_launch, parse_logs, PumpEvent};
 pub use execute::{ExecutionResult, Executor};
+pub use fees::{FeeDecision, FeeOracle, FeePolicy};
 pub use layout::{AccountLayout, LayoutStore};
+pub use provider::{ProviderPool, ProviderStatus, RetryPolicy, RpcErrorClass};
 pub use pump::{BondingCurveState, GlobalState, PumpContext};
 pub use rpc::Rpc;
 pub use signer::{

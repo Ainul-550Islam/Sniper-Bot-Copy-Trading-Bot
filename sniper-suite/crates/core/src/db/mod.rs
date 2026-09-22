@@ -19,7 +19,12 @@
 //! from the env var named by `database.url_env`; it is never logged (errors
 //! are mapped to messages without the URL).
 
+pub mod accounting;
 pub mod claims;
+pub mod copy;
+pub mod execution;
+pub mod ha;
+pub mod polymarket;
 pub mod repo;
 
 use std::time::Duration;

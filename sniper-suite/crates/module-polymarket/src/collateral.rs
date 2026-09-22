@@ -186,6 +186,35 @@ pub fn usd_to_raw(usd: f64, decimals: u8) -> PolyResult<u128> {
     Ok(raw as u128)
 }
 
+/// Pure funding verdict for one LIVE order (TASK 4): the funder's balance
+/// must cover `required_raw`, and — when an allowance check applies (EOA
+/// signing) — so must the exchange's allowance. Both figures must also cover
+/// the collateral ALREADY committed by our resting buy orders
+/// (`reserved_raw`), otherwise a second order could rest unfundable while
+/// the first is still open. Returns the typed error the pipeline maps to
+/// `INSUFFICIENT_FUNDING`.
+pub fn verify_funding(
+    balance_raw: u128,
+    allowance_raw: Option<u128>,
+    reserved_raw: u128,
+    required_raw: u128,
+) -> PolyResult<()> {
+    let needed = reserved_raw.saturating_add(required_raw);
+    if balance_raw < needed {
+        return Err(PolyError::insufficient_funding(format!(
+            "collateral balance {balance_raw} raw < required {required_raw} raw + reserved {reserved_raw} raw"
+        )));
+    }
+    if let Some(allowance) = allowance_raw {
+        if allowance < needed {
+            return Err(PolyError::insufficient_funding(format!(
+                "exchange allowance {allowance} raw < required {required_raw} raw + reserved {reserved_raw} raw — approve the exchange first"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +436,23 @@ mod tests {
         .await;
         let c = CollateralClient::new(&url, COLLATERAL_ADDRESS_POLYGON).unwrap();
         assert!(c.decimals().await.is_err());
+    }
+
+    #[test]
+    fn funding_verdict_counts_reserved_collateral() {
+        // Balance covers the order alone but not with what is already resting.
+        assert!(verify_funding(10_000_000, None, 0, 5_000_000).is_ok());
+        let err = verify_funding(10_000_000, None, 6_000_000, 5_000_000).unwrap_err();
+        assert!(matches!(err, PolyError::InsufficientFunding(_)));
+        assert!(err.to_string().contains("reserved 6000000"));
+        // Allowance is checked the same way when present.
+        assert!(verify_funding(10_000_000, Some(10_000_000), 0, 5_000_000).is_ok());
+        let err = verify_funding(10_000_000, Some(4_000_000), 0, 5_000_000).unwrap_err();
+        assert!(err.to_string().contains("allowance"));
+        // Proxy flows (no allowance check) only look at the balance.
+        assert!(verify_funding(5_000_000, None, 0, 5_000_000).is_ok());
+        // Saturating sum never wraps into a false pass.
+        assert!(verify_funding(u128::MAX, None, u128::MAX, 1).is_ok());
+        assert!(verify_funding(u128::MAX - 1, None, u128::MAX, 1).is_err());
     }
 }

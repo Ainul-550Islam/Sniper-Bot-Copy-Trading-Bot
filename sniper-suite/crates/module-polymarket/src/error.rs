@@ -56,6 +56,15 @@ pub enum PolyError {
     /// approves the wallet.
     #[error("insufficient collateral funding: {0}")]
     InsufficientFunding(String),
+    /// An order-lifecycle invariant was violated (illegal transition,
+    /// matched size above the order size, unknown venue order …). Surfaced
+    /// instead of silently coercing state.
+    #[error("order lifecycle error: {0}")]
+    Lifecycle(String),
+    /// The durable Polymarket journal (migration 0014) refused a write or a
+    /// read. Journal failures never fail a trade; callers meter and log.
+    #[error("journal error: {0}")]
+    Journal(String),
 }
 
 impl PolyError {
@@ -94,6 +103,20 @@ impl PolyError {
     /// On-chain funding/allowance does not cover the approved order.
     pub fn insufficient_funding(msg: impl Into<String>) -> Self {
         PolyError::InsufficientFunding(msg.into())
+    }
+    /// Order-lifecycle invariant violated.
+    pub fn lifecycle(msg: impl Into<String>) -> Self {
+        PolyError::Lifecycle(msg.into())
+    }
+    /// Durable journal failure.
+    pub fn journal(msg: impl Into<String>) -> Self {
+        PolyError::Journal(msg.into())
+    }
+    /// True when the failure means "the venue may still hold the order"
+    /// (transport failure or an ambiguous submit) — the caller must hand off
+    /// to reconciliation instead of treating the order as rejected.
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(self, PolyError::Http(_) | PolyError::SubmitUnknown { .. })
     }
 }
 
@@ -140,6 +163,50 @@ impl From<PolyError> for bot_core::error::BotError {
             PolyError::InsufficientFunding(m) => {
                 bot_core::error::BotError::other(format!("polymarket funding: {m}"))
             }
+            PolyError::Lifecycle(m) => {
+                bot_core::error::BotError::other(format!("polymarket order lifecycle: {m}"))
+            }
+            PolyError::Journal(m) => {
+                bot_core::error::BotError::db(format!("polymarket journal: {m}"))
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ambiguity_classification_covers_transport_and_submit_unknown() {
+        assert!(PolyError::http("timeout").is_ambiguous());
+        assert!(PolyError::SubmitUnknown {
+            order_id: "0xabc".into(),
+            reason: "reset".into()
+        }
+        .is_ambiguous());
+        for definite in [
+            PolyError::clob("rejected"),
+            PolyError::invalid("x"),
+            PolyError::lifecycle("bad transition"),
+            PolyError::journal("db down"),
+            PolyError::insufficient_funding("allowance"),
+            PolyError::balance_unavailable("rpc"),
+            PolyError::not_configured("key"),
+        ] {
+            assert!(!definite.is_ambiguous(), "{definite}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_and_journal_errors_map_into_core_errors() {
+        let e: bot_core::error::BotError = PolyError::lifecycle("filled -> resting").into();
+        assert!(e.to_string().contains("order lifecycle"));
+        let e: bot_core::error::BotError = PolyError::journal("pool exhausted").into();
+        assert!(e.to_string().contains("journal"));
+        assert_eq!(
+            PolyError::lifecycle("x").to_string(),
+            "order lifecycle error: x"
+        );
     }
 }

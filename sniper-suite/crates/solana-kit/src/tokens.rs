@@ -312,6 +312,75 @@ fn parse_json_array(text: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+/// Byte length of the SPL `Mint` account (`spl_token::state::Mint::LEN`).
+/// Token-2022 mints share the same first 82 bytes; extensions follow.
+pub const SPL_MINT_LEN: usize = 82;
+
+/// The safety-relevant fields of an SPL / Token-2022 `Mint` account.
+///
+/// Layout (`spl_token::state::Mint`): `mint_authority: COption<Pubkey>`
+/// (4-byte tag + 32), `supply: u64`, `decimals: u8`, `is_initialized: u8`,
+/// `freeze_authority: COption<Pubkey>` (4 + 32). Parsed by hand so the sniper
+/// can gate on authority state without pulling the token crates' full state
+/// machinery into the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MintInfo {
+    pub mint_authority: Option<Pubkey>,
+    pub supply: u64,
+    pub decimals: u8,
+    pub is_initialized: bool,
+    pub freeze_authority: Option<Pubkey>,
+    /// Total account length (> 82 means Token-2022 extensions are present).
+    pub raw_len: usize,
+}
+
+impl MintInfo {
+    /// Parse a mint account. Fails for anything shorter than the base layout.
+    pub fn parse(data: &[u8]) -> BotResult<Self> {
+        if data.len() < SPL_MINT_LEN {
+            return Err(BotError::encoding(format!(
+                "mint account is {} bytes; need at least {SPL_MINT_LEN}",
+                data.len()
+            )));
+        }
+        let coption = |off: usize| -> BotResult<Option<Pubkey>> {
+            let mut tag = [0u8; 4];
+            tag.copy_from_slice(&data[off..off + 4]);
+            match u32::from_le_bytes(tag) {
+                0 => Ok(None),
+                1 => {
+                    let mut pk = [0u8; 32];
+                    pk.copy_from_slice(&data[off + 4..off + 36]);
+                    Ok(Some(Pubkey::new_from_array(pk)))
+                }
+                other => Err(BotError::encoding(format!(
+                    "mint COption tag {other} at offset {off} is neither 0 nor 1"
+                ))),
+            }
+        };
+        let mut supply = [0u8; 8];
+        supply.copy_from_slice(&data[36..44]);
+        Ok(MintInfo {
+            mint_authority: coption(0)?,
+            supply: u64::from_le_bytes(supply),
+            decimals: data[44],
+            is_initialized: data[45] != 0,
+            freeze_authority: coption(46)?,
+            raw_len: data.len(),
+        })
+    }
+
+    /// Nobody can mint more supply.
+    pub fn mint_authority_revoked(&self) -> bool {
+        self.mint_authority.is_none()
+    }
+
+    /// Nobody can freeze holder accounts (a classic honeypot lever).
+    pub fn freeze_authority_revoked(&self) -> bool {
+        self.freeze_authority.is_none()
+    }
+}
+
 /// Resolve a pubkey from a config string, with a clear error message.
 pub fn parse_pubkey(label: &str, value: &str) -> BotResult<Pubkey> {
     Pubkey::from_str(value.trim())
@@ -552,5 +621,64 @@ mod tests {
         assert_eq!(transfer.program_id, *SYSTEM_PROGRAM);
         assert_eq!(sync.program_id, *TOKEN_PROGRAM);
         assert_eq!(sync.data[0], 17, "SyncNative tag is 17");
+    }
+
+    /// Byte-accurate SPL mint: optional authorities, supply, decimals.
+    fn mint_bytes(
+        mint_authority: Option<Pubkey>,
+        freeze_authority: Option<Pubkey>,
+        supply: u64,
+        decimals: u8,
+    ) -> Vec<u8> {
+        let mut d = vec![0u8; SPL_MINT_LEN];
+        if let Some(a) = mint_authority {
+            d[0..4].copy_from_slice(&1u32.to_le_bytes());
+            d[4..36].copy_from_slice(&a.to_bytes());
+        }
+        d[36..44].copy_from_slice(&supply.to_le_bytes());
+        d[44] = decimals;
+        d[45] = 1;
+        if let Some(f) = freeze_authority {
+            d[46..50].copy_from_slice(&1u32.to_le_bytes());
+            d[50..82].copy_from_slice(&f.to_bytes());
+        }
+        d
+    }
+
+    #[test]
+    fn mint_info_reads_authorities_supply_and_decimals() {
+        let freezer = Pubkey::new_unique();
+        let info =
+            MintInfo::parse(&mint_bytes(None, Some(freezer), 1_000_000_000_000_000, 6)).unwrap();
+        assert!(info.mint_authority_revoked());
+        assert!(!info.freeze_authority_revoked());
+        assert_eq!(info.freeze_authority, Some(freezer));
+        assert_eq!(info.supply, 1_000_000_000_000_000);
+        assert_eq!(info.decimals, 6);
+        assert!(info.is_initialized);
+        assert_eq!(info.raw_len, SPL_MINT_LEN);
+
+        let minter = Pubkey::new_unique();
+        let info = MintInfo::parse(&mint_bytes(Some(minter), None, 0, 9)).unwrap();
+        assert_eq!(info.mint_authority, Some(minter));
+        assert!(info.freeze_authority_revoked());
+        assert_eq!(info.decimals, 9);
+    }
+
+    #[test]
+    fn mint_info_tolerates_token_2022_extensions_and_rejects_garbage() {
+        // Extensions after byte 82 are ignored but reported through raw_len.
+        let mut d = mint_bytes(None, None, 5, 6);
+        d.extend_from_slice(&[0u8; 100]);
+        let info = MintInfo::parse(&d).unwrap();
+        assert_eq!(info.raw_len, 182);
+        assert!(info.mint_authority_revoked() && info.freeze_authority_revoked());
+        // Too short.
+        assert!(MintInfo::parse(&d[..81]).is_err());
+        assert!(MintInfo::parse(&[]).is_err());
+        // Invalid COption tag.
+        let mut bad = mint_bytes(None, None, 5, 6);
+        bad[0..4].copy_from_slice(&7u32.to_le_bytes());
+        assert!(MintInfo::parse(&bad).is_err());
     }
 }

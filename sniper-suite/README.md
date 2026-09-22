@@ -36,6 +36,14 @@ supervises every module.
 | [docs/STAKING.md](docs/STAKING.md) | program economics, governance, deploy + genesis sequence |
 | [docs/TESTING.md](docs/TESTING.md) | test layers, what runs where, known gaps |
 | [docs/RECONCILIATION.md](docs/RECONCILIATION.md) | source-of-truth model, ambiguity matrix, crash & startup recovery, PnL replay |
+| [docs/EXECUTION-RELIABILITY.md](docs/EXECUTION-RELIABILITY.md) | RPC provider pool & retry policy, WS resilience, tx lifecycle state machine, priority-fee policy, crash recovery, failure-injection test map |
+| [docs/SNIPER-ENGINE.md](docs/SNIPER-ENGINE.md) | sniper pipeline: unified `LaunchEvent`, DETECTED→CONFIRMED lifecycle, protocol detection (pump.fun / PumpSwap / Raydium AMM v4), safety gates, slippage engine, exposure controls, exit hardening, replay fixtures, failure-recovery map, latency metrics, operator runbook |
+| [docs/COPY-TRADING-ENGINE.md](docs/COPY-TRADING-ENGINE.md) | copy-trading engine: `LeaderTradeEvent`, leader lifecycle, staged pipeline and rejection reasons, policy/sizing, copy risk controls, intents, ordering, persistence (migration 0013), metrics, config reference, limitations |
+| [docs/COPY-TRADING-OPERATIONS.md](docs/COPY-TRADING-OPERATIONS.md) | copy-trading runbook: enabling, managing leaders, emergency controls, what to watch, tuning, reconciliation findings, failure modes, daily checks |
+| [docs/COPY-TRADING-RECOVERY.md](docs/COPY-TRADING-RECOVERY.md) | copy-trading recovery: durable state, crash points and actions, restart procedure, verification, continuous reconciliation, manual procedures |
+| [docs/POLYMARKET-ENGINE.md](docs/POLYMARKET-ENGINE.md) | Polymarket engine: strategy gates and skip vocabulary, frozen `OrderSignal` intents, staged pipeline and rejection reasons, the single risk decision, live order lifecycle (poll + user channel + cancel/TTL/reprice), local-vs-venue reconciliation, persistence (migration 0014), metrics, config reference, limitations |
+| [docs/POLYMARKET-OPERATIONS.md](docs/POLYMARKET-OPERATIONS.md) | Polymarket runbook: paper → live checklist, emergency controls, what to watch, tuning, reconciliation findings, failure modes, daily checks |
+| [docs/POLYMARKET-RECOVERY.md](docs/POLYMARKET-RECOVERY.md) | Polymarket recovery: durable state, crash points, restart procedure (`recover_after_restart`), verification queries, continuous reconciliation, manual procedures |
 | [docs/DISTRIBUTED.md](docs/DISTRIBUTED.md) | multi-replica operation: single active logical execution owner, claims/leases/fencing, flag & book sync |
 | [docs/RELEASE.md](docs/RELEASE.md) | versioning, reproducible-build analysis, release manifest, cut-a-release checklist |
 | [docs/HANDOVER.md](docs/HANDOVER.md) | engineering handover: verify from zero, verification-status taxonomy, maintenance invariants |
@@ -150,6 +158,31 @@ annotated reference of every section:
 | `ACCOUNT_CACHE_MAX_ENTRIES` | Warm-cache capacity (FIFO eviction; default 5 000). |
 | `SIMULATE_FIRST` / `ABORT_ON_SIMULATION_FAILURE` | Execution simulate policy (default `true`/`true`). |
 | `BROADCAST_FANOUT` | Race sends across primary + fallback RPCs, first accept wins (default `false`). |
+| `SNIPER_ENABLED` / `SNIPER_BUY_SOL` / `SNIPER_SLIPPAGE_PCT` | Module 1 master switch, SOL per snipe, base slippage (percent). |
+| `SNIPER_CREATOR_DENYLIST` / `SNIPER_KEYWORD_DENYLIST` | Comma-separated creator pubkeys / name-symbol keywords that are never sniped. |
+| `SNIPER_MAX_HOLD_SECS` / `SNIPER_TAKE_PROFIT_PCT` / `SNIPER_STOP_LOSS_PCT` | Exit rules (fractions, e.g. `1.0` = +100%). |
+| `SNIPER_MAX_LAUNCH_AGE_SECS` / `SNIPER_MAX_ENTRY_LATENCY_MS` | Stale-event thresholds on arrival / at hand-off (`STALE_EVENT`). |
+| `SNIPER_TRADE_PUMPSWAP` / `SNIPER_TRADE_RAYDIUM` | Enable PumpSwap / Raydium AMM v4 launch detection + direct routing. |
+| `SNIPER_SLIPPAGE_MODE` / `SNIPER_MAX_PRICE_IMPACT_BPS` | `fixed` \| `liquidity_aware` \| `price_impact`; price-impact rejection ceiling (`0` = off). |
+| `SNIPER_MAX_ENTRY_FEE_LAMPORTS` | Fee budget per entry transaction (`FEE_LIMIT`; `0` = off): base fee + priority fee at the policy ceiling × compute units + Jito tip. |
+| `SNIPER_MIN_LIQUIDITY_SOL` / `SNIPER_REQUIRE_MINT_AUTHORITY_REVOKED` / `SNIPER_REQUIRE_FREEZE_AUTHORITY_REVOKED` / `SNIPER_STRICT_GATES` | Safety-gate thresholds (see `docs/SNIPER-ENGINE.md` §4). |
+| `SNIPER_STALE_POSITION_EXIT_SECS` | Force-exit a position whose mark could not refresh for this long (`0` = off). |
+| `SNIPER_EMERGENCY_DISABLE` | `true` refuses every new sniper entry; exits keep running. |
+| `SNIPER_MAX_POSITION_SOL` / `SNIPER_MAX_TOTAL_EXPOSURE_SOL` / `SNIPER_MAX_CONCURRENT_POSITIONS` / `SNIPER_MAX_PENDING_EXECUTIONS` | Sniper exposure caps evaluated by the shared risk engine (`0` = inherit generic limit / off). |
+| `SNIPER_TOKEN_COOLDOWN_SECS` / `SNIPER_FAILED_ENTRY_COOLDOWN_SECS` / `SNIPER_DAILY_LOSS_LIMIT_SOL` | Per-mint attempt cooldown, failed-entry cooldown, sniper-only daily loss cap. |
+| `COPY_ENABLED` / `COPY_WALLETS` / `COPY_FRACTION` / `COPY_MAX_SOL` / `COPY_FEED` | Module 2 master switch, tracked wallets, default sizing, feed (`pumpportal` \| `logs_poll` \| `transaction_subscribe`). |
+| `COPY_MAX_EVENT_AGE_SECS` / `COPY_STRICT_ORDERING` / `COPY_MAX_SOL_PER_TRADE` / `COPY_MAX_BALANCE_FRACTION` / `COPY_MIN_MIRROR_SOL` | Copy pipeline: global staleness ceiling (chain time), refuse out-of-order events, global size caps and dust floor (see `docs/COPY-TRADING-ENGINE.md`). |
+| `COPY_RECONCILE_INTERVAL_SECS` / `COPY_RECONCILE_AUTO_EXIT` / `COPY_RECOVERY_LOOKBACK_HOURS` | Leader↔follower reconciliation cadence, sell when the leader fully exited, journal window re-seeded into dedup after a restart. |
+| `COPY_EMERGENCY_DISABLE` | `true` refuses every new mirrored entry; exits (incl. mirrored exits) keep running. |
+| `COPY_MAX_POSITION_SOL` / `COPY_MAX_TOTAL_EXPOSURE_SOL` / `COPY_MAX_CONCURRENT_POSITIONS` / `COPY_MAX_PENDING_EXECUTIONS` / `COPY_MAX_LEADER_EXPOSURE_SOL` | Copy exposure caps evaluated by the shared risk engine (`0` = inherit generic limit / off). |
+| `COPY_FAILED_ENTRY_COOLDOWN_SECS` / `COPY_DAILY_LOSS_LIMIT_SOL` | Failed-entry cooldown per mint, copy-only daily loss cap. |
+| `POLYMARKET_ENABLED` / `POLYMARKET_STRATEGY` / `POLYMARKET_STAKE_USD` / `POLYMARKET_SIGNATURE_TYPE` / `POLYMARKET_FUNDER` / `POLYMARKET_DOMAIN_VERSION` | Module 3 master switch, strategy (`value` \| `search`), USDC per decision, signing type (0–3), funder wallet, CLOB EIP-712 domain version. |
+| `POLY_API_KEY` / `POLY_API_SECRET` / `POLY_API_PASSPHRASE` | Pre-derived CLOB L2 credentials (otherwise derived from the private key at start-up). |
+| `POLYMARKET_MAX_SPREAD` / `POLYMARKET_MIN_LIQUIDITY_USD` / `POLYMARKET_QUOTE_MAX_AGE_SECS` / `POLYMARKET_MIN_TIME_TO_RESOLUTION_SECS` / `POLYMARKET_MIN_ORDER_SIZE` | Strategy gates and the venue minimum size (see `docs/POLYMARKET-ENGINE.md` §4). |
+| `POLYMARKET_ORDER_POLL_INTERVAL_SECS` / `POLYMARKET_ORDER_TTL_SECS` / `POLYMARKET_REPRICE_THRESHOLD` / `POLYMARKET_USE_USER_WEBSOCKET` / `POLYMARKET_CANCEL_ON_SHUTDOWN` | Live order lifecycle: status polling, TTL cancel, cancel-and-requote distance, authenticated user channel, cancel resting orders on stop. |
+| `POLYMARKET_RECONCILE_INTERVAL_SECS` / `POLYMARKET_RECONCILE_CANCEL_ORPHANS` | Local-vs-venue reconciliation cadence; cancel (instead of report) venue orders unknown locally. |
+| `POLY_MAX_POSITION_USD` / `POLY_MAX_TOTAL_EXPOSURE_USD` / `POLY_MAX_MARKET_EXPOSURE_USD` / `POLY_MAX_CONCURRENT_POSITIONS` / `POLY_MAX_OPEN_ORDERS` | Polymarket exposure caps evaluated by the shared risk engine (`0` = inherit generic limit / off); resting buy orders count as exposure. |
+| `POLY_DAILY_LOSS_LIMIT_USD` / `POLY_EMERGENCY_DISABLE` | Polymarket-only daily loss cap (USDC); `true` refuses every new Polymarket entry (cancels/reconciliation keep running). |
 
 Secret-bearing config fields store the **name** of an env var (e.g.
 `bot_token_env = "TELEGRAM_BOT_TOKEN"`), so keys never have to sit in the file.

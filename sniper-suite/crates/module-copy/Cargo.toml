@@ -20,6 +20,8 @@ tracing.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Durable copy journal trait (`recovery::CopyStore`).
+async-trait.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
@@ -32,3 +34,7 @@ solana-transaction-status.workspace = true
 base64.workspace = true
 bincode.workspace = true
 tracing-subscriber.workspace = true
+# TASK 3 pipeline tests reuse the sniper's mock JSON-RPC node harness
+# (`tests/common/mod.rs` includes it by path).
+module-sniper.workspace = true
+bs58.workspace = true

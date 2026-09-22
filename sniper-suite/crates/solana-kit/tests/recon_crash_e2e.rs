@@ -205,7 +205,7 @@ async fn crash_recovery_converges_to_chain_truth() {
         ConfirmOutcome::Confirmed { .. } => {
             ExternalState::Observed(ExternalExecutionState::Succeeded)
         }
-        ConfirmOutcome::Failed { .. } => {
+        ConfirmOutcome::Failed { .. } | ConfirmOutcome::Expired { .. } => {
             ExternalState::Observed(ExternalExecutionState::FailedOnExternal)
         }
         ConfirmOutcome::Timeout => ExternalState::Observed(ExternalExecutionState::Pending),
@@ -335,7 +335,7 @@ async fn ambiguous_send_is_never_a_definite_failure() {
         ConfirmOutcome::Confirmed { .. } => {
             ExternalState::Observed(ExternalExecutionState::Succeeded)
         }
-        ConfirmOutcome::Failed { .. } => {
+        ConfirmOutcome::Failed { .. } | ConfirmOutcome::Expired { .. } => {
             ExternalState::Observed(ExternalExecutionState::FailedOnExternal)
         }
         ConfirmOutcome::Timeout => ExternalState::Observed(ExternalExecutionState::Pending),

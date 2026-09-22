@@ -49,6 +49,25 @@ pub struct ApiKey {
     pub passphrase: String,
 }
 
+impl ApiKey {
+    /// The `auth` object of the user-channel websocket subscribe frame.
+    /// Same three credentials as the L2 headers, in the wire field names.
+    pub fn user_ws_auth(&self) -> serde_json::Value {
+        serde_json::json!({
+            "apiKey": self.key,
+            "secret": self.secret,
+            "passphrase": self.passphrase,
+        })
+    }
+
+    /// A log-safe description: the key id prefix only, never the secret or
+    /// passphrase.
+    pub fn redacted(&self) -> String {
+        let shown: String = self.key.chars().take(6).collect();
+        format!("apiKey {shown}… (secret/passphrase redacted)")
+    }
+}
+
 /// Build the L2 (HMAC) auth headers for a request.
 ///
 /// `method` is uppercased internally; `request_path` must include the leading
@@ -241,5 +260,23 @@ mod tests {
         assert_eq!(h["POLY_NONCE"], "0");
         assert!(h["POLY_SIGNATURE"].starts_with("0x"));
         assert_eq!(h["POLY_ADDRESS"], addr);
+    }
+
+    #[test]
+    fn api_key_user_ws_auth_and_redaction() {
+        let k = ApiKey {
+            key: "abcdef123456".into(),
+            secret: "c2VjcmV0".into(),
+            passphrase: "hunter2-xyz".into(),
+        };
+        let v = k.user_ws_auth();
+        assert_eq!(v["apiKey"], "abcdef123456");
+        assert_eq!(v["secret"], "c2VjcmV0");
+        assert_eq!(v["passphrase"], "hunter2-xyz");
+        let r = k.redacted();
+        assert!(r.starts_with("apiKey abcdef"));
+        assert!(!r.contains("123456"), "only a key prefix is shown");
+        assert!(!r.contains("c2VjcmV0"));
+        assert!(!r.contains("hunter2"));
     }
 }

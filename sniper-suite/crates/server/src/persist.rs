@@ -14,16 +14,29 @@
 //!
 //! The pump also owns the restart-restore path: [`restore`] loads open
 //! positions and unfinished orders back into memory before trading resumes.
+//!
+//! The execution lifecycle ledger (`bot_core::execution`) has its own durable
+//! path here too: [`ExecutionLedgerSink`] writes every state transition to
+//! `execution_lifecycle` / `execution_events` (write-ahead for `Submitted`)
+//! and turns the money-relevant ones into hash-chained audit rows, and
+//! [`restore_execution_ledger`] rehydrates the ledger after a restart so the
+//! duplicate guard and reconciliation know about attempts from the previous
+//! life of the process.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use bot_core::audit::{AuditOutcome, AuditTrail};
 use bot_core::auth::sha256_hex;
+use bot_core::db::execution::ExecutionRepo;
 use bot_core::db::repo::{
     OrderRepo, PositionRepo, ReconRepo, RiskEventRepo, SystemEventRepo, TradeRepo, TransactionRepo,
 };
 use bot_core::db::Database;
 use bot_core::events::AppEvent;
+use bot_core::execution::{
+    ExecutionRecord as LifecycleRecord, ExecutionSink, ExecutionState, ExecutionTransition,
+};
 use bot_core::lifecycle::Shutdown;
 use bot_core::models::{BotModule, ExecutionMode, TradeSource, Venue};
 use bot_core::oms::{ExecutionRecord, OrderDraft, OrderManager, OrderStatus};
@@ -218,41 +231,60 @@ impl PersistencePump {
         let exec_mode = mode
             .parse::<ExecutionMode>()
             .unwrap_or(ExecutionMode::Paper);
-        let draft = OrderDraft {
-            idempotency_key: idem,
-            module,
-            side: "buy".into(), // refined by the Fill event when it arrives
-            symbol: symbol.to_string(),
-            venue: venue.to_string(),
-            mode: exec_mode,
-            qty: quote_amount,
-            price: None,
-            meta: serde_json::json!({
-                "quote_amount": quote_amount,
-                "source_event": "order_sent",
-            }),
+        // Module 3 (TASK 4) creates its OMS order BEFORE publishing OrderSent
+        // and attaches the venue order id as `external_id`; that record is
+        // the one authoritative order — reuse it instead of minting a second
+        // one under an `ordersent|…` key. The module also owns its lifecycle
+        // transitions and execution records, so only the venue claim
+        // (transaction row + reconciliation queue) is added here.
+        let module_owned = match signature {
+            Some(sig) if venue == "polymarket" => find_by_external_id(&mgr, sig, module).await,
+            _ => None,
         };
-        let order = match mgr.create(draft).await {
-            Ok(o) => o,
-            Err(e) => {
-                warn!(error = %e, "OMS create failed for OrderSent event");
-                return;
+        let owned_by_module = module_owned.is_some();
+        let order = match module_owned {
+            Some(o) => o,
+            None => {
+                let draft = OrderDraft {
+                    idempotency_key: idem,
+                    module,
+                    side: "buy".into(), // refined by the Fill event when it arrives
+                    symbol: symbol.to_string(),
+                    venue: venue.to_string(),
+                    mode: exec_mode,
+                    qty: quote_amount,
+                    price: None,
+                    meta: serde_json::json!({
+                        "quote_amount": quote_amount,
+                        "source_event": "order_sent",
+                    }),
+                };
+                let order = match mgr.create(draft).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        warn!(error = %e, "OMS create failed for OrderSent event");
+                        return;
+                    }
+                };
+                if order.status == OrderStatus::Created {
+                    let _ = mgr
+                        .transition(&order.id, OrderStatus::Submitted, Some("order sent"))
+                        .await;
+                }
+                order
             }
         };
-        if order.status == OrderStatus::Created {
-            let _ = mgr
-                .transition(&order.id, OrderStatus::Submitted, Some("order sent"))
-                .await;
-        }
         if let Some(sig) = signature {
             // Polymarket submissions carry the derived CLOB order id in
             // `signature`; they reconcile through the venue adapter queue,
             // not the Solana transaction queue.
             let is_poly = venue == "polymarket";
             if is_poly {
-                let _ = mgr
-                    .attach_external(&order.id, Some(sig.to_string()), None)
-                    .await;
+                if !owned_by_module {
+                    let _ = mgr
+                        .attach_external(&order.id, Some(sig.to_string()), None)
+                        .await;
+                }
             } else {
                 let _ = mgr
                     .attach_external(&order.id, None, Some(sig.to_string()))
@@ -284,6 +316,9 @@ impl PersistencePump {
                 Err(e) => warn!(error = %e, %sig, "transaction persistence failed"),
             }
         }
+        if owned_by_module {
+            return;
+        }
         mgr.record_execution(ExecutionRecord {
             order_id: order.id.clone(),
             ts,
@@ -304,6 +339,16 @@ impl PersistencePump {
         let Some(mgr) = self.orders() else {
             return;
         };
+
+        // Module 3 (TASK 4) fills name their OMS order (`oms=<id>`); that
+        // order's lifecycle (partial fills, cancels after partials) and its
+        // execution records are driven by the module itself. Persisting the
+        // trade row above is all this layer adds for them.
+        if let Some(id) = extract_oms_order_id(trade.note.as_deref()) {
+            if mgr.get(&id).await.is_some() {
+                return;
+            }
+        }
 
         // Find the matching order: by signature (solana path) or create the
         // provider order now (polymarket path — its fills are the first
@@ -458,15 +503,50 @@ impl PersistencePump {
 /// Extract the CLOB order id from the note format used by module 3
 /// (`"<reason> order=<id>"`).
 pub fn extract_poly_order_id(note: Option<&str>) -> Option<String> {
+    extract_note_field(note, "order=")
+}
+
+/// Extract the OMS order id module 3 (TASK 4) writes into fill notes
+/// (`"… oms=<order_id> …"`).
+pub fn extract_oms_order_id(note: Option<&str>) -> Option<String> {
+    extract_note_field(note, "oms=")
+}
+
+fn extract_note_field(note: Option<&str>, key: &str) -> Option<String> {
     let note = note?;
-    let idx = note.find("order=")?;
-    let rest = &note[idx + "order=".len()..];
-    let id: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
-    if id.is_empty() {
-        None
-    } else {
-        Some(id)
+    // Match the key at a token boundary so `oms=` never matches inside a
+    // longer word and `order=` never matches inside `venue_order=`.
+    let mut search_from = 0usize;
+    while let Some(rel) = note[search_from..].find(key) {
+        let idx = search_from + rel;
+        let at_boundary = idx == 0
+            || note[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_whitespace());
+        if at_boundary {
+            let rest = &note[idx + key.len()..];
+            let id: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+            return if id.is_empty() { None } else { Some(id) };
+        }
+        search_from = idx + key.len();
     }
+    None
+}
+
+/// Find the module-owned OMS order that carries `external_id` (the venue
+/// order id) — in-memory mirror first (same process), then the database.
+async fn find_by_external_id(
+    mgr: &Arc<OrderManager>,
+    external_id: &str,
+    module: BotModule,
+) -> Option<bot_core::oms::Order> {
+    mgr.list(500).await.into_iter().find(|o| {
+        o.module == module
+            && o.external_id
+                .as_deref()
+                .is_some_and(|e| e.eq_ignore_ascii_case(external_id))
+    })
 }
 
 /// Restart recovery: reload open positions + unfinished orders into memory
@@ -497,6 +577,163 @@ pub async fn restore(db: &Arc<Database>, state: &Shared) {
         bot_core::recovery::sweep_unresolved_transactions(db, Duration::from_secs(90)).await;
     if swept > 0 {
         info!(swept, "unresolved transactions enqueued for reconciliation");
+    }
+
+    // 4) Execution lifecycle ledger: duplicate guard + ambiguous attempts.
+    restore_execution_ledger(db).await;
+}
+
+/// How many recently settled lifecycle rows are loaded back into the
+/// in-memory ledger so the duplicate guard also covers intents that landed
+/// shortly before a restart (a replayed feed event must not re-buy).
+const LEDGER_RESTORE_RECENT: i64 = 2_000;
+
+/// Rehydrate the process-wide execution ledger from `execution_lifecycle`
+/// and apply the restart policy:
+///
+/// * `Created`/`Validated` rows never produced a broadcast → closed as
+///   `Failed(Internal)` (safe: the `Submitted` row is written BEFORE the
+///   send, so its absence proves nothing left the process);
+/// * `Submitted`/`Pending` rows may have reached the network → kept live
+///   (blocking duplicates) and their signatures enqueued for the
+///   reconciliation worker, which resolves them against chain truth.
+pub async fn restore_execution_ledger(db: &Arc<Database>) {
+    let repo = ExecutionRepo::new(db.clone());
+    let ledger = bot_core::execution::ledger();
+    let mut rows = match repo.list_open().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "execution ledger restore: open rows unreadable — duplicate guard starts empty");
+            Vec::new()
+        }
+    };
+    match repo.list_recent(LEDGER_RESTORE_RECENT).await {
+        Ok(recent) => rows.extend(recent),
+        Err(e) => debug!(error = %e, "execution ledger restore: recent rows unreadable"),
+    }
+    let loaded = ledger.hydrate(rows).await;
+    let ambiguous = ledger.resolve_after_restart().await;
+    let recon = ReconRepo::new(db.clone());
+    let mut enqueued = 0usize;
+    for rec in &ambiguous {
+        if let Some(sig) = &rec.signature {
+            match recon.enqueue("transaction", sig).await {
+                Ok(()) => enqueued += 1,
+                Err(e) => debug!(intent = %rec.intent_id, error = %e, "recon enqueue failed"),
+            }
+        }
+    }
+    bot_core::obs::metrics::global()
+        .counter(
+            "bot_execution_restart_recovered_total",
+            "Execution attempts found live in the durable ledger at startup, by disposition.",
+            &[("disposition", "ambiguous")],
+        )
+        .inc_by(ambiguous.len() as u64);
+    if loaded > 0 || !ambiguous.is_empty() {
+        info!(
+            loaded,
+            ambiguous = ambiguous.len(),
+            enqueued,
+            "execution ledger restored from the database"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Execution lifecycle sink (durable rows + audit trail)
+// ---------------------------------------------------------------------------
+
+/// Durable + audited sink for the execution lifecycle ledger.
+///
+/// * With a database: every transition upserts the intent's row in
+///   `execution_lifecycle` and appends to `execution_events`. The ledger
+///   awaits sinks inline, so the `Submitted` row is on disk before the
+///   transaction is broadcast (crash point C of the recovery design).
+/// * Always: `Submitted`, `Confirmed`, `Failed`, `Expired` and `Reconciled`
+///   become hash-chained audit records (`executor` actor), which the audit
+///   trail also publishes on the event bus for the dashboard / Telegram.
+///
+/// Failures are metered and logged, never propagated — persistence must not
+/// be able to block or fail an execution.
+pub struct ExecutionLedgerSink {
+    repo: Option<ExecutionRepo>,
+    audit: Arc<AuditTrail>,
+}
+
+impl ExecutionLedgerSink {
+    pub fn new(db: Option<Arc<Database>>, audit: Arc<AuditTrail>) -> Arc<Self> {
+        Arc::new(ExecutionLedgerSink {
+            repo: db.map(ExecutionRepo::new),
+            audit,
+        })
+    }
+
+    /// Attach to the process-wide ledger. Call once at startup.
+    pub async fn install(self: Arc<Self>) {
+        bot_core::execution::ledger().attach_sink(self).await;
+    }
+
+    fn meter_failure(op: &str) {
+        bot_core::obs::metrics::global()
+            .counter(
+                "bot_execution_persist_failures_total",
+                "Execution lifecycle rows/events that could not be written.",
+                &[("op", op)],
+            )
+            .inc();
+    }
+
+    fn audit_outcome(state: ExecutionState, record: &LifecycleRecord) -> Option<AuditOutcome> {
+        match state {
+            ExecutionState::Submitted | ExecutionState::Confirmed => Some(AuditOutcome::Success),
+            ExecutionState::Failed | ExecutionState::Expired => Some(AuditOutcome::Failure),
+            ExecutionState::Reconciled => Some(if record.failure.is_some() {
+                AuditOutcome::Failure
+            } else {
+                AuditOutcome::Success
+            }),
+            ExecutionState::Created | ExecutionState::Validated | ExecutionState::Pending => None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionSink for ExecutionLedgerSink {
+    async fn on_transition(&self, record: &LifecycleRecord, transition: &ExecutionTransition) {
+        if let Some(repo) = &self.repo {
+            if let Err(e) = repo.upsert(record).await {
+                Self::meter_failure("upsert");
+                warn!(intent = %record.intent_id, error = %e, "execution lifecycle upsert failed");
+            }
+            if let Err(e) = repo.append_event(transition).await {
+                Self::meter_failure("event");
+                debug!(intent = %record.intent_id, error = %e, "execution event append failed");
+            }
+        }
+        if let Some(outcome) = Self::audit_outcome(transition.to, record) {
+            self.audit
+                .record(
+                    "executor",
+                    &format!("execution.{}", transition.to.as_str()),
+                    Some(&record.intent_id),
+                    outcome,
+                    serde_json::json!({
+                        "module": record.module,
+                        "label": record.label,
+                        "symbol": record.symbol,
+                        "wallet": record.wallet,
+                        "from": transition.from.map(|s| s.as_str()),
+                        "attempt": transition.attempt,
+                        "signature": transition.signature,
+                        "failure": transition.failure.map(|f| f.as_str()),
+                        "reason": transition.reason,
+                        "priority_fee_micro_lamports": record.priority_fee_micro_lamports,
+                        "last_valid_block_height": record.last_valid_block_height,
+                    }),
+                )
+                .await;
+        }
     }
 }
 
@@ -620,5 +857,22 @@ mod tests {
             Some("id1".into()),
             "stops at whitespace"
         );
+    }
+
+    #[test]
+    fn oms_order_id_extraction_matches_task4_fill_notes() {
+        let note = "Yes order=0xabc oms=ord_42 fill=0xabc:trade:9";
+        assert_eq!(extract_oms_order_id(Some(note)), Some("ord_42".into()));
+        assert_eq!(extract_poly_order_id(Some(note)), Some("0xabc".into()));
+        // Token boundaries: `venue_order=` is not `order=`, `atoms=` is not
+        // `oms=`.
+        assert_eq!(extract_poly_order_id(Some("venue_order=1")), None);
+        assert_eq!(extract_oms_order_id(Some("atoms=1")), None);
+        assert_eq!(
+            extract_oms_order_id(Some("atoms=1 oms=2")),
+            Some("2".into())
+        );
+        assert_eq!(extract_oms_order_id(Some("oms=")), None);
+        assert_eq!(extract_oms_order_id(None), None);
     }
 }

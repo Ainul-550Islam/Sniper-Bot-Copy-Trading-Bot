@@ -1400,3 +1400,581 @@ async fn pg_risk_oracle_counts_and_pnl() {
         "pnl {pnl_before} -> {pnl_after} must include the -0.5"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Copy-trading journal (migration 0013, TASK 3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pg_copy_journal_roundtrip() {
+    let Some(db) = setup().await else { return };
+    use bot_core::db::copy::{
+        CopyEventRecord, CopyLinkRecord, CopyRepo, LeaderEventRecord, LeaderRecord,
+    };
+    let repo = CopyRepo::new(db.clone());
+    let run = run_id();
+    let leader = format!("leader-{run}");
+    let now = chrono::Utc::now();
+
+    // Leaders: upsert keeps the earliest followed_at, grows counters, follows
+    // status; lifecycle events append.
+    let rec = LeaderRecord {
+        address: leader.clone(),
+        label: "whale".into(),
+        status: "active".into(),
+        source: "config".into(),
+        followed_at: now,
+        status_since: now,
+        events_seen: 3,
+        mirrored: 1,
+        rejected: 1,
+        last_event_at: Some(now),
+        last_slot: Some(100),
+        updated_at: now,
+    };
+    repo.upsert_leader(&rec).await.expect("leader upsert");
+    let mut again = rec.clone();
+    again.status = "paused".into();
+    again.events_seen = 1;
+    again.last_slot = Some(90);
+    again.followed_at = now - chrono::Duration::days(2);
+    repo.upsert_leader(&again).await.expect("leader upsert 2");
+    let got = repo.get_leader(&leader).await.expect("get").expect("row");
+    assert_eq!(got.status, "paused");
+    assert_eq!(got.events_seen, 3, "counters never shrink");
+    assert_eq!(got.last_slot, Some(100));
+    assert_eq!(got.label, "whale");
+    assert!(repo
+        .list_leaders()
+        .await
+        .unwrap()
+        .iter()
+        .any(|l| l.address == leader));
+    repo.append_leader_event(&LeaderEventRecord {
+        id: 0,
+        address: leader.clone(),
+        event: "paused".into(),
+        reason: Some("operator".into()),
+        replica_id: "r1".into(),
+        ts: now,
+    })
+    .await
+    .expect("leader event");
+    let events = repo.leader_events(&leader, 10).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event, "paused");
+    assert!(events[0].id > 0);
+
+    // Events: upsert on event_id keeps created_at, overwrites the outcome.
+    let event_id = format!("cev_{run}");
+    let ev = CopyEventRecord {
+        event_id: event_id.clone(),
+        leader: leader.clone(),
+        signature: format!("sig-{run}"),
+        slot: 123,
+        mint: format!("mint-{run}"),
+        side: "buy".into(),
+        venue: "pump.fun".into(),
+        token_amount: 1_000.0,
+        sol_amount: 0.5,
+        source: "pumpportal".into(),
+        source_sequence: 7,
+        event_at: Some(now),
+        observed_at: now,
+        stage: "REJECTED".into(),
+        reject_reason: Some("STALE_EVENT".into()),
+        detail: Some("old".into()),
+        intent_id: None,
+        position_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    repo.record_event(&ev).await.expect("event");
+    let mut filled = ev.clone();
+    filled.stage = "FILLED".into();
+    filled.reject_reason = None;
+    filled.detail = None;
+    filled.intent_id = Some("int_x".into());
+    filled.position_id = Some(format!("p-{run}"));
+    filled.created_at = now + chrono::Duration::hours(1);
+    repo.record_event(&filled).await.expect("event 2");
+    let got = repo.get_event(&event_id).await.unwrap().unwrap();
+    assert_eq!(got.stage, "FILLED");
+    assert_eq!(got.intent_id.as_deref(), Some("int_x"));
+    assert!(got.reject_reason.is_none());
+    assert_eq!(got.slot, 123);
+    assert_eq!(got.source_sequence, 7);
+    assert!(
+        (got.created_at - now).num_seconds().abs() < 2,
+        "created_at is first-seen"
+    );
+    let since = repo
+        .events_since(now - chrono::Duration::minutes(1), 1000)
+        .await
+        .unwrap();
+    assert!(since.iter().any(|e| e.event_id == event_id));
+    assert!(repo
+        .events_for_leader(&leader, 10)
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.event_id == event_id));
+
+    // Links: open → closed exactly once; state check constraint holds.
+    let position_id = format!("p-{run}");
+    let link = CopyLinkRecord {
+        position_id: position_id.clone(),
+        leader: leader.clone(),
+        mint: format!("mint-{run}"),
+        entry_event_id: event_id.clone(),
+        entry_signature: format!("sig-{run}"),
+        intent_id: Some("int_x".into()),
+        leader_token_amount: 1_000.0,
+        follower_qty: 50.0,
+        status: "open".into(),
+        opened_at: now,
+        closed_at: None,
+        exit_event_id: None,
+        last_reconciled_at: None,
+        note: None,
+        updated_at: now,
+    };
+    repo.upsert_link(&link).await.expect("link");
+    assert!(repo
+        .open_links()
+        .await
+        .unwrap()
+        .iter()
+        .any(|l| l.position_id == position_id));
+    let mut refreshed = link.clone();
+    refreshed.follower_qty = 25.0;
+    refreshed.last_reconciled_at = Some(now);
+    repo.upsert_link(&refreshed).await.expect("link refresh");
+    assert_eq!(
+        repo.get_link(&position_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .follower_qty,
+        25.0
+    );
+    assert!(repo
+        .close_link(
+            &position_id,
+            "closed",
+            Some("cev_exit"),
+            Some("leader exited")
+        )
+        .await
+        .unwrap());
+    assert!(
+        !repo
+            .close_link(&position_id, "orphaned", None, None)
+            .await
+            .unwrap(),
+        "only open links transition"
+    );
+    let closed = repo.get_link(&position_id).await.unwrap().unwrap();
+    assert_eq!(closed.status, "closed");
+    assert_eq!(closed.exit_event_id.as_deref(), Some("cev_exit"));
+    assert!(closed.closed_at.is_some());
+    let mut bad = link.clone();
+    bad.position_id = format!("p-bad-{run}");
+    bad.status = "bogus".into();
+    assert!(
+        repo.upsert_link(&bad).await.is_err(),
+        "CHECK (status) rejects unknown states"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Polymarket trading journal (migration 0014, TASK 4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn pg_polymarket_journal_roundtrip() {
+    let Some(db) = setup().await else { return };
+    use bot_core::db::polymarket::{
+        PolyFillRecord, PolyOrderRecord, PolyReconFindingRecord, PolyRepo, PolySignalRecord,
+    };
+    let repo = PolyRepo::new(db.clone());
+    let run = run_id();
+    let now = chrono::Utc::now();
+    let signal_id = format!("psig_{run}");
+    let venue_order_id = format!("0x{run:0>64}");
+    let order_id = format!("ord_{run}");
+
+    // Signals: upsert keeps created_at, follows stage/reason, COALESCEs ids.
+    let sig = PolySignalRecord {
+        signal_id: signal_id.clone(),
+        condition_id: "0xcond".into(),
+        token_id: format!("tok{run}"),
+        outcome: "Yes".into(),
+        side: "buy".into(),
+        strategy: "value".into(),
+        limit_price: 0.42,
+        size_tokens: 10.0,
+        stake_usd: 4.2,
+        mode: "paper".into(),
+        stage: "RISK_APPROVED".into(),
+        reject_reason: None,
+        detail: "first".into(),
+        order_id: None,
+        venue_order_id: None,
+        position_id: None,
+        created_at: now - chrono::Duration::minutes(1),
+        updated_at: now - chrono::Duration::minutes(1),
+    };
+    repo.record_signal(&sig).await.expect("signal insert");
+    let mut later = sig.clone();
+    later.stage = "FILLED".into();
+    later.detail = "second".into();
+    later.order_id = Some(order_id.clone());
+    later.venue_order_id = Some(venue_order_id.clone());
+    later.created_at = now;
+    later.updated_at = now;
+    repo.record_signal(&later).await.expect("signal upsert");
+    let got = repo.get_signal(&signal_id).await.unwrap().unwrap();
+    assert_eq!(got.stage, "FILLED");
+    assert_eq!(got.detail, "second");
+    assert_eq!(got.order_id.as_deref(), Some(order_id.as_str()));
+    assert!(got.created_at < now, "created_at keeps the first-seen time");
+    let mut rejected = sig.clone();
+    rejected.signal_id = format!("psig_rej_{run}");
+    rejected.stage = "REJECTED".into();
+    rejected.reject_reason = Some("SPREAD_TOO_WIDE".into());
+    repo.record_signal(&rejected).await.unwrap();
+    let recent = repo
+        .signals_since(now - chrono::Duration::hours(1), 1000)
+        .await
+        .unwrap();
+    assert!(recent.iter().any(|s| s.signal_id == signal_id));
+    assert!(recent
+        .iter()
+        .any(|s| s.reject_reason.as_deref() == Some("SPREAD_TOO_WIDE")));
+    let mut bad = sig.clone();
+    bad.signal_id = format!("psig_bad_{run}");
+    bad.side = "hold".into();
+    assert!(
+        repo.record_signal(&bad).await.is_err(),
+        "CHECK (side) rejects unknown sides"
+    );
+
+    // Orders: matched size never regresses, closed_at sticks, open list.
+    let order = PolyOrderRecord {
+        venue_order_id: venue_order_id.clone(),
+        order_id: order_id.clone(),
+        signal_id: signal_id.clone(),
+        condition_id: "0xcond".into(),
+        token_id: format!("tok{run}"),
+        outcome: "Yes".into(),
+        side: "buy".into(),
+        order_type: "GTC".into(),
+        limit_price: 0.42,
+        size_tokens: 10.0,
+        size_matched: 4.0,
+        mode: "live".into(),
+        state: "partially_filled".into(),
+        venue_status: "live".into(),
+        expiration: 0,
+        position_id: None,
+        replica_id: "r1".into(),
+        submitted_at: now - chrono::Duration::minutes(2),
+        updated_at: now,
+        closed_at: None,
+    };
+    repo.upsert_order(&order).await.expect("order insert");
+    let open = repo.open_orders().await.unwrap();
+    assert!(open.iter().any(|o| o.venue_order_id == venue_order_id));
+    let mut stale = order.clone();
+    stale.size_matched = 1.0;
+    stale.state = "resting".into();
+    repo.upsert_order(&stale).await.unwrap();
+    let got = repo.get_order(&venue_order_id).await.unwrap().unwrap();
+    assert_eq!(
+        got.size_matched, 4.0,
+        "a stale poll cannot un-fill an order"
+    );
+    let mut done = order.clone();
+    done.size_matched = 10.0;
+    done.state = "filled".into();
+    done.venue_status = "matched".into();
+    done.position_id = Some(format!("p{run}"));
+    done.closed_at = Some(now);
+    repo.upsert_order(&done).await.unwrap();
+    let got = repo.get_order(&venue_order_id).await.unwrap().unwrap();
+    assert_eq!(got.state, "filled");
+    assert!(got.closed_at.is_some());
+    assert_eq!(got.position_id.as_deref(), Some(format!("p{run}").as_str()));
+    assert!(!repo
+        .open_orders()
+        .await
+        .unwrap()
+        .iter()
+        .any(|o| o.venue_order_id == venue_order_id));
+
+    // Fills: guarded insert dedups on fill_id.
+    let fill = PolyFillRecord {
+        fill_id: format!("trade-{run}"),
+        venue_order_id: venue_order_id.clone(),
+        order_id: order_id.clone(),
+        token_id: format!("tok{run}"),
+        side: "buy".into(),
+        price: 0.42,
+        size_tokens: 4.0,
+        quote_usd: 1.68,
+        source: "user_ws".into(),
+        position_id: None,
+        ts: now,
+    };
+    assert!(repo.record_fill(&fill).await.unwrap(), "first booking");
+    assert!(
+        !repo.record_fill(&fill).await.unwrap(),
+        "replayed fill is not booked twice"
+    );
+    let fills = repo.fills_for(&venue_order_id).await.unwrap();
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].source, "user_ws");
+
+    // Recon findings: append-only, newest first.
+    repo.append_finding(&PolyReconFindingRecord {
+        id: 0,
+        kind: "orphan_venue_order".into(),
+        venue_order_id: Some(format!("0xorphan{run}")),
+        order_id: None,
+        token_id: Some(format!("tok{run}")),
+        detail: "open on venue, unknown locally".into(),
+        action: "reported".into(),
+        replica_id: "r1".into(),
+        ts: now,
+    })
+    .await
+    .unwrap();
+    let findings = repo.recent_findings(50).await.unwrap();
+    assert!(findings
+        .iter()
+        .any(|f| f.kind == "orphan_venue_order" && f.id > 0));
+}
+
+/// TASK 5 (migration 0015): the ledger event + postings insert is one
+/// transaction and idempotent on the event id; snapshots, decisions, kill
+/// switches and findings round-trip; the durable-store adapters recover a
+/// fresh ledger from the journal without booking anything twice.
+#[tokio::test]
+async fn global_ledger_repo_round_trips_and_is_idempotent() {
+    use bot_core::accounting::{
+        expand, fill_event, AccountingFindingKind, Applied, EventSide, GlobalLedger, LedgerStore,
+        PositionBook, StoredEvent,
+    };
+    use bot_core::db::accounting::AccountingRepo;
+    use bot_core::events::EventBus;
+    use bot_core::global_risk::{
+        DecisionContext, GlobalRiskRequest, KillScope, KillSwitchEvent, KillSwitchState,
+    };
+
+    let Some(db) = setup().await else { return };
+    let run = run_id();
+    let repo = AccountingRepo::new(db.clone());
+    let wallet = format!("wallet-{run}");
+
+    // Event + postings in one transaction; the replay inserts nothing.
+    let event = fill_event(
+        BotModule::Sniper,
+        Venue::PumpFun,
+        wallet.clone(),
+        "sniper",
+        format!("MINT-{run}"),
+        "SOL",
+        EventSide::Buy,
+        100.0,
+        0.01,
+        1.0,
+        0.0,
+        ExecutionMode::Paper,
+        format!("sig-{run}"),
+        Some(format!("intent-{run}")),
+        Some(format!("p-{run}")),
+        chrono::Utc::now(),
+        "db test",
+    );
+    let stored = StoredEvent {
+        event_id: event.event_id(),
+        event: event.clone(),
+        recorded_at: chrono::Utc::now(),
+        replica_id: "r1".into(),
+    };
+    let entry = expand(&event, 0.0).unwrap();
+    assert!(
+        repo.record_event(&stored, &entry).await.unwrap(),
+        "first booking"
+    );
+    assert!(
+        !repo.record_event(&stored, &entry).await.unwrap(),
+        "replayed event is not journaled twice"
+    );
+    let postings = repo.postings(&stored.event_id).await.unwrap();
+    assert_eq!(postings.len(), entry.postings.len());
+    assert!(repo
+        .load_events()
+        .await
+        .unwrap()
+        .iter()
+        .any(|e| e.event_id == stored.event_id));
+
+    // Position snapshot upsert.
+    let mut book = PositionBook::new();
+    book.apply(&event, &stored.event_id);
+    let snapshot = book.positions().next().unwrap().clone();
+    repo.upsert_position(&snapshot).await.unwrap();
+    repo.upsert_position(&snapshot).await.unwrap();
+    assert!(repo
+        .positions()
+        .await
+        .unwrap()
+        .iter()
+        .any(|p| p.key == snapshot.key && (p.qty - 100.0).abs() < 1e-9));
+
+    // A fresh ledger over the durable store rebuilds from the journal and
+    // treats the same fact as a duplicate.
+    let store: Arc<dyn LedgerStore> = Arc::new(TestLedgerStore(repo_arc(db.clone())));
+    let ledger = GlobalLedger::new(EventBus::new(16), "r2");
+    ledger.attach_store(store).await;
+    let report = ledger.recover(&[]).await;
+    assert!(report.journal_available);
+    assert!(report.rebuilt >= 1);
+    assert_eq!(ledger.submit(event.clone()).await, Applied::Duplicate);
+
+    // Decisions, kill switches and findings.
+    let engine = bot_core::global_risk::GlobalRiskEngine::new(
+        bot_core::config::GlobalRiskConfig::default(),
+        Arc::new(GlobalLedger::new(EventBus::new(16), "r3")),
+        EventBus::new(16),
+        "r3",
+    );
+    let decision = engine
+        .decide(
+            &GlobalRiskRequest {
+                module: BotModule::Sniper,
+                venue: Venue::PumpFun,
+                wallet: wallet.clone(),
+                strategy: "sniper".into(),
+                asset: format!("MINT-{run}"),
+                quote_asset: "SOL".into(),
+                requested_quote: 0.1,
+                mode: ExecutionMode::Paper,
+            },
+            &DecisionContext::default(),
+        )
+        .await;
+    repo.record_decision(&decision).await.unwrap();
+    repo.record_decision(&decision).await.unwrap();
+    assert!(repo
+        .recent_decisions(50)
+        .await
+        .unwrap()
+        .iter()
+        .any(|d| d.decision_id == decision.decision_id));
+    let scope = KillScope::Strategy(format!("copy:{run}"));
+    let now = chrono::Utc::now();
+    repo.upsert_kill_switch(&KillSwitchState {
+        scope: scope.clone(),
+        configured: false,
+        engaged: true,
+        reason: "incident".into(),
+        actor: "op".into(),
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+    repo.append_kill_switch_event(&KillSwitchEvent {
+        scope: scope.clone(),
+        action: "engage".into(),
+        reason: "incident".into(),
+        actor: "op".into(),
+        replica_id: "r1".into(),
+        ts: now,
+    })
+    .await
+    .unwrap();
+    assert!(repo
+        .load_kill_switches()
+        .await
+        .unwrap()
+        .iter()
+        .any(|s| s.scope == scope && s.engaged));
+    let finding = bot_core::accounting::reconcile(bot_core::accounting::ReconInputs {
+        orders: &[],
+        positions: &[],
+        trades: &[],
+        book: &PositionBook::new(),
+        events: &[],
+        pending: &[format!("led_pending_{run}")],
+        since: now,
+        tolerance: bot_core::reconciliation::QuantityTolerance::default(),
+        replica_id: "r1",
+        now,
+    })
+    .remove(0);
+    assert_eq!(
+        finding.kind,
+        AccountingFindingKind::UnresolvedFinancialEvent
+    );
+    repo.append_finding(&finding).await.unwrap();
+    assert!(repo
+        .recent_findings(50)
+        .await
+        .unwrap()
+        .iter()
+        .any(|f| f.finding_id == finding.finding_id));
+
+    // TASK 5 §5: a finding about the ORDER layer round-trips with its
+    // `order_id` (the intent layer of the reconciliation).
+    let mut order_finding = finding.clone();
+    order_finding.finding_id = format!("acf_order_{run}");
+    order_finding.kind = AccountingFindingKind::UnresolvedFinancialEvent;
+    order_finding.order_id = Some(format!("ord-{run}"));
+    order_finding.detail = "filled order with no ledger event".into();
+    repo.append_finding(&order_finding).await.unwrap();
+    let back = repo
+        .recent_findings(50)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|f| f.finding_id == order_finding.finding_id)
+        .expect("order-layer finding round-trips");
+    assert_eq!(back.order_id, order_finding.order_id);
+}
+
+fn repo_arc(db: Arc<Database>) -> Arc<bot_core::db::accounting::AccountingRepo> {
+    Arc::new(bot_core::db::accounting::AccountingRepo::new(db))
+}
+
+/// Minimal durable-store adapter for the test above (the server's
+/// `DbLedgerStore` is the production one; this mirrors its semantics).
+struct TestLedgerStore(Arc<bot_core::db::accounting::AccountingRepo>);
+
+#[async_trait::async_trait]
+impl bot_core::accounting::LedgerStore for TestLedgerStore {
+    async fn record_event(
+        &self,
+        stored: &bot_core::accounting::StoredEvent,
+        entry: &bot_core::accounting::Entry,
+    ) -> Option<bool> {
+        self.0.record_event(stored, entry).await.ok()
+    }
+    async fn load_events(&self) -> Option<Vec<bot_core::accounting::StoredEvent>> {
+        self.0.load_events().await.ok()
+    }
+    async fn upsert_position(&self, position: &bot_core::accounting::BookPosition) -> bool {
+        self.0.upsert_position(position).await.is_ok()
+    }
+    async fn append_finding(&self, finding: &bot_core::accounting::AccountingFinding) -> bool {
+        self.0.append_finding(finding).await.is_ok()
+    }
+    async fn recent_findings(
+        &self,
+        limit: usize,
+    ) -> Option<Vec<bot_core::accounting::AccountingFinding>> {
+        self.0.recent_findings(limit as i64).await.ok()
+    }
+}

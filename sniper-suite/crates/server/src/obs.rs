@@ -319,6 +319,20 @@ pub fn spawn_event_pump(shared: Shared, reg: &'static Registry) {
 pub async fn sample_once(shared: &Shared, rpc: &Rpc, health: &HealthRegistry, reg: &Registry) {
     let summary = shared.summary().await;
 
+    // TASK 6 — the worker's own readiness verdict is a first-class health
+    // component: a worker that lost a required lease, has not finished
+    // recovery or sits in a non-serving state must NEVER report READY, even
+    // when every dependency below is green.
+    let verdict = shared.ha().refresh_readiness().await;
+    health.set(
+        "worker",
+        if verdict.ready {
+            ComponentStatus::ok(verdict.detail())
+        } else {
+            ComponentStatus::not_ready(verdict.detail())
+        },
+    );
+
     reg.gauge(
         "bot_build_info",
         "Build information; value is always 1.",
@@ -769,9 +783,29 @@ mod tests {
         .expect("rpc builds offline")
     }
 
+    /// TASK 6: `sample_once` publishes the worker's own readiness as a
+    /// health component, so a state that never registered or recovered is
+    /// deliberately NOT ready. These probe tests are about the OTHER
+    /// components, so bring the worker to READY the way the server does.
+    async fn ready_worker(shared: &bot_core::state::Shared) {
+        shared.ha().register("test", 1, "0.1.0").await.unwrap();
+        shared
+            .ha()
+            .set_state(bot_core::ha::WorkerState::Recovering, "test")
+            .await
+            .unwrap();
+        shared.ha().set_recovery_complete(true).await;
+        shared
+            .ha()
+            .set_state(bot_core::ha::WorkerState::Ready, "test")
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn sample_once_mirrors_state_into_metrics_and_health() {
         let shared = AppState::new(AppConfig::from_defaults());
+        ready_worker(&shared).await;
         let rpc = test_rpc();
         let health = HealthRegistry::new();
         let reg = Registry::new();
@@ -800,6 +834,7 @@ mod tests {
     #[tokio::test]
     async fn sample_once_marks_enabled_but_stopped_module_not_ready() {
         let shared = AppState::new(AppConfig::from_defaults());
+        ready_worker(&shared).await;
         shared.set_enabled(BotModule::Sniper, true).await;
         // Enabled but the task loop never started: running=false, no heartbeat.
 
@@ -835,6 +870,48 @@ mod tests {
         let snap = health.snapshot();
         assert!(snap.ready, "running + fresh heartbeat => ready: {snap:?}");
         assert!(reg.encode().contains("bot_health_ready 1"));
+    }
+
+    /// TASK 6 §11: a worker that has not finished recovery (or lost a
+    /// required lease) must never report READY, however healthy the
+    /// dependencies are.
+    #[tokio::test]
+    async fn sample_once_reports_the_worker_component_and_gates_readiness() {
+        let shared = AppState::new(AppConfig::from_defaults());
+        let rpc = test_rpc();
+        let health = HealthRegistry::new();
+        let reg = Registry::new();
+
+        // Not registered, recovery not complete => not ready.
+        sample_once(&shared, &rpc, &health, &reg).await;
+        let snap = health.snapshot();
+        let worker = snap
+            .components
+            .iter()
+            .find(|c| c.name == "worker")
+            .expect("worker component");
+        assert!(!worker.status.ready, "{:?}", worker.status.detail);
+        assert!(!snap.ready);
+        // The `ha_*` family lives in the process-wide registry (the HA
+        // runtime publishes it directly), not in this test's local one.
+        assert!(bot_core::obs::metrics::global()
+            .encode()
+            .contains("ha_readiness "));
+
+        // After registration + recovery the component turns ready.
+        ready_worker(&shared).await;
+        sample_once(&shared, &rpc, &health, &reg).await;
+        let snap = health.snapshot();
+        let worker = snap
+            .components
+            .iter()
+            .find(|c| c.name == "worker")
+            .expect("worker component");
+        assert!(worker.status.ready, "{:?}", worker.status.detail);
+        assert!(snap.ready, "{snap:?}");
+        assert!(bot_core::obs::metrics::global()
+            .encode()
+            .contains("ha_readiness 1"));
     }
 
     fn module_status(

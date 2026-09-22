@@ -23,6 +23,11 @@ dotenvy.workspace = true
 once_cell.workspace = true
 rand.workspace = true
 uuid.workspace = true
+# TASK 7A: PBKDF2-HMAC-SHA256 password hashing and base64url token/salt
+# encoding. Both are already workspace dependencies (used by solana-kit and
+# the Polymarket signer), so this adds no new third-party crate.
+hmac.workspace = true
+base64.workspace = true
 async-trait.workspace = true
 sha2.workspace = true
 sqlx.workspace = true

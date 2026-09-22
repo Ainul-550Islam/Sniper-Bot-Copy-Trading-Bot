@@ -425,6 +425,74 @@ fn decode_transaction(
     tx.decode()
 }
 
+/// One top-level instruction of a confirmed transaction with its account
+/// indices resolved to pubkeys. Used by protocol-specific detectors (Raydium
+/// pool initialisation is not an Anchor event, so it has to be read from the
+/// instruction itself rather than from a `Program data:` log line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedInstruction {
+    pub program_id: Pubkey,
+    pub accounts: Vec<Pubkey>,
+    pub data: Vec<u8>,
+}
+
+/// Resolve every top-level instruction of `tx` (program id, account pubkeys,
+/// raw data). Lookup-table addresses come from `meta.loaded_addresses`, so a
+/// v0 transaction resolves exactly like a legacy one. Inner (CPI)
+/// instructions are not included: the notification meta carries them only
+/// as indices into the same key list and no current detector needs them.
+pub fn decode_instructions(
+    tx: &EncodedTransaction,
+    meta: &solana_transaction_status::UiTransactionStatusMeta,
+) -> BotResult<Vec<DecodedInstruction>> {
+    let keys = account_keys(tx, meta)?;
+    let resolve =
+        |program_id_index: u8, accounts: &[u8], data: Vec<u8>| -> Option<DecodedInstruction> {
+            let program_id = *keys.get(program_id_index as usize)?;
+            let accounts = accounts
+                .iter()
+                .map(|i| keys.get(*i as usize).copied())
+                .collect::<Option<Vec<Pubkey>>>()?;
+            Some(DecodedInstruction {
+                program_id,
+                accounts,
+                data,
+            })
+        };
+
+    let out = match tx {
+        EncodedTransaction::Json(json) => match &json.message {
+            solana_transaction_status::UiMessage::Raw(raw) => raw
+                .instructions
+                .iter()
+                .filter_map(|ix| {
+                    let data = bs58::decode(&ix.data).into_vec().ok()?;
+                    resolve(ix.program_id_index, &ix.accounts, data)
+                })
+                .collect(),
+            solana_transaction_status::UiMessage::Parsed(_) => {
+                return Err(BotError::encoding(
+                    "jsonParsed-encoded transactions carry no raw instructions; request `json` or `base64` encoding",
+                ))
+            }
+        },
+        other => {
+            let decoded = decode_transaction(other).ok_or_else(|| {
+                BotError::encoding(
+                    "could not deserialize the transaction; request base64 encoding",
+                )
+            })?;
+            decoded
+                .message
+                .instructions()
+                .iter()
+                .filter_map(|ix| resolve(ix.program_id_index, &ix.accounts, ix.data.clone()))
+                .collect()
+        }
+    };
+    Ok(out)
+}
+
 /// Index the balance entries by `account_index`.
 fn token_balances(
     entries: &OptionSerializer<Vec<UiTransactionTokenBalance>>,
@@ -1262,5 +1330,88 @@ mod tests {
             "meta": { "err": "not-a-transaction-error" },
         }))
         .is_none());
+    }
+
+    #[test]
+    fn decode_instructions_resolves_programs_accounts_and_data() {
+        // Two instructions against two programs; each touches the payer and
+        // one extra account, with distinct data so order is verifiable.
+        let payer = Keypair::new();
+        let prog_a = Pubkey::new_unique();
+        let prog_b = Pubkey::new_unique();
+        let extra = Pubkey::new_unique();
+        let ixs = vec![
+            solana_sdk::instruction::Instruction {
+                program_id: prog_a,
+                accounts: vec![
+                    solana_sdk::instruction::AccountMeta::new(payer.pubkey(), true),
+                    solana_sdk::instruction::AccountMeta::new_readonly(extra, false),
+                ],
+                data: vec![1, 2, 3],
+            },
+            solana_sdk::instruction::Instruction {
+                program_id: prog_b,
+                accounts: vec![solana_sdk::instruction::AccountMeta::new(
+                    payer.pubkey(),
+                    true,
+                )],
+                data: vec![9],
+            },
+        ];
+        let msg = MessageV0::try_compile(&payer.pubkey(), &ixs, &[], Hash::default()).unwrap();
+        let tx = solana_sdk::transaction::VersionedTransaction::try_new(
+            VersionedMessage::V0(msg),
+            &[&payer],
+        )
+        .unwrap();
+        let bytes = bincode::serialize(&tx).unwrap();
+        let encoded = EncodedTransaction::Binary(
+            base64::engine::general_purpose::STANDARD.encode(&bytes),
+            solana_transaction_status::TransactionBinaryEncoding::Base64,
+        );
+        let decoded = decode_instructions(&encoded, &base_meta()).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].program_id, prog_a);
+        assert_eq!(decoded[0].accounts, vec![payer.pubkey(), extra]);
+        assert_eq!(decoded[0].data, vec![1, 2, 3]);
+        assert_eq!(decoded[1].program_id, prog_b);
+        assert_eq!(decoded[1].accounts, vec![payer.pubkey()]);
+        assert_eq!(decoded[1].data, vec![9]);
+
+        // The `json` (raw message) encoding resolves identically.
+        let keys: Vec<String> = tx
+            .message
+            .static_account_keys()
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
+        let raw_ixs: Vec<UiCompiledInstruction> = tx
+            .message
+            .instructions()
+            .iter()
+            .map(|ix| UiCompiledInstruction {
+                program_id_index: ix.program_id_index,
+                accounts: ix.accounts.clone(),
+                data: bs58::encode(&ix.data).into_string(),
+                stack_height: None,
+            })
+            .collect();
+        let header = *tx.message.header();
+        let json = EncodedTransaction::Json(UiTransaction {
+            signatures: vec![tx.signatures[0].to_string()],
+            message: UiMessage::Raw(UiRawMessage {
+                header: MessageHeader {
+                    num_required_signatures: header.num_required_signatures,
+                    num_readonly_signed_accounts: header.num_readonly_signed_accounts,
+                    num_readonly_unsigned_accounts: header.num_readonly_unsigned_accounts,
+                },
+                account_keys: keys,
+                recent_blockhash: Hash::default().to_string(),
+                instructions: raw_ixs,
+                address_table_lookups: None,
+            }),
+        });
+        let from_json = decode_instructions(&json, &base_meta()).unwrap();
+        assert_eq!(from_json, decoded);
     }
 }

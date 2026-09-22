@@ -125,10 +125,25 @@ pub struct AppState {
 
     seen_launches: RwLock<BoundedSet>,
     seen_signatures: RwLock<BoundedSet>,
+    /// Leader-trade events the copy pipeline already decided on (Module 2's
+    /// one authoritative dedup, keyed by the event's dedup key). Distinct
+    /// from `seen_signatures`, which the copy FEEDS use to avoid re-fetching a
+    /// transaction — the two must never share a namespace or the feed's mark
+    /// would make the pipeline drop every event it hands over.
+    seen_copy_events: RwLock<BoundedSet>,
     /// symbol -> when we last exited it (re-entry cooldown).
     last_exit_at: RwLock<HashMap<String, DateTime<Utc>>>,
     /// "wallet:mint" -> when we last copied it.
     last_copy_at: RwLock<HashMap<String, DateTime<Utc>>>,
+    /// mint -> when the sniper last ATTEMPTED an entry (any outcome). Backs
+    /// `risk.sniper_token_cooldown_secs`.
+    last_entry_attempt_at: RwLock<HashMap<String, DateTime<Utc>>>,
+    /// mint -> when a sniper entry last FAILED (rejected / expired / no
+    /// fill). Backs `risk.sniper_failed_entry_cooldown_secs`.
+    last_failed_entry_at: RwLock<HashMap<String, DateTime<Utc>>>,
+    /// Realised PnL per module for the current UTC day (`(day, totals)`).
+    /// Backs the sniper-only daily loss cap; `daily` stays the global view.
+    daily_module_pnl: RwLock<(String, HashMap<BotModule, f64>)>,
 
     balances: RwLock<Balances>,
     /// Last published reconciliation backlog per claim kind
@@ -168,6 +183,17 @@ pub struct AppState {
     /// Process shutdown coordinator; attached once at startup. Module loops
     /// watch it so SIGTERM drains instead of killing in-flight work.
     shutdown: std::sync::OnceLock<std::sync::Arc<crate::lifecycle::Shutdown>>,
+    /// TASK 5 — the global ledger every module feeds with typed accounting
+    /// events (the ONE financial idempotency boundary). Always present; the
+    /// server attaches the durable journal before recovery.
+    ledger: Arc<crate::accounting::GlobalLedger>,
+    /// TASK 5 — the global risk engine `RiskEngine::check_entry` consults
+    /// first (portfolio limits, venue / strategy kill switches).
+    global_risk: Arc<crate::global_risk::GlobalRiskEngine>,
+    /// TASK 6 — worker identity, singleton role leases with fencing,
+    /// durable feed cursors, readiness and graceful shutdown. Always
+    /// present; the server attaches the durable store before recovery.
+    ha: Arc<crate::ha::HaRuntime>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -267,10 +293,36 @@ impl AppState {
             }
         };
 
+        let events = EventBus::new(2_000);
+        let ledger = Arc::new(crate::accounting::GlobalLedger::new(
+            events.clone(),
+            replica_id.clone(),
+        ));
+        let global_risk = Arc::new(crate::global_risk::GlobalRiskEngine::new(
+            raw.global_risk.clone(),
+            Arc::clone(&ledger),
+            events.clone(),
+            replica_id.clone(),
+        ));
+        let ha = Arc::new(crate::ha::HaRuntime::new(
+            replica_id.clone(),
+            crate::ha::HaSettings {
+                mode: raw.ha.ha_mode(),
+                heartbeat: chrono::Duration::from_std(raw.ha.heartbeat())
+                    .unwrap_or_else(|_| chrono::Duration::seconds(10)),
+                heartbeat_timeout: chrono::Duration::from_std(raw.ha.heartbeat_timeout())
+                    .unwrap_or_else(|_| chrono::Duration::seconds(45)),
+                lease_ttl: chrono::Duration::from_std(raw.ha.role_lease())
+                    .unwrap_or_else(|_| chrono::Duration::seconds(45)),
+                required_roles: raw.ha.required_role_list(),
+            },
+            events.clone(),
+        ));
+
         Arc::new(AppState {
             initial_config: config,
             config: RwLock::new(raw),
-            events: EventBus::new(2_000),
+            events,
             started_at: Utc::now(),
             modules: RwLock::new(modules),
             positions: RwLock::new(HashMap::new()),
@@ -285,8 +337,12 @@ impl AppState {
             }),
             seen_launches: RwLock::new(BoundedSet::default()),
             seen_signatures: RwLock::new(BoundedSet::default()),
+            seen_copy_events: RwLock::new(BoundedSet::default()),
             last_exit_at: RwLock::new(HashMap::new()),
             last_copy_at: RwLock::new(HashMap::new()),
+            last_entry_attempt_at: RwLock::new(HashMap::new()),
+            last_failed_entry_at: RwLock::new(HashMap::new()),
+            daily_module_pnl: RwLock::new((today(), HashMap::new())),
             balances: RwLock::new(Balances::default()),
             recon_unresolved: RwLock::new(Vec::new()),
             blocked_symbols: RwLock::new(std::collections::HashSet::new()),
@@ -298,7 +354,48 @@ impl AppState {
             dedup: std::sync::OnceLock::new(),
             orders: std::sync::OnceLock::new(),
             shutdown: std::sync::OnceLock::new(),
+            ledger,
+            global_risk,
+            ha,
         })
+    }
+
+    /// The HA runtime (TASK 6): worker identity + state, singleton role
+    /// leases with fencing, durable feed cursors, readiness, graceful
+    /// shutdown.
+    pub fn ha(&self) -> &Arc<crate::ha::HaRuntime> {
+        &self.ha
+    }
+
+    /// The global ledger (TASK 5). Modules submit typed
+    /// [`crate::accounting::AccountingEvent`]s here and never mutate
+    /// accounting state themselves.
+    pub fn ledger(&self) -> &Arc<crate::accounting::GlobalLedger> {
+        &self.ledger
+    }
+
+    /// The global risk engine (TASK 5).
+    pub fn global_risk(&self) -> &Arc<crate::global_risk::GlobalRiskEngine> {
+        &self.global_risk
+    }
+
+    /// Latest mark per open symbol from the modules' operational positions
+    /// (input of the global portfolio view).
+    pub async fn marks(&self) -> HashMap<String, f64> {
+        let positions = self.positions.read().await;
+        let mut marks = HashMap::new();
+        for p in positions.values() {
+            if p.status.is_terminal() || !(p.last_mark.is_finite() && p.last_mark > 0.0) {
+                continue;
+            }
+            let e = marks
+                .entry(p.symbol.clone())
+                .or_insert((p.updated_at, p.last_mark));
+            if p.updated_at >= e.0 {
+                *e = (p.updated_at, p.last_mark);
+            }
+        }
+        marks.into_iter().map(|(k, (_, m))| (k, m)).collect()
     }
 
     pub fn started_at(&self) -> DateTime<Utc> {
@@ -1068,11 +1165,77 @@ impl AppState {
                 daily.losses += 1;
             }
         }
+        {
+            let mut per_module = self.daily_module_pnl.write().await;
+            let t = today();
+            if per_module.0 != t {
+                per_module.0 = t;
+                per_module.1.clear();
+            }
+            *per_module.1.entry(module).or_insert(0.0) += amount;
+        }
         self.bump(module, |s| s.realized_pnl += amount).await;
     }
 
     pub async fn realized_pnl(&self, module: BotModule) -> f64 {
         *self.realized_pnl.read().await.get(&module).unwrap_or(&0.0)
+    }
+
+    /// Realised PnL booked by `module` during the current UTC day (0 after
+    /// the day rolled over, even before the first trade of the new day).
+    pub async fn daily_realized(&self, module: BotModule) -> f64 {
+        let per_module = self.daily_module_pnl.read().await;
+        if per_module.0 != today() {
+            return 0.0;
+        }
+        *per_module.1.get(&module).unwrap_or(&0.0)
+    }
+
+    // ------------------------------------------------- sniper entry attempts --
+
+    /// Cooldown horizon (seconds) that keeps an entry-attempt timestamp
+    /// relevant: the longer of the two sniper cooldowns.
+    async fn entry_attempt_ttl(&self) -> (i64, usize) {
+        let cfg = self.config.read().await;
+        (
+            cfg.risk
+                .sniper_token_cooldown_secs
+                .max(cfg.risk.sniper_failed_entry_cooldown_secs)
+                .max(cfg.risk.copy_failed_entry_cooldown_secs),
+            cfg.storage.max_dedup_entries,
+        )
+    }
+
+    /// Record that the sniper is ATTEMPTING an entry on `symbol` (mint).
+    /// Called once per attempt, before anything is built or sent.
+    pub async fn note_entry_attempt(&self, symbol: &str) {
+        let (ttl, cap) = self.entry_attempt_ttl().await;
+        let now = Utc::now();
+        let mut m = self.last_entry_attempt_at.write().await;
+        m.insert(symbol.to_string(), now);
+        prune_timestamps(&mut m, now, ttl, cap);
+    }
+
+    /// Record that an entry on `symbol` FAILED (the chain rejected it, it
+    /// expired, or it filled nothing) — sniper or copy; both modules'
+    /// failed-entry cooldowns read the same map. Ambiguous outcomes are NOT
+    /// failures — reconciliation decides those.
+    pub async fn note_failed_entry(&self, symbol: &str) {
+        let (ttl, cap) = self.entry_attempt_ttl().await;
+        let now = Utc::now();
+        let mut m = self.last_failed_entry_at.write().await;
+        m.insert(symbol.to_string(), now);
+        prune_timestamps(&mut m, now, ttl, cap);
+    }
+
+    /// When the sniper last attempted an entry on `symbol`, if recently.
+    pub async fn last_entry_attempt(&self, symbol: &str) -> Option<DateTime<Utc>> {
+        self.last_entry_attempt_at.read().await.get(symbol).copied()
+    }
+
+    /// When a sniper entry on `symbol` last failed, if recently.
+    pub async fn last_failed_entry(&self, symbol: &str) -> Option<DateTime<Utc>> {
+        self.last_failed_entry_at.read().await.get(symbol).copied()
     }
 
     pub async fn total_realized(&self) -> f64 {
@@ -1168,6 +1331,34 @@ impl AppState {
             return;
         }
         self.seen_signatures.write().await.remove(sig);
+    }
+
+    /// Returns `false` when the copy pipeline already decided on this
+    /// leader-trade event (Module 2's one authoritative dedup; key =
+    /// `LeaderTradeEvent::dedup_key`). Routes through the durable dedup
+    /// facade (`copy_event` namespace) when one is attached.
+    pub async fn mark_copy_event_seen(&self, key: &str) -> bool {
+        if let Some(d) = self.dedup.get() {
+            return d.mark("copy_event", key).await;
+        }
+        let cap = self.config.read().await.storage.max_dedup_entries;
+        self.seen_copy_events.write().await.insert(key, cap)
+    }
+
+    /// Whether the copy pipeline already decided on this event (read-only;
+    /// never marks).
+    pub async fn copy_event_seen(&self, key: &str) -> bool {
+        if let Some(d) = self.dedup.get() {
+            return d.contains("copy_event", key).await;
+        }
+        self.seen_copy_events.read().await.contains(key)
+    }
+
+    pub async fn seen_copy_event_count(&self) -> usize {
+        if let Some(d) = self.dedup.get() {
+            return d.len("copy_event").await;
+        }
+        self.seen_copy_events.read().await.len()
     }
 
     pub async fn seen_launch_count(&self) -> usize {
@@ -1322,9 +1513,17 @@ impl AppState {
     where
         F: FnOnce(&mut Config),
     {
-        let mut c = self.config.write().await;
-        f(&mut c);
-        c.clone()
+        let snapshot = {
+            let mut c = self.config.write().await;
+            f(&mut c);
+            c.clone()
+        };
+        // Keep the global risk engine on the live configuration (limits,
+        // reference rates, kill lists) — never a stale copy.
+        self.global_risk
+            .update_config(snapshot.global_risk.clone())
+            .await;
+        snapshot
     }
 
     pub async fn summary(&self) -> Summary {

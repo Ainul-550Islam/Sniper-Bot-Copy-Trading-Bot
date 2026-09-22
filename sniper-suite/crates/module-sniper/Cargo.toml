@@ -21,6 +21,7 @@ tracing.workspace = true
 chrono.workspace = true
 rand.workspace = true
 solana-sdk.workspace = true
+bs58.workspace = true
 
 [lib]
 name = "module_sniper"
@@ -32,3 +33,4 @@ path = "src/lib.rs"
 solana-transaction-status.workspace = true
 base64.workspace = true
 bincode.workspace = true
+async-trait.workspace = true

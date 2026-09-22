@@ -27,6 +27,14 @@ account_cache_ttl_ms = 30000                 # warm-cache age for semi-static ac
 account_cache_max_entries = 5000             # warm-cache capacity (FIFO eviction)
 request_timeout_ms = 10000
 max_retries = 3
+# Retry policy shared by every RPC call (exponential backoff with full jitter).
+retry_base_backoff_ms = 50                   # first retry delay
+retry_max_backoff_ms = 2000                  # ceiling for one delay
+retry_jitter = true                          # randomise delays so replicas never retry in lock-step
+rate_limit_cooldown_ms = 1000                # pause after HTTP 429 (Retry-After header wins when present)
+provider_failure_threshold = 3               # consecutive failures before a provider is skipped
+provider_cooldown_ms = 5000                  # how long an unhealthy provider is skipped before re-probe
+ws_stale_after_ms = 45000                    # reconnect when no frame arrives for this long (0 = off)
 
 # --- Execution / safety ------------------------------------------------------
 [execution]
@@ -43,6 +51,17 @@ send_retries = 2
 simulate_first = true                        # simulate before broadcasting (simulate/live modes)
 abort_on_simulation_failure = true           # drop the trade when simulation fails
 broadcast_fanout = false                     # race the send across primary + fallbacks (first accept wins)
+# Priority-fee policy. "fixed" pays priority_fee_micro_lamports (clamped to min/max);
+# "adaptive" pays the fee_percentile of getRecentPrioritizationFees, floored at
+# priority_fee_micro_lamports and capped at fee_max_micro_lamports.
+fee_mode = "fixed"                           # "fixed" | "adaptive"
+fee_min_micro_lamports = 0
+fee_max_micro_lamports = 5000000             # hard ceiling for adaptive quotes and retry escalation
+fee_emergency_max_micro_lamports = 20000000  # requests above this are REFUSED, not clamped
+fee_percentile = 75                          # adaptive: percentile of recent fees to pay
+fee_escalation_pct = 50                      # +50% fee on every rebuild/retry (capped by fee_max)
+fee_oracle_ttl_ms = 2000                     # adaptive: how long one fee sample is reused
+max_blockhash_age_ms = 20000                 # refresh a cached blockhash older than this before signing
 
 # --- Risk engine (shared by all trading modules) -----------------------------
 [risk]
@@ -68,20 +87,81 @@ poly_min_liquidity_usd = 1000.0
 poly_min_edge = 0.03
 poly_price_floor = 0.02
 poly_price_ceiling = 0.98
+# Sniper exposure controls (Module 1 only). Every `0` means "inherit the
+# generic limit above" or "check off" — see docs/SNIPER-ENGINE.md §6.
+sniper_max_position_quote = 0.0              # SOL per sniper entry (0 = max_position_quote)
+sniper_max_total_exposure_quote = 0.0        # SOL summed over open sniper positions (0 = generic envelope)
+sniper_max_concurrent_positions = 0          # open sniper positions (0 = max_open_positions)
+sniper_max_pending_executions = 2            # live sniper intents in the execution ledger (0 = unlimited)
+sniper_token_cooldown_secs = 0               # min seconds between two entry ATTEMPTS on one mint (0 = off)
+sniper_failed_entry_cooldown_secs = 120      # refuse a mint for this long after a FAILED entry (0 = off)
+sniper_daily_loss_limit_quote = 0.0          # sniper-only realized daily loss cap in SOL (0 = off)
+sniper_emergency_disable = false             # true = refuse EVERY new sniper entry (exits keep running)
+# Copy-trading exposure controls (Module 2 only). Every `0` means "inherit the
+# generic limit above" or "check off" — see docs/COPY-TRADING-ENGINE.md §7.
+copy_max_position_quote = 0.0                # SOL per mirrored entry (0 = max_position_quote)
+copy_max_total_exposure_quote = 0.0          # SOL summed over open copy positions (0 = generic envelope)
+copy_max_concurrent_positions = 0            # open copy positions (0 = max_open_positions)
+copy_max_pending_executions = 0              # live copy entry intents in the execution ledger (0 = unlimited)
+copy_failed_entry_cooldown_secs = 0          # refuse a mint for this long after a FAILED mirrored entry (0 = off)
+copy_daily_loss_limit_quote = 0.0            # copy-only realized daily loss cap in SOL (0 = off)
+copy_max_leader_exposure_quote = 0.0         # open exposure mirrored from ONE leader, SOL (0 = off)
+copy_emergency_disable = false               # true = refuse EVERY new mirrored entry (exits keep running)
+# Polymarket exposure controls (Module 3 only). USDC-denominated. Every `0`
+# means "inherit the generic limit above" or "check off" — see
+# docs/POLYMARKET-ENGINE.md §6. `reentry_cooldown_secs` above ALSO applies to
+# Polymarket tokens (a token closed less than that long ago is refused).
+poly_max_position_quote = 0.0                # USDC per order (0 = max_position_quote); larger requests are resized down
+poly_max_total_exposure_quote = 0.0          # USDC over open positions + resting buy orders (0 = generic envelope)
+poly_max_market_exposure_quote = 0.0         # USDC inside ONE market (condition id), positions + resting (0 = off)
+poly_max_concurrent_positions = 0            # open Polymarket positions (0 = max_open_positions)
+poly_max_open_orders = 0                     # resting CLOB orders at once (0 = unlimited)
+poly_daily_loss_limit_quote = 0.0            # Polymarket-only realized daily loss cap in USDC (0 = off)
+poly_emergency_disable = false               # true = refuse EVERY new Polymarket entry (cancels/recon keep running)
 
-# --- Module 1: pump.fun sniper ----------------------------------------------
+# --- TASK 5: global risk + accounting / ledger (docs/GLOBAL-RISK.md) ---------
+# ONE portfolio-level decision runs in front of every module's own risk
+# checks, over the global ledger's aggregated book (sniper + copy +
+# Polymarket). Every limit is in the REFERENCE currency below and every `0`
+# means "off", so this section changes nothing until a limit is set.
+# The suite fetches NO prices for this: native quote figures (SOL, USDC) are
+# converted with the operator-maintained rates below. A quote asset with open
+# exposure but no rate makes every reference-denominated check fail closed
+# (reject reason `reference_rate_missing`).
+[global_risk]
+reference_asset = "USD"
+capital_base_ref = 0.0                       # declared capital in reference units (0 = unknown → utilization 0, pct drawdown off)
+max_portfolio_exposure_ref = 0.0             # cap on total open exposure across every module (0 = off)
+max_wallet_exposure_ref = 0.0                # cap per wallet (0 = off)
+max_venue_exposure_ref = 0.0                 # cap per venue (0 = off)
+max_strategy_exposure_ref = 0.0              # cap per strategy label: sniper / copy:<leader> / value / search (0 = off)
+max_asset_exposure_ref = 0.0                 # cap per base asset (mint / token id) (0 = off)
+max_open_positions = 0                       # cap on open aggregated positions across every module (0 = off)
+max_order_notional_ref = 0.0                 # cap on one order's notional (0 = off)
+max_daily_loss_ref = 0.0                     # stop opening once today's net realized loss reaches this (0 = off)
+max_drawdown_ref = 0.0                       # stop opening once drawdown from the realized peak reaches this (0 = off)
+max_drawdown_pct = 0.0                       # same as a fraction of capital_base_ref (0 = off)
+killed_venues = []                           # venues refused for NEW entries, e.g. ["polymarket", "pump.fun"]
+killed_strategies = []                       # strategy labels refused for NEW entries, e.g. ["copy:<leader pubkey>"]
+accounting_reconcile_interval_secs = 60      # module positions / trades vs the global ledger (0 = startup only)
+
+[global_risk.reference_rates]                # quote asset → reference units; maintained by the operator
+USDC = 1.0
+# SOL = 150.0                                # REQUIRED before any reference-denominated limit can gate Solana entries
+
+# --- Module 1: launch sniper (pump.fun / PumpSwap / Raydium AMM v4) ----------
 [sniper]
 enabled = false
 buy_sol = 0.01                               # SOL per snipe (before risk sizing)
-slippage_pct = 15.0                          # PERCENT (15 = 15%)
-use_pumpportal = true                        # PumpPortal launch feed
+slippage_pct = 15.0                          # PERCENT (15 = 15%); base tolerance for the pump.fun curve
+use_pumpportal = true                        # PumpPortal launch feed (pump.fun only)
 pumpportal_ws_url = "wss://pumpportal.fun/api/data"
 # pumpportal_api_key = "..."                 # optional; raises rate limits only
-use_log_subscription = true                  # also watch pump logsSubscribe (redundant feed)
+use_log_subscription = true                  # logsSubscribe on pump.fun (+ PumpSwap / Raydium when traded)
 use_transaction_subscribe = false            # Geyser push feed (needs network.geyser_ws_url); lowest latency
-trade_pumpswap = true                        # allow graduated PumpSwap routing
-trade_raydium = true                         # allow Raydium routing
-use_jupiter_fallback = true                  # route graduated tokens via Jupiter
+trade_pumpswap = true                        # detect PumpSwap CreatePool launches + route through the AMM
+trade_raydium = true                         # detect Raydium AMM v4 initialize2 pools + route through AMM v4
+use_jupiter_fallback = true                  # Jupiter when no direct venue is available (entries + exits)
 take_profit_pct = 1.0                        # FRACTION (1.0 = +100%)
 stop_loss_pct = 0.3                          # FRACTION (0.3 = -30%)
 trailing_stop_pct = 0.25
@@ -92,10 +172,31 @@ pump_extra_accounts = []
 pump_append_bonding_curve_v2 = true
 pump_learn_account_layout = true             # learn the buy/sell account layout from chain
 pump_layout_file = "data/pump_account_layout.json"
-max_entry_latency_ms = 1000                  # skip launches older than this end-to-end
-max_launch_age_secs = 30
+max_entry_latency_ms = 1000                  # observe → hand-off budget; exceeded = STALE_EVENT (0 = off)
+max_launch_age_secs = 30                     # launches older than this on arrival = STALE_EVENT
 creator_denylist = []
 keyword_denylist = ["rug", "scam", "honeypot", "test"]
+# Slippage engine (docs/SNIPER-ENGINE.md §5). Every mode is clamped by
+# risk.max_slippage_bps; per-token overrides never exceed that hard maximum.
+slippage_mode = "fixed"                      # "fixed" | "liquidity_aware" | "price_impact"
+# pumpswap_slippage_pct = 15.0               # per-protocol base (PERCENT); unset = slippage_pct
+# raydium_slippage_pct = 15.0                # per-protocol base (PERCENT); unset = slippage_pct
+slippage_overrides_bps = {}                  # per-mint override in BPS, e.g. { "<mint>" = 500 }
+max_price_impact_bps = 2500                  # reject when modelled price impact exceeds this (0 = off)
+max_entry_fee_lamports = 0                   # FEE_LIMIT budget for the worst-case entry tx fee (0 = off; >= 5000)
+# Safety gates (docs/SNIPER-ENGINE.md §4). Measurable checks only — none of
+# them is a guarantee against scams, rugs or losses.
+min_liquidity_sol = 0.0                      # quote-side SOL in the curve/pool at decision time (0 = off)
+require_mint_authority_revoked = false       # pump.fun revokes it; arbitrary Raydium tokens may not
+require_freeze_authority_revoked = true      # freeze authority present = reject (TOKEN_STATE_INVALID)
+max_creator_initial_buy_sol = 0.0            # PumpPortal creator opening buy above this = reject (0 = off)
+min_pool_supply_fraction = 0.0               # AMM launches: fraction of supply that must be pooled (0 = off)
+max_snapshot_age_ms = 2000                   # market snapshot older than this at submit = STALE_EVENT
+strict_gates = false                         # true = a gate that cannot be evaluated REJECTS instead of skipping
+# Exit hardening (docs/SNIPER-ENGINE.md §8).
+stale_position_exit_secs = 0                 # force-exit when the mark could not refresh this long (0 = off)
+exit_retry_backoff_secs = 10                 # min seconds between exit attempts after a FAILED exit
+failed_entry_cleanup = true                  # close (no sell) positions whose entry provably never landed
 
 # --- Module 2: copy trading --------------------------------------------------
 [copy]
@@ -112,8 +213,17 @@ decode_pumpswap = true
 decode_raydium = true
 decode_jupiter = true
 # max_token_age_secs = 600
+# Copy-engine pipeline (docs/COPY-TRADING-ENGINE.md).
+max_event_age_secs = 30                      # global ceiling on leader-trade age (chain time; 0 = off)
+strict_ordering = false                      # true = refuse events behind the leader's newest processed slot
+max_sol_per_trade = 0.0                      # global cap on one mirrored buy, SOL (0 = off)
+max_balance_fraction = 0.0                   # global cap as a fraction of the spendable balance (0 = off)
+min_mirror_sol = 0.0                         # refuse mirrors smaller than this as dust (0 = off)
+reconcile_interval_secs = 60                 # leader-vs-follower reconciliation cadence (0 = never)
+reconcile_auto_exit = false                  # true = SELL a mirrored position whose leader fully exited
+recovery_lookback_hours = 24                 # re-seed dedup from the durable journal after a restart (0 = off)
 
-# Tracked wallets. Each entry sizes its own mirrors:
+# Tracked wallets ("leaders"). Each entry sizes its own mirrors:
 #   fixed_sol              -> spend this much SOL per copy (ignores fraction)
 #   fraction_of_their_size -> else mirror this fraction of their SOL
 #   max_sol                -> ceiling for the proportional size
@@ -121,6 +231,9 @@ decode_jupiter = true
 #   buys_only              -> only mirror buys (never their sells)
 #   slippage_pct           -> per-wallet slippage override
 #   max_staleness_secs     -> skip trades we see later than this
+#   paused                 -> keep following (observe, count, reconcile) but mirror nothing new
+#   max_exposure_sol       -> cap on open exposure mirrored from THIS leader (0 = off)
+#   max_open_positions     -> cap on open positions mirrored from THIS leader (0 = off)
 # [[copy.wallets]]
 # address = "WHALE_PUBKEY_BASE58"
 # label = "smart-money-1"
@@ -129,6 +242,9 @@ decode_jupiter = true
 # min_sol = 0.5
 # buys_only = true
 # max_staleness_secs = 30
+# paused = false
+# max_exposure_sol = 1.0
+# max_open_positions = 4
 
 # --- Module 3: Polymarket ----------------------------------------------------
 [polymarket]
@@ -169,6 +285,23 @@ heartbeat = true
 heartbeat_interval_secs = 10
 # builder_code = "0x..32 bytes.."
 watch_keywords = []                          # used by the "search" strategy
+# --- Order pipeline / lifecycle (docs/POLYMARKET-ENGINE.md) -----------------
+# Strategy gates (evaluated BEFORE the shared risk engine; each produces an
+# explicit skip reason in the signal journal).
+max_spread = 0.10                            # skip when ask - bid is wider than this (probability units, 0 = off)
+min_liquidity_usd = 0.0                      # skip when Gamma liquidity is below this (USDC, 0 = off)
+quote_max_age_secs = 120                     # skip when the book snapshot is older than this (0 = off)
+min_time_to_resolution_secs = 3600           # skip markets resolving sooner than this (0 = off)
+min_order_size = 5.0                         # smallest order in outcome tokens (the CLOB minimum is 5)
+# Resting-order lifecycle (live mode; paper fills in-process).
+order_poll_interval_secs = 15                # GET /data/order status poll for every non-terminal order
+order_ttl_secs = 0                           # cancel a resting order after this many seconds (0 = never; GTD expiry still applies)
+reprice_threshold = 0.0                      # cancel a resting BUY sitting more than this below the best ask (0 = off)
+use_user_websocket = true                    # authenticated `user` channel for order/trade events (polling still runs)
+cancel_on_shutdown = true                    # cancel every resting order on module shutdown
+# Local-vs-venue reconciliation (GET /data/orders for our API key).
+reconcile_interval_secs = 60                 # 0 = off (NOT recommended in live mode)
+reconcile_cancel_orphans = false             # true = cancel venue orders unknown locally; false = report only
 
 # --- Module 4: staking program (on-chain; managed off-process) ---------------
 [contract]
@@ -306,6 +439,30 @@ flag_sync_secs = 5
 # Position-book refresh from the shared DB so risk capacity converges
 # across replicas (floor 5 s).
 book_sync_secs = 30
+# --- TASK 6: worker identity, singleton role leases, readiness -------------
+# How this worker participates in the cluster (docs/HA-ARCHITECTURE.md §5):
+#   single         one worker owns everything; leases still make a restart safe
+#   active_passive standbys wait for the singleton leases to expire / be released
+#   active_active  several workers process concurrently (per-execution claims
+#                  keep them apart, role leases keep singletons singular)
+# Clustered modes REQUIRE [database].enabled = true: the in-memory HA store is
+# process-local and would give every worker its own "truth".
+mode = "single"
+# Worker heartbeat period (floor 1 s). Written to ha_workers; the shared
+# database clock is the reference for every liveness comparison.
+heartbeat_secs = 10
+# A worker is STALE after this long without a heartbeat (floor 5 s, and at
+# least 2 x heartbeat_secs). Staleness only drives detection, metrics and
+# audit — leases of a stale worker are taken over when they EXPIRE.
+heartbeat_timeout_secs = 45
+# Duration of a singleton ROLE lease: reconciliation, recovery,
+# accounting_maintenance, state_sync, feed:<name> (floor 5 s; renewed every
+# third). Distinct from claim_lease_secs, which leases ONE execution intent.
+role_lease_secs = 45
+# Roles this worker must HOLD before it reports READY. Empty = readiness does
+# not depend on any lease (what a single worker wants). Example for an
+# active/passive pair: ["accounting_maintenance", "reconciliation"].
+required_roles = []
 
 [database]
 enabled = false

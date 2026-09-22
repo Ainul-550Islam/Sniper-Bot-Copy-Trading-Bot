@@ -22,7 +22,7 @@ use solana_kit::rpc::Rpc;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 
-use module_sniper::LaunchDetector;
+use module_sniper::{LaunchDetector, LaunchProtocol};
 
 async fn spawn_mock(script: Vec<String>) -> (SocketAddr, Arc<Mutex<Vec<Value>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -114,7 +114,7 @@ async fn launch_detector_maps_pumpportal_new_token_to_token_launch() {
         .await
         .expect("detector must start with the pumpportal feed enabled");
 
-    let launch = tokio::time::timeout(Duration::from_secs(15), launches.recv())
+    let event = tokio::time::timeout(Duration::from_secs(15), launches.recv())
         .await
         .expect("timed out waiting for a launch")
         .expect("launch channel closed");
@@ -123,8 +123,21 @@ async fn launch_detector_maps_pumpportal_new_token_to_token_launch() {
     let frames = received.lock().unwrap().clone();
     assert_eq!(frames, vec![json!({"method": "subscribeNewToken"})]);
 
+    // Normalised event contract (TASK 2 §B): protocol, source, identity.
+    assert_eq!(event.protocol, LaunchProtocol::PumpFun);
+    assert_eq!(event.source, LaunchFeed::PumpPortal);
+    assert_eq!(event.mint, mint.to_string());
+    assert_eq!(event.base_mint, mint.to_string());
+    assert_eq!(event.signature.as_deref(), Some(signature));
+    assert_eq!(event.source_seq, 1, "first message on the feed");
+    assert!(!event.raw_hash.is_empty());
+    assert_eq!(event.event_id, event.compute_event_id());
+    assert_eq!(event.dedup_key(), mint.to_string());
+    assert_eq!(event.liquidity_quote_lamports, Some(2_000_000_000));
+
     // Field mapping (launch_from_pumpportal) — the contract the entry engine
     // relies on.
+    let launch = &event.launch;
     assert_eq!(launch.mint, mint.to_string());
     assert_eq!(launch.name, "E2E Token");
     assert_eq!(launch.symbol, "E2E");

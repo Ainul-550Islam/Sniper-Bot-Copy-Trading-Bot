@@ -23,12 +23,12 @@
       "programs/staking-suite (native Solana program, own lockfile, built with cargo build-sbf / agave 2.1.21)"
     ],
     "database_migrations": {
-      "count": 11,
-      "high_water_mark": "0011",
+      "count": 16,
+      "high_water_mark": "0016",
       "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)"
     },
-    "api_endpoints_documented": 28,
-    "docs_count": 49
+    "api_endpoints_documented": 35,
+    "docs_count": 63
   },
   "toolchain": {
     "rust": "1.98.1",
@@ -42,14 +42,24 @@
     "solana_cli": "solana-cli 2.1.21 (src:8a085eeb; feat:1416569292) \u2014 official anza-xyz/agave release tarball, SHA-256 5da3359e296f1e6c13522b874317cb4cfe33e73301a9dc60b1e1435cc133b397"
   },
   "test_counts": {
-    "workspace_total": 537,
+    "workspace_total": 1026,
+    "workspace_total_run": "global-risk-accounting pass 2026-09-21 (TASK 5): cargo test --workspace -j 2 -- --test-threads=1 \u2192 1026 passed / 0 failed / 1 ignored (replay fixture generator) across 50 test binaries, hermetic sandbox (no PostgreSQL / Redis / network: the gated suites executed in their self-skipping mode; module suites against in-process mocks)",
+    "workspace_total_at_polymarket_layout_pass_2026-09-21": 901,
+    "workspace_total_run_at_polymarket_layout_pass": "polymarket-engine module-layout pass 2026-09-21 (TASK 4 structure aligned with TASK 1-3; no behaviour change): cargo test --workspace -j 2 -- --test-threads=1 \u2192 901 passed / 0 failed / 1 ignored (replay fixture generator) across 48 test binaries, hermetic sandbox (no PostgreSQL / Redis / network: the gated suites executed in their self-skipping mode; the Polymarket suites run against an in-process mock CLOB / Gamma / RPC / user websocket)",
+    "workspace_total_at_polymarket_completeness_pass_2026-09-21": 895,
+    "workspace_total_at_polymarket_engine_pass_2026-09-21": 893,
+    "workspace_total_at_copy_engine_reconciliation_2026-09-21": 816,
+    "workspace_total_at_copy_engine_pass_2026-09-21": 814,
+    "workspace_total_at_sniper_engine_pass_2026-09-21": 723,
+    "workspace_total_at_audit_pass_2026-09-18": 537,
     "workspace_total_at_freeze_0e139c3": 521,
     "workspace_gated_integration_executed": 38,
-    "db_integration": 23,
+    "db_integration": 25,
     "redis_integration": 10,
     "distributed_integration": 4,
     "two_replica_mirror": 1,
     "staking_host": 71,
+    "staking_host_rerun": "sniper-engine pass 2026-09-21 (program source untouched): fmt --check clean, clippy --all-targets -D warnings clean, 71 passed / 0 failed; validator e2e not executed (STAKING_E2E unset)",
     "staking_host_at_freeze_0e139c3": 48,
     "release_check_gates": {
       "pass": 20,
@@ -59,7 +69,21 @@
     "failures": 0,
     "staking_validator_e2e_executed_passed": 3,
     "staking_validator_e2e_run": "hardening pass 2026-09-18: STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1 \u2192 3 passed / 0 failed in 160.72s on solana-test-validator 2.1.21 (metadata e2e against the real mainnet-cloned mpl-token-metadata)",
-    "workspace_total_all_features": 537
+    "workspace_total_all_features": 537,
+    "workspace_total_all_features_note": "audit-pass figure; --all-features was not re-run in the sniper-engine pass",
+    "module_sniper": {
+      "lib": 60,
+      "pipeline": 15,
+      "failure_injection": 22,
+      "exit_sweeper": 5,
+      "concurrency": 4,
+      "replay": 5,
+      "replay_ignored_generator": 1,
+      "property": 12,
+      "detect_feed": 1,
+      "geyser_detect": 2,
+      "total_passed": 126
+    }
   },
   "verification_status": {
     "verified_final_pass": [
@@ -76,7 +100,16 @@
       "HARDENING PASS: cargo test --workspace 537/537 exit 0 AND cargo test --workspace --all-features 537/537 exit 0 (real PG 17.11 + Redis 8.0.2)",
       "HARDENING PASS: pg_dump\u2192restore round-trip RE-EXECUTED on PostgreSQL 17.11 (dump SHA-256 5989ecf1\u2026, tables/migrations/rowcounts identical, db_integration 23/23 against the restored DB, app startup + /health + /ready + /api/status(paper, live_allowed=false) + /api/audit/verify + clean SIGTERM shutdown against the restored DB)",
       "HARDENING PASS: latency_bench network benches executed against public devnet (read-only + simulate; no broadcasts): getSlot p50=65ms/p95=211ms n=30, getLatestBlockhash p50=65ms/p95=67ms n=30, simulateTransaction p50=66ms/p95=275ms n=10 \u2014 sandbox-network figures, NOT product guarantees",
-      "HARDENING PASS: scripts/staking-identity.sh verify/set-id/deploy guards tested (set-id round-trip tree-hash identical; deploy refuses keypair\u2260declare_id mismatch and placeholder-on-public-cluster)"
+      "HARDENING PASS: scripts/staking-identity.sh verify/set-id/deploy guards tested (set-id round-trip tree-hash identical; deploy refuses keypair\u2260declare_id mismatch and placeholder-on-public-cluster)",
+      "SNIPER-ENGINE PASS 2026-09-21 (Rust 1.98.1, hermetic sandbox): cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -- --test-threads=1 \u2192 723 passed / 0 failed / 1 ignored; cargo test -p module-sniper \u2192 126 passed (+1 ignored generator); staking fmt/clippy/host tests 71/71 re-run on the untouched program; scripts/verify-delivery.sh 7 PASS / 0 FAIL; secret + TODO/stub-marker scans clean",
+      "POLYMARKET-ENGINE PASS 2026-09-21 (Rust 1.98.1, hermetic sandbox): cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -- --test-threads=1 \u2192 893 passed / 0 failed / 1 ignored across 48 binaries; cargo test -p module-polymarket \u2192 91 unit + 49 integration (order_pipeline 10, order_lifecycle 9, user_ws 4, idempotency_concurrency 4, reconciliation 6, crash_recovery 6, strategy_sizing 5, mock_clob_gamma 5) against the in-process mock venue; migration 0014 + PolyRepo round-trips inside db_integration (25); no live venue, no real order, no funded wallet was used \u2014 not a claim of safety or profitability",
+      "POLYMARKET-ENGINE COMPLETENESS PASS 2026-09-21 (TASK 4 follow-up): polymarket_position claim kind (settled CTF balance truth for live Polymarket positions, shared correction policy with Solana positions), EOA funder/signer guard in sign_order_bundle, repository documents re-synchronised with the current tree (REPOSITORY-MAP 262 tracked files, 14 migrations, 57 docs); fmt/clippy clean; cargo test --workspace \u2192 895 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 92 unit + 49 integration, server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree; the position truth source is exercised offline through the shared engine's unit tests only \u2014 not against a live Polygon node",
+      "POLYMARKET-ENGINE VERIFICATION PASS 2026-09-21 (TASK 4 buyer-grade verification, no new features): FAK `matched` no longer fabricates the killed remainder into a fill (explicit venue quantity only; immediate GET /data/order after a FAK matched POST; acknowledged-but-absent orders held unknown instead of failed), unrecognised DELETE /order answers are never a cancel confirmation (status re-read; cancel_all closes only venue-listed ids), user-channel trade replays after a restart no longer advance the local cumulative (durable fill journal is the replay authority), per-trade deltas are reconciled against polled cumulatives (trade_matched + associate_trades: a trade a poll already captured is never booked twice); fmt/clippy clean; cargo test --workspace \u2192 901 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 94 unit + 53 integration: order_pipeline 10, order_lifecycle 11, user_ws 5, idempotency_concurrency 4, reconciliation 6, crash_recovery 7, strategy_sizing 5, mock_clob_gamma 5; server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree; the venue's FAK partial-fill reporting has not been observed against the live CLOB \u2014 not a claim of safety or profitability",
+      "POLYMARKET-ENGINE MODULE-LAYOUT PASS 2026-09-21 (TASK 4 structure aligned with the TASK 1-3 layout; no behaviour change, no new features, no public API change): crates/module-polymarket/src/lib.rs (3,892 lines) split into lib.rs + discover.rs, pipeline.rs, lifecycle.rs, reconcile.rs, recovery.rs, funding.rs, store.rs, metrics.rs, audit.rs, venue.rs \u2014 function bodies moved verbatim, pub(crate) visibility where a sibling file calls a helper, inline metric registrations routed through one helper per series (same names / help / labels); fmt/clippy clean; cargo test --workspace -j 2 \u2192 901 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 94 unit + 53 integration unchanged, server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree (272 tracked files under sniper-suite/); no live venue, order, wallet or Polygon node used \u2014 not a claim of safety or profitability",
+      "GLOBAL-RISK-ACCOUNTING PASS 2026-09-21 (TASK 5, Rust 1.98.1, hermetic sandbox): one global risk decision (GlobalRiskEngine, step 2b of RiskEngine::check_entry: process / venue / strategy kill switches, reference-rate presence, open-position, order-notional, portfolio / wallet / venue / strategy / asset exposure, daily loss, drawdown; 14 deterministic reasons, journaled snapshots) + the global double-entry ledger (typed AccountingEvents from every sniper / copy / Polymarket fill site, ONE deterministic event id, balanced postings, PositionBook aggregation, PortfolioView, 8-kind accounting reconciliation that never repairs, replay-safe recovery) + migration 0015 (7 additive tables) + 5 API routes; cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -j 2 -- --test-threads=1 \u2192 962 passed / 0 failed / 1 ignored across 49 binaries (bot-core 209 unit + global_risk_accounting 18 + db_integration 26 gated, server 36, module suites unchanged plus ledger assertions); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree (297 tracked files, 15 migrations, 60 docs); the PostgreSQL repository round-trip is gated on POSTGRES_URL and was NOT executed in the sandbox; no live venue, funded wallet, database or price feed used \u2014 not a claim of safety or profitability",
+      "GLOBAL-RISK-ACCOUNTING COMPLETENESS PASS 2026-09-22 (TASK 5 file-by-file audit): every declared module, every spec item and every config key re-checked against the tree; ONE gap found and closed \u2014 accounting reconciliation now compares all FOUR record layers required by \u00a75 (OMS orders \u2192 module trades/fills \u2192 ledger events \u2192 positions): ReconInputs gained `orders`, a filled / partially-filled OMS order that no ledger event references is reported (unresolved_financial_event, or missing_ledger_entry when its trade is also unbooked), intent-only order states are never reported, a ledger event explained only by its order is no longer an orphan, findings carry `order_id` (migration 0015 column, repository + API), server feeds the last 5,000 orders per pass; 4 new tests (3 unit + `the_order_layer_is_reconciled_against_the_ledger` against a real OrderManager) + a PostgreSQL order_id round-trip assertion; fmt/clippy clean; cargo test --workspace \u2192 966 passed / 0 failed / 1 ignored across 49 binaries; verify-delivery 7 PASS / 0 FAIL (297 files, 15 migrations, 60 docs); bundle tree repaired (4 dot-directory files the snapshot cycle had dropped from the expanded copy; the tarball was always complete)",
+      "HA-DISTRIBUTED-RELIABILITY PASS 2026-09-22 (TASK 6, Rust 1.98.1, hermetic sandbox): worker identity + registration + heartbeat with per-life generations and a 9-state machine; SINGLETON role leases (reconciliation, recovery, accounting_maintenance, state_sync, feed:<name>) with strictly increasing fencing generations, one-statement atomic acquisition, CAS renew/release/verify and deterministic FenceError (fenced / expired / store_unavailable); durable feed cursors with duplicate suppression, gap detection that is never silently skipped and deliberate replay; the pure crash-boundary x order-recovery matrix (12 boundaries, 5 local x 7 venue evidence pairs, exactly one action each, NO action that resubmits); restart rebuild of ledger / positions / risk state through the TASK 5 idempotent path; failover reconciliation that reports and never repairs; readiness that is never true without state + recovery + required leases (re-verified against the store) + healthy dependencies; graceful shutdown that persists cursors and releases leases; migration 0016 (7 additive tables) + HaRepo + DbHaStore + LeasedWorker + GET /api/ha; fmt clean; clippy --workspace --all-targets -D warnings clean; cargo test --workspace -j 2 -- --test-threads=1 \u2192 1025 passed / 0 failed / 1 ignored across 50 binaries (bot-core 253 unit + ha_distributed 17 + global_risk_accounting 19 + db_integration 26 gated, server 37); scripts/verify-delivery.sh 7 PASS / 0 FAIL (313 tracked files, 16 migrations, 63 docs); the PostgreSQL HaStore path is gated on POSTGRES_URL and was NOT executed in the sandbox; no live venue, funded wallet, database or multi-host cluster used \u2014 not a claim of safety, profitability or institutional production readiness",
+      "HA-DISTRIBUTED COMPLETENESS PASS 2026-09-22 (TASK 6 integration audit): two integration gaps found and closed \u2014 (1) the cluster-singleton jobs still ran unleased on every replica, so the venue/chain reconciliation sweep, the hourly retention housekeeping and the periodic position re-verification now run as fenced LeasedWorkers under the reconciliation / recovery / state_sync leases (4 leased singletons in total with accounting_maintenance); (2) the durable feed cursors existed but no feed used them, so module-copy's poll loop now resumes each leader wallet from its durable signature instead of re-seeding with \"newest signature now\" (which silently skipped every trade that happened while the process was down) and module-polymarket's authenticated user channel now continues its delivery numbering across process lives and records skipped deliveries as gaps; the three remaining unleased loops (recon-backlog snapshot, runtime-flag sync, position-book sync) are per-worker local views by design; 1 new integration test (feed_wiring_shapes_survive_a_restart); fmt/clippy clean; cargo test --workspace \u2192 1026 passed / 0 failed / 1 ignored across 50 binaries; verify-delivery 7 PASS / 0 FAIL (313 files, 16 migrations, 63 docs); bundle tree repaired again (the same 4 dot-directory files the snapshot cycle drops from expanded copies; the tarball was always complete)"
     ],
     "previously_verified_identical_source": [
       "recon_crash_e2e against a local solana-test-validator",
@@ -90,7 +123,8 @@
       "GitHub Actions CI run (no CI runner; every CI gate has a recorded local-equivalent execution \u2014 see docs/CI-LOCAL-EQUIVALENCE.md mapping in the evidence package)",
       "Polymarket live-read validation against Polygon mainnet (module is mock-tested 66+5; operator procedure in docs/LIVE-VALIDATION.md)",
       "cargo cyclonedx / cargo spdx formatted SBOM (tools not installed; cargo tree + both Cargo.lock files + cargo audit/deny outputs are recorded as the dependency evidence)",
-      "external security audit / penetration test / formal verification (none performed \u2014 do not claim 'audited')"
+      "external security audit / penetration test / formal verification (none performed \u2014 do not claim 'audited')",
+      "SNIPER-ENGINE PASS 2026-09-21: gated PostgreSQL / Redis integration suites, cargo audit / cargo deny (tools absent) and the staking validator e2e were NOT executed in the build sandbox; the pass added no migration and did not touch the staking program"
     ]
   },
   "external_handover_blockers": [

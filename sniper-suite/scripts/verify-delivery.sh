@@ -44,6 +44,11 @@ docs/TECHNICAL-DIFFERENTIATORS.md docs/DELIVERY-MANIFEST.md
 docs/FINAL-DELIVERY.md docs/BUYER-QUICKSTART.md docs/TECHNICAL-FACT-SHEET.md
 docs/SELLER-FACT-SHEET.md docs/SELLING-LISTING-SOURCE.md docs/DEMO-RUNBOOK.md
 docs/EVIDENCE-INDEX.md docs/REPOSITORY-MAP.md docs/ARCHIVE-CHECKLIST.md
+docs/EXECUTION-RELIABILITY.md docs/SNIPER-ENGINE.md
+docs/COPY-TRADING-ENGINE.md docs/COPY-TRADING-OPERATIONS.md docs/COPY-TRADING-RECOVERY.md
+docs/POLYMARKET-ENGINE.md docs/POLYMARKET-OPERATIONS.md docs/POLYMARKET-RECOVERY.md
+docs/GLOBAL-RISK.md docs/ACCOUNTING-LEDGER.md docs/RISK-OPERATIONS.md
+docs/HA-ARCHITECTURE.md docs/DISTRIBUTED-OPERATIONS.md docs/CRASH-RECOVERY.md
 "
 missing=""
 for f in $REQUIRED_FILES; do
@@ -54,12 +59,12 @@ if [ -z "$missing" ]; then
 else
   bad "missing required files:$missing"
 fi
-# migrations 0001-0011
+# migrations 0001-0016 (contiguous, forward-only)
 migmissing=""
-for i in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011; do
+for i in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016; do
   ls crates/core/migrations/${i}_*.sql >/dev/null 2>&1 || migmissing="$migmissing $i"
 done
-[ -z "$migmissing" ] && ok "migrations 0001-0011 present" || bad "missing migrations:$migmissing"
+[ -z "$migmissing" ] && ok "migrations 0001-0016 present" || bad "missing migrations:$migmissing"
 
 # ---------------------------------------------------------- 2. version id --
 V_FILE="$(tr -d '[:space:]' < VERSION)"

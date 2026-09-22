@@ -249,6 +249,46 @@ impl GammaClient {
         let mut markets = self.markets(&query).await?;
         Ok(markets.pop())
     }
+
+    /// `GET /markets?condition_ids=...` — the market for one CLOB condition
+    /// id (restart recovery re-hydrates adopted orders with the question /
+    /// outcome names this way). `Ok(None)` when Gamma does not know it.
+    pub async fn market_by_condition(&self, condition_id: &str) -> PolyResult<Option<PolyMarket>> {
+        let url = format!("{}/markets", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("condition_ids", condition_id), ("limit", "1")])
+            .send()
+            .await?
+            .error_for_status()?;
+        let raw: Vec<GammaMarket> = resp.json().await?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|m| m.to_poly())
+            .find(|m| m.condition_id.eq_ignore_ascii_case(condition_id)))
+    }
+}
+
+/// Seconds until `market` resolves at `now` (`None` = no end date known).
+/// Negative when the end date has passed.
+pub fn seconds_to_resolution(
+    market: &PolyMarket,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
+    market
+        .end_date
+        .map(|end| end.signed_duration_since(now).num_seconds())
+}
+
+/// Human label for an outcome token inside `market` (falls back to the id).
+pub fn outcome_label(market: &PolyMarket, token_id: &str) -> String {
+    market
+        .outcomes
+        .iter()
+        .find(|o| o.token_id == token_id)
+        .map(|o| o.outcome.clone())
+        .unwrap_or_else(|| token_id.to_string())
 }
 
 #[cfg(test)]
@@ -325,5 +365,39 @@ mod tests {
         assert!(pairs.contains(&("active".to_string(), "true".to_string())));
         assert!(pairs.contains(&("limit".to_string(), "5".to_string())));
         assert!(!pairs.iter().any(|(k, _)| k == "closed"));
+    }
+
+    #[test]
+    fn resolution_and_outcome_helpers() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-21T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut m = PolyMarket {
+            condition_id: "0xc".into(),
+            question: "q".into(),
+            slug: "q".into(),
+            neg_risk: false,
+            active: true,
+            closed: false,
+            accepting_orders: true,
+            end_date: Some(now + chrono::Duration::seconds(90)),
+            volume: 0.0,
+            liquidity: 0.0,
+            outcomes: vec![PolyOutcome {
+                outcome: "Yes".into(),
+                token_id: "111".into(),
+                price: 0.5,
+                winner: None,
+            }],
+        };
+        assert_eq!(seconds_to_resolution(&m, now), Some(90));
+        assert_eq!(
+            seconds_to_resolution(&m, now + chrono::Duration::seconds(100)),
+            Some(-10)
+        );
+        m.end_date = None;
+        assert_eq!(seconds_to_resolution(&m, now), None);
+        assert_eq!(outcome_label(&m, "111"), "Yes");
+        assert_eq!(outcome_label(&m, "222"), "222");
     }
 }

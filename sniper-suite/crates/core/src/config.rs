@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BotError, BotResult};
-use crate::models::{BotModule, ExecutionMode};
+use crate::maths::LAMPORTS_PER_SIGNATURE;
+use crate::models::{BotModule, ExecutionMode, Venue};
 
 /// Top-level configuration.
 ///
@@ -21,6 +22,9 @@ pub struct Config {
     pub network: NetworkConfig,
     pub execution: ExecutionConfig,
     pub risk: RiskConfig,
+    /// TASK 5 — portfolio-level limits, kill switches and the reference
+    /// currency of the global ledger.
+    pub global_risk: GlobalRiskConfig,
     pub sniper: SniperConfig,
     pub copy: CopyConfig,
     pub polymarket: PolymarketConfig,
@@ -58,6 +62,25 @@ pub struct NetworkConfig {
     pub account_cache_ttl_ms: u64,
     /// Maximum number of accounts held in the warm cache (FIFO eviction).
     pub account_cache_max_entries: usize,
+    /// First retry delay of the RPC retry policy (exponential from here).
+    pub retry_base_backoff_ms: u64,
+    /// Ceiling for one retry delay.
+    pub retry_max_backoff_ms: u64,
+    /// Randomise every delay in `[0, computed]` (full jitter) so a fleet of
+    /// replicas never retries in lock-step against a recovering provider.
+    pub retry_jitter: bool,
+    /// Minimum pause after an HTTP 429 / provider quota error before that
+    /// provider is used again (a `Retry-After` hint, when present, wins).
+    pub rate_limit_cooldown_ms: u64,
+    /// Consecutive failures after which a provider is considered unhealthy
+    /// and skipped for `provider_cooldown_ms` (automatic failover).
+    pub provider_failure_threshold: u32,
+    /// How long an unhealthy provider is skipped before it is probed again.
+    pub provider_cooldown_ms: u64,
+    /// Websocket stale-connection detector: with no inbound frame (data or
+    /// pong) for this long the socket is closed and re-established with all
+    /// subscriptions restored. `0` disables the detector.
+    pub ws_stale_after_ms: u64,
 }
 
 impl Default for NetworkConfig {
@@ -83,6 +106,13 @@ impl Default for NetworkConfig {
             // removes a round trip from every snipe.
             account_cache_ttl_ms: 30_000,
             account_cache_max_entries: 5_000,
+            retry_base_backoff_ms: 50,
+            retry_max_backoff_ms: 2_000,
+            retry_jitter: true,
+            rate_limit_cooldown_ms: 1_000,
+            provider_failure_threshold: 3,
+            provider_cooldown_ms: 5_000,
+            ws_stale_after_ms: 45_000,
         }
     }
 }
@@ -90,6 +120,19 @@ impl Default for NetworkConfig {
 impl NetworkConfig {
     pub fn is_devnet(&self) -> bool {
         self.cluster.contains("devnet") || self.rpc_url.contains("devnet")
+    }
+
+    /// Every configured HTTP endpoint, primary first, blanks and duplicates
+    /// removed (the RPC provider pool is built from this list).
+    pub fn rpc_endpoints(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(1 + self.rpc_url_fallbacks.len());
+        for url in std::iter::once(&self.rpc_url).chain(self.rpc_url_fallbacks.iter()) {
+            let u = url.trim();
+            if !u.is_empty() && !out.iter().any(|x| x == u) {
+                out.push(u.to_string());
+            }
+        }
+        out
     }
 }
 
@@ -127,6 +170,30 @@ pub struct ExecutionConfig {
     /// Duplicate delivery is harmless — the leader dedupes by signature —
     /// and it materially raises the landing rate when one node lags.
     pub broadcast_fanout: bool,
+    /// Priority-fee policy: `fixed` always uses `priority_fee_micro_lamports`
+    /// (clamped to the bounds below); `adaptive` samples
+    /// `getRecentPrioritizationFees` and pays the configured percentile of
+    /// recent fees (never below `priority_fee_micro_lamports`, never above
+    /// `fee_max_micro_lamports`).
+    pub fee_mode: String,
+    /// Lower bound for any priority fee the executor will set.
+    pub fee_min_micro_lamports: u64,
+    /// Upper bound: adaptive quotes and retry escalation are clamped here.
+    pub fee_max_micro_lamports: u64,
+    /// Emergency limit: a request that asks for MORE than this (explicitly
+    /// or through escalation) is refused outright instead of clamped — a
+    /// runaway fee is a bug, not a market condition.
+    pub fee_emergency_max_micro_lamports: u64,
+    /// Percentile (1–100) of recent prioritization fees used by `adaptive`.
+    pub fee_percentile: u8,
+    /// Fee increase per retry attempt, in percent of the previous attempt's
+    /// fee (a blockhash-expired rebuild pays more to land faster).
+    pub fee_escalation_pct: u64,
+    /// How long one `getRecentPrioritizationFees` sample stays valid.
+    pub fee_oracle_ttl_ms: u64,
+    /// Maximum age of a cached blockhash the executor will still sign with;
+    /// older hashes are refreshed before signing.
+    pub max_blockhash_age_ms: u64,
 }
 
 impl Default for ExecutionConfig {
@@ -145,6 +212,14 @@ impl Default for ExecutionConfig {
             simulate_first: true,
             abort_on_simulation_failure: true,
             broadcast_fanout: false,
+            fee_mode: "fixed".into(),
+            fee_min_micro_lamports: 0,
+            fee_max_micro_lamports: 5_000_000,
+            fee_emergency_max_micro_lamports: 20_000_000,
+            fee_percentile: 75,
+            fee_escalation_pct: 50,
+            fee_oracle_ttl_ms: 2_000,
+            max_blockhash_age_ms: 20_000,
         }
     }
 }
@@ -153,6 +228,11 @@ impl ExecutionConfig {
     /// The single source of truth for "may I really broadcast?".
     pub fn live_allowed(&self) -> bool {
         self.mode.is_live() && self.allow_live_trading
+    }
+
+    /// `true` when the adaptive priority-fee oracle is enabled.
+    pub fn fee_adaptive(&self) -> bool {
+        self.fee_mode.trim().eq_ignore_ascii_case("adaptive")
     }
 }
 
@@ -203,6 +283,74 @@ pub struct RiskConfig {
     /// Never buy above this price or below the complement on Polymarket.
     pub poly_price_floor: f64,
     pub poly_price_ceiling: f64,
+    /// Sniper exposure controls (Module 1 only; every value `0` = inherit
+    /// the generic limit above or disable the check) ----------------------
+    /// Per-token cap for a sniper entry in SOL (`0` = `max_position_quote`).
+    pub sniper_max_position_quote: f64,
+    /// Cap on the SUM of open sniper exposure in SOL (`0` = the generic
+    /// `max_position_quote × max_open_positions` envelope).
+    pub sniper_max_total_exposure_quote: f64,
+    /// Max simultaneously open sniper positions (`0` = `max_open_positions`).
+    pub sniper_max_concurrent_positions: usize,
+    /// Max sniper execution intents that are live in the execution ledger
+    /// (created/validated/submitted/pending) at once (`0` = unlimited).
+    pub sniper_max_pending_executions: usize,
+    /// Minimum seconds between two entry ATTEMPTS on the same mint,
+    /// regardless of outcome (`0` = off).
+    pub sniper_token_cooldown_secs: i64,
+    /// After an entry attempt FAILED (rejected by the chain, expired, no
+    /// fill), refuse the same mint for this many seconds (`0` = off).
+    pub sniper_failed_entry_cooldown_secs: i64,
+    /// Sniper-only daily realized loss cap in SOL (`0` = off). Independent
+    /// of — and evaluated in addition to — `daily_loss_limit_quote`.
+    pub sniper_daily_loss_limit_quote: f64,
+    /// Emergency disable: refuse EVERY new sniper entry while true. Exits
+    /// keep running (reducing exposure is always allowed). Unlike the kill
+    /// switch it affects only Module 1 and only entries.
+    pub sniper_emergency_disable: bool,
+    /// Copy-trading exposure controls (Module 2 only; every value `0` =
+    /// inherit the generic limit above or disable the check) ---------------
+    /// Per-token cap for a mirrored entry in SOL (`0` = `max_position_quote`).
+    pub copy_max_position_quote: f64,
+    /// Cap on the SUM of open copy exposure in SOL (`0` = the generic
+    /// `max_position_quote × max_open_positions` envelope).
+    pub copy_max_total_exposure_quote: f64,
+    /// Max simultaneously open copy positions (`0` = `max_open_positions`).
+    pub copy_max_concurrent_positions: usize,
+    /// Max copy execution intents that are live in the execution ledger
+    /// (created/validated/submitted/pending) at once (`0` = unlimited).
+    pub copy_max_pending_executions: usize,
+    /// After a mirrored entry attempt FAILED on a mint, refuse that mint for
+    /// this many seconds (`0` = off).
+    pub copy_failed_entry_cooldown_secs: i64,
+    /// Copy-only daily realized loss cap in SOL (`0` = off). Independent of —
+    /// and evaluated in addition to — `daily_loss_limit_quote`.
+    pub copy_daily_loss_limit_quote: f64,
+    /// Cap on the open exposure mirrored from ONE leader, in SOL (`0` = off).
+    pub copy_max_leader_exposure_quote: f64,
+    /// Emergency disable: refuse EVERY new mirrored entry while true. Exits
+    /// (including mirrored exits) keep running.
+    pub copy_emergency_disable: bool,
+    /// Polymarket exposure controls (Module 3 only, TASK 4; every value
+    /// `0` = inherit the generic limit above or disable the check) ----------
+    /// Per-order USDC cap for a Polymarket entry (`0` = `max_position_quote`).
+    pub poly_max_position_quote: f64,
+    /// Cap on the SUM of open Polymarket exposure in USDC — open positions
+    /// PLUS resting (unfilled) buy orders (`0` = the generic envelope).
+    pub poly_max_total_exposure_quote: f64,
+    /// Cap on the open exposure inside ONE market (condition id), USDC,
+    /// positions plus resting orders (`0` = off).
+    pub poly_max_market_exposure_quote: f64,
+    /// Max simultaneously open Polymarket positions (`0` = `max_open_positions`).
+    pub poly_max_concurrent_positions: usize,
+    /// Max resting (non-terminal) CLOB orders at once (`0` = unlimited).
+    pub poly_max_open_orders: usize,
+    /// Polymarket-only daily realized loss cap in USDC (`0` = off).
+    /// Independent of — and evaluated in addition to — `daily_loss_limit_quote`.
+    pub poly_daily_loss_limit_quote: f64,
+    /// Emergency disable: refuse EVERY new Polymarket entry while true.
+    /// Cancels, exits and reconciliation keep running.
+    pub poly_emergency_disable: bool,
 }
 
 impl Default for RiskConfig {
@@ -230,6 +378,85 @@ impl Default for RiskConfig {
             poly_min_edge: 0.03,
             poly_price_floor: 0.02,
             poly_price_ceiling: 0.98,
+            sniper_max_position_quote: 0.0,
+            sniper_max_total_exposure_quote: 0.0,
+            sniper_max_concurrent_positions: 0,
+            sniper_max_pending_executions: 2,
+            sniper_token_cooldown_secs: 0,
+            sniper_failed_entry_cooldown_secs: 120,
+            sniper_daily_loss_limit_quote: 0.0,
+            sniper_emergency_disable: false,
+            copy_max_position_quote: 0.0,
+            copy_max_total_exposure_quote: 0.0,
+            copy_max_concurrent_positions: 0,
+            copy_max_pending_executions: 0,
+            copy_failed_entry_cooldown_secs: 0,
+            copy_daily_loss_limit_quote: 0.0,
+            copy_max_leader_exposure_quote: 0.0,
+            copy_emergency_disable: false,
+            poly_max_position_quote: 0.0,
+            poly_max_total_exposure_quote: 0.0,
+            poly_max_market_exposure_quote: 0.0,
+            poly_max_concurrent_positions: 0,
+            poly_max_open_orders: 0,
+            poly_daily_loss_limit_quote: 0.0,
+            poly_emergency_disable: false,
+        }
+    }
+}
+
+impl RiskConfig {
+    /// Effective per-token cap for a sniper entry.
+    pub fn sniper_position_cap(&self) -> f64 {
+        if self.sniper_max_position_quote > 0.0 {
+            self.sniper_max_position_quote
+        } else {
+            self.max_position_quote
+        }
+    }
+
+    /// Effective concurrent-position cap for the sniper.
+    pub fn sniper_position_limit(&self) -> usize {
+        if self.sniper_max_concurrent_positions > 0 {
+            self.sniper_max_concurrent_positions
+        } else {
+            self.max_open_positions
+        }
+    }
+
+    /// Effective per-token cap for a mirrored (copy) entry.
+    pub fn copy_position_cap(&self) -> f64 {
+        if self.copy_max_position_quote > 0.0 {
+            self.copy_max_position_quote
+        } else {
+            self.max_position_quote
+        }
+    }
+
+    /// Effective concurrent-position cap for the copy module.
+    pub fn copy_position_limit(&self) -> usize {
+        if self.copy_max_concurrent_positions > 0 {
+            self.copy_max_concurrent_positions
+        } else {
+            self.max_open_positions
+        }
+    }
+
+    /// Effective per-order cap (USDC) for a Polymarket entry.
+    pub fn poly_position_cap(&self) -> f64 {
+        if self.poly_max_position_quote > 0.0 {
+            self.poly_max_position_quote
+        } else {
+            self.max_position_quote
+        }
+    }
+
+    /// Effective concurrent-position cap for the Polymarket module.
+    pub fn poly_position_limit(&self) -> usize {
+        if self.poly_max_concurrent_positions > 0 {
+            self.poly_max_concurrent_positions
+        } else {
+            self.max_open_positions
         }
     }
 }
@@ -253,9 +480,15 @@ pub struct SniperConfig {
     /// processed-commitment notifications straight from a Geyser-enabled
     /// node, decoded through the same pump event parser as `logsSubscribe`.
     pub use_transaction_subscribe: bool,
-    /// Trade graduated tokens on PumpSwap instead of skipping them.
+    /// PumpSwap protocol: detect `CreatePoolEvent` launches on the AMM and
+    /// route PumpSwap entries/exits directly through the AMM program (a
+    /// pump.fun token that already graduated is routed here too). When
+    /// false, PumpSwap launches are rejected with `INVALID_ROUTE` and
+    /// graduated pump tokens use the Jupiter fallback only.
     pub trade_pumpswap: bool,
-    /// Route through Raydium AMM v4 when a pool exists.
+    /// Raydium AMM v4 protocol: detect `initialize2` pool creations and
+    /// route entries/exits directly through the AMM v4 program. CLMM /
+    /// CPMM / LaunchLab pools are recognised but never traded.
     pub trade_raydium: bool,
     /// Fall back to the Jupiter aggregator if no direct venue is found.
     pub use_jupiter_fallback: bool,
@@ -281,7 +514,9 @@ pub struct SniperConfig {
     /// Learn the account layout by watching successful buys on chain.
     pub pump_learn_account_layout: bool,
     pub pump_layout_file: String,
-    /// Maximum time between seeing a launch and sending the buy.
+    /// Latency budget from OBSERVING a launch to handing the transaction to
+    /// the execution engine. Exceeding it rejects with `STALE_EVENT` right
+    /// before submission (the edge is gone; do not chase it). `0` = off.
     pub max_entry_latency_ms: u64,
     /// Skip launches older than this many seconds by the time we see them.
     pub max_launch_age_secs: i64,
@@ -289,6 +524,63 @@ pub struct SniperConfig {
     pub creator_denylist: Vec<String>,
     /// Denylist of keywords in the token name/symbol.
     pub keyword_denylist: Vec<String>,
+    /// Slippage engine ------------------------------------------------------
+    /// `"fixed"` uses `slippage_pct` as is; `"liquidity_aware"` widens the
+    /// base tolerance for thin pools (up to the hard maximum) and tightens
+    /// it for deep ones; `"price_impact"` sets the tolerance from the
+    /// modelled price impact of the sized trade plus `slippage_pct` as a
+    /// buffer. Every mode is clamped by `risk.max_slippage_bps`.
+    pub slippage_mode: String,
+    /// Per-protocol base slippage overrides in percent (`None` = inherit
+    /// `slippage_pct`).
+    pub pumpswap_slippage_pct: Option<f64>,
+    pub raydium_slippage_pct: Option<f64>,
+    /// Per-token slippage override in basis points, keyed by mint
+    /// (`[sniper.slippage_overrides_bps]`). Still clamped by the hard max.
+    pub slippage_overrides_bps: std::collections::BTreeMap<String, u64>,
+    /// Reject an entry whose modelled price impact exceeds this (`0` = off).
+    pub max_price_impact_bps: u64,
+    /// Fee budget per entry transaction in lamports (`0` = off): the
+    /// deterministic worst case of base fee (5 000 per signature) + priority
+    /// fee at the ceiling the `[execution]` fee policy can settle on ×
+    /// compute-unit limit + Jito tip (when `execution.use_jito`). Exceeding
+    /// it rejects the entry as `FEE_LIMIT` before anything is built.
+    pub max_entry_fee_lamports: u64,
+    /// Safety gates ---------------------------------------------------------
+    /// Minimum quote-side liquidity (SOL) in the curve/pool at decision time
+    /// (`0` = off).
+    pub min_liquidity_sol: f64,
+    /// Require the mint authority to be revoked (nobody can inflate supply).
+    /// Off by default: pump.fun revokes it, arbitrary Raydium tokens may not.
+    pub require_mint_authority_revoked: bool,
+    /// Require the freeze authority to be revoked (nobody can freeze your
+    /// token account — the classic honeypot lever). pump.fun tokens always
+    /// pass; this bites for Raydium-native launches.
+    pub require_freeze_authority_revoked: bool,
+    /// Concentration gate: reject when the creator's opening buy exceeds
+    /// this many SOL (`0` = off). Only PumpPortal reports it.
+    pub max_creator_initial_buy_sol: f64,
+    /// Concentration gate for AMM launches: the fraction of the total supply
+    /// that must sit inside the pool (`0` = off, e.g. `0.5` = at least half
+    /// the supply is pooled; less means the rest can be dumped on you).
+    pub min_pool_supply_fraction: f64,
+    /// Reject when the market snapshot (curve/pool read) used for the
+    /// decision is older than this at submission time.
+    pub max_snapshot_age_ms: u64,
+    /// Strict gates: when a gate cannot be evaluated because the protocol /
+    /// feed does not expose the datum, REJECT instead of skipping the gate.
+    pub strict_gates: bool,
+    /// Exit hardening -------------------------------------------------------
+    /// Force an exit when a position's mark price could not be refreshed for
+    /// this many seconds (`0` = off). A blind exit at unknown price is the
+    /// last resort, hence off by default.
+    pub stale_position_exit_secs: i64,
+    /// Minimum seconds between two exit attempts for the same position after
+    /// a FAILED exit (prevents hammering the chain every sweep).
+    pub exit_retry_backoff_secs: u64,
+    /// Close (without selling) positions whose ENTRY provably never landed
+    /// according to the execution ledger (failed / expired attempts).
+    pub failed_entry_cleanup: bool,
 }
 
 impl Default for SniperConfig {
@@ -324,12 +616,38 @@ impl Default for SniperConfig {
                 "honeypot".into(),
                 "test".into(),
             ],
+            slippage_mode: "fixed".into(),
+            pumpswap_slippage_pct: None,
+            raydium_slippage_pct: None,
+            slippage_overrides_bps: std::collections::BTreeMap::new(),
+            max_price_impact_bps: 2_500,
+            max_entry_fee_lamports: 0,
+            min_liquidity_sol: 0.0,
+            require_mint_authority_revoked: false,
+            require_freeze_authority_revoked: true,
+            max_creator_initial_buy_sol: 0.0,
+            min_pool_supply_fraction: 0.0,
+            max_snapshot_age_ms: 2_000,
+            strict_gates: false,
+            stale_position_exit_secs: 0,
+            exit_retry_backoff_secs: 10,
+            failed_entry_cleanup: true,
         }
     }
 }
 
+impl SniperConfig {
+    /// Normalised slippage mode (`fixed` | `liquidity_aware` | `price_impact`).
+    pub fn slippage_mode_normalized(&self) -> String {
+        self.slippage_mode
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_")
+    }
+}
+
 /// One wallet that Module 2 mirrors.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CopyWallet {
     pub address: String,
@@ -350,6 +668,15 @@ pub struct CopyWallet {
     pub slippage_pct: Option<f64>,
     /// Skip if our node sees the trade later than this (we would be too late).
     pub max_staleness_secs: i64,
+    /// Operator pause: keep following (events are still observed, counted
+    /// and reconciled) but mirror nothing new. Hot-reloadable.
+    pub paused: bool,
+    /// Cap on the open exposure mirrored from THIS leader, in SOL (`0` =
+    /// only the global `risk.copy_max_leader_exposure_quote` applies).
+    pub max_exposure_sol: f64,
+    /// Max simultaneously open positions mirrored from THIS leader
+    /// (`0` = no per-leader limit).
+    pub max_open_positions: usize,
 }
 
 impl Default for CopyWallet {
@@ -364,6 +691,9 @@ impl Default for CopyWallet {
             buys_only: false,
             slippage_pct: None,
             max_staleness_secs: 20,
+            paused: false,
+            max_exposure_sol: 0.0,
+            max_open_positions: 0,
         }
     }
 }
@@ -394,6 +724,32 @@ pub struct CopyConfig {
     pub decode_pumpswap: bool,
     pub decode_raydium: bool,
     pub decode_jupiter: bool,
+    /// Global ceiling on how old a leader trade may be when the pipeline
+    /// picks it up (seconds since the chain/source produced it, falling back
+    /// to local observation). A wallet's `max_staleness_secs` can only
+    /// tighten this. `0` = off.
+    pub max_event_age_secs: i64,
+    /// Reject a leader event that arrives BEHIND that leader's newest
+    /// processed slot (`OUT_OF_ORDER`) instead of mirroring it late.
+    pub strict_ordering: bool,
+    /// Global cap on one mirrored buy in SOL, applied after the per-wallet
+    /// rule (`0` = off).
+    pub max_sol_per_trade: f64,
+    /// Global cap on one mirrored buy as a fraction of the spendable balance
+    /// (`0` = off, `1` = the whole balance).
+    pub max_balance_fraction: f64,
+    /// Mirrors smaller than this many SOL are not worth a transaction fee
+    /// and are refused as dust (`0` = off).
+    pub min_mirror_sol: f64,
+    /// How often leader activity is reconciled against our mirrored
+    /// positions (seconds; `0` = never).
+    pub reconcile_interval_secs: u64,
+    /// When reconciliation finds a leader that fully exited a mint we still
+    /// hold, sell through the normal mirrored-exit path. Off = flag only.
+    pub reconcile_auto_exit: bool,
+    /// After a restart, re-seed the dedup facade from the durable
+    /// processed-event journal this far back (hours; `0` = off).
+    pub recovery_lookback_hours: i64,
 }
 
 impl Default for CopyConfig {
@@ -413,6 +769,14 @@ impl Default for CopyConfig {
             decode_pumpswap: true,
             decode_raydium: true,
             decode_jupiter: true,
+            max_event_age_secs: 30,
+            strict_ordering: false,
+            max_sol_per_trade: 0.0,
+            max_balance_fraction: 0.0,
+            min_mirror_sol: 0.0,
+            reconcile_interval_secs: 60,
+            reconcile_auto_exit: false,
+            recovery_lookback_hours: 24,
         }
     }
 }
@@ -468,6 +832,42 @@ pub struct PolymarketConfig {
     pub builder_code: Option<String>,
     /// Keywords used by the simple `search` strategy.
     pub watch_keywords: Vec<String>,
+    /// Order pipeline / lifecycle controls (TASK 4) ----------------------
+    /// Reject a decision when the quoted spread (`ask - bid`) is wider than
+    /// this (probability units, `0` = off).
+    pub max_spread: f64,
+    /// Reject a decision when the market's Gamma liquidity figure is below
+    /// this many USDC (`0` = off).
+    pub min_liquidity_usd: f64,
+    /// Reject a decision whose quote is older than this many seconds (`0` =
+    /// off; quotes without a timestamp are treated as fresh).
+    pub quote_max_age_secs: i64,
+    /// Reject a decision when the market resolves within this many seconds
+    /// (`0` = off). Protects against entering minutes before settlement.
+    pub min_time_to_resolution_secs: i64,
+    /// Smallest order the engine will place, in outcome tokens (the CLOB's
+    /// own minimum is 5 shares).
+    pub min_order_size: f64,
+    /// Poll the CLOB for the status of resting orders this often (seconds).
+    pub order_poll_interval_secs: u64,
+    /// Cancel a resting order that has not filled after this many seconds
+    /// (`0` = never; GTD expiry still applies).
+    pub order_ttl_secs: i64,
+    /// Cancel + let the next scan re-quote a resting BUY whose price sits
+    /// more than this far below the current best ask (probability units,
+    /// `0` = off).
+    pub reprice_threshold: f64,
+    /// Compare local order state with the venue's open-order list this often
+    /// (seconds, `0` = off).
+    pub reconcile_interval_secs: u64,
+    /// Cancel venue orders that are open for our API key but unknown
+    /// locally (found by reconciliation). `false` = report only.
+    pub reconcile_cancel_orphans: bool,
+    /// Subscribe to the authenticated `user` websocket channel for order /
+    /// trade events (needs API credentials; polling always runs as well).
+    pub use_user_websocket: bool,
+    /// Cancel every resting order when the module shuts down.
+    pub cancel_on_shutdown: bool,
 }
 
 impl Default for PolymarketConfig {
@@ -499,6 +899,18 @@ impl Default for PolymarketConfig {
             heartbeat_interval_secs: 10,
             builder_code: None,
             watch_keywords: Vec::new(),
+            max_spread: 0.10,
+            min_liquidity_usd: 0.0,
+            quote_max_age_secs: 120,
+            min_time_to_resolution_secs: 3600,
+            min_order_size: 5.0,
+            order_poll_interval_secs: 15,
+            order_ttl_secs: 0,
+            reprice_threshold: 0.0,
+            reconcile_interval_secs: 60,
+            reconcile_cancel_orphans: false,
+            use_user_websocket: true,
+            cancel_on_shutdown: true,
         }
     }
 }
@@ -723,6 +1135,118 @@ impl Default for ObservabilityConfig {
     }
 }
 
+/// TASK 5 — the global risk / accounting layer (`docs/GLOBAL-RISK.md`).
+///
+/// Every limit is expressed in the REFERENCE currency (`reference_asset`,
+/// default `USD`); native quote figures (SOL, USDC) are converted with the
+/// operator-configured `reference_rates`. The suite fetches no prices for
+/// this: a quote asset with open exposure but no rate makes every
+/// reference-denominated check fail closed (`reference_rate_missing`).
+/// Every limit defaults to `0` = off, so an unconfigured suite behaves as
+/// before TASK 5.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GlobalRiskConfig {
+    /// Label of the reference currency the limits and the portfolio view
+    /// are denominated in.
+    pub reference_asset: String,
+    /// Reference rate per quote asset (`quote → reference`), e.g.
+    /// `SOL = 150.0`, `USDC = 1.0`. Operator-maintained; audited on reload.
+    pub reference_rates: HashMap<String, f64>,
+    /// Operator-declared capital base in reference units. Backs capital
+    /// utilization and `max_drawdown_pct`. `0` = unknown.
+    pub capital_base_ref: f64,
+    /// Cap on total open exposure across every module (0 = off).
+    pub max_portfolio_exposure_ref: f64,
+    /// Cap on open exposure per wallet (0 = off).
+    pub max_wallet_exposure_ref: f64,
+    /// Cap on open exposure per venue (0 = off).
+    pub max_venue_exposure_ref: f64,
+    /// Cap on open exposure per strategy label (0 = off).
+    pub max_strategy_exposure_ref: f64,
+    /// Cap on open exposure per base asset (0 = off).
+    pub max_asset_exposure_ref: f64,
+    /// Cap on open aggregated positions across every module (0 = off).
+    pub max_open_positions: usize,
+    /// Cap on one order's notional (0 = off).
+    pub max_order_notional_ref: f64,
+    /// Stop opening once today's net realized loss reaches this (0 = off).
+    pub max_daily_loss_ref: f64,
+    /// Stop opening once the drawdown from the realized peak (incl.
+    /// unrealized) reaches this absolute figure (0 = off).
+    pub max_drawdown_ref: f64,
+    /// Same, as a fraction of `capital_base_ref` (0 = off; needs the base).
+    pub max_drawdown_pct: f64,
+    /// Venues refused for NEW entries (`Venue::as_str` names, e.g.
+    /// `polymarket`, `pump.fun`). Exits keep running.
+    pub killed_venues: Vec<String>,
+    /// Strategy labels refused for NEW entries (`sniper`, `copy:<leader>`,
+    /// the Polymarket strategy name).
+    pub killed_strategies: Vec<String>,
+    /// How often the server reconciles module positions / trades against
+    /// the global ledger (seconds; 0 = only at startup).
+    pub accounting_reconcile_interval_secs: u64,
+}
+
+impl Default for GlobalRiskConfig {
+    fn default() -> Self {
+        GlobalRiskConfig {
+            reference_asset: "USD".into(),
+            reference_rates: HashMap::from([("USDC".to_string(), 1.0)]),
+            capital_base_ref: 0.0,
+            max_portfolio_exposure_ref: 0.0,
+            max_wallet_exposure_ref: 0.0,
+            max_venue_exposure_ref: 0.0,
+            max_strategy_exposure_ref: 0.0,
+            max_asset_exposure_ref: 0.0,
+            max_open_positions: 0,
+            max_order_notional_ref: 0.0,
+            max_daily_loss_ref: 0.0,
+            max_drawdown_ref: 0.0,
+            max_drawdown_pct: 0.0,
+            killed_venues: Vec::new(),
+            killed_strategies: Vec::new(),
+            accounting_reconcile_interval_secs: 60,
+        }
+    }
+}
+
+impl GlobalRiskConfig {
+    /// `killed_venues` parsed (unknown names are rejected by validation).
+    pub fn killed_venue_list(&self) -> Vec<Venue> {
+        self.killed_venues
+            .iter()
+            .filter_map(|v| Venue::parse(v.trim()))
+            .collect()
+    }
+
+    /// True when any limit that needs a reference conversion is on.
+    pub fn needs_reference_rates(&self) -> bool {
+        self.max_portfolio_exposure_ref > 0.0
+            || self.max_wallet_exposure_ref > 0.0
+            || self.max_venue_exposure_ref > 0.0
+            || self.max_strategy_exposure_ref > 0.0
+            || self.max_asset_exposure_ref > 0.0
+            || self.max_order_notional_ref > 0.0
+            || self.max_daily_loss_ref > 0.0
+            || self.effective_drawdown_limit().is_some()
+    }
+
+    /// The drawdown limit in reference units: the tighter of the absolute
+    /// figure and `capital_base_ref × max_drawdown_pct`; `None` when off.
+    pub fn effective_drawdown_limit(&self) -> Option<f64> {
+        let abs = (self.max_drawdown_ref > 0.0).then_some(self.max_drawdown_ref);
+        let pct = (self.max_drawdown_pct > 0.0 && self.capital_base_ref > 0.0)
+            .then_some(self.capital_base_ref * self.max_drawdown_pct);
+        match (abs, pct) {
+            (Some(a), Some(p)) => Some(a.min(p)),
+            (Some(a), None) => Some(a),
+            (None, Some(p)) => Some(p),
+            (None, None) => None,
+        }
+    }
+}
+
 /// Reconciliation & crash recovery (Prompt 2 §H): startup gate behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -798,6 +1322,28 @@ pub struct HaConfig {
     /// positions, per-symbol exposure) converges across replicas. Clamped
     /// to a 5 s floor.
     pub book_sync_secs: u64,
+    /// TASK 6 — how this worker participates in the cluster:
+    /// `single` (one worker owns everything), `active_passive` (standbys
+    /// wait for the singleton leases to expire) or `active_active`
+    /// (several workers process concurrently; per-execution claims keep
+    /// them apart). Unknown values fall back to `single` with a warning.
+    pub mode: String,
+    /// TASK 6 — worker heartbeat period in seconds (clamped to a 1 s floor).
+    pub heartbeat_secs: u64,
+    /// TASK 6 — a worker is STALE after this long without a heartbeat.
+    /// Leases of a stale worker are only taken over once they EXPIRE; this
+    /// value only drives detection, metrics and audit. Clamped to a 5 s
+    /// floor and to at least twice `heartbeat_secs`.
+    pub heartbeat_timeout_secs: u64,
+    /// TASK 6 — duration granted per singleton ROLE lease (reconciliation,
+    /// recovery, accounting maintenance, state sync, each feed). Renewed
+    /// every third of this. Clamped to a 5 s floor. Distinct from
+    /// `claim_lease_secs`, which leases ONE execution intent.
+    pub role_lease_secs: u64,
+    /// TASK 6 — roles this worker must hold before it reports READY. Empty
+    /// (default) = readiness does not depend on any lease, which is what a
+    /// single worker with no standby wants.
+    pub required_roles: Vec<String>,
 }
 
 impl Default for HaConfig {
@@ -808,7 +1354,48 @@ impl Default for HaConfig {
             claim_handoff_grace_secs: 900,
             flag_sync_secs: 5,
             book_sync_secs: 30,
+            mode: "single".into(),
+            heartbeat_secs: 10,
+            heartbeat_timeout_secs: 45,
+            role_lease_secs: 45,
+            required_roles: Vec::new(),
         }
+    }
+}
+
+impl HaConfig {
+    /// The parsed HA mode (`single` when the string is unknown —
+    /// validation warns).
+    pub fn ha_mode(&self) -> crate::ha::HaMode {
+        crate::ha::HaMode::parse(&self.mode).unwrap_or(crate::ha::HaMode::Single)
+    }
+
+    /// Effective heartbeat period (>= 1 s).
+    pub fn heartbeat(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.heartbeat_secs.max(1))
+    }
+
+    /// Effective staleness timeout (>= 5 s and >= 2 × heartbeat).
+    pub fn heartbeat_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.heartbeat_timeout_secs
+                .max(5)
+                .max(self.heartbeat_secs.saturating_mul(2)),
+        )
+    }
+
+    /// Effective role-lease duration (>= 5 s).
+    pub fn role_lease(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.role_lease_secs.max(5))
+    }
+
+    /// The parsed required roles (unknown names are dropped — validation
+    /// rejects them before startup).
+    pub fn required_role_list(&self) -> Vec<crate::ha::LeaseRole> {
+        self.required_roles
+            .iter()
+            .filter_map(|r| crate::ha::LeaseRole::parse(r))
+            .collect()
     }
 }
 
@@ -1264,6 +1851,27 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     if let Some(v) = env_u64("ACCOUNT_CACHE_MAX_ENTRIES", w) {
         c.network.account_cache_max_entries = v as usize;
     }
+    if let Some(v) = env_u64("RPC_RETRY_BASE_BACKOFF_MS", w) {
+        c.network.retry_base_backoff_ms = v;
+    }
+    if let Some(v) = env_u64("RPC_RETRY_MAX_BACKOFF_MS", w) {
+        c.network.retry_max_backoff_ms = v;
+    }
+    if let Some(v) = env_bool("RPC_RETRY_JITTER", w) {
+        c.network.retry_jitter = v;
+    }
+    if let Some(v) = env_u64("RPC_RATE_LIMIT_COOLDOWN_MS", w) {
+        c.network.rate_limit_cooldown_ms = v;
+    }
+    if let Some(v) = env_u64("RPC_PROVIDER_FAILURE_THRESHOLD", w) {
+        c.network.provider_failure_threshold = v.min(u32::MAX as u64) as u32;
+    }
+    if let Some(v) = env_u64("RPC_PROVIDER_COOLDOWN_MS", w) {
+        c.network.provider_cooldown_ms = v;
+    }
+    if let Some(v) = env_u64("WS_STALE_AFTER_MS", w) {
+        c.network.ws_stale_after_ms = v;
+    }
 
     // --- execution ---
     if let Some(v) = env_str("EXECUTION_MODE", w) {
@@ -1302,6 +1910,27 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     }
     if let Some(v) = env_bool("BROADCAST_FANOUT", w) {
         c.execution.broadcast_fanout = v;
+    }
+    if let Some(v) = env_str("FEE_MODE", w) {
+        c.execution.fee_mode = v;
+    }
+    if let Some(v) = env_u64("FEE_MIN_MICRO_LAMPORTS", w) {
+        c.execution.fee_min_micro_lamports = v;
+    }
+    if let Some(v) = env_u64("FEE_MAX_MICRO_LAMPORTS", w) {
+        c.execution.fee_max_micro_lamports = v;
+    }
+    if let Some(v) = env_u64("FEE_EMERGENCY_MAX_MICRO_LAMPORTS", w) {
+        c.execution.fee_emergency_max_micro_lamports = v;
+    }
+    if let Some(v) = env_u64("FEE_PERCENTILE", w) {
+        c.execution.fee_percentile = v.min(100) as u8;
+    }
+    if let Some(v) = env_u64("FEE_ESCALATION_PCT", w) {
+        c.execution.fee_escalation_pct = v;
+    }
+    if let Some(v) = env_u64("MAX_BLOCKHASH_AGE_MS", w) {
+        c.execution.max_blockhash_age_ms = v;
     }
 
     // --- persistence / dedup ---
@@ -1417,6 +2046,61 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     if let Some(v) = env_f64("SNIPER_STOP_LOSS_PCT", w) {
         c.sniper.stop_loss_pct = if v <= 0.0 { None } else { Some(v) };
     }
+    if let Some(v) = env_bool("SNIPER_TRADE_PUMPSWAP", w) {
+        c.sniper.trade_pumpswap = v;
+    }
+    if let Some(v) = env_bool("SNIPER_TRADE_RAYDIUM", w) {
+        c.sniper.trade_raydium = v;
+    }
+    if let Some(v) = env_str("SNIPER_SLIPPAGE_MODE", w) {
+        c.sniper.slippage_mode = v;
+    }
+    if let Some(v) = env_u64("SNIPER_MAX_PRICE_IMPACT_BPS", w) {
+        c.sniper.max_price_impact_bps = v;
+    }
+    if let Some(v) = env_u64("SNIPER_MAX_ENTRY_FEE_LAMPORTS", w) {
+        c.sniper.max_entry_fee_lamports = v;
+    }
+    if let Some(v) = env_f64("SNIPER_MIN_LIQUIDITY_SOL", w) {
+        c.sniper.min_liquidity_sol = v;
+    }
+    if let Some(v) = env_bool("SNIPER_REQUIRE_MINT_AUTHORITY_REVOKED", w) {
+        c.sniper.require_mint_authority_revoked = v;
+    }
+    if let Some(v) = env_bool("SNIPER_REQUIRE_FREEZE_AUTHORITY_REVOKED", w) {
+        c.sniper.require_freeze_authority_revoked = v;
+    }
+    if let Some(v) = env_bool("SNIPER_STRICT_GATES", w) {
+        c.sniper.strict_gates = v;
+    }
+    if let Some(v) = env_i64("SNIPER_STALE_POSITION_EXIT_SECS", w) {
+        c.sniper.stale_position_exit_secs = v;
+    }
+    // Sniper exposure controls live in [risk] but are Module-1 specific.
+    if let Some(v) = env_bool("SNIPER_EMERGENCY_DISABLE", w) {
+        c.risk.sniper_emergency_disable = v;
+    }
+    if let Some(v) = env_f64("SNIPER_MAX_POSITION_SOL", w) {
+        c.risk.sniper_max_position_quote = v;
+    }
+    if let Some(v) = env_f64("SNIPER_MAX_TOTAL_EXPOSURE_SOL", w) {
+        c.risk.sniper_max_total_exposure_quote = v;
+    }
+    if let Some(v) = env_u64("SNIPER_MAX_CONCURRENT_POSITIONS", w) {
+        c.risk.sniper_max_concurrent_positions = v as usize;
+    }
+    if let Some(v) = env_u64("SNIPER_MAX_PENDING_EXECUTIONS", w) {
+        c.risk.sniper_max_pending_executions = v as usize;
+    }
+    if let Some(v) = env_i64("SNIPER_TOKEN_COOLDOWN_SECS", w) {
+        c.risk.sniper_token_cooldown_secs = v;
+    }
+    if let Some(v) = env_i64("SNIPER_FAILED_ENTRY_COOLDOWN_SECS", w) {
+        c.risk.sniper_failed_entry_cooldown_secs = v;
+    }
+    if let Some(v) = env_f64("SNIPER_DAILY_LOSS_LIMIT_SOL", w) {
+        c.risk.sniper_daily_loss_limit_quote = v;
+    }
 
     // --- module 2 ---
     if let Some(v) = env_bool("COPY_ENABLED", w) {
@@ -1455,6 +2139,55 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     if let Some(v) = env_str("COPY_FEED", w) {
         c.copy.feed = v;
     }
+    if let Some(v) = env_i64("COPY_MAX_EVENT_AGE_SECS", w) {
+        c.copy.max_event_age_secs = v;
+    }
+    if let Some(v) = env_bool("COPY_STRICT_ORDERING", w) {
+        c.copy.strict_ordering = v;
+    }
+    if let Some(v) = env_f64("COPY_MAX_SOL_PER_TRADE", w) {
+        c.copy.max_sol_per_trade = v;
+    }
+    if let Some(v) = env_f64("COPY_MAX_BALANCE_FRACTION", w) {
+        c.copy.max_balance_fraction = v;
+    }
+    if let Some(v) = env_f64("COPY_MIN_MIRROR_SOL", w) {
+        c.copy.min_mirror_sol = v;
+    }
+    if let Some(v) = env_u64("COPY_RECONCILE_INTERVAL_SECS", w) {
+        c.copy.reconcile_interval_secs = v;
+    }
+    if let Some(v) = env_bool("COPY_RECONCILE_AUTO_EXIT", w) {
+        c.copy.reconcile_auto_exit = v;
+    }
+    if let Some(v) = env_i64("COPY_RECOVERY_LOOKBACK_HOURS", w) {
+        c.copy.recovery_lookback_hours = v;
+    }
+    // Copy exposure controls live in [risk] but are Module-2 specific.
+    if let Some(v) = env_bool("COPY_EMERGENCY_DISABLE", w) {
+        c.risk.copy_emergency_disable = v;
+    }
+    if let Some(v) = env_f64("COPY_MAX_POSITION_SOL", w) {
+        c.risk.copy_max_position_quote = v;
+    }
+    if let Some(v) = env_f64("COPY_MAX_TOTAL_EXPOSURE_SOL", w) {
+        c.risk.copy_max_total_exposure_quote = v;
+    }
+    if let Some(v) = env_u64("COPY_MAX_CONCURRENT_POSITIONS", w) {
+        c.risk.copy_max_concurrent_positions = v as usize;
+    }
+    if let Some(v) = env_u64("COPY_MAX_PENDING_EXECUTIONS", w) {
+        c.risk.copy_max_pending_executions = v as usize;
+    }
+    if let Some(v) = env_i64("COPY_FAILED_ENTRY_COOLDOWN_SECS", w) {
+        c.risk.copy_failed_entry_cooldown_secs = v;
+    }
+    if let Some(v) = env_f64("COPY_DAILY_LOSS_LIMIT_SOL", w) {
+        c.risk.copy_daily_loss_limit_quote = v;
+    }
+    if let Some(v) = env_f64("COPY_MAX_LEADER_EXPOSURE_SOL", w) {
+        c.risk.copy_max_leader_exposure_quote = v;
+    }
 
     // --- module 3 ---
     if let Some(v) = env_bool("POLYMARKET_ENABLED", w) {
@@ -1490,6 +2223,63 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
             Ok(n) => w.push(format!("POLYMARKET_SIGNATURE_TYPE={n} out of range 0..=3")),
             Err(e) => w.push(format!("POLYMARKET_SIGNATURE_TYPE: {e}")),
         }
+    }
+    if let Some(v) = env_f64("POLYMARKET_MAX_SPREAD", w) {
+        c.polymarket.max_spread = v;
+    }
+    if let Some(v) = env_f64("POLYMARKET_MIN_LIQUIDITY_USD", w) {
+        c.polymarket.min_liquidity_usd = v;
+    }
+    if let Some(v) = env_i64("POLYMARKET_QUOTE_MAX_AGE_SECS", w) {
+        c.polymarket.quote_max_age_secs = v;
+    }
+    if let Some(v) = env_i64("POLYMARKET_MIN_TIME_TO_RESOLUTION_SECS", w) {
+        c.polymarket.min_time_to_resolution_secs = v;
+    }
+    if let Some(v) = env_f64("POLYMARKET_MIN_ORDER_SIZE", w) {
+        c.polymarket.min_order_size = v;
+    }
+    if let Some(v) = env_u64("POLYMARKET_ORDER_POLL_INTERVAL_SECS", w) {
+        c.polymarket.order_poll_interval_secs = v;
+    }
+    if let Some(v) = env_i64("POLYMARKET_ORDER_TTL_SECS", w) {
+        c.polymarket.order_ttl_secs = v;
+    }
+    if let Some(v) = env_f64("POLYMARKET_REPRICE_THRESHOLD", w) {
+        c.polymarket.reprice_threshold = v;
+    }
+    if let Some(v) = env_u64("POLYMARKET_RECONCILE_INTERVAL_SECS", w) {
+        c.polymarket.reconcile_interval_secs = v;
+    }
+    if let Some(v) = env_bool("POLYMARKET_RECONCILE_CANCEL_ORPHANS", w) {
+        c.polymarket.reconcile_cancel_orphans = v;
+    }
+    if let Some(v) = env_bool("POLYMARKET_USE_USER_WEBSOCKET", w) {
+        c.polymarket.use_user_websocket = v;
+    }
+    if let Some(v) = env_bool("POLYMARKET_CANCEL_ON_SHUTDOWN", w) {
+        c.polymarket.cancel_on_shutdown = v;
+    }
+    if let Some(v) = env_bool("POLY_EMERGENCY_DISABLE", w) {
+        c.risk.poly_emergency_disable = v;
+    }
+    if let Some(v) = env_f64("POLY_MAX_POSITION_USD", w) {
+        c.risk.poly_max_position_quote = v;
+    }
+    if let Some(v) = env_f64("POLY_MAX_TOTAL_EXPOSURE_USD", w) {
+        c.risk.poly_max_total_exposure_quote = v;
+    }
+    if let Some(v) = env_f64("POLY_MAX_MARKET_EXPOSURE_USD", w) {
+        c.risk.poly_max_market_exposure_quote = v;
+    }
+    if let Some(v) = env_u64("POLY_MAX_CONCURRENT_POSITIONS", w) {
+        c.risk.poly_max_concurrent_positions = v as usize;
+    }
+    if let Some(v) = env_u64("POLY_MAX_OPEN_ORDERS", w) {
+        c.risk.poly_max_open_orders = v as usize;
+    }
+    if let Some(v) = env_f64("POLY_DAILY_LOSS_LIMIT_USD", w) {
+        c.risk.poly_daily_loss_limit_quote = v;
     }
 
     // --- module 4 ---
@@ -1638,6 +2428,501 @@ pub fn resolve_api_key(c: &Config) -> Option<String> {
         .filter(|v| !v.trim().is_empty())
 }
 
+/// Sniper-engine specific validation (slippage engine, safety gates, exit
+/// hardening, exposure controls). Split out so the rules stay readable.
+fn validate_sniper_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
+    let sn = &c.sniper;
+    let mode = sn.slippage_mode_normalized();
+    if !matches!(mode.as_str(), "fixed" | "liquidity_aware" | "price_impact") {
+        return Err(BotError::config(format!(
+            "sniper.slippage_mode = \"{}\" — expected \"fixed\", \"liquidity_aware\" or \"price_impact\"",
+            sn.slippage_mode
+        )));
+    }
+    for (label, v) in [
+        ("sniper.pumpswap_slippage_pct", sn.pumpswap_slippage_pct),
+        ("sniper.raydium_slippage_pct", sn.raydium_slippage_pct),
+    ] {
+        if let Some(v) = v {
+            if !v.is_finite() || !(0.0..=100.0).contains(&v) {
+                return Err(BotError::config(format!("{label} must be in [0, 100]")));
+            }
+        }
+    }
+    for (mint, bps) in &sn.slippage_overrides_bps {
+        if mint.trim().is_empty() {
+            return Err(BotError::config(
+                "sniper.slippage_overrides_bps contains an empty mint key",
+            ));
+        }
+        if *bps > 10_000 {
+            return Err(BotError::config(format!(
+                "sniper.slippage_overrides_bps[{mint}] = {bps} must be <= 10000"
+            )));
+        }
+        if *bps > c.risk.max_slippage_bps {
+            w.push(format!(
+                "sniper.slippage_overrides_bps[{mint}] = {bps} exceeds risk.max_slippage_bps = {} — it will be clamped",
+                c.risk.max_slippage_bps
+            ));
+        }
+    }
+    if sn.max_price_impact_bps > 10_000 {
+        return Err(BotError::config(
+            "sniper.max_price_impact_bps must be <= 10000",
+        ));
+    }
+    if sn.max_entry_fee_lamports > 0 {
+        if sn.max_entry_fee_lamports < LAMPORTS_PER_SIGNATURE {
+            return Err(BotError::config(format!(
+                "sniper.max_entry_fee_lamports must be 0 (off) or >= {LAMPORTS_PER_SIGNATURE} \
+                 (the base fee of one signature)"
+            )));
+        }
+        // The configured first-attempt fee alone must fit, or every entry is
+        // FEE_LIMIT before it starts (the pipeline also prices retries and
+        // the adaptive ceiling; this is the floor of that estimate).
+        let ex = &c.execution;
+        let priority = (ex.priority_fee_micro_lamports as u128 * ex.compute_unit_limit as u128)
+            .div_ceil(1_000_000);
+        let tip = if ex.use_jito { ex.jito_tip_lamports } else { 0 };
+        let floor = (LAMPORTS_PER_SIGNATURE as u128)
+            .saturating_add(priority)
+            .saturating_add(tip as u128);
+        if floor > sn.max_entry_fee_lamports as u128 {
+            w.push(format!(
+                "sniper.max_entry_fee_lamports = {} is below the fee of the configured first \
+                 attempt ({floor} lamports = {LAMPORTS_PER_SIGNATURE} base + \
+                 priority_fee_micro_lamports × compute_unit_limit{}) — every sniper entry will \
+                 be rejected as FEE_LIMIT",
+                sn.max_entry_fee_lamports,
+                if ex.use_jito {
+                    " + jito_tip_lamports"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    if !sn.min_liquidity_sol.is_finite() || sn.min_liquidity_sol < 0.0 {
+        return Err(BotError::config("sniper.min_liquidity_sol must be >= 0"));
+    }
+    if !sn.max_creator_initial_buy_sol.is_finite() || sn.max_creator_initial_buy_sol < 0.0 {
+        return Err(BotError::config(
+            "sniper.max_creator_initial_buy_sol must be >= 0",
+        ));
+    }
+    if !sn.min_pool_supply_fraction.is_finite()
+        || !(0.0..=1.0).contains(&sn.min_pool_supply_fraction)
+    {
+        return Err(BotError::config(
+            "sniper.min_pool_supply_fraction must be in [0, 1]",
+        ));
+    }
+    if sn.max_snapshot_age_ms == 0 {
+        return Err(BotError::config("sniper.max_snapshot_age_ms must be > 0"));
+    }
+    if sn.stale_position_exit_secs < 0 {
+        return Err(BotError::config(
+            "sniper.stale_position_exit_secs must be >= 0 (0 = off)",
+        ));
+    }
+    if sn.exit_retry_backoff_secs == 0 {
+        w.push(
+            "sniper.exit_retry_backoff_secs = 0 — a failed exit is retried on every sweep".into(),
+        );
+    }
+    if !(0.0..=1.0).contains(&sn.take_profit_sell_fraction) {
+        return Err(BotError::config(
+            "sniper.take_profit_sell_fraction must be in [0, 1]",
+        ));
+    }
+    if sn.trade_raydium && !sn.use_log_subscription && !sn.use_transaction_subscribe {
+        w.push(
+            "sniper.trade_raydium is on but neither use_log_subscription nor use_transaction_subscribe is — Raydium pools are only detectable through a Solana websocket feed"
+                .into(),
+        );
+    }
+    if sn.trade_pumpswap && !sn.use_log_subscription && !sn.use_transaction_subscribe {
+        w.push(
+            "sniper.trade_pumpswap is on but neither use_log_subscription nor use_transaction_subscribe is — PumpSwap pool creations are only detectable through a Solana websocket feed"
+                .into(),
+        );
+    }
+    let r = &c.risk;
+    for (label, v) in [
+        (
+            "risk.sniper_max_position_quote",
+            r.sniper_max_position_quote,
+        ),
+        (
+            "risk.sniper_max_total_exposure_quote",
+            r.sniper_max_total_exposure_quote,
+        ),
+        (
+            "risk.sniper_daily_loss_limit_quote",
+            r.sniper_daily_loss_limit_quote,
+        ),
+    ] {
+        if !v.is_finite() || v < 0.0 {
+            return Err(BotError::config(format!("{label} must be >= 0 (0 = off)")));
+        }
+    }
+    if r.sniper_token_cooldown_secs < 0 || r.sniper_failed_entry_cooldown_secs < 0 {
+        return Err(BotError::config(
+            "risk.sniper_token_cooldown_secs / sniper_failed_entry_cooldown_secs must be >= 0",
+        ));
+    }
+    if r.sniper_max_position_quote > r.max_position_quote && r.max_position_quote > 0.0 {
+        w.push(format!(
+            "risk.sniper_max_position_quote = {} exceeds risk.max_position_quote = {} — the generic cap still applies",
+            r.sniper_max_position_quote, r.max_position_quote
+        ));
+    }
+    if r.sniper_emergency_disable {
+        w.push("risk.sniper_emergency_disable is set — every sniper ENTRY will be refused".into());
+    }
+    Ok(())
+}
+
+/// Copy-trading engine settings (TASK 3): the `[copy]` pipeline knobs and
+/// the Module-2 exposure controls in `[risk]`.
+fn validate_copy_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
+    let cp = &c.copy;
+    if cp.max_event_age_secs < 0 {
+        return Err(BotError::config(
+            "copy.max_event_age_secs must be >= 0 (0 = off)",
+        ));
+    }
+    for (label, v) in [
+        ("copy.max_sol_per_trade", cp.max_sol_per_trade),
+        ("copy.min_mirror_sol", cp.min_mirror_sol),
+    ] {
+        if !v.is_finite() || v < 0.0 {
+            return Err(BotError::config(format!("{label} must be >= 0 (0 = off)")));
+        }
+    }
+    if !cp.max_balance_fraction.is_finite() || !(0.0..=1.0).contains(&cp.max_balance_fraction) {
+        return Err(BotError::config(
+            "copy.max_balance_fraction must be in [0, 1] (0 = off)",
+        ));
+    }
+    if cp.recovery_lookback_hours < 0 {
+        return Err(BotError::config(
+            "copy.recovery_lookback_hours must be >= 0 (0 = off)",
+        ));
+    }
+    for wallet in &cp.wallets {
+        if !wallet.max_exposure_sol.is_finite() || wallet.max_exposure_sol < 0.0 {
+            return Err(BotError::config(format!(
+                "copy wallet {} max_exposure_sol must be >= 0 (0 = off)",
+                wallet.address
+            )));
+        }
+        if wallet.max_staleness_secs < 0 {
+            return Err(BotError::config(format!(
+                "copy wallet {} max_staleness_secs must be >= 0 (0 = off)",
+                wallet.address
+            )));
+        }
+    }
+    if cp.enabled && cp.reconcile_auto_exit {
+        w.push(
+            "copy.reconcile_auto_exit is on — reconciliation may SELL a mirrored position whose leader fully exited"
+                .into(),
+        );
+    }
+    if cp.enabled && cp.reconcile_interval_secs == 0 {
+        w.push("copy.reconcile_interval_secs = 0 — leader activity is never reconciled against mirrored positions".into());
+    }
+    if cp.enabled && cp.wallets.iter().all(|wl| wl.paused) && !cp.wallets.is_empty() {
+        w.push(
+            "copy trading enabled but every configured wallet is paused — nothing will be mirrored"
+                .into(),
+        );
+    }
+    let r = &c.risk;
+    for (label, v) in [
+        ("risk.copy_max_position_quote", r.copy_max_position_quote),
+        (
+            "risk.copy_max_total_exposure_quote",
+            r.copy_max_total_exposure_quote,
+        ),
+        (
+            "risk.copy_daily_loss_limit_quote",
+            r.copy_daily_loss_limit_quote,
+        ),
+        (
+            "risk.copy_max_leader_exposure_quote",
+            r.copy_max_leader_exposure_quote,
+        ),
+    ] {
+        if !v.is_finite() || v < 0.0 {
+            return Err(BotError::config(format!("{label} must be >= 0 (0 = off)")));
+        }
+    }
+    if r.copy_failed_entry_cooldown_secs < 0 {
+        return Err(BotError::config(
+            "risk.copy_failed_entry_cooldown_secs must be >= 0",
+        ));
+    }
+    if r.copy_max_position_quote > r.max_position_quote && r.max_position_quote > 0.0 {
+        w.push(format!(
+            "risk.copy_max_position_quote = {} exceeds risk.max_position_quote = {} — the generic cap still applies",
+            r.copy_max_position_quote, r.max_position_quote
+        ));
+    }
+    if r.copy_emergency_disable {
+        w.push("risk.copy_emergency_disable is set — every mirrored ENTRY will be refused".into());
+    }
+    Ok(())
+}
+
+/// TASK 4: Polymarket order-pipeline and exposure-control invariants.
+fn validate_polymarket_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
+    let p = &c.polymarket;
+    for (label, v) in [
+        ("polymarket.stake_usd", p.stake_usd),
+        ("polymarket.min_order_size", p.min_order_size),
+    ] {
+        if !v.is_finite() || v <= 0.0 {
+            return Err(BotError::config(format!("{label} must be > 0")));
+        }
+    }
+    for (label, v) in [
+        ("polymarket.min_edge", p.min_edge),
+        ("polymarket.min_liquidity_usd", p.min_liquidity_usd),
+    ] {
+        if !v.is_finite() || v < 0.0 {
+            return Err(BotError::config(format!("{label} must be >= 0")));
+        }
+    }
+    for (label, v) in [
+        ("polymarket.max_spread", p.max_spread),
+        ("polymarket.reprice_threshold", p.reprice_threshold),
+    ] {
+        if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+            return Err(BotError::config(format!(
+                "{label} must be in [0, 1] (probability units, 0 = off)"
+            )));
+        }
+    }
+    for (label, v) in [
+        ("polymarket.quote_max_age_secs", p.quote_max_age_secs),
+        (
+            "polymarket.min_time_to_resolution_secs",
+            p.min_time_to_resolution_secs,
+        ),
+        ("polymarket.order_ttl_secs", p.order_ttl_secs),
+        ("polymarket.expiration_secs", p.expiration_secs),
+    ] {
+        if v < 0 {
+            return Err(BotError::config(format!("{label} must be >= 0 (0 = off)")));
+        }
+    }
+    if p.order_poll_interval_secs == 0 {
+        return Err(BotError::config(
+            "polymarket.order_poll_interval_secs must be > 0",
+        ));
+    }
+    let order_type = p.order_type.trim().to_ascii_uppercase();
+    if !matches!(order_type.as_str(), "GTC" | "GTD" | "FOK" | "FAK") {
+        return Err(BotError::config(format!(
+            "polymarket.order_type = \"{}\" — expected GTC, GTD, FOK or FAK",
+            p.order_type
+        )));
+    }
+    if order_type == "GTD" && p.expiration_secs == 0 {
+        return Err(BotError::config(
+            "polymarket.order_type = GTD requires expiration_secs > 0",
+        ));
+    }
+    if p.max_open_markets == 0 {
+        return Err(BotError::config("polymarket.max_open_markets must be > 0"));
+    }
+    if p.enabled && p.reconcile_interval_secs == 0 {
+        w.push(
+            "polymarket.reconcile_interval_secs = 0 — local orders are never compared with the venue"
+                .into(),
+        );
+    }
+    if p.enabled && p.reconcile_cancel_orphans {
+        w.push(
+            "polymarket.reconcile_cancel_orphans is on — reconciliation will CANCEL venue orders it does not recognise"
+                .into(),
+        );
+    }
+    if p.enabled && !p.cancel_on_shutdown && !p.heartbeat {
+        w.push(
+            "polymarket.cancel_on_shutdown and heartbeat are both off — resting orders survive a crash unattended"
+                .into(),
+        );
+    }
+    let r = &c.risk;
+    for (label, v) in [
+        ("risk.poly_max_position_quote", r.poly_max_position_quote),
+        (
+            "risk.poly_max_total_exposure_quote",
+            r.poly_max_total_exposure_quote,
+        ),
+        (
+            "risk.poly_max_market_exposure_quote",
+            r.poly_max_market_exposure_quote,
+        ),
+        (
+            "risk.poly_daily_loss_limit_quote",
+            r.poly_daily_loss_limit_quote,
+        ),
+    ] {
+        if !v.is_finite() || v < 0.0 {
+            return Err(BotError::config(format!("{label} must be >= 0 (0 = off)")));
+        }
+    }
+    if r.poly_max_position_quote > r.max_position_quote && r.max_position_quote > 0.0 {
+        w.push(format!(
+            "risk.poly_max_position_quote = {} exceeds risk.max_position_quote = {} — the generic cap still applies",
+            r.poly_max_position_quote, r.max_position_quote
+        ));
+    }
+    if r.poly_emergency_disable {
+        w.push(
+            "risk.poly_emergency_disable is set — every Polymarket ENTRY will be refused".into(),
+        );
+    }
+    Ok(())
+}
+
+/// TASK 6 `[ha]` sanity: a known mode, sane heartbeat/lease windows and
+/// only known role names in `required_roles`.
+fn validate_ha(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
+    let ha = &c.ha;
+    if crate::ha::HaMode::parse(&ha.mode).is_none() {
+        return Err(BotError::config(format!(
+            "ha.mode '{}' is unknown (use single | active_passive | active_active)",
+            ha.mode
+        )));
+    }
+    if ha.heartbeat_secs == 0 {
+        return Err(BotError::config("ha.heartbeat_secs must be >= 1"));
+    }
+    if ha.heartbeat_timeout_secs > 0 && ha.heartbeat_timeout_secs < ha.heartbeat_secs * 2 {
+        w.push(format!(
+            "ha.heartbeat_timeout_secs ({}) is less than twice ha.heartbeat_secs ({}); a single missed beat would mark this worker stale — the effective timeout is raised to {}s",
+            ha.heartbeat_timeout_secs,
+            ha.heartbeat_secs,
+            ha.heartbeat_timeout().as_secs()
+        ));
+    }
+    if ha.role_lease_secs > 0 && ha.role_lease_secs < 5 {
+        w.push(format!(
+            "ha.role_lease_secs ({}) is below the 5s floor; the floor is used",
+            ha.role_lease_secs
+        ));
+    }
+    for r in &ha.required_roles {
+        if crate::ha::LeaseRole::parse(r).is_none() {
+            return Err(BotError::config(format!(
+                "ha.required_roles: unknown role '{r}' (use reconciliation | recovery | accounting_maintenance | state_sync | feed:<name>)"
+            )));
+        }
+    }
+    if ha.ha_mode().is_clustered() && !c.database.enabled {
+        return Err(BotError::config(format!(
+            "ha.mode = '{}' needs [database].enabled = true: worker registration, leases and cursors must be durable and shared, and the in-memory store is process-local",
+            ha.mode
+        )));
+    }
+    Ok(())
+}
+
+/// TASK 5 `[global_risk]` sanity: finite non-negative limits, positive
+/// rates, known venue names, a fraction for the drawdown percentage.
+fn validate_global_risk(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
+    let g = &c.global_risk;
+    if g.reference_asset.trim().is_empty() {
+        return Err(BotError::config(
+            "global_risk.reference_asset must not be empty",
+        ));
+    }
+    for (label, v) in [
+        ("global_risk.capital_base_ref", g.capital_base_ref),
+        (
+            "global_risk.max_portfolio_exposure_ref",
+            g.max_portfolio_exposure_ref,
+        ),
+        (
+            "global_risk.max_wallet_exposure_ref",
+            g.max_wallet_exposure_ref,
+        ),
+        (
+            "global_risk.max_venue_exposure_ref",
+            g.max_venue_exposure_ref,
+        ),
+        (
+            "global_risk.max_strategy_exposure_ref",
+            g.max_strategy_exposure_ref,
+        ),
+        (
+            "global_risk.max_asset_exposure_ref",
+            g.max_asset_exposure_ref,
+        ),
+        (
+            "global_risk.max_order_notional_ref",
+            g.max_order_notional_ref,
+        ),
+        ("global_risk.max_daily_loss_ref", g.max_daily_loss_ref),
+        ("global_risk.max_drawdown_ref", g.max_drawdown_ref),
+    ] {
+        if !v.is_finite() || v < 0.0 {
+            return Err(BotError::config(format!("{label} must be >= 0 (0 = off)")));
+        }
+    }
+    if !g.max_drawdown_pct.is_finite() || !(0.0..=1.0).contains(&g.max_drawdown_pct) {
+        return Err(BotError::config(
+            "global_risk.max_drawdown_pct must be in [0, 1] (0 = off)",
+        ));
+    }
+    if g.max_drawdown_pct > 0.0 && g.capital_base_ref <= 0.0 {
+        w.push(
+            "global_risk.max_drawdown_pct is set but capital_base_ref is 0 — the percentage limit is inactive"
+                .into(),
+        );
+    }
+    for (asset, rate) in &g.reference_rates {
+        if asset.trim().is_empty() {
+            return Err(BotError::config(
+                "global_risk.reference_rates: asset name must not be empty",
+            ));
+        }
+        if !rate.is_finite() || *rate <= 0.0 {
+            return Err(BotError::config(format!(
+                "global_risk.reference_rates.{asset} must be a positive number"
+            )));
+        }
+    }
+    for v in &g.killed_venues {
+        if Venue::parse(v.trim()).is_none() {
+            return Err(BotError::config(format!(
+                "global_risk.killed_venues: unknown venue '{v}' (use Venue names such as polymarket, pump.fun, pumpswap, raydium-amm-v4, raydium-clmm, jupiter, paper)"
+            )));
+        }
+    }
+    for st in &g.killed_strategies {
+        if st.trim().is_empty() {
+            return Err(BotError::config(
+                "global_risk.killed_strategies: strategy label must not be empty",
+            ));
+        }
+    }
+    if g.needs_reference_rates() && !g.reference_rates.contains_key("SOL") {
+        w.push(
+            "global_risk: reference-denominated limits are on but reference_rates has no SOL entry — Solana entries will be refused (reference_rate_missing) until one is configured"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     // --- signing identities (key-custody boundary) ---
     let mut seen: Vec<&str> = Vec::new();
@@ -1707,6 +2992,78 @@ fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
                 .into(),
         );
     }
+    // --- execution reliability: fee policy + retry policy ---
+    if !matches!(
+        c.execution.fee_mode.trim().to_ascii_lowercase().as_str(),
+        "fixed" | "adaptive"
+    ) {
+        return Err(BotError::config(format!(
+            "execution.fee_mode = {:?} — must be \"fixed\" or \"adaptive\"",
+            c.execution.fee_mode
+        )));
+    }
+    if c.execution.fee_min_micro_lamports > c.execution.fee_max_micro_lamports {
+        return Err(BotError::config(
+            "execution.fee_min_micro_lamports must be <= execution.fee_max_micro_lamports",
+        ));
+    }
+    if c.execution.fee_max_micro_lamports > c.execution.fee_emergency_max_micro_lamports {
+        return Err(BotError::config(
+            "execution.fee_max_micro_lamports must be <= execution.fee_emergency_max_micro_lamports",
+        ));
+    }
+    if c.execution.priority_fee_micro_lamports > c.execution.fee_emergency_max_micro_lamports {
+        return Err(BotError::config(
+            "execution.priority_fee_micro_lamports exceeds execution.fee_emergency_max_micro_lamports",
+        ));
+    }
+    if c.execution.priority_fee_micro_lamports > c.execution.fee_max_micro_lamports {
+        w.push(format!(
+            "execution.priority_fee_micro_lamports ({}) is above fee_max_micro_lamports ({}) — \
+             the executor clamps every fee to the maximum",
+            c.execution.priority_fee_micro_lamports, c.execution.fee_max_micro_lamports
+        ));
+    }
+    if c.execution.fee_percentile == 0 || c.execution.fee_percentile > 100 {
+        return Err(BotError::config(
+            "execution.fee_percentile must be in [1, 100]",
+        ));
+    }
+    if c.execution.fee_escalation_pct > 1_000 {
+        return Err(BotError::config(
+            "execution.fee_escalation_pct must be <= 1000",
+        ));
+    }
+    if c.execution.max_blockhash_age_ms == 0 || c.execution.max_blockhash_age_ms > 90_000 {
+        return Err(BotError::config(
+            "execution.max_blockhash_age_ms must be in (0, 90000] (a blockhash lives ~60-90 s)",
+        ));
+    }
+    if c.network.retry_base_backoff_ms == 0 {
+        return Err(BotError::config(
+            "network.retry_base_backoff_ms must be > 0",
+        ));
+    }
+    if c.network.retry_max_backoff_ms < c.network.retry_base_backoff_ms {
+        return Err(BotError::config(
+            "network.retry_max_backoff_ms must be >= network.retry_base_backoff_ms",
+        ));
+    }
+    if c.network.provider_failure_threshold == 0 {
+        return Err(BotError::config(
+            "network.provider_failure_threshold must be >= 1",
+        ));
+    }
+    if c.network.rpc_endpoints().is_empty() {
+        return Err(BotError::config("network.rpc_url must not be empty"));
+    }
+    if c.network.ws_stale_after_ms != 0 && c.network.ws_stale_after_ms < 5_000 {
+        w.push(format!(
+            "network.ws_stale_after_ms = {} is very aggressive — the client pings every 20 s, \
+             values under 5000 will reconnect constantly",
+            c.network.ws_stale_after_ms
+        ));
+    }
     if c.risk.max_position_fraction <= 0.0 || c.risk.max_position_fraction > 1.0 {
         return Err(BotError::config(
             "risk.max_position_fraction must be in (0, 1]",
@@ -1726,6 +3083,11 @@ fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     if c.risk.max_slippage_bps > 10_000 {
         return Err(BotError::config("risk.max_slippage_bps must be <= 10000"));
     }
+    validate_sniper_engine(c, w)?;
+    validate_copy_engine(c, w)?;
+    validate_polymarket_engine(c, w)?;
+    validate_global_risk(c, w)?;
+    validate_ha(c, w)?;
     if c.polymarket.signature_type > 3 {
         return Err(BotError::config(
             "polymarket.signature_type must be 0, 1, 2 or 3",
@@ -1917,6 +3279,84 @@ mod tests {
     }
 
     #[test]
+    fn execution_reliability_defaults_are_coherent_and_validated() {
+        let cfg = Config::default();
+        let mut w = Vec::new();
+        validate(&cfg, &mut w).expect("defaults must validate");
+        assert!(!cfg.execution.fee_adaptive());
+        assert!(cfg.execution.fee_min_micro_lamports <= cfg.execution.priority_fee_micro_lamports);
+        assert!(cfg.execution.priority_fee_micro_lamports <= cfg.execution.fee_max_micro_lamports);
+        assert!(
+            cfg.execution.fee_max_micro_lamports <= cfg.execution.fee_emergency_max_micro_lamports
+        );
+        assert_eq!(
+            cfg.network.rpc_endpoints().len(),
+            3,
+            "primary + 2 fallbacks"
+        );
+        assert!(cfg.network.retry_jitter);
+
+        let mut bad = Config::default();
+        bad.execution.fee_mode = "yolo".into();
+        assert!(validate(&bad, &mut Vec::new()).is_err(), "unknown fee mode");
+
+        let mut bad = Config::default();
+        bad.execution.fee_max_micro_lamports = bad.execution.fee_emergency_max_micro_lamports + 1;
+        assert!(
+            validate(&bad, &mut Vec::new()).is_err(),
+            "max above emergency"
+        );
+
+        let mut bad = Config::default();
+        bad.execution.priority_fee_micro_lamports =
+            bad.execution.fee_emergency_max_micro_lamports + 1;
+        assert!(
+            validate(&bad, &mut Vec::new()).is_err(),
+            "base fee above emergency"
+        );
+
+        let mut bad = Config::default();
+        bad.execution.fee_percentile = 0;
+        assert!(validate(&bad, &mut Vec::new()).is_err(), "percentile 0");
+
+        let mut bad = Config::default();
+        bad.network.retry_max_backoff_ms = 1;
+        assert!(
+            validate(&bad, &mut Vec::new()).is_err(),
+            "max backoff below base"
+        );
+
+        let mut bad = Config::default();
+        bad.execution.max_blockhash_age_ms = 0;
+        assert!(validate(&bad, &mut Vec::new()).is_err(), "blockhash age 0");
+
+        // Duplicate / blank endpoints collapse; order is preserved.
+        let net = NetworkConfig {
+            rpc_url: "https://a".into(),
+            rpc_url_fallbacks: vec!["".into(), "https://a".into(), " https://b ".into()],
+            ..Default::default()
+        };
+        assert_eq!(net.rpc_endpoints(), vec!["https://a", "https://b"]);
+    }
+
+    #[test]
+    fn legacy_config_without_reliability_keys_still_parses() {
+        // Existing config files predate the fee/retry keys: serde(default)
+        // must fill them in and validation must pass unchanged.
+        let text = r#"
+[network]
+rpc_url = "https://api.mainnet-beta.solana.com"
+[execution]
+mode = "paper"
+priority_fee_micro_lamports = 250000
+"#;
+        let cfg: Config = toml::from_str(text).expect("legacy config parses");
+        assert_eq!(cfg.execution.fee_mode, "fixed");
+        assert_eq!(cfg.network.provider_failure_threshold, 3);
+        validate(&cfg, &mut Vec::new()).expect("legacy config validates");
+    }
+
+    #[test]
     fn observability_config_rejects_invalid_values() {
         let mut cfg = Config::default();
         cfg.observability.log_format = "yaml".into();
@@ -1964,6 +3404,96 @@ mod tests {
         // API must default to loopback so an unkeyed control plane is not
         // reachable off-box (fail-closed hardening).
         assert_eq!(cfg.api.bind_host, "127.0.0.1");
+        // Every TASK 4 key is documented in the example (serde defaults would
+        // otherwise hide a missing line).
+        for key in [
+            "poly_max_position_quote",
+            "poly_max_total_exposure_quote",
+            "poly_max_market_exposure_quote",
+            "poly_max_concurrent_positions",
+            "poly_max_open_orders",
+            "poly_daily_loss_limit_quote",
+            "poly_emergency_disable",
+            "max_spread",
+            "min_liquidity_usd",
+            "quote_max_age_secs",
+            "min_time_to_resolution_secs",
+            "min_order_size",
+            "order_poll_interval_secs",
+            "order_ttl_secs",
+            "reprice_threshold",
+            "use_user_websocket",
+            "cancel_on_shutdown",
+            "reconcile_interval_secs",
+            "reconcile_cancel_orphans",
+            // TASK 5 `[global_risk]` keys.
+            "reference_asset",
+            "capital_base_ref",
+            "max_portfolio_exposure_ref",
+            "max_wallet_exposure_ref",
+            "max_venue_exposure_ref",
+            "max_strategy_exposure_ref",
+            "max_asset_exposure_ref",
+            "max_order_notional_ref",
+            "max_daily_loss_ref",
+            "max_drawdown_ref",
+            "max_drawdown_pct",
+            "killed_venues",
+            "killed_strategies",
+            "accounting_reconcile_interval_secs",
+            // TASK 6 `[ha]` keys.
+            "mode",
+            "heartbeat_secs",
+            "heartbeat_timeout_secs",
+            "role_lease_secs",
+            "required_roles",
+        ] {
+            assert!(
+                text.lines()
+                    .any(|l| l.trim_start().starts_with(&format!("{key} ="))),
+                "config.toml.example is missing `{key}`"
+            );
+        }
+        // TASK 6: the example's `[ha]` section is the compiled default —
+        // single-worker mode, no required roles, so an unconfigured suite
+        // behaves exactly as before TASK 6.
+        let h = HaConfig::default();
+        assert_eq!(cfg.ha.mode, h.mode);
+        assert_eq!(cfg.ha.ha_mode(), crate::ha::HaMode::Single);
+        assert_eq!(cfg.ha.heartbeat_secs, h.heartbeat_secs);
+        assert_eq!(cfg.ha.heartbeat_timeout_secs, h.heartbeat_timeout_secs);
+        assert_eq!(cfg.ha.role_lease_secs, h.role_lease_secs);
+        assert!(cfg.ha.required_roles.is_empty());
+        // TASK 5: the example's global section is the compiled default —
+        // every limit off, USDC pinned at 1.0, no kill lists — so an
+        // unconfigured suite behaves exactly as before TASK 5.
+        let g = GlobalRiskConfig::default();
+        assert_eq!(cfg.global_risk.reference_asset, g.reference_asset);
+        assert_eq!(cfg.global_risk.reference_rates, g.reference_rates);
+        assert_eq!(cfg.global_risk.max_open_positions, 0);
+        assert!(!cfg.global_risk.needs_reference_rates());
+        assert!(cfg.global_risk.killed_venues.is_empty());
+        assert!(cfg.global_risk.killed_strategies.is_empty());
+        // The example's values equal the compiled defaults for the lifecycle
+        // knobs, so a fresh deployment behaves exactly as documented.
+        let d = PolymarketConfig::default();
+        assert_eq!(cfg.polymarket.min_order_size, d.min_order_size);
+        assert_eq!(
+            cfg.polymarket.order_poll_interval_secs,
+            d.order_poll_interval_secs
+        );
+        assert_eq!(
+            cfg.polymarket.reconcile_interval_secs,
+            d.reconcile_interval_secs
+        );
+        assert_eq!(
+            cfg.polymarket.reconcile_cancel_orphans,
+            d.reconcile_cancel_orphans
+        );
+        assert_eq!(cfg.polymarket.use_user_websocket, d.use_user_websocket);
+        assert_eq!(cfg.polymarket.cancel_on_shutdown, d.cancel_on_shutdown);
+        assert_eq!(cfg.risk.poly_max_open_orders, 0);
+        assert!(!cfg.risk.poly_emergency_disable);
     }
 
     // ------------------------------------------------------------------
@@ -1975,6 +3505,149 @@ mod tests {
         validate(cfg, &mut w)
             .expect_err("config must fail validation")
             .to_string()
+    }
+
+    // ------------------------------------------------------------------
+    // TASK 5 `[global_risk]`
+    // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // TASK 6 `[ha]`
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn ha_defaults_are_single_worker_and_validate() {
+        let cfg = Config::default();
+        assert_eq!(cfg.ha.ha_mode(), crate::ha::HaMode::Single);
+        assert_eq!(cfg.ha.heartbeat().as_secs(), 10);
+        assert_eq!(cfg.ha.heartbeat_timeout().as_secs(), 45);
+        assert_eq!(cfg.ha.role_lease().as_secs(), 45);
+        assert!(cfg.ha.required_role_list().is_empty());
+        let mut w = Vec::new();
+        validate(&cfg, &mut w).expect("defaults validate");
+        assert!(w.iter().all(|x| !x.contains("ha.")), "{w:?}");
+    }
+
+    #[test]
+    fn ha_rejects_unknown_modes_roles_and_clustered_without_a_database() {
+        let mut cfg = Config::default();
+        cfg.ha.mode = "clustered".into();
+        assert!(validate_err(&cfg).contains("ha.mode"));
+
+        let mut cfg = Config::default();
+        cfg.ha.required_roles = vec!["nonsense".into()];
+        assert!(validate_err(&cfg).contains("required_roles"));
+
+        let mut cfg = Config::default();
+        cfg.ha.heartbeat_secs = 0;
+        assert!(validate_err(&cfg).contains("heartbeat_secs"));
+
+        // A clustered mode needs durable shared state.
+        let mut cfg = Config::default();
+        cfg.ha.mode = "active_active".into();
+        cfg.database.enabled = false;
+        assert!(validate_err(&cfg).contains("database"));
+        cfg.database.enabled = true;
+        let mut w = Vec::new();
+        validate(&cfg, &mut w).expect("clustered + database validates");
+    }
+
+    #[test]
+    fn ha_clamps_and_warns_on_tight_windows() {
+        let mut cfg = Config::default();
+        cfg.ha.heartbeat_secs = 20;
+        cfg.ha.heartbeat_timeout_secs = 25; // < 2 x heartbeat
+        cfg.ha.role_lease_secs = 2; // below the floor
+        let mut w = Vec::new();
+        validate(&cfg, &mut w).expect("valid but warned");
+        assert!(
+            w.iter().any(|x| x.contains("heartbeat_timeout_secs")),
+            "{w:?}"
+        );
+        assert!(w.iter().any(|x| x.contains("role_lease_secs")), "{w:?}");
+        // The effective values are the clamped ones.
+        assert_eq!(cfg.ha.heartbeat_timeout().as_secs(), 40);
+        assert_eq!(cfg.ha.role_lease().as_secs(), 5);
+    }
+
+    #[test]
+    fn ha_role_names_parse_into_lease_roles() {
+        let mut cfg = Config::default();
+        cfg.ha.required_roles = vec![
+            "reconciliation".into(),
+            "accounting_maintenance".into(),
+            "feed:polymarket_user".into(),
+        ];
+        cfg.database.enabled = true;
+        let mut w = Vec::new();
+        validate(&cfg, &mut w).expect("known roles validate");
+        let roles = cfg.ha.required_role_list();
+        assert_eq!(roles.len(), 3);
+        assert!(roles.contains(&crate::ha::LeaseRole::Reconciliation));
+        assert!(roles.contains(&crate::ha::LeaseRole::Feed("polymarket_user".into())));
+    }
+
+    #[test]
+    fn global_risk_defaults_are_off_and_validate() {
+        let cfg = Config::default();
+        let g = &cfg.global_risk;
+        assert_eq!(g.reference_asset, "USD");
+        assert_eq!(g.reference_rates.get("USDC"), Some(&1.0));
+        assert!(!g.needs_reference_rates());
+        assert_eq!(g.effective_drawdown_limit(), None);
+        assert!(g.killed_venue_list().is_empty());
+        let mut w = Vec::new();
+        validate(&cfg, &mut w).expect("defaults validate");
+        assert!(w.iter().all(|x| !x.contains("global_risk")));
+    }
+
+    #[test]
+    fn global_risk_rejects_bad_limits_rates_and_venues() {
+        let mut cfg = Config::default();
+        cfg.global_risk.max_portfolio_exposure_ref = -1.0;
+        assert!(validate_err(&cfg).contains("max_portfolio_exposure_ref"));
+        let mut cfg = Config::default();
+        cfg.global_risk.max_drawdown_pct = 1.5;
+        assert!(validate_err(&cfg).contains("max_drawdown_pct"));
+        let mut cfg = Config::default();
+        cfg.global_risk.reference_rates.insert("SOL".into(), 0.0);
+        assert!(validate_err(&cfg).contains("reference_rates.SOL"));
+        let mut cfg = Config::default();
+        cfg.global_risk.killed_venues = vec!["binance".into()];
+        assert!(validate_err(&cfg).contains("killed_venues"));
+        let mut cfg = Config::default();
+        cfg.global_risk.killed_strategies = vec!["  ".into()];
+        assert!(validate_err(&cfg).contains("killed_strategies"));
+        let mut cfg = Config::default();
+        cfg.global_risk.reference_asset = " ".into();
+        assert!(validate_err(&cfg).contains("reference_asset"));
+    }
+
+    #[test]
+    fn global_risk_drawdown_limit_takes_the_tighter_of_abs_and_pct() {
+        let mut g = GlobalRiskConfig {
+            max_drawdown_ref: 500.0,
+            ..Default::default()
+        };
+        assert_eq!(g.effective_drawdown_limit(), Some(500.0));
+        g.capital_base_ref = 10_000.0;
+        g.max_drawdown_pct = 0.02; // 200
+        assert_eq!(g.effective_drawdown_limit(), Some(200.0));
+        g.max_drawdown_ref = 0.0;
+        assert_eq!(g.effective_drawdown_limit(), Some(200.0));
+        g.capital_base_ref = 0.0;
+        assert_eq!(g.effective_drawdown_limit(), None);
+        assert!(!g.needs_reference_rates());
+        g.max_daily_loss_ref = 1.0;
+        assert!(g.needs_reference_rates());
+        // Turning a reference-denominated limit on without a SOL rate warns.
+        let mut cfg = Config::default();
+        cfg.global_risk.max_daily_loss_ref = 1.0;
+        let mut w = Vec::new();
+        validate(&cfg, &mut w).expect("valid");
+        assert!(w.iter().any(|x| x.contains("no SOL entry")), "{w:?}");
+        cfg.global_risk.killed_venues = vec!["polymarket".into(), "pump.fun".into()];
+        assert_eq!(cfg.global_risk.killed_venue_list().len(), 2);
     }
 
     #[test]
@@ -2119,5 +3792,463 @@ alias = "sniper"
         };
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("deadbeef"));
+    }
+
+    // ------------------------------------------------------------------
+    // Sniper engine configuration (slippage engine, gates, exposure)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sniper_engine_defaults_preserve_legacy_behaviour() {
+        // Every new knob defaults to "inherit the generic limit" or "off"
+        // except the two that are safe for the pump.fun path by construction.
+        let c = Config::default();
+        assert_eq!(c.sniper.slippage_mode_normalized(), "fixed");
+        assert!(c.sniper.slippage_overrides_bps.is_empty());
+        assert_eq!(c.sniper.min_liquidity_sol, 0.0);
+        assert!(!c.sniper.require_mint_authority_revoked);
+        assert!(c.sniper.require_freeze_authority_revoked);
+        assert_eq!(c.sniper.stale_position_exit_secs, 0);
+        assert!(c.sniper.failed_entry_cleanup);
+        assert_eq!(c.sniper.max_entry_fee_lamports, 0);
+        assert_eq!(c.risk.sniper_position_cap(), c.risk.max_position_quote);
+        assert_eq!(c.risk.sniper_position_limit(), c.risk.max_open_positions);
+        assert_eq!(c.risk.sniper_max_total_exposure_quote, 0.0);
+        assert!(!c.risk.sniper_emergency_disable);
+        let mut w = Vec::new();
+        assert!(validate(&c, &mut w).is_ok());
+    }
+
+    #[test]
+    fn sniper_engine_rejects_unknown_slippage_mode_and_bad_bounds() {
+        let mut c = Config::default();
+        c.sniper.slippage_mode = "yolo".into();
+        assert!(validate_err(&c).contains("slippage_mode"));
+
+        let mut c = Config::default();
+        c.sniper.slippage_mode = "Liquidity-Aware".into(); // normalised
+        let mut w = Vec::new();
+        assert!(validate(&c, &mut w).is_ok());
+        assert_eq!(c.sniper.slippage_mode_normalized(), "liquidity_aware");
+
+        let mut c = Config::default();
+        c.sniper
+            .slippage_overrides_bps
+            .insert("So11111111111111111111111111111111111111112".into(), 10_001);
+        assert!(validate_err(&c).contains("slippage_overrides_bps"));
+
+        let mut c = Config::default();
+        c.sniper.max_price_impact_bps = 20_000;
+        assert!(validate_err(&c).contains("max_price_impact_bps"));
+
+        let mut c = Config::default();
+        c.sniper.min_pool_supply_fraction = 1.5;
+        assert!(validate_err(&c).contains("min_pool_supply_fraction"));
+
+        let mut c = Config::default();
+        c.sniper.max_snapshot_age_ms = 0;
+        assert!(validate_err(&c).contains("max_snapshot_age_ms"));
+
+        // Fee budget: below one signature's base fee is an error; a budget
+        // the configured first attempt cannot meet validates but warns.
+        let mut c = Config::default();
+        c.sniper.max_entry_fee_lamports = 4_999;
+        assert!(validate_err(&c).contains("max_entry_fee_lamports"));
+
+        let mut c = Config::default();
+        c.sniper.max_entry_fee_lamports = 5_000;
+        let mut w = Vec::new();
+        validate(&c, &mut w).unwrap();
+        assert!(w.iter().any(|m| m.contains("FEE_LIMIT")), "{w:?}");
+
+        let mut c = Config::default();
+        // default execution: 250 000 µlamports/CU × 400 000 CU = 100 000 + 5 000 base
+        c.sniper.max_entry_fee_lamports = 105_000;
+        let mut w = Vec::new();
+        validate(&c, &mut w).unwrap();
+        assert!(!w.iter().any(|m| m.contains("FEE_LIMIT")), "{w:?}");
+        c.sniper.max_entry_fee_lamports = 104_999;
+        let mut w = Vec::new();
+        validate(&c, &mut w).unwrap();
+        assert!(w.iter().any(|m| m.contains("FEE_LIMIT")), "{w:?}");
+        c.execution.use_jito = true;
+        c.sniper.max_entry_fee_lamports = 105_000 + c.execution.jito_tip_lamports;
+        let mut w = Vec::new();
+        validate(&c, &mut w).unwrap();
+        assert!(!w.iter().any(|m| m.contains("FEE_LIMIT")), "{w:?}");
+
+        let mut c = Config::default();
+        c.risk.sniper_token_cooldown_secs = -1;
+        assert!(validate_err(&c).contains("cooldown"));
+
+        let mut c = Config::default();
+        c.risk.sniper_daily_loss_limit_quote = -0.5;
+        assert!(validate_err(&c).contains("sniper_daily_loss_limit_quote"));
+    }
+
+    #[test]
+    fn sniper_engine_overrides_inherit_when_zero_and_warn_when_odd() {
+        let mut c = Config::default();
+        c.risk.sniper_max_position_quote = 0.2;
+        c.risk.sniper_max_concurrent_positions = 3;
+        assert_eq!(c.risk.sniper_position_cap(), 0.2);
+        assert_eq!(c.risk.sniper_position_limit(), 3);
+
+        // Emergency disable is legal but loud.
+        let mut c = Config::default();
+        c.risk.sniper_emergency_disable = true;
+        let mut w = Vec::new();
+        validate(&c, &mut w).unwrap();
+        assert!(w.iter().any(|m| m.contains("sniper_emergency_disable")));
+
+        // An override above the hard max is clamped at runtime — warned here.
+        let mut c = Config::default();
+        c.risk.max_slippage_bps = 1_000;
+        c.sniper
+            .slippage_overrides_bps
+            .insert("So11111111111111111111111111111111111111112".into(), 5_000);
+        let mut w = Vec::new();
+        validate(&c, &mut w).unwrap();
+        assert!(w.iter().any(|m| m.contains("will be clamped")));
+    }
+
+    // ------------------------------------------------------------------
+    // Copy-trading engine (TASK 3)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn copy_engine_defaults_preserve_legacy_behaviour() {
+        let c = Config::default();
+        assert_eq!(c.copy.max_event_age_secs, 30);
+        assert!(!c.copy.strict_ordering);
+        assert_eq!(c.copy.max_sol_per_trade, 0.0);
+        assert_eq!(c.copy.max_balance_fraction, 0.0);
+        assert_eq!(c.copy.min_mirror_sol, 0.0);
+        assert_eq!(c.copy.reconcile_interval_secs, 60);
+        assert!(!c.copy.reconcile_auto_exit);
+        assert_eq!(c.copy.recovery_lookback_hours, 24);
+        let w = CopyWallet::default();
+        assert!(!w.paused);
+        assert_eq!(w.max_exposure_sol, 0.0);
+        assert_eq!(w.max_open_positions, 0);
+        assert_eq!(c.risk.copy_position_cap(), c.risk.max_position_quote);
+        assert_eq!(c.risk.copy_position_limit(), c.risk.max_open_positions);
+        assert_eq!(c.risk.copy_max_pending_executions, 0);
+        assert_eq!(c.risk.copy_failed_entry_cooldown_secs, 0);
+        assert_eq!(c.risk.copy_daily_loss_limit_quote, 0.0);
+        assert_eq!(c.risk.copy_max_leader_exposure_quote, 0.0);
+        assert!(!c.risk.copy_emergency_disable);
+        let mut warnings = Vec::new();
+        assert!(validate(&c, &mut warnings).is_ok());
+    }
+
+    #[test]
+    fn copy_engine_rejects_bad_bounds_and_warns_loudly() {
+        let mut c = Config::default();
+        c.copy.max_event_age_secs = -1;
+        assert!(validate_err(&c).contains("max_event_age_secs"));
+
+        let mut c = Config::default();
+        c.copy.max_balance_fraction = 1.5;
+        assert!(validate_err(&c).contains("max_balance_fraction"));
+
+        let mut c = Config::default();
+        c.copy.max_sol_per_trade = f64::NAN;
+        assert!(validate_err(&c).contains("max_sol_per_trade"));
+
+        let mut c = Config::default();
+        c.copy.min_mirror_sol = -0.1;
+        assert!(validate_err(&c).contains("min_mirror_sol"));
+
+        let mut c = Config::default();
+        c.copy.recovery_lookback_hours = -2;
+        assert!(validate_err(&c).contains("recovery_lookback_hours"));
+
+        let mut c = Config::default();
+        c.copy.wallets = vec![CopyWallet {
+            address: "whale".into(),
+            max_exposure_sol: -1.0,
+            ..CopyWallet::default()
+        }];
+        assert!(validate_err(&c).contains("max_exposure_sol"));
+
+        let mut c = Config::default();
+        c.copy.wallets = vec![CopyWallet {
+            address: "whale".into(),
+            max_staleness_secs: -5,
+            ..CopyWallet::default()
+        }];
+        assert!(validate_err(&c).contains("max_staleness_secs"));
+
+        for (label, mutate) in [
+            (
+                "copy_max_position_quote",
+                (|r: &mut RiskConfig| r.copy_max_position_quote = -1.0) as fn(&mut RiskConfig),
+            ),
+            ("copy_max_total_exposure_quote", |r| {
+                r.copy_max_total_exposure_quote = f64::INFINITY
+            }),
+            ("copy_daily_loss_limit_quote", |r| {
+                r.copy_daily_loss_limit_quote = -0.5
+            }),
+            ("copy_max_leader_exposure_quote", |r| {
+                r.copy_max_leader_exposure_quote = -0.5
+            }),
+            ("copy_failed_entry_cooldown_secs", |r| {
+                r.copy_failed_entry_cooldown_secs = -1
+            }),
+        ] {
+            let mut c = Config::default();
+            mutate(&mut c.risk);
+            assert!(validate_err(&c).contains(label), "{label}");
+        }
+
+        // Legal but loud.
+        let mut c = Config::default();
+        c.copy.enabled = true;
+        c.copy.reconcile_auto_exit = true;
+        c.copy.reconcile_interval_secs = 0;
+        c.copy.wallets = vec![CopyWallet {
+            address: "whale".into(),
+            paused: true,
+            ..CopyWallet::default()
+        }];
+        c.risk.copy_emergency_disable = true;
+        c.risk.copy_max_position_quote = 5.0;
+        let mut w = Vec::new();
+        validate(&c, &mut w).unwrap();
+        for needle in [
+            "reconcile_auto_exit",
+            "reconcile_interval_secs = 0",
+            "every configured wallet is paused",
+            "copy_emergency_disable",
+            "copy_max_position_quote",
+        ] {
+            assert!(
+                w.iter().any(|m| m.contains(needle)),
+                "missing warning {needle}: {w:?}"
+            );
+        }
+        assert_eq!(c.risk.copy_position_cap(), 5.0);
+    }
+
+    // ------------------------------------------------------------------
+    // Polymarket engine (TASK 4)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn polymarket_engine_defaults_preserve_legacy_behaviour() {
+        let c = Config::default();
+        let p = &c.polymarket;
+        assert_eq!(p.max_spread, 0.10);
+        assert_eq!(p.min_liquidity_usd, 0.0);
+        assert_eq!(p.quote_max_age_secs, 120);
+        assert_eq!(p.min_time_to_resolution_secs, 3600);
+        assert_eq!(p.min_order_size, 5.0);
+        assert_eq!(p.order_poll_interval_secs, 15);
+        assert_eq!(p.order_ttl_secs, 0);
+        assert_eq!(p.reprice_threshold, 0.0);
+        assert_eq!(p.reconcile_interval_secs, 60);
+        assert!(!p.reconcile_cancel_orphans);
+        assert!(p.use_user_websocket);
+        assert!(p.cancel_on_shutdown);
+        assert_eq!(c.risk.poly_position_cap(), c.risk.max_position_quote);
+        assert_eq!(c.risk.poly_position_limit(), c.risk.max_open_positions);
+        assert_eq!(c.risk.poly_max_open_orders, 0);
+        assert_eq!(c.risk.poly_max_market_exposure_quote, 0.0);
+        assert_eq!(c.risk.poly_daily_loss_limit_quote, 0.0);
+        assert!(!c.risk.poly_emergency_disable);
+        let mut warnings = Vec::new();
+        assert!(validate(&c, &mut warnings).is_ok());
+    }
+
+    #[test]
+    fn polymarket_engine_rejects_bad_bounds_and_warns_loudly() {
+        for (label, mutate) in [
+            (
+                "stake_usd",
+                (|p: &mut PolymarketConfig| p.stake_usd = 0.0) as fn(&mut PolymarketConfig),
+            ),
+            ("min_order_size", |p| p.min_order_size = -1.0),
+            ("min_edge", |p| p.min_edge = -0.01),
+            ("min_liquidity_usd", |p| p.min_liquidity_usd = f64::NAN),
+            ("max_spread", |p| p.max_spread = 1.5),
+            ("reprice_threshold", |p| p.reprice_threshold = -0.1),
+            ("quote_max_age_secs", |p| p.quote_max_age_secs = -1),
+            ("min_time_to_resolution_secs", |p| {
+                p.min_time_to_resolution_secs = -1
+            }),
+            ("order_ttl_secs", |p| p.order_ttl_secs = -5),
+            ("expiration_secs", |p| p.expiration_secs = -5),
+            ("order_poll_interval_secs", |p| {
+                p.order_poll_interval_secs = 0
+            }),
+            ("order_type", |p| p.order_type = "IOC".into()),
+            ("GTD requires expiration_secs", |p| {
+                p.order_type = "gtd".into();
+                p.expiration_secs = 0;
+            }),
+            ("max_open_markets", |p| p.max_open_markets = 0),
+        ] {
+            let mut c = Config::default();
+            mutate(&mut c.polymarket);
+            assert!(validate_err(&c).contains(label), "{label}");
+        }
+        for (label, mutate) in [
+            (
+                "poly_max_position_quote",
+                (|r: &mut RiskConfig| r.poly_max_position_quote = -1.0) as fn(&mut RiskConfig),
+            ),
+            ("poly_max_total_exposure_quote", |r| {
+                r.poly_max_total_exposure_quote = f64::INFINITY
+            }),
+            ("poly_max_market_exposure_quote", |r| {
+                r.poly_max_market_exposure_quote = -0.5
+            }),
+            ("poly_daily_loss_limit_quote", |r| {
+                r.poly_daily_loss_limit_quote = f64::NAN
+            }),
+        ] {
+            let mut c = Config::default();
+            mutate(&mut c.risk);
+            assert!(validate_err(&c).contains(label), "{label}");
+        }
+
+        // Legal but loud.
+        let mut c = Config::default();
+        c.polymarket.enabled = true;
+        c.polymarket.reconcile_interval_secs = 0;
+        c.polymarket.reconcile_cancel_orphans = true;
+        c.polymarket.cancel_on_shutdown = false;
+        c.polymarket.heartbeat = false;
+        c.risk.poly_emergency_disable = true;
+        c.risk.poly_max_position_quote = 50.0;
+        let mut w = Vec::new();
+        validate(&c, &mut w).unwrap();
+        for needle in [
+            "reconcile_interval_secs = 0",
+            "reconcile_cancel_orphans",
+            "cancel_on_shutdown",
+            "poly_emergency_disable",
+            "poly_max_position_quote",
+        ] {
+            assert!(
+                w.iter().any(|m| m.contains(needle)),
+                "missing warning {needle}: {w:?}"
+            );
+        }
+        assert_eq!(c.risk.poly_position_cap(), 50.0);
+        c.risk.poly_max_concurrent_positions = 2;
+        assert_eq!(c.risk.poly_position_limit(), 2);
+    }
+
+    #[test]
+    fn polymarket_toml_accepts_the_new_keys() {
+        let text = r#"
+[polymarket]
+enabled = false
+max_spread = 0.05
+min_liquidity_usd = 250.0
+quote_max_age_secs = 30
+min_time_to_resolution_secs = 7200
+min_order_size = 5.0
+order_poll_interval_secs = 10
+order_ttl_secs = 900
+reprice_threshold = 0.02
+reconcile_interval_secs = 45
+reconcile_cancel_orphans = true
+use_user_websocket = false
+cancel_on_shutdown = true
+
+[risk]
+poly_max_position_quote = 25.0
+poly_max_total_exposure_quote = 100.0
+poly_max_market_exposure_quote = 40.0
+poly_max_concurrent_positions = 3
+poly_max_open_orders = 4
+poly_daily_loss_limit_quote = 20.0
+poly_emergency_disable = false
+"#;
+        let c: Config = toml::from_str(text).expect("parses");
+        assert_eq!(c.polymarket.max_spread, 0.05);
+        assert_eq!(c.polymarket.min_liquidity_usd, 250.0);
+        assert_eq!(c.polymarket.quote_max_age_secs, 30);
+        assert_eq!(c.polymarket.min_time_to_resolution_secs, 7200);
+        assert_eq!(c.polymarket.order_poll_interval_secs, 10);
+        assert_eq!(c.polymarket.order_ttl_secs, 900);
+        assert_eq!(c.polymarket.reprice_threshold, 0.02);
+        assert_eq!(c.polymarket.reconcile_interval_secs, 45);
+        assert!(c.polymarket.reconcile_cancel_orphans);
+        assert!(!c.polymarket.use_user_websocket);
+        assert_eq!(c.risk.poly_max_position_quote, 25.0);
+        assert_eq!(c.risk.poly_max_total_exposure_quote, 100.0);
+        assert_eq!(c.risk.poly_max_market_exposure_quote, 40.0);
+        assert_eq!(c.risk.poly_max_concurrent_positions, 3);
+        assert_eq!(c.risk.poly_max_open_orders, 4);
+        assert_eq!(c.risk.poly_daily_loss_limit_quote, 20.0);
+        let mut w = Vec::new();
+        validate(&c, &mut w).expect("valid");
+    }
+
+    #[test]
+    fn copy_wallet_toml_accepts_the_new_keys() {
+        let text = r#"
+[copy]
+enabled = true
+strict_ordering = true
+max_sol_per_trade = 0.1
+reconcile_auto_exit = false
+
+[[copy.wallets]]
+address = "WhalePubkey"
+paused = true
+max_exposure_sol = 0.5
+max_open_positions = 2
+"#;
+        let cfg: Config = toml::from_str(text).expect("copy section parses");
+        assert!(cfg.copy.strict_ordering);
+        assert_eq!(cfg.copy.max_sol_per_trade, 0.1);
+        assert!(cfg.copy.wallets[0].paused);
+        assert_eq!(cfg.copy.wallets[0].max_exposure_sol, 0.5);
+        assert_eq!(cfg.copy.wallets[0].max_open_positions, 2);
+        assert_eq!(
+            cfg.copy.wallets[0].max_staleness_secs, 20,
+            "unset keys keep their defaults"
+        );
+    }
+
+    #[test]
+    fn sniper_engine_config_round_trips_through_toml() {
+        let mut c = Config::default();
+        c.sniper.slippage_mode = "price_impact".into();
+        c.sniper
+            .slippage_overrides_bps
+            .insert("So11111111111111111111111111111111111111112".into(), 800);
+        c.sniper.pumpswap_slippage_pct = Some(20.0);
+        c.risk.sniper_max_pending_executions = 4;
+        let text = toml::to_string(&c).expect("serialises");
+        let back: Config =
+            toml::from_str(&text).expect("deny_unknown_fields accepts its own output");
+        assert_eq!(back.sniper.slippage_mode, "price_impact");
+        assert_eq!(
+            back.sniper
+                .slippage_overrides_bps
+                .get("So11111111111111111111111111111111111111112"),
+            Some(&800)
+        );
+        assert_eq!(back.sniper.pumpswap_slippage_pct, Some(20.0));
+        assert_eq!(back.risk.sniper_max_pending_executions, 4);
+        // A config written BEFORE these fields existed still parses.
+        let legacy = r#"
+[sniper]
+enabled = false
+buy_sol = 0.02
+[risk]
+max_open_positions = 4
+"#;
+        let old: Config = toml::from_str(legacy).expect("legacy config parses");
+        assert_eq!(old.sniper.buy_sol, 0.02);
+        assert_eq!(old.sniper.slippage_mode, "fixed");
+        assert_eq!(old.risk.sniper_position_limit(), 4);
     }
 }

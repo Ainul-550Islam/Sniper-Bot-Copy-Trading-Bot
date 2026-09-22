@@ -1,482 +1,1036 @@
-//! Entry path for Module 1: turn an accepted [`TokenLaunch`] into a position.
+//! Entry path for Module 1: turn a normalised [`LaunchEvent`] into a position
+//! through one deterministic, staged pipeline (TASK 2 §C/§F/§I/§J/§K).
 //!
-//! The hot path is a pump.fun bonding-curve buy — that is where a token lives
-//! in its first seconds, which is exactly the window the sniper targets. If the
-//! curve has *already* completed by the time we act (we were beaten to it, or
-//! the launch was relayed late), the token has graduated and we route through
-//! Jupiter instead, provided `sniper.use_jupiter_fallback` is on.
+//! ```text
+//!  DETECTED ──► VALIDATED ──► RISK_APPROVED ──► EXECUTION_READY ──► SUBMITTED ──► CONFIRMED
+//!     │             │               │                  │                 │
+//!     └── REJECTED ─┴───────────────┴──────────────────┘                 └── FAILED
+//! ```
 //!
-//! Every step is gated:
-//!   1. dedup (`mark_launch_seen`),
-//!   2. static screening (`risk.check_launch_with_lists`),
-//!   3. sizing + hard limits (`risk.check_entry`),
-//!   4. execution (`Executor`, which honours paper/simulate/live).
+//! Checks, in order (each one names the machine-readable reason it emits):
+//!
+//! | # | check | reason |
+//! |---|-------|--------|
+//! | 1 | event shape (pubkeys, signature, identity, timestamps) | `INVALID_EVENT` |
+//! | 2 | protocol routable under the live config | `INVALID_ROUTE` |
+//! | 3 | kill switch / emergency halt | `KILL_SWITCH` |
+//! | 4 | module enabled, `risk.sniper_emergency_disable` off | `STRATEGY_DISABLED` |
+//! | 5 | launch age ≤ `sniper.max_launch_age_secs` | `STALE_EVENT` |
+//! | 6 | symbol not gated by unresolved reconciliation | `SYMBOL_GATED` |
+//! | 7 | authoritative dedup (`AppState::mark_launch_seen`) | `DUPLICATE_EVENT` |
+//! | 8 | static screening (`RiskEngine::check_launch_with_lists`) | `RISK_REJECTED` |
+//! | 9 | RPC provider pool healthy | `EXECUTION_UNAVAILABLE` |
+//! | 10 | wallet balance readable | `EXECUTION_UNAVAILABLE` |
+//! | 11 | venue readable, route resolvable, pool exists | `EXECUTION_UNAVAILABLE` / `INVALID_ROUTE` / `POOL_NOT_READY` |
+//! | 12 | safety gates (`gates::evaluate`) | `POOL_NOT_READY` / `TOKEN_STATE_INVALID` / `INSUFFICIENT_LIQUIDITY` / `CONCENTRATION_LIMIT` / `STALE_EVENT` |
+//! | 13 | slippage engine finds an allowed tolerance | `SLIPPAGE_LIMIT` |
+//! | 14 | modelled price impact ≤ `sniper.max_price_impact_bps` | `PRICE_IMPACT_LIMIT` |
+//! | 15 | fee budget: executor fee policy accepts the configured priority fee; worst-case tx fee ≤ `sniper.max_entry_fee_lamports` | `FEE_LIMIT` |
+//! | 16 | `RiskEngine::check_entry` (sizing, exposure, cooldowns, caps) | `EXPOSURE_LIMIT` / `SLIPPAGE_LIMIT` / `KILL_SWITCH` / `STRATEGY_DISABLED` / `RISK_REJECTED` |
+//! | 17 | distributed ownership claim | `OWNERSHIP_LOST` |
+//! | 18 | transaction built for the route | `EXECUTION_UNAVAILABLE` |
+//! | 19 | entry latency budget + snapshot freshness at submit time | `STALE_EVENT` |
+//!
+//! Execution always goes through the hardened engine
+//! ([`solana_kit::execute::Executor`] — ledger, deterministic intent ids, fee
+//! policy, reconciliation) with the write-ahead intent journal and the
+//! ownership permit around it, exactly as before this pipeline existed.
 
-use chrono::Utc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
 use tracing::{debug, info, warn};
 
 use bot_core::error::{BotError, BotResult};
 use bot_core::events::AppEvent;
 use bot_core::maths;
-use bot_core::models::BotModule;
 use bot_core::models::{
-    ExecutionMode, Position, PositionSide, TokenLaunch, Trade, TradeSource, Venue,
+    BotModule, ExecutionMode, Position, PositionSide, TokenLaunch, Trade, TradeSource, Venue,
 };
 use bot_core::risk::EntryRequest;
 
 use solana_kit::consts::WSOL_MINT;
-use solana_kit::execute::ExecStatus;
+use solana_kit::execute::{ExecStatus, ExecutionResult};
 use solana_kit::jupiter::{Jupiter, QuoteRequest};
-use solana_kit::pump::{self, BuildOptions, PumpContext};
+use solana_kit::pump::{self, BuildOptions};
+use solana_kit::pumpswap;
 use solana_kit::tx::TxRequest;
 
+use crate::event::{raw_hash_of, LaunchEvent};
+use crate::gates::{self, MarketSnapshot};
+use crate::market::{load_market, MarketData, VenueData};
+use crate::pipeline::{
+    check_fee_budget, count_event, count_rejection, count_stage, observe_slippage, precheck,
+    EntryRoute, LatencyTimeline, Lifecycle, PrecheckContext, RejectReason, Rejection, SniperStage,
+};
+use crate::slippage::{self, SlippageDecision, SlippageInputs, SlippageMode};
 use crate::{available_sol, Sniper};
 
+/// Sequence numbers for events that enter through the legacy
+/// [`TokenLaunch`] door (manual / server-injected launches).
+static MANUAL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// What one pass through the pipeline produced. Returned to callers and
+/// tests; the run loop only needs to know whether an infrastructure error
+/// occurred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntryOutcome {
+    pub event_id: String,
+    pub mint: String,
+    pub stage: SniperStage,
+    pub rejection: Option<Rejection>,
+    pub route: Option<EntryRoute>,
+    /// Deterministic execution-intent id, once a route was chosen.
+    pub intent_id: Option<String>,
+    pub position_id: Option<String>,
+    pub slippage_bps: Option<u64>,
+    pub price_impact_bps: Option<u64>,
+    /// Worst-case transaction fee the entry was budgeted at (check 15), in
+    /// lamports, once the route was known.
+    pub fee_estimate_lamports: Option<u64>,
+    pub timeline: LatencyTimeline,
+    /// `gate=outcome,…` for the audit trail.
+    pub gates: String,
+}
+
+impl EntryOutcome {
+    pub fn accepted(&self) -> bool {
+        self.rejection.is_none()
+            && matches!(self.stage, SniperStage::Submitted | SniperStage::Confirmed)
+    }
+
+    /// True when the refusal was an infrastructure problem (RPC, balance,
+    /// venue read, build, execution engine) rather than a decision — the
+    /// run loop records these against the module.
+    pub fn infra_failure(&self) -> bool {
+        matches!(
+            &self.rejection,
+            Some(r) if r.reason == RejectReason::ExecutionUnavailable
+        )
+    }
+}
+
+/// Everything the build step needs, gathered by the validation steps.
+struct Approved {
+    market: MarketData,
+    slippage: SlippageDecision,
+    sized_lamports: u64,
+}
+
+/// A transaction ready for the execution engine.
+enum Prepared {
+    /// Instructions the executor builds, signs and lifecycles itself.
+    Request {
+        req: TxRequest,
+        expected_out_raw: u64,
+        spend_lamports: u64,
+        base_decimals: u8,
+    },
+    /// A Jupiter-signed transaction handed to the executor's lifecycle
+    /// (`send_prebuilt`), or nothing at all in paper mode.
+    Jupiter {
+        built: Option<solana_kit::tx::BuiltTx>,
+        label: String,
+        intent_id: String,
+        expected_out_raw: u64,
+        spend_lamports: u64,
+        base_decimals: u8,
+    },
+}
+
 impl Sniper {
-    /// Evaluate one launch and, if it passes every gate, buy it.
-    ///
-    /// Returns `Ok(())` for "handled" (including "screened out") and `Err` only
-    /// for infrastructure failures worth recording against the module.
+    /// Legacy entry point: wrap a [`TokenLaunch`] (pump.fun protocol) into a
+    /// [`LaunchEvent`] and run the pipeline. Kept so existing callers and
+    /// manual launches keep working.
     pub async fn consider_launch(&mut self, launch: TokenLaunch) -> BotResult<()> {
-        // Per-symbol reconciliation gate (§H): refuse NEW entries while this
-        // symbol has unresolved claims. Exits are never gated (reducing
-        // exposure is always safe). Checked before dedup so a gated symbol
-        // does not consume its one-shot launch slot.
-        if self.state.is_symbol_blocked(&launch.mint.to_string()).await {
-            bot_core::obs::metrics::global()
-                .counter(
-                    "bot_symbol_gated_entries_total",
-                    "Entries refused because the symbol is gated by unresolved reconciliation.",
-                    &[("module", "sniper")],
-                )
-                .inc();
-            debug!(mint = %launch.mint, "symbol gated by unresolved reconciliation — skipping entry");
-            return Ok(());
+        let raw = serde_json::to_vec(&launch)
+            .map(|b| raw_hash_of(&b))
+            .unwrap_or_else(|_| raw_hash_of(launch.mint.as_bytes()));
+        let seq = MANUAL_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        let event = LaunchEvent::from_token_launch(launch, seq, raw);
+        let outcome = self.consider_event(event).await;
+        match outcome.rejection {
+            Some(r) if outcome.infra_failure() => Err(BotError::rpc(format!(
+                "snipe {}: {}",
+                outcome.mint, r.detail
+            ))),
+            _ => Ok(()),
         }
+    }
+
+    /// Evaluate one normalised launch event and, if it passes every gate,
+    /// buy it. Never fails: every refusal — decision or infrastructure — is
+    /// described by the returned outcome (`EntryOutcome::infra_failure`
+    /// tells the two apart).
+    pub async fn consider_event(&mut self, event: LaunchEvent) -> EntryOutcome {
+        let now = Utc::now();
+        count_event(event.protocol, &event.source.to_string());
+        let mut lc = Lifecycle::start(
+            &event.event_id,
+            event.protocol,
+            event.effective_ts(),
+            event.observed_at,
+            now,
+        );
+        count_stage(SniperStage::Detected, event.protocol);
+
+        let mut route = None;
+        let mut intent_id = None;
+        let mut slippage_bps = None;
+        let mut price_impact_bps = None;
+        let mut fee_estimate_lamports = None;
+        let mut gates_summary = String::new();
+        let mut position_id = None;
+
+        let result = self
+            .run_pipeline(
+                &event,
+                &mut lc,
+                &mut route,
+                &mut intent_id,
+                &mut slippage_bps,
+                &mut price_impact_bps,
+                &mut fee_estimate_lamports,
+                &mut gates_summary,
+                &mut position_id,
+            )
+            .await;
+
+        let rejection = result.err();
+        lc.timeline.record_metrics(event.protocol);
+
+        let outcome = EntryOutcome {
+            event_id: event.event_id.clone(),
+            mint: event.mint.clone(),
+            stage: lc.stage,
+            rejection: rejection.clone(),
+            route,
+            intent_id,
+            position_id,
+            slippage_bps,
+            price_impact_bps,
+            fee_estimate_lamports,
+            timeline: lc.timeline.clone(),
+            gates: gates_summary,
+        };
+        self.publish_audit(&event, &lc, &outcome).await;
+        outcome
+    }
+
+    /// The staged checks. Every `Err` is a terminal rejection already
+    /// applied to `lc`; `Ok` means the execution engine was handed the
+    /// transaction (the result of which is reflected in `lc.stage`).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_pipeline(
+        &mut self,
+        event: &LaunchEvent,
+        lc: &mut Lifecycle,
+        route_out: &mut Option<EntryRoute>,
+        intent_out: &mut Option<String>,
+        slippage_out: &mut Option<u64>,
+        impact_out: &mut Option<u64>,
+        fee_out: &mut Option<u64>,
+        gates_out: &mut String,
+        position_out: &mut Option<String>,
+    ) -> Result<(), Rejection> {
         let cfg = self.state.config_snapshot().await;
         let sniper = cfg.sniper.clone();
         let risk_cfg = cfg.risk.clone();
+        let now = Utc::now();
 
-        // 1. Dedup: both feeds race to report the same mint; only the first wins.
-        if !self.state.mark_launch_seen(&launch.mint).await {
-            debug!(mint = %launch.mint, "launch already seen, ignoring duplicate");
-            return Ok(());
+        // ---- DETECTED → VALIDATED --------------------------------------
+        // 1.–6. Shape, route, kill switch, enabled/emergency, age, symbol
+        //       gate — the pure `precheck` shared with the replay engine.
+        //       The symbol gate (§H) refuses NEW entries while the symbol has
+        //       unresolved reconciliation claims and runs before dedup so a
+        //       gated symbol does not consume its one-shot launch slot. The
+        //       kill/enabled checks are cheap early exits; the risk engine
+        //       re-checks them authoritatively in step 16.
+        let precheck_ctx = PrecheckContext {
+            kill_switch: self.state.kill_switch(),
+            module_enabled: self.state.is_enabled(BotModule::Sniper).await,
+            emergency_disable: risk_cfg.sniper_emergency_disable,
+            symbol_gated: self.state.is_symbol_blocked(&event.mint).await,
+        };
+        if let Err((reason, detail)) = precheck(event, &sniper, precheck_ctx, now) {
+            if reason == RejectReason::SymbolGated {
+                bot_core::obs::metrics::global()
+                    .counter(
+                        "bot_symbol_gated_entries_total",
+                        "Entries refused because the symbol is gated by unresolved reconciliation.",
+                        &[("module", "sniper")],
+                    )
+                    .inc();
+            }
+            return Err(self.reject(lc, event, reason, detail));
         }
-
-        // Latency accounting: how long between the feed observing the launch and
-        // us getting here. Purely informational at this point.
-        let observe_age_ms = Utc::now()
-            .signed_duration_since(launch.observed_at)
-            .num_milliseconds()
-            .max(0) as u64;
-
-        // 2. Static screening (denylists, creator buy, market cap, age).
+        // 7. The one authoritative dedup: feeds race to report the same
+        //    launch; only the first observation wins.
+        if !self.state.mark_launch_seen(&event.dedup_key()).await {
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::DuplicateEvent,
+                format!("launch {} already seen", event.dedup_key()),
+            ));
+        }
+        // 8. Static screening (denylists, creator buy, market cap, age).
+        let age_secs = (event.age_ms(now) / 1_000) as i64;
         let screen = self.risk.check_launch_with_lists(
-            &launch,
+            &event.launch,
             &risk_cfg,
             &sniper.creator_denylist,
             &sniper.keyword_denylist,
             &[], // known-bad-creator list is not persisted yet
-            0,   // we are at the tip; the launch is ~0s old
+            age_secs,
             sniper.max_launch_age_secs,
         );
         let (accepted, reason) = match &screen {
             Ok(()) => (true, None),
             Err(r) => (false, Some(r.clone())),
         };
-
         self.state.events.publish(AppEvent::Launch {
             ts: Utc::now(),
-            launch: Box::new(launch.clone()),
+            launch: Box::new(event.launch.clone()),
             accepted,
             reason: reason.clone(),
         });
-
-        if screen.is_err() {
-            debug!(
-                mint = %launch.mint,
-                symbol = %launch.symbol,
-                reason = ?reason,
-                "launch screened out"
-            );
-            return Ok(());
+        if let Some(r) = reason {
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::RiskRejected,
+                format!("screening: {r}"),
+            ));
         }
-
+        self.advance(lc, event, SniperStage::Validated)?;
         info!(
-            mint = %launch.mint,
-            symbol = %launch.symbol,
-            name = %launch.name,
-            cap_sol = launch.market_cap_sol,
-            feed = %launch.feed,
-            observe_age_ms,
-            "launch accepted — evaluating entry"
+            event = %event.event_id,
+            protocol = %event.protocol,
+            mint = %event.mint,
+            symbol = %event.launch.symbol,
+            name = %event.launch.name,
+            cap_sol = event.launch.market_cap_sol,
+            feed = %event.source,
+            age_ms = event.age_ms(now),
+            "launch validated — evaluating entry"
         );
 
-        // 3. Resolve the mint and load the bonding curve.
-        let mint = Pubkey::try_from(launch.mint.as_str())
-            .map_err(|e| BotError::invalid(format!("launch mint {}: {e}", launch.mint)))?;
+        // ---- VALIDATED → RISK_APPROVED ---------------------------------
+        let approved = self
+            .validate_market_and_risk(
+                event,
+                lc,
+                &cfg,
+                gates_out,
+                route_out,
+                slippage_out,
+                impact_out,
+                fee_out,
+            )
+            .await?;
+        self.advance(lc, event, SniperStage::RiskApproved)?;
 
-        // Available SOL for sizing (risk needs the real balance).
-        let available = available_sol(&self.state, &self.wallet, &self.rpc).await?;
+        // ---- RISK_APPROVED → EXECUTION_READY ---------------------------
+        // 17. Distributed execution ownership (§B/§F): exactly one replica
+        //     may execute this launch. Claimed AFTER risk so a rejected
+        //     entry never consumes a claim; an unavailable ownership store
+        //     fails closed (§K).
+        let mint = event.mint_pubkey().ok_or_else(|| {
+            self.reject(lc, event, RejectReason::InvalidEvent, "mint unparseable")
+        })?;
+        let mut permit = match bot_core::ownership::Permit::acquire(
+            self.ownership.as_deref(),
+            format!("snipe:{}", event.mint),
+            "entry",
+            "sniper",
+            "launch",
+            &event.launch.symbol,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(self.reject(
+                    lc,
+                    event,
+                    RejectReason::ExecutionUnavailable,
+                    format!("ownership store: {e}"),
+                ))
+            }
+        };
+        if !permit.proceed() {
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::OwnershipLost,
+                "snipe owned by another replica",
+            ));
+        }
 
-        let slippage_bps = (sniper.slippage_pct * 100.0).round() as u64;
+        // 18. Build for the chosen route.
+        let route = approved.market.route;
+        let intent = snipe_intent_id(event, &mint, route.as_str());
+        *intent_out = Some(intent.clone());
+        let prepared = match self.prepare(event, &approved, &mint, &intent, &cfg).await {
+            Ok(p) => p,
+            Err(e) => {
+                permit.finish(false).await;
+                return Err(self.reject(
+                    lc,
+                    event,
+                    RejectReason::ExecutionUnavailable,
+                    format!("build ({route}): {e}"),
+                ));
+            }
+        };
+
+        // 19. Latency budget + snapshot freshness, measured right before the
+        //     hand-off: chasing a launch we are already late on, or acting
+        //     on numbers older than the operator allows, is refused here.
+        let pre_submit = Utc::now();
+        let held = event.held_ms(pre_submit);
+        if sniper.max_entry_latency_ms > 0 && held > sniper.max_entry_latency_ms {
+            permit.finish(false).await;
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::StaleEvent,
+                format!(
+                    "entry latency {held} ms exceeds budget {} ms",
+                    sniper.max_entry_latency_ms
+                ),
+            ));
+        }
+        let snapshot_age = approved.market.snapshot.age_ms(pre_submit);
+        if snapshot_age > sniper.max_snapshot_age_ms {
+            permit.finish(false).await;
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::StaleEvent,
+                format!(
+                    "market snapshot {snapshot_age} ms old at submit (max {} ms)",
+                    sniper.max_snapshot_age_ms
+                ),
+            ));
+        }
+        if let Err(r) = self.advance(lc, event, SniperStage::ExecutionReady) {
+            permit.finish(false).await;
+            return Err(r);
+        }
+
+        // ---- EXECUTION_READY → SUBMITTED → CONFIRMED / FAILED ----------
+        // The kill switch is re-read at the last moment: one engaged while
+        // the market was read or the transaction built must stop the
+        // hand-off — the execution engine itself has no view of it.
+        if self.state.kill_switch() {
+            permit.finish(false).await;
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::KillSwitch,
+                "kill switch engaged before submission",
+            ));
+        }
+        // An attempt is about to leave the process: record it for the
+        // per-token cooldown whatever the outcome.
+        self.state.note_entry_attempt(&event.mint).await;
+        // Honour runtime mode/gate changes made since startup.
+        self.refresh_policy().await;
+        // Fencing (§E): ownership must still be ours at broadcast time.
+        if let Err(e) = permit.fence().await {
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::OwnershipLost,
+                format!("fenced before broadcast: {e}"),
+            ));
+        }
+        if let Err(r) = self.advance(lc, event, SniperStage::Submitted) {
+            permit.finish(false).await;
+            return Err(r);
+        }
+
+        let (result, expected_out_raw, spend_lamports, base_decimals, mode_live) = match prepared {
+            Prepared::Request {
+                req,
+                expected_out_raw,
+                spend_lamports,
+                base_decimals,
+            } => {
+                // Write-ahead intent (§I crash point C): journaled BEFORE
+                // broadcast, linked to the signature (or abandoned) after.
+                let journal = self.intent_rec(&event.mint, "buy", &expected_out_raw.to_string());
+                let res = bot_core::recovery::with_intent(
+                    self.intents.as_ref(),
+                    journal,
+                    self.executor.run(req),
+                    |r| r.broadcast_signature(),
+                )
+                .await;
+                match res {
+                    Ok(r) => (r, expected_out_raw, spend_lamports, base_decimals, true),
+                    Err(e) => {
+                        permit.finish(false).await;
+                        self.state.note_failed_entry(&event.mint).await;
+                        return Err(self.fail(lc, event, format!("execution engine: {e}")));
+                    }
+                }
+            }
+            Prepared::Jupiter {
+                built,
+                label,
+                intent_id,
+                expected_out_raw,
+                spend_lamports,
+                base_decimals,
+            } => {
+                let mode = self.state.execution_mode().await;
+                let res: BotResult<ExecutionResult> = match (mode, built) {
+                    (ExecutionMode::Paper, _) | (_, None) => {
+                        let mut r = ExecutionResult::empty(
+                            &label,
+                            &intent_id,
+                            mode == ExecutionMode::Paper,
+                        );
+                        if mode == ExecutionMode::Paper {
+                            r.status = ExecStatus::PaperFilled;
+                            r.state = bot_core::execution::ExecutionState::Confirmed;
+                        } else {
+                            // Simulate-success: nothing broadcast; counts as
+                            // `Sent` for bookkeeping, as before.
+                            r.status = ExecStatus::Sent;
+                            r.state = bot_core::execution::ExecutionState::Validated;
+                        }
+                        r.attempts = 1;
+                        Ok(r)
+                    }
+                    (_, Some(built)) => match self.state.may_broadcast().await {
+                        Err(e) => Err(e),
+                        Ok(()) => {
+                            let journal =
+                                self.intent_rec(&event.mint, "buy", &spend_lamports.to_string());
+                            bot_core::recovery::with_intent(
+                                self.intents.as_ref(),
+                                journal,
+                                self.executor.send_prebuilt(&built),
+                                |r| r.broadcast_signature(),
+                            )
+                            .await
+                        }
+                    },
+                };
+                match res {
+                    Ok(r) => (
+                        r,
+                        expected_out_raw,
+                        spend_lamports,
+                        base_decimals,
+                        mode == ExecutionMode::Live,
+                    ),
+                    Err(e) => {
+                        permit.finish(false).await;
+                        self.state.note_failed_entry(&event.mint).await;
+                        return Err(self.fail(lc, event, format!("jupiter execution: {e}")));
+                    }
+                }
+            }
+        };
+
+        // Ownership terminal (§I/§M): an unproven outcome (Sent/SendUnknown)
+        // hands the execution to reconciliation — the claim stays blocked
+        // for the grace window so no replica resubmits; a determinate
+        // outcome releases it. Paper/simulate never moved money → release.
+        permit
+            .finish(mode_live && result.status.is_ambiguous())
+            .await;
+
+        let latency_ms = event.held_ms(Utc::now());
+        if !result.succeeded() {
+            self.state.note_failed_entry(&event.mint).await;
+            self.state.inc_orders_sent(BotModule::Sniper).await;
+            self.state.inc_orders_failed(BotModule::Sniper).await;
+            let detail = format!(
+                "{:?}{}: {}",
+                result.status,
+                result
+                    .failure
+                    .map(|f| format!(" ({})", f.as_str()))
+                    .unwrap_or_default(),
+                result.error.as_deref().unwrap_or("order did not fill")
+            );
+            self.state.record_error(BotModule::Sniper, &detail).await;
+            self.state.events.publish(AppEvent::Error {
+                ts: Utc::now(),
+                module: Some(BotModule::Sniper),
+                message: format!("snipe {} {detail}", event.launch.symbol),
+                fatal: false,
+            });
+            warn!(symbol = %event.launch.symbol, %detail, "snipe did not fill");
+            return Err(self.fail(lc, event, detail));
+        }
+
+        if matches!(
+            result.status,
+            ExecStatus::Confirmed | ExecStatus::PaperFilled
+        ) {
+            self.advance(lc, event, SniperStage::Confirmed)?;
+        }
+        // Ambiguous outcomes (Sent / SendUnknown) stay SUBMITTED: the
+        // position is booked (the transaction may land) and reconciliation
+        // settles the lifecycle record.
+
+        let pos = self
+            .record_execution(
+                event,
+                route,
+                &result,
+                expected_out_raw,
+                spend_lamports,
+                base_decimals,
+                latency_ms,
+                mint,
+                approved.market.snapshot.pool.clone(),
+                approved.slippage.bps,
+            )
+            .await
+            .map_err(|e| self.fail(lc, event, format!("bookkeeping: {e}")))?;
+        *position_out = Some(pos);
+        Ok(())
+    }
+
+    /// Steps 9–15: readiness, market data, gates, slippage, price impact,
+    /// risk. Returns everything the build step needs; the `*_out` slots are
+    /// filled as soon as each value is known so a rejection still reports
+    /// the route, tolerance and impact it was decided on.
+    #[allow(clippy::too_many_arguments)]
+    async fn validate_market_and_risk(
+        &mut self,
+        event: &LaunchEvent,
+        lc: &mut Lifecycle,
+        cfg: &bot_core::config::Config,
+        gates_out: &mut String,
+        route_out: &mut Option<EntryRoute>,
+        slippage_out: &mut Option<u64>,
+        impact_out: &mut Option<u64>,
+        fee_out: &mut Option<u64>,
+    ) -> Result<Approved, Rejection> {
+        let sniper = &cfg.sniper;
+        let risk_cfg = &cfg.risk;
+        // 9. RPC readiness: every provider tripped means nothing below can
+        //    succeed — say so instead of burning the latency budget.
+        if self.rpc.unhealthy() {
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::ExecutionUnavailable,
+                "all RPC providers are tripped",
+            ));
+        }
+        // 10. Balance (risk needs the real number).
+        let available = match available_sol(&self.state, &self.wallet, &self.rpc).await {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(self.reject(
+                    lc,
+                    event,
+                    RejectReason::ExecutionUnavailable,
+                    format!("balance: {e}"),
+                ))
+            }
+        };
+        // 11. Market data for the route. The Jupiter route quotes the size
+        //     we intend to spend (capped by the risk position cap so the
+        //     quote is for a realistic amount).
+        let intended_sol = sniper.buy_sol.min(risk_cfg.sniper_position_cap());
+        let intended_lamports = maths::sol_to_lamports(intended_sol);
+        let fetched_at = Utc::now();
+        let market = match load_market(
+            &self.rpc,
+            &self.wallet.pubkey,
+            event,
+            sniper,
+            intended_lamports,
+            fetched_at,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => return Err(self.reject(lc, event, e.reason, e.detail)),
+        };
+        *route_out = Some(market.route);
+        // 12. Safety gates.
+        let report = gates::evaluate(&market.snapshot, sniper, Utc::now());
+        report.record_metrics();
+        *gates_out = report.summary();
+        if let Some((gate, detail)) = report.first_failure(sniper.strict_gates) {
+            return Err(self.reject(
+                lc,
+                event,
+                gates::reason_for_gate(gate),
+                format!("gate {gate}: {detail}"),
+            ));
+        }
+        // 13. Slippage engine.
+        let slippage = match slippage::decide(&slippage_inputs(
+            sniper,
+            risk_cfg,
+            &market.snapshot,
+            market.route,
+            &event.mint,
+            intended_lamports,
+        )) {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(self.reject(lc, event, RejectReason::SlippageLimit, e.to_string()))
+            }
+        };
+        observe_slippage(slippage.bps, slippage.mode.as_str());
+        *slippage_out = Some(slippage.bps);
+        *impact_out = Some(slippage.price_impact_bps);
+        // 14. Price impact.
+        if sniper.max_price_impact_bps > 0
+            && slippage.price_impact_bps > sniper.max_price_impact_bps
+        {
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::PriceImpactLimit,
+                format!(
+                    "modelled price impact {} bps exceeds max {} bps",
+                    slippage.price_impact_bps, sniper.max_price_impact_bps
+                ),
+            ));
+        }
+        // 15. Fee budget. The policy and attempt count are derived from the
+        //     same config snapshot `refresh_policy` installs on the executor
+        //     right before the hand-off, so this pre-check and the engine's
+        //     own `decide` see identical inputs; the engine stays the
+        //     authority at submission time.
+        let fee_policy = solana_kit::execute::fee_policy_from_config(cfg);
+        let attempts = u32::from(crate::exec_policy(cfg).max_attempts);
+        let fee = match check_fee_budget(
+            &fee_policy,
+            &cfg.execution,
+            market.route,
+            attempts,
+            sniper.max_entry_fee_lamports,
+        ) {
+            Ok(estimate) => estimate,
+            Err((reason, detail)) => return Err(self.reject(lc, event, reason, detail)),
+        };
+        *fee_out = Some(fee.total_lamports);
+        // 16. The authoritative risk decision.
         let decision = self
             .risk
             .check_entry(&EntryRequest {
                 module: BotModule::Sniper,
-                venue: Venue::PumpFun,
-                symbol: launch.mint.clone(),
-                symbol_display: launch.symbol.clone(),
+                venue: market.route.venue(),
+                symbol: event.mint.clone(),
+                symbol_display: event.launch.symbol.clone(),
                 requested_quote: sniper.buy_sol,
                 available_quote: available,
-                slippage_bps,
+                slippage_bps: slippage.bps,
                 price: None,
                 fair_value: None,
                 liquidity: None,
+                // TASK 5 — attribution for the global layer.
+                wallet: self.wallet.pubkey.to_string(),
+                strategy: bot_core::global_risk::strategy_label(BotModule::Sniper, None),
             })
             .await;
-
         if !decision.allowed() {
             self.state.inc_risk_rejected(BotModule::Sniper).await;
             self.state.events.publish(AppEvent::RiskRejected {
                 ts: Utc::now(),
                 module: BotModule::Sniper,
-                symbol: launch.symbol.clone(),
+                symbol: event.launch.symbol.clone(),
                 reason: decision.reason.clone(),
             });
-            info!(symbol = %launch.symbol, reason = %decision.reason, "entry rejected by risk");
-            return Ok(());
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::from_risk_code(decision.code),
+                format!(
+                    "risk[{}]: {}",
+                    decision.code.map(|c| c.as_str()).unwrap_or("none"),
+                    decision.reason
+                ),
+            ));
         }
         self.state.inc_signals(BotModule::Sniper).await;
-
-        let sized_sol = decision.sized_quote;
+        let sized_lamports = maths::sol_to_lamports(decision.sized_quote);
+        if sized_lamports == 0 {
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::RiskRejected,
+                "sized SOL rounds to zero lamports",
+            ));
+        }
+        // A reduced size can only lower the impact; re-decide so the
+        // recorded tolerance matches what is actually sent.
+        let slippage = if sized_lamports < intended_lamports {
+            match slippage::decide(&slippage_inputs(
+                sniper,
+                risk_cfg,
+                &market.snapshot,
+                market.route,
+                &event.mint,
+                sized_lamports,
+            )) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Err(self.reject(lc, event, RejectReason::SlippageLimit, e.to_string()))
+                }
+            }
+        } else {
+            slippage
+        };
+        *slippage_out = Some(slippage.bps);
+        *impact_out = Some(slippage.price_impact_bps);
         debug!(
-            symbol = %launch.symbol,
+            symbol = %event.launch.symbol,
+            route = %market.route,
             requested = sniper.buy_sol,
-            sized = sized_sol,
+            sized = decision.sized_quote,
             verdict = ?decision.verdict,
+            slippage_bps = slippage.bps,
+            impact_bps = slippage.price_impact_bps,
+            fee_estimate_lamports = fee.total_lamports,
             "entry sized"
         );
+        Ok(Approved {
+            market,
+            slippage,
+            sized_lamports,
+        })
+    }
 
-        // 3.5 Distributed execution ownership (Prompt 3 §B/§F): exactly one
-        //     replica may execute this launch, no matter how many observed it.
-        //     The logical identity is the mint (`snipe:{mint}`), claimed AFTER
-        //     risk (a rejected entry never consumes a claim). Loser replicas
-        //     skip deterministically (§G); an unavailable ownership store
-        //     aborts the entry — fail closed (§K), never "proceed locally".
-        let mut permit = bot_core::ownership::Permit::acquire(
-            self.ownership.as_deref(),
-            format!("snipe:{}", launch.mint),
-            "entry",
-            "sniper",
-            "launch",
-            &launch.symbol,
-        )
-        .await?;
-        if !permit.proceed() {
-            debug!(mint = %launch.mint, "snipe owned by another replica — skipping");
-            return Ok(());
-        }
-
-        // 4. Load the curve to see whether the token is still on the bonding
-        //    curve or has already graduated.
-        let ctx = PumpContext::load(&self.rpc, &mint, &self.wallet.pubkey, None).await?;
-
-        if ctx.curve.complete {
-            // Graduated before we could act. Fall back to Jupiter if allowed.
-            if !sniper.use_jupiter_fallback {
-                info!(symbol = %launch.symbol, "token already graduated and jupiter fallback is off — skipping");
-                // Nothing was broadcast: determinate → release the claim.
-                permit.finish(false).await;
-                return Ok(());
+    /// Step 18: build the transaction for the chosen route. Nothing here
+    /// touches the network except the Jupiter swap build (which needs the
+    /// aggregator) and the ATA existence checks.
+    async fn prepare(
+        &mut self,
+        event: &LaunchEvent,
+        approved: &Approved,
+        mint: &Pubkey,
+        intent_id: &str,
+        cfg: &bot_core::config::Config,
+    ) -> BotResult<Prepared> {
+        let sniper = &cfg.sniper;
+        let lamports = approved.sized_lamports;
+        let slip_pct = slippage::bps_to_pct(approved.slippage.bps);
+        let with_common = |req: TxRequest| -> TxRequest {
+            let mut req = req
+                .priority_fee(cfg.execution.priority_fee_micro_lamports)
+                .compute_units(cfg.execution.compute_unit_limit)
+                // Deterministic lifecycle identity: one launch → one buy
+                // intent, so a replayed detection or a post-crash retry maps
+                // onto the same ledger record and is refused while the first
+                // attempt is live.
+                .with_intent_id(intent_id)
+                .attributed("sniper", mint.to_string());
+            if cfg.execution.use_jito {
+                req = req.jito_tip(cfg.execution.jito_tip_lamports);
             }
-            return self
-                .buy_graduated_via_jupiter(
-                    &launch,
-                    mint,
-                    sized_sol,
-                    slippage_bps,
-                    observe_age_ms,
-                    &mut permit,
-                )
-                .await;
-        }
-
-        // 5. Bonding-curve buy.
-        self.buy_on_curve(
-            &launch,
-            &ctx,
-            sized_sol,
-            sniper.slippage_pct,
-            observe_age_ms,
-            &mut permit,
-        )
-        .await
-    }
-
-    /// Execute a pump.fun bonding-curve buy and record the position.
-    async fn buy_on_curve(
-        &mut self,
-        launch: &TokenLaunch,
-        ctx: &PumpContext,
-        sized_sol: f64,
-        slippage_pct: f64,
-        observe_age_ms: u64,
-        permit: &mut bot_core::ownership::Permit,
-    ) -> BotResult<()> {
-        let cfg = self.state.config_snapshot().await;
-        let sniper = cfg.sniper.clone();
-
-        let sol_in = maths::sol_to_lamports(sized_sol);
-        if sol_in == 0 {
-            return Err(BotError::invalid("sized SOL rounds to zero lamports"));
-        }
-        let fee_bps = ctx.global_state.fee_basis_points;
-
-        // Expected tokens out and the lamport ceiling, from the curve math.
-        let (amount, max_sol_cost) = pump::plan_buy(&ctx.curve, sol_in, slippage_pct, fee_bps)?;
-        if amount == 0 {
-            return Err(BotError::solana(
-                "bonding curve returns zero tokens for this buy — curve may be complete",
-            ));
-        }
-
-        // Build the instruction through the (possibly learned) layout.
-        let opts = BuildOptions {
-            extra_accounts: sniper.pump_extra_accounts.clone(),
-            append_bonding_curve_v2: sniper.pump_append_bonding_curve_v2,
-            ..BuildOptions::default()
-        };
-        let buy_ix = {
-            let store = self.layouts.read().await;
-            pump::build_buy_ix(ctx, &store, &opts, amount, max_sol_cost)?
+            req
         };
 
-        let mut req = TxRequest::new(format!("snipe-{}", launch.symbol))
-            .with_instruction(buy_ix)
-            .priority_fee(cfg.execution.priority_fee_micro_lamports)
-            .compute_units(cfg.execution.compute_unit_limit);
-        if cfg.execution.use_jito {
-            req = req.jito_tip(cfg.execution.jito_tip_lamports);
-        }
-
-        // Honour runtime mode/gate changes made since startup.
-        self.refresh_policy().await;
-        // Fencing (§E): re-validate ownership immediately before the
-        // journal write + broadcast — a replica whose lease was taken over
-        // while building the transaction must not send it.
-        permit.fence().await?;
-        let started = Utc::now();
-        // Write-ahead intent (§I crash point C): journaled BEFORE broadcast,
-        // linked to the signature (or abandoned) immediately after.
-        let intent = self.intent_rec(&ctx.mint.to_string(), "buy", &amount.to_string());
-        let result = bot_core::recovery::with_intent(
-            self.intents.as_ref(),
-            intent,
-            self.executor.run(req),
-            |r| r.broadcast_signature(),
-        )
-        .await?;
-        let exec_ms = (Utc::now() - started).num_milliseconds().max(0) as u64;
-        // Ownership terminal (§I/§M): an unproven outcome (Sent/SendUnknown)
-        // hands the execution to reconciliation — the claim stays blocked for
-        // the grace window so no replica resubmits; a determinate outcome
-        // releases it.
-        permit.finish(result.status.is_ambiguous()).await;
-
-        self.record_execution(
-            launch,
-            Venue::PumpFun,
-            &result,
-            amount,
-            sol_in,
-            6,
-            observe_age_ms + exec_ms,
-            ctx.mint,
-        )
-        .await
-    }
-
-    /// Buy an already-graduated token through Jupiter (WSOL → mint).
-    #[allow(clippy::too_many_arguments)]
-    async fn buy_graduated_via_jupiter(
-        &mut self,
-        launch: &TokenLaunch,
-        mint: Pubkey,
-        sized_sol: f64,
-        slippage_bps: u64,
-        observe_age_ms: u64,
-        permit: &mut bot_core::ownership::Permit,
-    ) -> BotResult<()> {
-        let cfg = self.state.config_snapshot().await;
-        let lamports = maths::sol_to_lamports(sized_sol);
-        if lamports == 0 {
-            return Err(BotError::invalid("sized SOL rounds to zero lamports"));
-        }
-
-        let jupiter = Jupiter::new();
-        let quote = jupiter
-            .quote(&QuoteRequest::new(*WSOL_MINT, mint, lamports).slippage_bps(slippage_bps))
-            .await?;
-        let out_amount = quote.out_amount_u64()?;
-        if out_amount == 0 {
-            return Err(BotError::solana(
-                "jupiter found no output for the graduated buy",
-            ));
-        }
-
-        let mode = self.state.execution_mode().await;
-        let started = Utc::now();
-
-        // In paper mode we never build/send: the quote is the fill.
-        // `sent` = (signature, confirmed) once a real broadcast happened.
-        let sent: Option<(String, bool)> = if mode == ExecutionMode::Paper {
-            None
-        } else {
-            let blockhash = self.rpc.latest_blockhash(true).await?.blockhash;
-            let (_q, tx, _last_valid) = jupiter
-                .build_swap(
-                    &self.wallet,
-                    &QuoteRequest::new(*WSOL_MINT, mint, lamports).slippage_bps(slippage_bps),
-                    Some(blockhash),
-                    Some(cfg.execution.priority_fee_micro_lamports),
-                )
-                .await?;
-            if mode == ExecutionMode::Simulate {
-                let sim = self.rpc.simulate(&tx).await?;
-                if let Some(err) = sim.value.err {
-                    return Err(BotError::solana(format!("jupiter simulate failed: {err}")));
+        match (&approved.market.venue, approved.market.route) {
+            (VenueData::PumpCurve(ctx), EntryRoute::PumpCurve) => {
+                let fee_bps = ctx.global_state.fee_basis_points;
+                let (amount, max_sol_cost) =
+                    pump::plan_buy(&ctx.curve, lamports, slip_pct, fee_bps)?;
+                if amount == 0 {
+                    return Err(BotError::solana(
+                        "bonding curve returns zero tokens for this buy — curve may be complete",
+                    ));
                 }
-                None
-            } else {
-                // Live (already gated by may_broadcast inside execution_mode()).
-                self.state.may_broadcast().await?;
-                // Fencing (§E): ownership must still be ours at broadcast time.
-                permit.fence().await?;
-                let intent = self.intent_rec(&mint.to_string(), "buy", &lamports.to_string());
-                let sig = bot_core::recovery::with_intent(
-                    self.intents.as_ref(),
-                    intent,
-                    self.rpc.send_transaction(&tx),
-                    |s| Some(s.to_string()),
-                )
-                .await?;
-                let confirmed = matches!(
-                    self.rpc
-                        .confirm(
-                            &sig,
-                            std::time::Duration::from_millis(cfg.execution.confirm_timeout_ms),
-                            std::time::Duration::from_millis(cfg.execution.confirm_poll_ms.max(50)),
-                        )
-                        .await,
-                    Ok(solana_kit::rpc::ConfirmOutcome::Confirmed { .. })
+                let opts = BuildOptions {
+                    extra_accounts: sniper.pump_extra_accounts.clone(),
+                    append_bonding_curve_v2: sniper.pump_append_bonding_curve_v2,
+                    ..BuildOptions::default()
+                };
+                let buy_ix = {
+                    let store = self.layouts.read().await;
+                    pump::build_buy_ix(ctx, &store, &opts, amount, max_sol_cost)?
+                };
+                let req = with_common(
+                    TxRequest::new(format!("snipe-{}", event.launch.symbol))
+                        .with_instruction(buy_ix),
                 );
-                Some((sig.to_string(), confirmed))
+                Ok(Prepared::Request {
+                    req,
+                    expected_out_raw: amount,
+                    spend_lamports: lamports,
+                    base_decimals: 6,
+                })
             }
-        };
-        let exec_ms = (Utc::now() - started).num_milliseconds().max(0) as u64;
-
-        let signature = sent.as_ref().map(|(s, _)| s.clone());
-        // Proof-of-landing decides the status (§I): a broadcast whose
-        // confirmation was NOT observed is `Sent` (ambiguous), never
-        // optimistically `Confirmed`.
-        let confirmed = sent.as_ref().map(|(_, c)| *c).unwrap_or(false);
-        // Synthesise an ExecutionResult-shaped record via the shared recorder.
-        let result = solana_kit::execute::ExecutionResult {
-            signature: signature.clone().unwrap_or_default(),
-            status: if mode == ExecutionMode::Paper {
-                ExecStatus::PaperFilled
-            } else if sent.is_some() && confirmed {
-                ExecStatus::Confirmed
-            } else {
-                // Live-unconfirmed AND simulate-success both land here, as
-                // before: `Sent` counts as filled for bookkeeping; the permit
-                // terminal above distinguishes them via `sent`.
-                ExecStatus::Sent
-            },
-            label: format!("snipe-jup-{}", launch.symbol),
-            total_ms: exec_ms,
-            simulate_ms: None,
-            send_ms: None,
-            confirm_ms: None,
-            tx_size: 0,
-            logs: Vec::new(),
-            error: None,
-            paper: mode == ExecutionMode::Paper,
-            attempts: 1,
-        };
-        // Ownership terminal (§I/§M): only a broadcast whose landing is
-        // unproven is ambiguous; paper/simulate never moved money → release.
-        permit.finish(sent.is_some() && !confirmed).await;
-
-        self.record_execution(
-            launch,
-            Venue::Jupiter,
-            &result,
-            out_amount,
-            lamports,
-            6,
-            observe_age_ms + exec_ms,
-            mint,
-        )
-        .await
+            (VenueData::PumpSwap(ctx), EntryRoute::PumpSwapDirect) => {
+                let (quote_in, min_base_out, max_quote_in) =
+                    pumpswap::plan_buy(ctx, lamports, slip_pct)?;
+                let expected_out = ctx.quote_buy(quote_in)?;
+                let (_ata, create_ata) = self.wallet.ensure_ata(&self.rpc, mint).await?;
+                let buy_ix = {
+                    let store = self.layouts.read().await;
+                    pumpswap::build_buy_ix(
+                        ctx,
+                        &store,
+                        pumpswap::BuyKind::ExactQuoteIn,
+                        quote_in,
+                        min_base_out,
+                        false,
+                    )?
+                };
+                let mut req = TxRequest::new(format!("snipe-ps-{}", event.launch.symbol));
+                if let Some(ix) = create_ata {
+                    req = req.with_instruction(ix);
+                }
+                // Wrap enough SOL to cover the swap plus protocol/creator
+                // fees; the remainder is swept back by `unwrap_sol`.
+                let mut req = with_common(req.with_instruction(buy_ix)).wrap_sol(max_quote_in);
+                req.unwrap_sol = true;
+                Ok(Prepared::Request {
+                    req,
+                    expected_out_raw: expected_out,
+                    spend_lamports: quote_in,
+                    base_decimals: ctx.base_decimals,
+                })
+            }
+            (VenueData::Raydium(pool), EntryRoute::RaydiumV4Direct) => {
+                let expected_out = pool.quote(&WSOL_MINT, lamports)?;
+                let min_out = maths::minus_pct_u64(expected_out, slip_pct);
+                if min_out == 0 {
+                    return Err(BotError::solana(
+                        "slippage tolerance would allow zero tokens out",
+                    ));
+                }
+                let (token_ata, create_ata) = self.wallet.ensure_ata(&self.rpc, mint).await?;
+                let wsol_ata = pump::associated_user(
+                    &WSOL_MINT,
+                    &self.wallet.pubkey,
+                    &solana_kit::consts::TOKEN_PROGRAM,
+                );
+                let swap_ix = {
+                    let store = self.layouts.read().await;
+                    pool.swap_base_in_learned(
+                        &store,
+                        &self.wallet.pubkey,
+                        &wsol_ata,
+                        &token_ata,
+                        lamports,
+                        min_out,
+                        pool.market.is_none(),
+                    )?
+                };
+                let mut req = TxRequest::new(format!("snipe-ray-{}", event.launch.symbol));
+                if let Some(ix) = create_ata {
+                    req = req.with_instruction(ix);
+                }
+                let mut req = with_common(req.with_instruction(swap_ix)).wrap_sol(lamports);
+                req.unwrap_sol = true;
+                Ok(Prepared::Request {
+                    req,
+                    expected_out_raw: expected_out,
+                    spend_lamports: lamports,
+                    base_decimals: approved.market.snapshot.base_decimals,
+                })
+            }
+            (VenueData::Jupiter(quote), EntryRoute::Jupiter) => {
+                let out_amount = quote.out_amount_u64()?;
+                if out_amount == 0 {
+                    return Err(BotError::solana(
+                        "jupiter found no output for the graduated buy",
+                    ));
+                }
+                let label = format!("snipe-jup-{}", event.launch.symbol);
+                let mode = self.state.execution_mode().await;
+                // Paper never builds/sends: the quote is the fill. Simulate
+                // builds + simulates only. Live hands the Jupiter-signed
+                // transaction to the executor's lifecycle.
+                let built = if mode == ExecutionMode::Paper {
+                    None
+                } else {
+                    let jupiter = Jupiter::new();
+                    let request = QuoteRequest::new(*WSOL_MINT, *mint, lamports)
+                        .slippage_bps(approved.slippage.bps);
+                    let recent = self.rpc.latest_blockhash(true).await?;
+                    let (_q, tx, last_valid) = jupiter
+                        .build_swap(
+                            &self.wallet,
+                            &request,
+                            Some(recent.blockhash),
+                            Some(cfg.execution.priority_fee_micro_lamports),
+                        )
+                        .await?;
+                    if mode == ExecutionMode::Simulate {
+                        let sim = self.rpc.simulate(&tx).await?;
+                        if let Some(err) = sim.value.err {
+                            return Err(BotError::solana(format!(
+                                "jupiter simulate failed: {err}"
+                            )));
+                        }
+                        None
+                    } else {
+                        Some(
+                            solana_kit::tx::BuiltTx::from_signed(
+                                &label,
+                                tx,
+                                recent.blockhash,
+                                last_valid.or(Some(recent.last_valid_block_height)),
+                            )?
+                            .with_intent_id(intent_id)
+                            .attributed("sniper", mint.to_string()),
+                        )
+                    }
+                };
+                Ok(Prepared::Jupiter {
+                    built,
+                    label,
+                    intent_id: intent_id.to_string(),
+                    expected_out_raw: out_amount,
+                    spend_lamports: lamports,
+                    base_decimals: approved.market.snapshot.base_decimals,
+                })
+            }
+            (venue, route) => Err(BotError::invalid(format!(
+                "route {route} does not match the loaded venue {}",
+                venue_name(venue)
+            ))),
+        }
     }
 
     /// Shared post-execution bookkeeping: position, trade, events, counters.
     ///
-    /// `amount_raw` is the base tokens received (in `base_decimals`), `sol_in`
-    /// the lamports spent. For paper/simulate the plan values *are* the fill;
-    /// for live they are the intended fill (a confirmed-transaction decode can
-    /// refine this later).
+    /// `amount_raw` is the base tokens expected (in `base_decimals`),
+    /// `sol_in` the lamports spent. For paper/simulate the plan values *are*
+    /// the fill; for live they are the intended fill (a confirmed-transaction
+    /// decode can refine this later). Returns the position id.
     #[allow(clippy::too_many_arguments)]
     async fn record_execution(
         &mut self,
-        launch: &TokenLaunch,
-        venue: Venue,
-        result: &solana_kit::execute::ExecutionResult,
+        event: &LaunchEvent,
+        route: EntryRoute,
+        result: &ExecutionResult,
         amount_raw: u64,
         sol_in: u64,
         base_decimals: u8,
         latency_ms: u64,
         mint: Pubkey,
-    ) -> BotResult<()> {
+        pool: Option<String>,
+        slippage_bps: u64,
+    ) -> BotResult<String> {
         let cfg = self.state.config_snapshot().await;
         let sniper = cfg.sniper.clone();
         let mode = self.state.execution_mode().await;
+        let venue: Venue = route.venue();
+        let launch = &event.launch;
 
         self.state.inc_orders_sent(BotModule::Sniper).await;
-
-        // Did it work?
-        let filled = matches!(
-            result.status,
-            ExecStatus::Confirmed
-                | ExecStatus::Sent
-                | ExecStatus::SendUnknown
-                | ExecStatus::PaperFilled
-        );
-        if !filled {
-            self.state.inc_orders_failed(BotModule::Sniper).await;
-            self.state
-                .record_error(
-                    BotModule::Sniper,
-                    result.error.as_deref().unwrap_or("order did not fill"),
-                )
-                .await;
-            self.state.events.publish(AppEvent::Error {
-                ts: Utc::now(),
-                module: Some(BotModule::Sniper),
-                message: format!(
-                    "snipe {} {:?}: {}",
-                    launch.symbol,
-                    result.status,
-                    result.error.as_deref().unwrap_or("unknown")
-                ),
-                fatal: false,
-            });
-            warn!(symbol = %launch.symbol, status = ?result.status, error = ?result.error, "snipe did not fill");
-            return Ok(());
-        }
 
         // Compute the fill economics in human units.
         let qty = maths::from_raw_amount(amount_raw, base_decimals);
@@ -517,13 +1071,28 @@ impl Sniper {
             quote_symbol: "SOL".into(),
             price,
             fee: 0.0,
-            slippage_bps: (sniper.slippage_pct * 100.0).round() as u64,
+            slippage_bps,
             signature: signature.clone(),
             position_id: None,
-            note: Some(format!("feed={} {}", launch.feed, launch.name)),
+            note: Some(format!(
+                "feed={} protocol={} route={} event={} {}",
+                launch.feed, event.protocol, route, event.event_id, launch.name
+            )),
             latency_ms: Some(latency_ms),
         };
         let trade_id = trade.id.clone();
+        // TASK 5 — the typed accounting event for this fill, built from the
+        // same trade record (signature = reference for live fills, a
+        // paper reference otherwise; the deterministic snipe intent id is
+        // the correlation). Submitted after the position exists so the
+        // event carries the position id.
+        let mut ledger_event = bot_core::accounting::fill_event_for_trade(
+            &trade,
+            self.wallet.pubkey.to_string(),
+            bot_core::global_risk::strategy_label(BotModule::Sniper, None),
+            None,
+            Some(snipe_intent_id(event, &mint, route.as_str())),
+        );
         self.state.record_trade(trade.clone()).await;
         self.state.events.publish(AppEvent::Fill {
             ts: Utc::now(),
@@ -532,6 +1101,7 @@ impl Sniper {
 
         // ---- Position -----------------------------------------------------
         let pos_id = self.state.next_id("p");
+        ledger_event.position_id = Some(pos_id.clone());
         let mut position = Position::new(
             pos_id.clone(),
             TradeSource::Sniper,
@@ -544,7 +1114,9 @@ impl Sniper {
         position.apply_buy(qty, price, cost_sol);
         position.entry_signature = signature.clone();
         position.entry_latency_ms = Some(latency_ms);
-        position.market_id = None;
+        // The venue the position lives on (curve / AMM pool address) so the
+        // exit path can mark and sell without rediscovering it.
+        position.market_id = pool;
 
         // Exit parameters from the sniper config, expressed as absolute price
         // levels derived from the entry price (risk.check_exit prefers these).
@@ -562,6 +1134,9 @@ impl Sniper {
             ts: Utc::now(),
             position: Box::new(position),
         });
+        // The global ledger is the only mutator of global accounting state;
+        // the module hands over the typed event and keeps its own record.
+        self.state.ledger().submit(ledger_event).await;
 
         // Persist the learned layout store if a live buy confirmed (the layout
         // that just worked is worth keeping). Best-effort, never fatal.
@@ -573,16 +1148,18 @@ impl Sniper {
 
         info!(
             symbol = %launch.symbol,
+            route = %route,
             qty,
             cost_sol,
             price,
             latency_ms,
             status = ?result.status,
+            intent = %result.intent_id,
             trade_id,
             pos_id,
             "SNIPED"
         );
-        Ok(())
+        Ok(pos_id)
     }
 
     /// After a confirmed live buy, learn the account layout from the on-chain
@@ -630,4 +1207,157 @@ impl Sniper {
         store.save(&path).await?;
         Ok(())
     }
+
+    // ---- lifecycle helpers ----------------------------------------------
+
+    fn reject(
+        &self,
+        lc: &mut Lifecycle,
+        event: &LaunchEvent,
+        reason: RejectReason,
+        detail: impl Into<String>,
+    ) -> Rejection {
+        let rejection = lc.reject(reason, detail, Utc::now());
+        count_rejection(&rejection, event.protocol);
+        count_stage(lc.stage, event.protocol);
+        debug!(
+            event = %event.event_id,
+            mint = %event.mint,
+            reason = %rejection.reason,
+            stage = %rejection.stage,
+            detail = %rejection.detail,
+            "launch rejected"
+        );
+        rejection
+    }
+
+    fn fail(
+        &self,
+        lc: &mut Lifecycle,
+        event: &LaunchEvent,
+        detail: impl Into<String>,
+    ) -> Rejection {
+        let rejection = lc.fail(detail, Utc::now());
+        count_rejection(&rejection, event.protocol);
+        count_stage(lc.stage, event.protocol);
+        rejection
+    }
+
+    fn advance(
+        &self,
+        lc: &mut Lifecycle,
+        event: &LaunchEvent,
+        next: SniperStage,
+    ) -> Result<(), Rejection> {
+        match lc.advance(next, Utc::now()) {
+            Ok(()) => {
+                count_stage(next, event.protocol);
+                Ok(())
+            }
+            Err(r) => {
+                // An illegal transition is a programming error surfaced as a
+                // rejection; make sure the lifecycle still terminates.
+                let rejection = lc.reject(r.reason, r.detail.clone(), Utc::now());
+                count_rejection(&rejection, event.protocol);
+                Err(rejection)
+            }
+        }
+    }
+
+    /// One audit record per event: stage path, route, intent and the
+    /// rejection (if any). Persisted by the server's audit sink like every
+    /// other `AppEvent::Audit`.
+    async fn publish_audit(&self, event: &LaunchEvent, lc: &Lifecycle, outcome: &EntryOutcome) {
+        let outcome_text = match &outcome.rejection {
+            Some(r) => format!(
+                "{} route={} reason={} detail={} path={} gates=[{}]",
+                lc.stage,
+                outcome.route.map(|r| r.as_str()).unwrap_or("-"),
+                r.reason,
+                r.detail,
+                lc.path(),
+                outcome.gates
+            ),
+            None => format!(
+                "{} route={} intent={} position={} slippage_bps={} impact_bps={} fee_est_lamports={} total_ms={} path={} gates=[{}]",
+                lc.stage,
+                outcome.route.map(|r| r.as_str()).unwrap_or("-"),
+                outcome.intent_id.as_deref().unwrap_or("-"),
+                outcome.position_id.as_deref().unwrap_or("-"),
+                outcome.slippage_bps.unwrap_or(0),
+                outcome.price_impact_bps.unwrap_or(0),
+                outcome.fee_estimate_lamports.unwrap_or(0),
+                lc.timeline.total_ms().unwrap_or(0),
+                lc.path(),
+                outcome.gates
+            ),
+        };
+        self.state.events.publish(AppEvent::Audit {
+            ts: Utc::now(),
+            actor: "sniper".into(),
+            action: format!("sniper.entry.{}", lc.stage.as_str().to_ascii_lowercase()),
+            target: Some(format!("{}:{}", event.protocol, event.mint)),
+            outcome: outcome_text,
+        });
+    }
+}
+
+/// Assemble the slippage-engine inputs for one route/size.
+fn slippage_inputs(
+    sniper: &bot_core::config::SniperConfig,
+    risk: &bot_core::config::RiskConfig,
+    snapshot: &MarketSnapshot,
+    route: EntryRoute,
+    mint: &str,
+    trade_lamports: u64,
+) -> SlippageInputs {
+    let protocol_bps = match route {
+        EntryRoute::PumpSwapDirect => sniper.pumpswap_slippage_pct.map(slippage::pct_to_bps),
+        EntryRoute::RaydiumV4Direct => sniper.raydium_slippage_pct.map(slippage::pct_to_bps),
+        EntryRoute::PumpCurve | EntryRoute::Jupiter => None,
+    };
+    SlippageInputs {
+        mode: SlippageMode::parse(&sniper.slippage_mode).unwrap_or_default(),
+        strategy_bps: slippage::pct_to_bps(sniper.slippage_pct),
+        protocol_bps,
+        token_bps: sniper.slippage_overrides_bps.get(mint).copied(),
+        hard_max_bps: risk.max_slippage_bps,
+        quote_reserve_lamports: snapshot.pricing_quote_reserve_lamports,
+        trade_lamports,
+    }
+}
+
+fn venue_name(v: &VenueData) -> &'static str {
+    match v {
+        VenueData::PumpCurve(_) => "pump curve",
+        VenueData::PumpSwap(_) => "pumpswap pool",
+        VenueData::Raydium(_) => "raydium pool",
+        VenueData::Jupiter(_) => "jupiter quote",
+    }
+}
+
+/// Deterministic execution-intent id for one launch → one buy. The launch is
+/// identified by its creation signature (falling back to the slot, then to
+/// the observation time) so a replayed feed event or a post-crash retry maps
+/// onto the same ledger record. The route is part of the id: a curve buy and
+/// a Jupiter buy of the same launch are different transactions.
+pub(crate) fn snipe_intent_id(event: &LaunchEvent, mint: &Pubkey, route: &str) -> String {
+    let launch_ref = event
+        .signature
+        .clone()
+        .or_else(|| event.slot.map(|s| s.to_string()))
+        .unwrap_or_else(|| event.observed_at.timestamp_millis().to_string());
+    bot_core::execution::intent_id(&["sniper", &mint.to_string(), "buy", route, &launch_ref])
+}
+
+/// Public wrapper so tests and the replay engine compute the exact intent
+/// id the live path would use.
+pub fn entry_intent_id(event: &LaunchEvent, route: EntryRoute) -> Option<String> {
+    let mint = event.mint_pubkey()?;
+    Some(snipe_intent_id(event, &mint, route.as_str()))
+}
+
+/// Timestamp helper shared with tests: `now` as the pipeline sees it.
+pub fn pipeline_now() -> DateTime<Utc> {
+    Utc::now()
 }

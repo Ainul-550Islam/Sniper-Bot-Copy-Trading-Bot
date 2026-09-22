@@ -37,7 +37,7 @@ use bot_core::state::AppState;
 use solana_kit::consts::{EV_PUMP_CREATE, PUMP_PROGRAM_ID, TOKEN_PROGRAM, WSOL_MINT};
 use solana_kit::rpc::Rpc;
 
-use module_sniper::LaunchDetector;
+use module_sniper::{LaunchDetector, LaunchProtocol};
 
 const SERVER_SUB_ID: u64 = 4242;
 
@@ -242,12 +242,25 @@ async fn geyser_transaction_subscribe_yields_a_token_launch() {
         .await
         .expect("detector must start with the geyser feed enabled");
 
-    let launch = tokio::time::timeout(Duration::from_secs(15), launches.recv())
+    let event = tokio::time::timeout(Duration::from_secs(15), launches.recv())
         .await
         .expect("timed out waiting for the pushed launch")
         .expect("launch channel closed");
 
+    // Normalised event contract (TASK 2 §B/§C): the push feed is identified,
+    // slotted, sequenced and hashed, and the id matches its identity.
+    assert_eq!(event.protocol, LaunchProtocol::PumpFun);
+    assert_eq!(event.source, LaunchFeed::TransactionSubscribe);
+    assert_eq!(event.slot, Some(310_000_999));
+    assert_eq!(event.signature.as_deref(), Some(sig));
+    assert_eq!(event.source_seq, 1);
+    assert!(!event.raw_hash.is_empty());
+    assert_eq!(event.event_id, event.compute_event_id());
+    assert!(event.pool.is_some(), "the bonding curve rides along");
+    assert!(event.initial_price_sol.unwrap() > 0.0);
+
     // Decoded from the pushed Create event.
+    let launch = &event.launch;
     assert_eq!(launch.mint, mint.to_string());
     assert_eq!(launch.name, "Geyser Token");
     assert_eq!(launch.symbol, "GEYSER");
@@ -278,7 +291,9 @@ async fn geyser_transaction_subscribe_yields_a_token_launch() {
         "failed creates must be skipped"
     );
 
-    // The subscription filtered on the pump program.
+    // The subscription filtered on the pump program first, and — with the
+    // default config enabling both AMM protocols — on PumpSwap and Raydium
+    // AMM v4 as well (one push feed serves all three detectors).
     let frames = received.lock().unwrap().clone();
     let sub = frames
         .iter()
@@ -286,7 +301,11 @@ async fn geyser_transaction_subscribe_yields_a_token_launch() {
         .expect("a transactionSubscribe frame was sent");
     assert_eq!(
         sub["params"][0]["accountInclude"],
-        json!([PUMP_PROGRAM_ID.to_string()])
+        json!([
+            PUMP_PROGRAM_ID.to_string(),
+            solana_kit::consts::PUMPSWAP_PROGRAM_ID.to_string(),
+            solana_kit::consts::RAYDIUM_AMM_V4.to_string(),
+        ])
     );
 
     // Side effect: the detector heartbeated the sniper module.

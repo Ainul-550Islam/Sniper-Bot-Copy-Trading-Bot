@@ -30,6 +30,8 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
+# TASK 7A: SaaS identifiers (tenant API key rows).
+uuid.workspace = true
 dotenvy.workspace = true
 solana-sdk.workspace = true
 solana-client.workspace = true

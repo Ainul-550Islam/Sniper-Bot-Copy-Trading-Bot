@@ -357,6 +357,18 @@ pub fn find_graduation(logs: &[String]) -> Option<PumpEvent> {
     })
 }
 
+/// Scan logs for a PumpSwap pool creation (`pump_amm::CreatePoolEvent`).
+///
+/// This is the launch signal for the PumpSwap protocol: either a pump.fun
+/// migration (the canonical `index = 0` pool) or a pool created directly on
+/// the AMM. Migration/complete events are deliberately NOT returned here —
+/// they do not carry the pool reserves the sniper needs to size an entry.
+pub fn find_pool_creation(logs: &[String]) -> Option<PumpEvent> {
+    parse_logs(logs)
+        .into_iter()
+        .find(|e| matches!(e, PumpEvent::CreatePool { .. }))
+}
+
 // --------------------------------------------------------------------------
 // Borsh reader
 // --------------------------------------------------------------------------

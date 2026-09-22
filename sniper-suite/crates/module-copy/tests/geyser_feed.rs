@@ -7,6 +7,12 @@
 //! `transactionNotification` (full base64 tx + meta), decodes the swap
 //! through the same pipeline as polling, and emits a [`WalletTrade`].
 //! Offline and deterministic.
+//!
+//! TASK 3 regression guard: the feed's `mark_signature_seen` is fetch
+//! suppression only. The emitted trade must still be *fresh* for the
+//! pipeline's one authoritative dedup (`AppState::mark_copy_event_seen`,
+//! `copy_event` namespace) — before TASK 3 the run loop re-marked the `sig`
+//! namespace and every Geyser / polled event was dropped as a duplicate.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -38,6 +44,8 @@ use bot_core::state::AppState;
 use solana_kit::consts::{PUMP_PROGRAM_ID, WSOL_MINT};
 use solana_kit::rpc::Rpc;
 
+use module_copy::event::{EventSource, LeaderTradeEvent};
+use module_copy::event_dedup::{self, DedupOutcome};
 use module_copy::feeds::CopyFeed;
 
 const SERVER_SUB_ID: u64 = 777;
@@ -234,6 +242,9 @@ async fn geyser_feed_pushes_a_whale_buy_into_the_copy_channel() {
         buys_only: false,
         max_staleness_secs: 300,
         slippage_pct: Some(15.0),
+        paused: false,
+        max_exposure_sol: 0.0,
+        max_open_positions: 0,
     }];
     cfg.network.geyser_ws_url = Some(format!("ws://{addr}/"));
     let state = AppState::new(AppConfig {
@@ -266,6 +277,28 @@ async fn geyser_feed_pushes_a_whale_buy_into_the_copy_channel() {
     assert_eq!(t.token_amount, 25.0);
     assert!((t.sol_amount - 1.5).abs() < 1e-9, "1.5 SOL spent");
     assert!(t.block_time.is_some());
+
+    // The feed marked the signature for fetch suppression (`sig` namespace)…
+    assert!(
+        !state.mark_signature_seen(sig).await,
+        "the geyser feed marks each decoded signature once"
+    );
+    // …which must NOT make the pipeline drop the event: the authoritative
+    // dedup lives in the `copy_event` namespace and sees the event as fresh
+    // exactly once, then as a duplicate.
+    let event = LeaderTradeEvent::from_wallet_trade(&t, EventSource::TransactionSubscribe, 1);
+    assert!(!state.copy_event_seen(&event.dedup_key()).await);
+    assert_eq!(
+        event_dedup::claim(&state, &event).await,
+        DedupOutcome::Fresh,
+        "a geyser-delivered trade is not a duplicate on first processing"
+    );
+    assert_eq!(
+        event_dedup::claim(&state, &event).await,
+        DedupOutcome::Duplicate,
+        "…and is decided exactly once"
+    );
+    assert_eq!(state.seen_copy_event_count().await, 1);
 
     // Nothing else may be emitted (the failed tx is skipped).
     assert!(
@@ -307,6 +340,9 @@ async fn geyser_feed_falls_back_to_polling_without_a_geyser_url() {
         buys_only: false,
         max_staleness_secs: 300,
         slippage_pct: None,
+        paused: false,
+        max_exposure_sol: 0.0,
+        max_open_positions: 0,
     }];
     cfg.network.geyser_ws_url = None;
     let state = AppState::new(AppConfig {

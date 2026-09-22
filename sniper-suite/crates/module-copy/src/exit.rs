@@ -1,9 +1,14 @@
 //! Exit path for Module 2: manage TP/SL/trailing/max-hold on mirrored
 //! positions, and sell when a whale we copied exits.
 //!
-//! [`sell_position`] is a free function so both the background sweeper and the
-//! mirror-exit path in [`crate::mirror`] can call it with the infrastructure
-//! they already hold.
+//! [`sell_position`] is a free function so the background sweeper, the
+//! mirrored-exit stage of the pipeline (`CopyBot::mirror_exit` in
+//! `event.rs`) and the reconciler's auto-exit can call it with the
+//! infrastructure they already hold. Every sell carries the hardened
+//! deterministic exit id from [`crate::intent::exit_intent_id`] (position
+//! id, mint, open time and the exact sell) and the unchanged `copy-exit-*`
+//! label, and goes through the same executor / execution ledger /
+//! write-ahead intent journal / ownership permit as before TASK 3.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +35,8 @@ use solana_kit::pump::{self, BondingCurveState, BuildOptions, PumpContext};
 use solana_kit::rpc::Rpc;
 use solana_kit::tokens::Wallet;
 use solana_kit::tx::TxRequest;
+
+use crate::intent::{exit_intent_id, exit_label, ExitRoute};
 
 /// Sweep interval for mirrored positions.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(4);
@@ -72,7 +79,8 @@ impl ExitSweeper {
     ) -> Self {
         let cfg = state.config_snapshot().await;
         let mut executor =
-            Executor::new(rpc.clone(), wallet.clone(), exec_policy_from_config(&cfg));
+            Executor::new(rpc.clone(), wallet.clone(), exec_policy_from_config(&cfg))
+                .with_fee_policy(solana_kit::execute::fee_policy_from_config(&cfg));
         if let Some(reg) = &signers {
             executor = executor.with_signer_registry(Arc::clone(reg));
         }
@@ -123,6 +131,10 @@ impl ExitSweeper {
         let cfg = self.state.config_snapshot().await;
         // Refresh the executor policy each pass (picks up mode/gate changes).
         self.executor.set_policy(exec_policy_from_config(&cfg));
+        let fees = solana_kit::execute::fee_policy_from_config(&cfg);
+        if *self.executor.fee_policy() != fees {
+            self.executor.set_fee_policy(fees);
+        }
 
         for mut position in positions {
             if !kill {
@@ -301,10 +313,22 @@ pub async fn sell_position(
             sell_raw,
             slippage_pct,
             mk_journal(),
+            &exit_intent_id(position, sell_raw, ExitRoute::Curve),
         )
         .await?
     } else if cfg.sniper.use_jupiter_fallback {
-        sell_via_jupiter(state, rpc, wallet, mint, sell_raw, &cfg, mk_journal()).await?
+        sell_via_jupiter(
+            state,
+            executor,
+            rpc,
+            wallet,
+            mint,
+            sell_raw,
+            &cfg,
+            mk_journal(),
+            &exit_intent_id(position, sell_raw, ExitRoute::Jupiter),
+        )
+        .await?
     } else {
         return Err(BotError::solana(
             "token graduated and jupiter fallback is off — cannot exit copy position",
@@ -360,6 +384,16 @@ pub async fn sell_position(
         )),
         latency_ms: None,
     };
+    // TASK 5 — the typed accounting event for this exit fill (same figures
+    // as the trade record; the leader-scoped strategy label keeps the
+    // exposure attributed to the leader that opened it).
+    let ledger_event = bot_core::accounting::fill_event_for_trade(
+        &trade,
+        wallet.pubkey.to_string(),
+        bot_core::global_risk::strategy_label(BotModule::Copy, position.copied_wallet.as_deref()),
+        None,
+        None,
+    );
     state.record_trade(trade.clone()).await;
     state.events.publish(AppEvent::Fill {
         ts: Utc::now(),
@@ -375,6 +409,9 @@ pub async fn sell_position(
         })
         .await;
     risk.book_pnl(BotModule::Copy, realized).await;
+    // The global ledger is the only mutator of global accounting state; it
+    // books the realized slice from its own average cost.
+    state.ledger().submit(ledger_event).await;
 
     let remaining = position.qty - sell_qty_human;
     if remaining <= f64::EPSILON || fraction >= 1.0 {
@@ -399,6 +436,7 @@ pub async fn sell_position(
 }
 
 /// Sell on the bonding curve. Returns (quote_sol, signature, venue, status).
+#[allow(clippy::too_many_arguments)]
 async fn sell_on_curve(
     executor: &mut Executor,
     layouts: &Arc<RwLock<LayoutStore>>,
@@ -407,6 +445,7 @@ async fn sell_on_curve(
     sell_raw: u64,
     slippage_pct: f64,
     journal: Journal<'_>,
+    intent_id: &str,
 ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
     let (amount, min_sol_output) = pump::plan_sell(&ctx.curve, sell_raw, slippage_pct)?;
     let opts = BuildOptions {
@@ -418,10 +457,13 @@ async fn sell_on_curve(
         let store = layouts.read().await;
         pump::build_sell_ix(ctx, &store, &opts, amount, min_sol_output)?
     };
-    let mut req = TxRequest::new(format!("copy-exit-{}", ctx.mint))
+    let mut req = TxRequest::new(exit_label(&ctx.mint.to_string(), ExitRoute::Curve))
         .with_instruction(sell_ix)
         .priority_fee(cfg.execution.priority_fee_micro_lamports)
-        .compute_units(cfg.execution.compute_unit_limit);
+        .compute_units(cfg.execution.compute_unit_limit)
+        // One exit decision → one lifecycle record (duplicate-protected).
+        .with_intent_id(intent_id)
+        .attributed("copy", ctx.mint.to_string());
     if cfg.execution.use_jito {
         req = req.jito_tip(cfg.execution.jito_tip_lamports);
     }
@@ -444,14 +486,17 @@ async fn sell_on_curve(
 }
 
 /// Sell a graduated token through Jupiter (mint → WSOL).
+#[allow(clippy::too_many_arguments)]
 async fn sell_via_jupiter(
     state: &Shared,
+    executor: &Executor,
     rpc: &Rpc,
     wallet: &Arc<Wallet>,
     mint: Pubkey,
     sell_raw: u64,
     cfg: &bot_core::config::Config,
     journal: Journal<'_>,
+    intent_id: &str,
 ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
     let slippage_bps = (cfg.copy.slippage_pct * 100.0).round() as u64;
     let jupiter = Jupiter::new();
@@ -461,15 +506,18 @@ async fn sell_via_jupiter(
     let expected_out = quote.out_amount_u64()?;
     let mode = state.execution_mode().await;
 
-    let signature = if mode == ExecutionMode::Paper {
+    // `outcome` is the executor's verdict once a live broadcast went through
+    // the lifecycle (ledger, duplicate guard, expiry-aware confirmation);
+    // `None` for paper (nothing built) and simulate-success (nothing sent).
+    let outcome: Option<solana_kit::execute::ExecutionResult> = if mode == ExecutionMode::Paper {
         None
     } else {
-        let blockhash = rpc.latest_blockhash(true).await?.blockhash;
-        let (_q, tx, _lv) = jupiter
+        let recent = rpc.latest_blockhash(true).await?;
+        let (_q, tx, last_valid) = jupiter
             .build_swap(
                 wallet,
                 &QuoteRequest::new(mint, *WSOL_MINT, sell_raw).slippage_bps(slippage_bps),
-                Some(blockhash),
+                Some(recent.blockhash),
                 Some(cfg.execution.priority_fee_micro_lamports),
             )
             .await?;
@@ -483,33 +531,41 @@ async fn sell_via_jupiter(
             None
         } else {
             state.may_broadcast().await?;
-            let sig = match journal {
+            let built = solana_kit::tx::BuiltTx::from_signed(
+                exit_label(&mint.to_string(), ExitRoute::Jupiter),
+                tx,
+                recent.blockhash,
+                last_valid.or(Some(recent.last_valid_block_height)),
+            )?
+            .with_intent_id(intent_id)
+            .attributed("copy", mint.to_string());
+            let result = match journal {
                 Some((sink, rec)) => {
                     bot_core::recovery::with_intent(
                         Some(sink),
                         rec,
-                        rpc.send_transaction(&tx),
-                        |s| Some(s.to_string()),
+                        executor.send_prebuilt(&built),
+                        |r| r.broadcast_signature(),
                     )
                     .await?
                 }
-                None => rpc.send_transaction(&tx).await?,
+                None => executor.send_prebuilt(&built).await?,
             };
-            let _ = rpc
-                .confirm(
-                    &sig,
-                    Duration::from_millis(cfg.execution.confirm_timeout_ms),
-                    Duration::from_millis(cfg.execution.confirm_poll_ms.max(50)),
-                )
-                .await;
-            Some(sig.to_string())
+            Some(result)
         }
     };
 
-    let status = match mode {
-        ExecutionMode::Paper => ExecStatus::PaperFilled,
-        _ if signature.is_some() => ExecStatus::Confirmed,
-        _ => ExecStatus::Sent,
+    // Proof-of-landing decides the status (§I): the executor reports
+    // Confirmed only when the signature was observed on chain; an unproven
+    // broadcast stays `Sent` (ambiguous) for reconciliation.
+    let (signature, status) = match (&mode, outcome) {
+        (ExecutionMode::Paper, _) => (None, ExecStatus::PaperFilled),
+        (_, Some(result)) => (
+            (!result.signature.is_empty()).then(|| result.signature.clone()),
+            result.status,
+        ),
+        // Simulate-success: counts as filled for bookkeeping, as before.
+        (_, None) => (None, ExecStatus::Sent),
     };
     Ok((
         maths::lamports_to_sol(expected_out),

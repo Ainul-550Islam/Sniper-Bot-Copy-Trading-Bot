@@ -15,11 +15,14 @@
 //! Everything defaults to **paper** trading: no transaction is broadcast
 //! unless `execution.mode = "live"` and `execution.allow_live_trading = true`.
 
+mod accounting;
 mod api;
 mod dashboard;
+mod ha;
 mod obs;
 mod persist;
 mod recon;
+mod saas;
 mod ws;
 
 use std::sync::Arc;
@@ -112,8 +115,24 @@ async fn main() -> anyhow::Result<()> {
     let orders = OrderManager::new(db.clone(), cfg.storage.max_dedup_entries.max(1024));
     state.attach_orders(orders.clone());
 
+    // TASK 5 — global ledger + global risk journals (Postgres when attached,
+    // memory otherwise). Installed BEFORE restore / modules so no financial
+    // event or decision can be booked against the wrong journal.
+    accounting::attach(&state, db.as_ref()).await;
+
+    // TASK 6 — HA store (workers, leases with fencing, durable cursors,
+    // recovery journal). Installed BEFORE registration and recovery.
+    ha::attach(&state, db.as_ref()).await;
+
     // Audit trail (hash-chained when the DB is attached).
     let audit = AuditTrail::new(db.clone(), state.events.clone());
+
+    // Execution lifecycle ledger → durable rows (when the DB is attached) +
+    // audit records for every money-relevant transition. Installed BEFORE
+    // restore/modules so no transition can be missed.
+    persist::ExecutionLedgerSink::new(db.clone(), audit.clone())
+        .install()
+        .await;
 
     // ---- distributed execution ownership (Prompt 3 §B/§C/§D/§K) -----------
     // Store authority: Postgres (authoritative, durable audit) > Redis
@@ -216,6 +235,34 @@ async fn main() -> anyhow::Result<()> {
     if let Some(db) = &db {
         persist::restore(db, &state).await;
     }
+    // TASK 5 — rebuild the global ledger / risk state from the journal
+    // against the restored positions (replay-safe; gaps reported, never
+    // synthesised), then one reconciliation pass and the portfolio gauges.
+    let accounting_report = accounting::recover(&state).await;
+    state.events.publish(AppEvent::Lifecycle {
+        ts: chrono::Utc::now(),
+        message: format!("global ledger recovered: {}", accounting_report.summary()),
+    });
+    // TASK 6 — register this worker life and journal one deterministic
+    // recovery action per unfinished order (§6). The venue has not been read
+    // yet at this point, so nothing is ever finalized here: ambiguous work is
+    // held for reconciliation, provably-unsent work is closed.
+    let ambiguous_intents: Vec<String> = bot_core::execution::ledger()
+        .open()
+        .await
+        .into_iter()
+        .filter(|r| {
+            matches!(
+                r.state,
+                bot_core::execution::ExecutionState::Submitted
+                    | bot_core::execution::ExecutionState::Pending
+            )
+        })
+        .map(|r| r.intent_id)
+        .collect();
+    let worker_state =
+        ha::register_and_recover(&state, env!("CARGO_PKG_VERSION"), &ambiguous_intents).await;
+    info!(state = %worker_state, worker = %state.replica_id(), "worker ready");
 
     // ---- observability: event pump + state sampler ------------------------
     let health = Arc::new(HealthRegistry::new());
@@ -297,6 +344,10 @@ async fn main() -> anyhow::Result<()> {
         )));
         if cfg.polymarket.enabled {
             if let Some(poly) = PolymarketOrderTruth::new(state.clone(), db.clone()).await {
+                // Orders: CLOB status truth. Positions: settled CTF balance
+                // truth (same PolyBot handle, same correction policy as the
+                // Solana position source).
+                worker.register(Arc::new(poly.position_truth()));
                 worker.register(Arc::new(poly));
             }
         }
@@ -330,11 +381,26 @@ async fn main() -> anyhow::Result<()> {
             block_for_unresolved(&state, db, &report.unresolved, &audit).await;
         }
 
+        // TASK 6 — the venue/chain reconciliation worker is a CLUSTER
+        // SINGLETON: exactly one worker may resolve claims, or two replicas
+        // would race on the same reconciliation item. The lease is fenced
+        // before every sweep; a worker that lost it steps down instead of
+        // continuing to mutate shared state.
         {
             let w = worker.clone();
-            worker_handles.push(tokio::spawn(async move {
-                w.run(32, Duration::from_secs(30)).await;
-            }));
+            worker_handles.push(
+                ha::LeasedWorker::new(
+                    state.clone(),
+                    bot_core::ha::LeaseRole::Reconciliation,
+                    Duration::from_secs(30),
+                )
+                .spawn(shutdown.clone(), move |_state, _guard| {
+                    let w = w.clone();
+                    async move {
+                        w.run_once(32).await;
+                    }
+                }),
+            );
         }
 
         // Keep the reconciliation backlog snapshot fresh for /api/status,
@@ -411,52 +477,70 @@ async fn main() -> anyhow::Result<()> {
             let state4 = state.clone();
             let shutdown4 = shutdown.clone();
             let recheck = Duration::from_secs(cfg.recovery.position_recheck_interval_secs.max(30));
-            worker_handles.push(tokio::spawn(async move {
-                use bot_core::db::repo::ReconRepo;
-                use bot_core::models::Venue;
-                let mut ticker = tokio::time::interval(recheck);
-                ticker.tick().await; // first tick is immediate — skip it
-                loop {
-                    tokio::select! {
-                        _ = shutdown4.wait() => break,
-                        _ = ticker.tick() => {
-                            let repo = ReconRepo::new(db4.clone());
-                            let mut queued = 0usize;
-                            for p in state4.open_positions().await {
-                                if p.mode != ExecutionMode::Live {
-                                    continue; // paper/simulate have no chain truth
+            // Polymarket positions are verifiable on-chain only through the
+            // CTF reader; without `[polymarket].ctf_rpc_url` nothing could
+            // ever resolve such a claim, so none is raised.
+            let poly_chain_truth =
+                cfg.polymarket.enabled && !cfg.polymarket.ctf_rpc_url.trim().is_empty();
+            // TASK 6 — cluster singleton under the `state_sync` lease: the
+            // sweep enqueues reconciliation claims, and N replicas would
+            // enqueue the same ones N times.
+            worker_handles.push(
+                ha::LeasedWorker::new(state4.clone(), bot_core::ha::LeaseRole::StateSync, recheck)
+                    .spawn(shutdown4.clone(), move |state4, _guard| {
+                        let db4 = db4.clone();
+                        async move {
+                            use bot_core::db::repo::ReconRepo;
+                            use bot_core::models::Venue;
+                            {
+                                let repo = ReconRepo::new(db4.clone());
+                                let mut queued = 0usize;
+                                for p in state4.open_positions().await {
+                                    if p.mode != ExecutionMode::Live {
+                                        continue; // paper/simulate have no chain truth
+                                    }
+                                    let kind = match p.venue {
+                                        Venue::Paper => continue, // no chain truth
+                                        Venue::PolymarketClob => {
+                                            if !poly_chain_truth {
+                                                continue; // no CTF reader configured
+                                            }
+                                            "polymarket_position" // settled ERC-1155 balance
+                                        }
+                                        _ => "position", // Solana token balance
+                                    };
+                                    let _ = repo.reopen_resolved(kind, &p.id).await;
+                                    if repo.enqueue(kind, &p.id).await.is_ok() {
+                                        queued += 1;
+                                    }
                                 }
-                                if matches!(p.venue, Venue::PolymarketClob | Venue::Paper) {
-                                    continue; // not a Solana token balance
+                                if queued > 0 {
+                                    debug!(queued, "positions queued for on-chain re-verification");
                                 }
-                                let _ = repo.reopen_resolved("position", &p.id).await;
-                                if repo.enqueue("position", &p.id).await.is_ok() {
-                                    queued += 1;
-                                }
-                            }
-                            if queued > 0 {
-                                debug!(queued, "positions queued for on-chain re-verification");
                             }
                         }
-                    }
-                }
-            }));
+                    }),
+            );
         }
 
         // Hourly housekeeping (dedup TTLs, idempotency keys, aged events).
+        // TASK 6 — cluster singleton under the `recovery` lease: retention
+        // deletes must run once, not once per replica.
         {
             let db2 = db.clone();
-            let shutdown2 = shutdown.clone();
-            worker_handles.push(tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(Duration::from_secs(3600));
-                ticker.tick().await; // first tick is immediate — skip it
-                loop {
-                    tokio::select! {
-                        _ = shutdown2.wait() => break,
-                        _ = ticker.tick() => run_maintenance(&db2, 30).await,
+            worker_handles.push(
+                ha::LeasedWorker::new(
+                    state.clone(),
+                    bot_core::ha::LeaseRole::Recovery,
+                    Duration::from_secs(3600),
+                )
+                .spawn(shutdown.clone(), move |_state, _guard| {
+                    let db2 = db2.clone();
+                    async move {
+                        run_maintenance(&db2, 30).await;
                     }
-                }
-            }));
+                }),
+            );
         }
     }
 
@@ -533,6 +617,30 @@ async fn main() -> anyhow::Result<()> {
         }));
     }
 
+    // TASK 6 — worker heartbeat, stale-worker survey and readiness refresh.
+    worker_handles.push(ha::spawn_heartbeat(
+        state.clone(),
+        shutdown.clone(),
+        cfg.ha.heartbeat(),
+    ));
+
+    // TASK 5 + 6 — periodic accounting maintenance (flush pending journal
+    // writes, reconcile module truth against the ledger, refresh gauges),
+    // held by exactly ONE worker through the `accounting_maintenance`
+    // singleton lease and fenced before every tick.
+    if cfg.global_risk.accounting_reconcile_interval_secs > 0 {
+        worker_handles.push(
+            ha::LeasedWorker::new(
+                state.clone(),
+                bot_core::ha::LeaseRole::AccountingMaintenance,
+                Duration::from_secs(cfg.global_risk.accounting_reconcile_interval_secs.max(5)),
+            )
+            .spawn(shutdown.clone(), |state, _guard| async move {
+                accounting::maintenance_tick(&state).await;
+            }),
+        );
+    }
+
     // ---- modules -----------------------------------------------------------
     // Write-ahead intent journal (§I crash point C): DB-backed sink handed to
     // the Solana trading modules when enabled and a durable backend exists.
@@ -543,6 +651,16 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    // Durable copy journal (TASK 3): leaders, processed leader events and
+    // leader ↔ follower links live in Postgres when a database is configured.
+    let copy_store: Option<Arc<dyn module_copy::recovery::CopyStore>> = db.as_ref().map(|d| {
+        Arc::new(recon::DbCopyStore::new(d.clone())) as Arc<dyn module_copy::recovery::CopyStore>
+    });
+    // Durable Polymarket journal (TASK 4): signals, venue orders, fills and
+    // reconciliation findings live in Postgres when a database is configured.
+    let poly_store: Option<Arc<dyn module_polymarket::store::PolyStore>> = db.as_ref().map(|d| {
+        Arc::new(recon::DbPolyStore::new(d.clone())) as Arc<dyn module_polymarket::store::PolyStore>
+    });
     let module_handles = spawn_modules(
         &state,
         &rpc,
@@ -550,9 +668,18 @@ async fn main() -> anyhow::Result<()> {
         &signers,
         &cfg,
         intents.as_ref(),
+        copy_store.as_ref(),
+        poly_store.as_ref(),
         &ownership,
     )
     .await;
+
+    // ---- TASK 7A: SaaS control plane ---------------------------------------
+    // The tenant store is created before the API so the deployment
+    // organization exists on the first request. A single-tenant operator
+    // keeps using their deployment key; it maps to this organization and
+    // can never reach another one.
+    let saas = Arc::new(saas::SaasStore::new());
 
     // ---- control plane -----------------------------------------------------
     let api_handle = if cfg.api.enabled {
@@ -565,6 +692,7 @@ async fn main() -> anyhow::Result<()> {
             audit.clone(),
             db.clone(),
             store.clone(),
+            Arc::clone(&saas),
             shutdown.clone(),
         )?)
     } else {
@@ -597,6 +725,17 @@ async fn main() -> anyhow::Result<()> {
             }
         })
         .await;
+    // 2b) TASK 6 — HA drain: stop accepting, persist cursors, release every
+    //     singleton lease so a standby takes over immediately, mark stopped.
+    {
+        let state_ha = state.clone();
+        let reason_ha = reason.clone();
+        shutdown
+            .run_phase("ha-drain", Duration::from_secs(10), async move {
+                ha::shutdown(&state_ha, &reason_ha).await;
+            })
+            .await;
+    }
     // 3) Journal + persistence pumps flush their buffers and stop.
     shutdown
         .run_phase("pump-flush", Duration::from_secs(10), async move {
@@ -673,6 +812,8 @@ async fn spawn_modules(
     signers: &Arc<SignerRegistry>,
     cfg: &Config,
     intents: Option<&Arc<dyn bot_core::recovery::IntentSink>>,
+    copy_store: Option<&Arc<dyn module_copy::recovery::CopyStore>>,
+    poly_store: Option<&Arc<dyn module_polymarket::store::PolyStore>>,
     ownership: &Arc<bot_core::ownership::OwnershipRegistry>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
@@ -712,6 +853,9 @@ async fn spawn_modules(
         if let Some(sink) = intents {
             copy = copy.with_intent_sink(Arc::clone(sink));
         }
+        if let Some(store) = copy_store {
+            copy = copy.with_copy_store(Arc::clone(store));
+        }
         let mut copy = copy.with_ownership(Arc::clone(ownership));
         match copy.spawn_feed().await {
             Ok(feed) => {
@@ -731,6 +875,9 @@ async fn spawn_modules(
         match module_polymarket::PolyBot::new(state.clone()).await {
             Ok(poly) => {
                 let mut poly = poly.with_ownership(Arc::clone(ownership));
+                if let Some(store) = poly_store {
+                    poly = poly.with_store(Arc::clone(store));
+                }
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = poly.run().await {
                         error!(error = %e, "module 3 (polymarket) stopped");
@@ -783,6 +930,7 @@ fn serve_api(
     audit: Arc<AuditTrail>,
     db: Option<Arc<bot_core::db::Database>>,
     journal: Option<bot_core::storage::Store>,
+    saas: Arc<saas::SaasStore>,
     shutdown: Arc<Shutdown>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let api_key = bot_core::config::resolve_api_key(cfg);
@@ -809,6 +957,7 @@ fn serve_api(
         serve_dashboard: cfg.api.serve_dashboard,
         health: Arc::clone(health),
         metrics_enabled: cfg.observability.metrics_enabled,
+        saas: Arc::clone(&saas),
     };
     let app = with_cors(api::router(api_state), &cfg.api.cors_origins);
 
@@ -964,7 +1113,7 @@ async fn symbol_for_claim(
             .flatten()
             .map(|r| r.symbol)
             .and_then(non_empty),
-        "position" => {
+        "position" | "polymarket_position" => {
             if let Some(p) = state.position(subject).await {
                 if let Some(sym) = non_empty(p.symbol.clone()) {
                     return Some(sym);
@@ -1074,7 +1223,7 @@ async fn block_for_unresolved(
 fn modules_for_recon_kind(kind: &str) -> &'static [BotModule] {
     match kind {
         "transaction" | "position" | "balance" | "intent" => &[BotModule::Sniper, BotModule::Copy],
-        "polymarket_order" => &[BotModule::Polymarket],
+        "polymarket_order" | "polymarket_position" => &[BotModule::Polymarket],
         // "order" (or anything future): cannot attribute to one module.
         _ => &[BotModule::Sniper, BotModule::Copy, BotModule::Polymarket],
     }
@@ -1196,6 +1345,14 @@ mod tests {
         assert!(state.module_status(BotModule::Sniper).await.enabled);
         assert!(state.module_status(BotModule::Copy).await.enabled);
         assert!(!state.module_status(BotModule::Polymarket).await.enabled);
+
+        // An unresolved settled-balance claim is Module 3's alone as well.
+        state.set_enabled(BotModule::Polymarket, true).await;
+        block_modules_for_unresolved(&state, &[("polymarket_position".to_string(), 1i64)], &audit)
+            .await;
+        assert!(state.module_status(BotModule::Sniper).await.enabled);
+        assert!(state.module_status(BotModule::Copy).await.enabled);
+        assert!(!state.module_status(BotModule::Polymarket).await.enabled);
     }
 
     #[test]
@@ -1205,6 +1362,11 @@ mod tests {
         assert_eq!(modules_for_recon_kind("something_new").len(), 3);
         assert_eq!(modules_for_recon_kind("transaction").len(), 2);
         assert_eq!(modules_for_recon_kind("polymarket_order").len(), 1);
+        // Polymarket position claims (settled CTF balance) gate only Module 3.
+        assert_eq!(
+            modules_for_recon_kind("polymarket_position"),
+            &[BotModule::Polymarket]
+        );
         // Intent claims (crash point C) are Solana-side money movement.
         assert_eq!(modules_for_recon_kind("intent").len(), 2);
     }

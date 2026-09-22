@@ -69,8 +69,13 @@ claims).
   those log lines as secret-bearing: prefer providers that authenticate by
   header, or restrict log access accordingly. The suite's own secrets are
   never part of any URL it logs.
-* **Polymarket:** private key + funder via env-seeded config; EIP-712
-  signing happens in-process.
+* **Polymarket:** private key (`POLYMARKET_PRIVATE_KEY` / `POLYGON_PRIVATE_KEY`)
+  + funder via env-seeded config; EIP-712 signing happens in-process. The
+  CLOB L2 credentials (`POLY_API_KEY` / `POLY_API_SECRET` /
+  `POLY_API_PASSPHRASE`) are read from the environment or derived from the
+  key at start-up; they are used for the HMAC request headers and the
+  authenticated user-websocket frame and are never logged, journaled or
+  audited (the journal stores order ids and sizes only).
 
 ## Execution safety
 

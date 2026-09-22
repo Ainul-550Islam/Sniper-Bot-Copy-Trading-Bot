@@ -56,6 +56,15 @@ pub struct TxRequest {
     pub extra_signers: Vec<Pubkey>,
     /// Human label used in logs and events.
     pub label: String,
+    /// Explicit execution-intent id (see `bot_core::execution::intent_id`).
+    /// `None` = the executor derives one deterministically from the wallet,
+    /// label and instruction content ([`TxRequest::intent_digest`]), so the
+    /// same logical transaction maps to the same id on every attempt.
+    pub intent_id: Option<String>,
+    /// Producing module for lifecycle records (`sniper`, `copy`, …).
+    pub module: String,
+    /// Market / mint / pair for lifecycle records and dashboards.
+    pub symbol: String,
 }
 
 impl Default for TxRequest {
@@ -71,6 +80,9 @@ impl Default for TxRequest {
             blockhash: None,
             extra_signers: Vec::new(),
             label: "tx".into(),
+            intent_id: None,
+            module: "solana".into(),
+            symbol: String::new(),
         }
     }
 }
@@ -116,6 +128,48 @@ impl TxRequest {
     pub fn lookup_table(mut self, table: AddressLookupTableAccount) -> Self {
         self.lookup_tables.push(table);
         self
+    }
+
+    /// Pin the execution-intent id (duplicate protection key).
+    pub fn with_intent_id(mut self, id: impl Into<String>) -> Self {
+        self.intent_id = Some(id.into());
+        self
+    }
+
+    /// Attribute the request to a module / market for lifecycle records.
+    pub fn attributed(mut self, module: impl Into<String>, symbol: impl Into<String>) -> Self {
+        self.module = module.into();
+        self.symbol = symbol.into();
+        self
+    }
+
+    /// Deterministic digest of the request's LOGICAL content: instructions
+    /// (program, accounts, data), compute limit, wSOL handling, extra
+    /// signers and label. Priority fee, Jito tip and blockhash are excluded
+    /// on purpose — they legitimately change between attempts of the same
+    /// intent (escalation, rebuild).
+    pub fn intent_digest(&self) -> String {
+        let mut bytes: Vec<u8> = Vec::with_capacity(256);
+        bytes.extend_from_slice(self.label.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&self.compute_unit_limit.to_le_bytes());
+        bytes.extend_from_slice(&self.wrap_sol_lamports.to_le_bytes());
+        bytes.push(self.unwrap_sol as u8);
+        for signer in &self.extra_signers {
+            bytes.extend_from_slice(signer.as_ref());
+        }
+        for ix in &self.instructions {
+            bytes.extend_from_slice(ix.program_id.as_ref());
+            bytes.extend_from_slice(&(ix.accounts.len() as u32).to_le_bytes());
+            for meta in &ix.accounts {
+                bytes.extend_from_slice(meta.pubkey.as_ref());
+                bytes.push(meta.is_signer as u8);
+                bytes.push(meta.is_writable as u8);
+            }
+            bytes.extend_from_slice(&(ix.data.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&ix.data);
+        }
+        bot_core::execution::digest_hex(&bytes)
     }
 }
 
@@ -200,9 +254,12 @@ impl<'a> TxBuilder<'a> {
     /// serialized size (useful for the latency budget).
     pub async fn build(&self, req: &TxRequest) -> BotResult<BuiltTx> {
         let ixs = self.prepare(req).await?;
-        let blockhash = match req.blockhash {
-            Some(bh) => bh,
-            None => self.rpc.latest_blockhash(false).await?.blockhash,
+        let (blockhash, last_valid_block_height) = match req.blockhash {
+            Some(bh) => (bh, None),
+            None => {
+                let bh = self.rpc.latest_blockhash(false).await?;
+                (bh.blockhash, Some(bh.last_valid_block_height))
+            }
         };
 
         let message = if req.lookup_tables.is_empty() {
@@ -331,8 +388,12 @@ impl<'a> TxBuilder<'a> {
             size,
             account_count,
             blockhash,
+            last_valid_block_height,
             label: req.label.clone(),
             instructions: ixs,
+            intent_id: req.intent_id.clone().unwrap_or_default(),
+            module: req.module.clone(),
+            symbol: req.symbol.clone(),
         })
     }
 }
@@ -345,13 +406,83 @@ pub struct BuiltTx {
     pub size: usize,
     pub account_count: usize,
     pub blockhash: Hash,
+    /// Expiry height of `blockhash` when the builder fetched it itself
+    /// (`None` for a caller-pinned blockhash). Lets the executor detect
+    /// "can never land" instead of waiting out the confirmation timeout.
+    pub last_valid_block_height: Option<u64>,
     pub label: String,
+    /// The instructions the builder compiled. Empty for transactions that
+    /// were signed elsewhere and wrapped with [`BuiltTx::from_signed`]
+    /// (the executor treats those as "cannot be bundled": no tip lookup).
     pub instructions: Vec<Instruction>,
+    /// Pinned execution-intent id (empty = derive one from the signature).
+    pub intent_id: String,
+    /// Producing module / market for lifecycle records.
+    pub module: String,
+    pub symbol: String,
 }
 
 impl BuiltTx {
     pub fn signature(&self) -> Signature {
         self.tx.signatures.first().copied().unwrap_or_default()
+    }
+
+    /// Wrap a transaction that was built and signed elsewhere (a Jupiter
+    /// swap, a PumpPortal local trade) so it can go through the executor's
+    /// lifecycle — ledger, duplicate protection, expiry-aware confirmation —
+    /// instead of a bare `send_transaction`.
+    pub fn from_signed(
+        label: impl Into<String>,
+        tx: VersionedTransaction,
+        blockhash: Hash,
+        last_valid_block_height: Option<u64>,
+    ) -> BotResult<Self> {
+        let label = label.into();
+        let bytes = bincode::serialize(&tx)
+            .map_err(|e| BotError::encoding(format!("serialize {label}: {e}")))?;
+        let size = bytes.len();
+        if size > PACKET_DATA_SIZE {
+            return Err(BotError::invalid(format!(
+                "{label} is {size} bytes, over the {PACKET_DATA_SIZE} byte limit"
+            )));
+        }
+        let account_count = match &tx.message {
+            VersionedMessage::V0(m) => {
+                m.account_keys.len()
+                    + m.address_table_lookups
+                        .iter()
+                        .map(|l| l.writable_indexes.len() + l.readonly_indexes.len())
+                        .sum::<usize>()
+            }
+            VersionedMessage::Legacy(m) => m.account_keys.len(),
+        };
+        Ok(BuiltTx {
+            tx,
+            bytes,
+            size,
+            account_count,
+            blockhash,
+            last_valid_block_height,
+            label,
+            instructions: Vec::new(),
+            intent_id: String::new(),
+            module: String::new(),
+            symbol: String::new(),
+        })
+    }
+
+    /// Pin the execution-intent id the executor will use for this
+    /// transaction (see `bot_core::execution::intent_id`).
+    pub fn with_intent_id(mut self, id: impl Into<String>) -> Self {
+        self.intent_id = id.into();
+        self
+    }
+
+    /// Attribute the transaction to a module / market for lifecycle records.
+    pub fn attributed(mut self, module: impl Into<String>, symbol: impl Into<String>) -> Self {
+        self.module = module.into();
+        self.symbol = symbol.into();
+        self
     }
 
     /// How much headroom is left before the packet limit.
@@ -1049,5 +1180,44 @@ mod tests {
         assert_eq!(required.len(), msg.header.num_required_signatures as usize);
         assert_eq!(required[0], payer.pubkey(), "fee payer signs first");
         assert!(required.contains(&co.pubkey()));
+    }
+
+    #[test]
+    fn intent_digest_ignores_fee_tip_and_blockhash_but_not_content() {
+        let payer = Keypair::new();
+        let dest = Pubkey::new_unique();
+        let base = TxRequest::new("digest-test")
+            .with_instruction(system_instruction::transfer(&payer.pubkey(), &dest, 5))
+            .priority_fee(1_000);
+        let d0 = base.intent_digest();
+        assert_eq!(d0.len(), 64, "sha256 hex");
+        assert_eq!(base.clone().intent_digest(), d0, "deterministic");
+
+        // Attempt-variable fields do not change the identity.
+        let mut retry = base.clone();
+        retry.priority_fee_micro_lamports = 999_999;
+        retry.jito_tip_lamports = 50_000;
+        retry.blockhash = Some(Hash::new_unique());
+        assert_eq!(retry.intent_digest(), d0);
+
+        // Content does.
+        let other_amount = TxRequest::new("digest-test")
+            .with_instruction(system_instruction::transfer(&payer.pubkey(), &dest, 6));
+        assert_ne!(other_amount.intent_digest(), d0);
+        let other_label = TxRequest::new("digest-test-2")
+            .with_instruction(system_instruction::transfer(&payer.pubkey(), &dest, 5));
+        assert_ne!(other_label.intent_digest(), d0);
+        let mut other_cu = base.clone();
+        other_cu.compute_unit_limit += 1;
+        assert_ne!(other_cu.intent_digest(), d0);
+
+        let tagged = base
+            .clone()
+            .attributed("sniper", "MINT")
+            .with_intent_id("int_x");
+        assert_eq!(tagged.module, "sniper");
+        assert_eq!(tagged.symbol, "MINT");
+        assert_eq!(tagged.intent_id.as_deref(), Some("int_x"));
+        assert_eq!(TxRequest::default().module, "solana");
     }
 }

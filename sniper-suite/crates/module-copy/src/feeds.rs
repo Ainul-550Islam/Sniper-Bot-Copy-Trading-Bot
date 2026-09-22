@@ -13,9 +13,30 @@
 //!   [`decode_swap`]. Works on any RPC and yields exact amounts, at the cost
 //!   of a poll interval.
 //!
-//! All feeds push into one channel; the consumer de-duplicates by signature
-//! (and so does each feed, via `mark_signature_seen`), so it is safe to run
-//! them together.
+//! All feeds push into one channel. Two different marks exist and they must
+//! never be confused (TASK 3 §03):
+//!
+//! * **Fetch suppression, here.** The polling and Geyser paths call
+//!   `AppState::mark_signature_seen` (namespace `sig`) once per transaction
+//!   they *decode*, so a signature that both the poll loop and the
+//!   post-reconnect backfill (or two feeds) discover is fetched and decoded
+//!   only once. This is an RPC-saving guard, not a trading decision: it says
+//!   nothing about whether the trade was mirrored.
+//! * **The one authoritative dedup, in the pipeline.** Every event a feed
+//!   hands over is marked seen exactly once — by `event_dedup::claim` inside
+//!   `CopyBot::process_event` — through `AppState::mark_copy_event_seen`
+//!   (the durable dedup facade, namespace `copy_event`, key
+//!   `copy:{signature}:{leader}:{mint}:{side}`). That mark is the decision
+//!   record; a redelivery of the same leader trade is refused as
+//!   `DUPLICATE_EVENT` there and nowhere else.
+//!
+//! The consumer (`lib.rs` run loop) therefore never re-marks the `sig`
+//! namespace: before TASK 3 it did, so every polled / Geyser event — already
+//! marked by its feed — was dropped as a duplicate before it could be
+//! mirrored (the PumpPortal feed, which does not pre-mark, was unaffected,
+//! which is why the regression went unnoticed). The PumpPortal path does not
+//! mark `sig` at all: PumpPortal delivers each trade once and its messages
+//! are not re-fetched.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -28,6 +49,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use bot_core::error::{BotError, BotResult};
+use bot_core::ha::FeedId;
 use bot_core::maths;
 use bot_core::models::{BotModule, PositionSide, Venue, WalletTrade};
 use bot_core::state::Shared;
@@ -39,8 +61,8 @@ use solana_kit::decode::{
 use solana_kit::pumpportal::{
     PumpPortalFeed, PumpPortalMessage, PumpPortalSubscription, TradeMessage,
 };
-use solana_kit::rpc::Rpc;
-use solana_kit::ws::{SolanaWs, TransactionFilter, WsMessage};
+use solana_kit::rpc::{Rpc, SignatureInfo};
+use solana_kit::ws::{SolanaWs, TransactionFilter, WsMessage, WsPolicy};
 
 /// Buffer for the merged output channel.
 const OUT_BUFFER: usize = 512;
@@ -225,11 +247,24 @@ async fn run_poll(
         return;
     }
 
-    // Warm-up: seed each cursor with the current newest signature so the first
-    // live poll only emits trades that happen *after* start-up. Without this we
-    // would replay recent history and mirror stale whale trades.
+    // Warm-up (TASK 6 §4): resume from the DURABLE cursor when this wallet
+    // was polled before — a restart must not silently skip the trades that
+    // happened while the process was down. Only when no durable position
+    // exists do we seed with the current newest signature, so a brand-new
+    // wallet does not replay its whole history.
     let mut cursors: HashMap<String, Option<Signature>> = HashMap::new();
     for (wstr, wkey) in &tracked {
+        let durable = state
+            .ha()
+            .cursor(FeedId::CopyLogs, wstr)
+            .await
+            .token
+            .and_then(|t| Signature::from_str(&t).ok());
+        if let Some(sig) = durable {
+            info!(wallet = %wstr, cursor = %sig, "copy poll resuming from the durable cursor");
+            cursors.insert(wstr.clone(), Some(sig));
+            continue;
+        }
         match rpc.signatures_for_address(wkey, 1, None).await {
             Ok(sigs) => {
                 cursors.insert(wstr.clone(), sigs.first().map(|s| s.signature));
@@ -260,50 +295,158 @@ async fn run_poll(
             };
             // Newest-first. Walk them, emitting decoded swaps.
             for info in &sigs {
-                if info.err.is_some() {
-                    continue; // failed transaction
-                }
-                if !state.mark_signature_seen(&info.signature.to_string()).await {
-                    // `false` = already emitted (possibly by another feed);
-                    // still advance the cursor below.
-                    continue;
-                }
-                let confirmed = match rpc.get_transaction(&info.signature).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        debug!(sig = %info.signature, error = %e, "copy poll getTransaction failed");
-                        continue;
-                    }
-                };
-                let Some(meta) = confirmed.transaction.meta.clone() else {
-                    continue;
-                };
-                match decode_swap(
-                    wkey,
-                    &info.signature.to_string(),
-                    confirmed.slot,
-                    confirmed.block_time,
-                    &confirmed.transaction.transaction,
-                    &meta,
-                ) {
-                    Ok(Some(swap)) => {
-                        let trade = wallet_trade_from_decoded(&swap);
-                        state.heartbeat(BotModule::Copy).await;
-                        if out.send(trade).await.is_err() {
-                            debug!("copy consumer gone; stopping poll forwarder");
-                            return;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => debug!(sig = %info.signature, error = %e, "copy decode failed"),
+                if emit_signature(&rpc, &state, &out, wkey, info).await == Emit::ConsumerGone {
+                    debug!("copy consumer gone; stopping poll forwarder");
+                    return;
                 }
             }
             if let Some(newest) = sigs.first() {
                 cursors.insert(wstr.clone(), Some(newest.signature));
+                // TASK 6 — persist the position so a restart resumes here
+                // instead of at "now"; the offer also suppresses a repeated
+                // head and feeds the cursor-lag gauge.
+                state
+                    .ha()
+                    .offer_token(
+                        FeedId::CopyLogs,
+                        wstr,
+                        &newest.signature.to_string(),
+                        newest
+                            .block_time
+                            .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
+                    )
+                    .await;
             }
         }
     }
+}
+
+/// Outcome of [`emit_signature`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Emit {
+    /// A decoded swap was handed to the consumer.
+    Emitted,
+    /// Failed tx, already seen, not a swap, or unreadable — nothing sent.
+    Skipped,
+    /// The consumer hung up.
+    ConsumerGone,
+}
+
+/// Fetch, decode and emit ONE confirmed signature for `wkey` — shared by the
+/// poll loop and the post-reconnect backfill so both produce identical
+/// trades and go through the same fetch suppression (`sig` namespace). The
+/// emitted trade is NOT yet decided: the pipeline's authoritative dedup
+/// (`copy_event` namespace) marks it exactly once when it is processed.
+async fn emit_signature(
+    rpc: &Rpc,
+    state: &Shared,
+    out: &mpsc::Sender<WalletTrade>,
+    wkey: &Pubkey,
+    info: &SignatureInfo,
+) -> Emit {
+    if info.err.is_some() {
+        return Emit::Skipped; // failed transaction
+    }
+    if !state.mark_signature_seen(&info.signature.to_string()).await {
+        // `false` = already fetched/decoded by this process (poll loop,
+        // backfill or another feed) — fetch suppression only; the
+        // pipeline's `copy_event` mark is untouched by this call.
+        return Emit::Skipped;
+    }
+    let confirmed = match rpc.get_transaction(&info.signature).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Emit::Skipped,
+        Err(e) => {
+            debug!(sig = %info.signature, error = %e, "copy poll getTransaction failed");
+            return Emit::Skipped;
+        }
+    };
+    let Some(meta) = confirmed.transaction.meta.clone() else {
+        return Emit::Skipped;
+    };
+    match decode_swap(
+        wkey,
+        &info.signature.to_string(),
+        confirmed.slot,
+        confirmed.block_time,
+        &confirmed.transaction.transaction,
+        &meta,
+    ) {
+        Ok(Some(swap)) => {
+            let trade = wallet_trade_from_decoded(&swap);
+            state.heartbeat(BotModule::Copy).await;
+            if out.send(trade).await.is_err() {
+                return Emit::ConsumerGone;
+            }
+            Emit::Emitted
+        }
+        Ok(None) => Emit::Skipped,
+        Err(e) => {
+            debug!(sig = %info.signature, error = %e, "copy decode failed");
+            Emit::Skipped
+        }
+    }
+}
+
+/// Slack added around a websocket outage when deciding which signatures the
+/// backfill may replay: covers clock skew and the last notification that was
+/// in flight when the socket died.
+const BACKFILL_SLACK: Duration = Duration::from_secs(5);
+
+/// Missed-event recovery for the push feed: after a websocket outage, walk
+/// every tracked wallet's recent signatures and emit the ones that landed
+/// inside the outage window. The window is bounded by `block_time` (never by
+/// a bare `limit`) so a long outage can never replay pre-startup history, and
+/// everything still goes through `mark_signature_seen` (fetch suppression),
+/// so a trade the socket did deliver is not decoded and handed over twice;
+/// should one slip through anyway, the pipeline's authoritative dedup
+/// refuses the second copy. Returns `false` when the consumer is gone.
+async fn backfill_after_gap(
+    rpc: &Rpc,
+    state: &Shared,
+    out: &mpsc::Sender<WalletTrade>,
+    tracked: &[(String, Pubkey)],
+    outage: Duration,
+    sig_limit: usize,
+) -> bool {
+    let since_unix = (Utc::now()
+        - chrono::Duration::from_std(outage + BACKFILL_SLACK)
+            .unwrap_or_else(|_| chrono::Duration::seconds(60)))
+    .timestamp();
+    let mut recovered = 0usize;
+    for (wstr, wkey) in tracked {
+        let sigs = match rpc.signatures_for_address(wkey, sig_limit, None).await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(wallet = %wstr, error = %e, "copy geyser backfill: signatures failed");
+                continue;
+            }
+        };
+        for info in sigs
+            .iter()
+            .filter(|i| i.block_time.is_some_and(|t| t >= since_unix))
+        {
+            match emit_signature(rpc, state, out, wkey, info).await {
+                Emit::Emitted => recovered += 1,
+                Emit::Skipped => {}
+                Emit::ConsumerGone => return false,
+            }
+        }
+    }
+    bot_core::obs::metrics::global()
+        .counter(
+            "bot_ws_backfilled_events_total",
+            "Events recovered by the post-reconnect backfill after a websocket outage.",
+            &[("feed", "copy_transaction_subscribe")],
+        )
+        .inc_by(recovered as u64);
+    info!(
+        outage_ms = outage.as_millis() as u64,
+        wallets = tracked.len(),
+        recovered,
+        "copy geyser: backfill after websocket gap complete"
+    );
+    true
 }
 
 /// Geyser `transactionSubscribe` forwarder (BUILD PLAN §5): whale
@@ -311,8 +454,9 @@ async fn run_poll(
 /// they are processed, instead of being discovered by the poll loop one
 /// `poll_interval_ms` later. Notifications carry the full base64 transaction
 /// plus meta — the exact inputs [`decode_swap`] already consumes — so the
-/// decode path is shared with polling, including signature dedup (a trade
-/// seen by another feed is never emitted twice).
+/// decode path is shared with polling, including fetch suppression (a
+/// transaction already decoded by another feed is not decoded again). The
+/// once-only trading decision is the pipeline's `copy_event` mark.
 ///
 /// Failure policy: an endpoint that does not speak `transactionSubscribe`,
 /// or a stream that ends, degrades to [`run_poll`] — the copy feed must
@@ -340,7 +484,10 @@ async fn run_transaction_subscribe(
         return;
     }
 
-    let ws = SolanaWs::new(url.clone());
+    let ws = SolanaWs::with_policy(
+        url.clone(),
+        WsPolicy::from_network(&state.config_snapshot().await.network),
+    );
     let conn = ws.spawn();
     let filter = TransactionFilter {
         account_include: tracked.iter().map(|(_, k)| k.to_string()).collect(),
@@ -376,7 +523,9 @@ async fn run_transaction_subscribe(
                     continue; // failed on chain — nothing to copy
                 }
                 if !state.mark_signature_seen(&notif.signature).await {
-                    continue; // `false` = already emitted by another feed
+                    // `false` = already decoded by another feed / the
+                    // backfill — fetch suppression only (see module docs).
+                    continue;
                 }
                 // The filter may match several tracked wallets (e.g. a
                 // whale-to-whale transfer); decode against each and emit
@@ -406,6 +555,28 @@ async fn run_transaction_subscribe(
                     }
                 }
                 if consumer_gone {
+                    break;
+                }
+            }
+            // Missed-event recovery: the socket was down for `outage_ms`;
+            // pull what the tracked wallets did meanwhile through the poll
+            // pipeline (bounded by the outage window, deduped by signature).
+            WsMessage::Gap { outage_ms, .. } => {
+                let cfg = state.config_snapshot().await;
+                if !cfg.copy.enabled {
+                    continue;
+                }
+                if !backfill_after_gap(
+                    &rpc,
+                    &state,
+                    &out,
+                    &tracked,
+                    Duration::from_millis(outage_ms),
+                    sig_limit,
+                )
+                .await
+                {
+                    consumer_gone = true;
                     break;
                 }
             }

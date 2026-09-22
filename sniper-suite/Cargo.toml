@@ -71,7 +71,7 @@ hmac = "0.12"
 tiny-keccak = { version = "2", features = ["keccak"] }
 ed25519-dalek = "2"
 rand = "0.8"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 num-bigint = "0.4"
 
 # --- persistence ------------------------------------------------------------

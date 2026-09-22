@@ -7,6 +7,11 @@
 use crate::error::{BotError, BotResult};
 
 pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
+/// Base transaction fee the runtime charges per signature (lamports).
+pub const LAMPORTS_PER_SIGNATURE: u64 = 5_000;
+/// Compute-unit ceiling of one Solana transaction — what an aggregator-built
+/// transaction (Jupiter) may request when it sets its own budget.
+pub const MAX_TRANSACTION_COMPUTE_UNITS: u32 = 1_400_000;
 pub const BPS_DENOM: u64 = 10_000;
 /// Polymarket amounts are 6-decimal USDC/pUSD integers.
 pub const POLY_DECIMALS: u64 = 1_000_000;
@@ -275,19 +280,30 @@ pub fn pump_get_sol_for_tokens(
     }
 }
 
-/// Price of one whole token in SOL, given the curve reserves.
+/// pump.fun mints carry 6 decimals; the curve's reserves are raw units.
+pub const PUMP_TOKEN_DECIMALS: u8 = 6;
+/// Every pump.fun token has a fixed supply of one billion whole tokens.
+pub const PUMP_TOTAL_SUPPLY_TOKENS: f64 = 1_000_000_000.0;
+
+/// Price of one whole token in SOL, given the curve reserves (raw units:
+/// lamports and 6-decimal token units, exactly as the account stores them).
+///
+/// A fresh curve (30 SOL virtual over 1.073 B virtual tokens) prices at
+/// ~2.8e-8 SOL per token. The entry price the sniper books
+/// (`lamports spent / tokens received`) is in the same unit, so the exit
+/// sweeper's marks compare like for like.
 pub fn pump_spot_price_sol(virtual_sol_reserves: u64, virtual_token_reserves: u64) -> f64 {
     if virtual_token_reserves == 0 {
         return 0.0;
     }
-    (virtual_sol_reserves as f64 / LAMPORTS_PER_SOL as f64)
-        / (virtual_token_reserves as f64 / PUMP_TOKEN_TOTAL_SUPPLY as f64)
+    lamports_to_sol(virtual_sol_reserves)
+        / from_raw_amount(virtual_token_reserves, PUMP_TOKEN_DECIMALS)
 }
 
-/// Market cap in SOL implied by the curve reserves.
+/// Market cap in SOL implied by the curve reserves (spot price × the fixed
+/// one-billion supply): ~28 SOL for a fresh curve.
 pub fn pump_market_cap_sol(virtual_sol_reserves: u64, virtual_token_reserves: u64) -> f64 {
-    pump_spot_price_sol(virtual_sol_reserves, virtual_token_reserves)
-        * (PUMP_TOKEN_TOTAL_SUPPLY as f64 / LAMPORTS_PER_SOL as f64)
+    pump_spot_price_sol(virtual_sol_reserves, virtual_token_reserves) * PUMP_TOTAL_SUPPLY_TOKENS
 }
 
 /// Round `price` down to the nearest multiple of `tick_size` (Polymarket).
@@ -467,5 +483,25 @@ mod tests {
         assert_eq!(poly_precision(0.01), (2, 2, 4));
         assert_eq!(poly_precision(0.001), (3, 2, 5));
         assert_eq!(poly_precision(0.0025), (4, 2, 6));
+    }
+
+    #[test]
+    fn pump_spot_price_and_market_cap_use_on_chain_units() {
+        // A fresh mainnet curve: 30 SOL virtual, 1.073 B tokens (6 dp) virtual.
+        let vsol = 30 * LAMPORTS_PER_SOL;
+        let vtok = 1_073_000_000 * 1_000_000u64;
+        let price = pump_spot_price_sol(vsol, vtok);
+        assert!((price - 2.7959e-8).abs() < 1e-11, "price = {price}");
+        let cap = pump_market_cap_sol(vsol, vtok);
+        assert!((cap - 27.96).abs() < 0.01, "cap = {cap}");
+        // The booked entry price (`SOL spent / tokens received`) sits on the
+        // same scale as the mark, so exits compare like for like.
+        let tokens = pump_get_tokens_for_sol(LAMPORTS_PER_SOL, vsol, vtok).unwrap();
+        let entry = 1.0 / from_raw_amount(tokens, PUMP_TOKEN_DECIMALS);
+        assert!(
+            entry > price && entry < price * 1.1,
+            "entry {entry} vs spot {price}"
+        );
+        assert_eq!(pump_spot_price_sol(vsol, 0), 0.0);
     }
 }

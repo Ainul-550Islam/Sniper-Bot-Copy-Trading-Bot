@@ -11,7 +11,7 @@ Code map:
 |---|---|---|
 | Comparison engine (pure) | `crates/core/src/reconciliation.rs` | typed EXPECTED-vs-OBSERVED verdicts, PnL reconstruction — no I/O |
 | Queue mechanics | `crates/core/src/recovery.rs` | claim/retry/park worker, startup gate, sweeper |
-| Venue adapters | `crates/server/src/recon.rs` | Solana tx, Solana position, Polymarket order truth sources |
+| Venue adapters | `crates/server/src/recon.rs` | Solana tx, Solana position, Polymarket order, Polymarket position (settled CTF balance) truth sources |
 | Order state machine | `crates/core/src/oms.rs` | `Unknown`/`Reconciled` states, idempotency keys |
 | Persistence hooks | `crates/server/src/persist.rs` | claims at submit/fill time, restart restore |
 | Executor ambiguity | `crates/solana-kit/src/execute.rs` | `Sent` / `SendUnknown` vs definite `SendFailed` |
@@ -57,13 +57,24 @@ Every money-moving attempt produces a **claim** in `reconciliation_state`
 * Solana exits publish `Fill` directly → the persistence pump claims the
   exit signature too (idempotent insert; overlap with the entry claim is a
   no-op).
-* Polymarket: `Fill` (matched) → claim `polymarket_order:<orderID>`;
-  submit-unknown (transport failure during `POST /order`) → the order id is
+* Polymarket: every live submission publishes `OrderSent` (venue
+  `polymarket`, the CLOB order id in the signature slot) → OMS external id
+  + `transactions` row (chain `polymarket`) + claim
+  `polymarket_order:<orderID>`; matched quantity arrives as a trade record
+  whose note carries `order=<orderID>` and re-arms the same claim.
+  Submit-unknown (transport failure during `POST /order`) → the order id is
   **derived locally** (EIP-712 struct hash = the exchange's `getOrderHash`)
-  and claimed via an `OrderSent` event, so even a POST that never answered
-  is reconciled against the CLOB after restart.
+  and claimed via the same `OrderSent` event, so even a POST that never
+  answered is reconciled against the CLOB after restart. The module also
+  keeps its own write-ahead order journal (`poly_orders`, migration 0014)
+  and a local-vs-venue open-order sweep — see `docs/POLYMARKET-ENGINE.md`
+  §9 and `docs/POLYMARKET-RECOVERY.md`.
 * Positions: periodic re-verification re-arms `position:<id>` claims for
-  every open LIVE Solana position (`position_recheck_interval_secs`).
+  every open LIVE Solana position and `polymarket_position:<id>` claims for
+  every open LIVE Polymarket position (`position_recheck_interval_secs`).
+  The Polymarket kind is raised only when `[polymarket].ctf_rpc_url` is
+  configured — the settled ERC-1155 balance is its only chain truth, so
+  without the reader no claim could ever resolve.
 * Sweeper: `sweep_unresolved_transactions` re-enqueues `submitted` rows
   older than 90 s (crash between broadcast and claim, DB write lost, etc.).
 
@@ -178,12 +189,12 @@ DB connect → migrations → config version check
 → orphan-intent sweep (pending intents from a previous life → `intent` claims)
 → startup_reconcile(window = recovery.startup_reconcile_secs)   ← GATE
 → unresolved claims (pending/in_progress) are attributed PER SYMBOL where
-  possible (intent → journaled symbol; position → its symbol; transaction /
-  polymarket_order → via the attributed order row):
+  possible (intent → journaled symbol; position / polymarket_position → its
+  symbol; transaction / polymarket_order → via the attributed order row):
      attributable   → only that symbol is entry-gated (exits stay allowed)
      unattributable → conservative module-wide fallback:
         transaction/position/balance/intent → Sniper+Copy blocked
-        polymarket_order                    → Polymarket blocked
+        polymarket_order/polymarket_position → Polymarket blocked
         unknown kinds                       → all trading modules blocked
    (set_blocked_symbols / set_enabled(false) + audit record + Error event;
     the 60 s sampler recomputes the gate — resolving claims unblocks)
@@ -204,8 +215,12 @@ in between leaves a `pending` orphan: an AMBIGUOUS outcome with no signature
 to look up. Orphans are swept into `intent` claims (startup + 60 s cadence),
 their symbol is entry-gated, and the claim parks for operators after retries
 — the transaction is never blindly resubmitted. Cost: one local INSERT per
-execution. Polymarket needs no intent journal: its deterministic salt makes
-order submission idempotent at the venue (a retry reuses the same order id).
+execution. Polymarket needs no *separate* intent journal for venue
+idempotency: its deterministic salt makes order submission idempotent at
+the venue (a retry reuses the same order id). Since TASK 4 the module still
+journals the claimed order id in `poly_orders` BEFORE the POST so that a
+crash between the claim and the venue answer is recovered as `AMBIGUOUS`
+(held for reconciliation, never resubmitted) — `docs/POLYMARKET-RECOVERY.md`.
 
 A blocked module is a *safe state*, not an error state: risk limits computed
 from a book that contradicts the chain would be fiction (e.g. local 100
@@ -262,6 +277,16 @@ Layers, outermost first:
 * Live Solana positions are re-verified against the aggregated on-chain
   balance (per-execution claims + periodic rechecks). Tolerance: 1 %
   relative or dust floor (fee/rent artifacts on tiny positions).
+* Live Polymarket positions are re-verified the same way against the
+  funder's settled outcome-token balance (CTF ERC-1155 `balanceOf`, six
+  decimals) by `PolymarketPositionTruth` — same engine (`compare_position`),
+  same tolerance, same correction policy (`settle_position_outcome` is one
+  function shared by both venues). A non-terminal Polymarket OMS order on the
+  same token counts as "execution in flight", so resting or partially matched
+  orders never trigger a correction. Metered as
+  `bot_reconciliation_outcomes_total{kind="polymarket_position"}`; a failed
+  read is `bot_external_state_read_errors_total{source="polygon_ctf"}` and
+  retries — never a zero.
 * **Flags, not silent rewrites**: `ExternalAhead`/`LocalAhead`/
   `QuantityMismatch` raise a `drift_flag` risk event + Error alert and
   resolve as `drift-flagged` — the book is *not* rewritten from a balance

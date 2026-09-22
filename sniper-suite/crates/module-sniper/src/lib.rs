@@ -1,22 +1,34 @@
 //! Module 1 — the new-launch sniper.
 //!
 //! ## What it does
-//! Watches pump.fun for brand-new tokens and buys within roughly a second of
-//! launch, then manages the exit (take-profit / stop-loss / trailing / time).
+//! Watches pump.fun (bonding-curve creations), PumpSwap (pool creations) and
+//! Raydium AMM v4 (pool initialisations) for brand-new tokens, runs every
+//! observation through one deterministic validation pipeline and buys within
+//! roughly a second of launch, then manages the exit (take-profit /
+//! stop-loss / trailing / time / stale-position).
 //!
 //! ## How it is wired
 //! ```text
-//!  PumpPortal ─┐
-//!              ├─► detect::LaunchDetector ─► mpsc<TokenLaunch> ─► Sniper::run
-//!  logsSubscribe┘                                                    │
-//!                                                                    ▼
-//!                              risk.check_launch_with_lists  ──►  entry::consider_launch
-//!                                                                    │  (buy)
-//!                                                                    ▼
-//!                                              state.upsert_position + EventBus
-//!                                                                    │
-//!                              exit::sweep (mark price → risk.check_exit) ─► sell
+//!  PumpPortal ──────┐
+//!  logsSubscribe ───┼─► detect::LaunchDetector ─► mpsc<event::LaunchEvent> ─► Sniper::run
+//!  transactionSubscribe ┘   (normalise + sequence + raw hash)                  │
+//!                                                                              ▼
+//!   entry::consider_event — pipeline::SniperStage lifecycle
+//!     DETECTED  ─ shape · route · kill/enabled · age · symbol gate · dedup · screening
+//!     VALIDATED ─ rpc ready · balance · market::load_market · gates::evaluate
+//!                 · slippage::decide · price impact · risk.check_entry
+//!     RISK_APPROVED ─ ownership permit · build (curve | pumpswap | raydium | jupiter)
+//!                 · latency budget · snapshot freshness
+//!     EXECUTION_READY ─► SUBMITTED (Executor: ledger, intent id, fee policy) ─► CONFIRMED
+//!                                                                              │
+//!                                              state.upsert_position + EventBus + Audit
+//!                                                                              │
+//!   exit::sweep — failed-entry cleanup · ambiguous hold · venue mark · risk.check_exit
+//!                 · stale rule · retry backoff ─► sell (same engine, exit intent id)
 //! ```
+//!
+//! `replay::ReplayEngine` drives the same validation code over recorded
+//! fixtures without any network or submission.
 //!
 //! ## Safety
 //! Every buy and sell flows through [`bot_core::risk::RiskEngine`] and the
@@ -34,12 +46,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use bot_core::config::Config;
 use bot_core::error::{BotError, BotResult};
 use bot_core::events::AppEvent;
-use bot_core::models::{BotModule, ExecutionMode, TokenLaunch};
+use bot_core::models::{BotModule, ExecutionMode};
 use bot_core::risk::RiskEngine;
 use bot_core::state::Shared;
 
@@ -50,9 +62,18 @@ use solana_kit::tokens::Wallet;
 
 pub mod detect;
 pub mod entry;
+pub mod event;
 pub mod exit;
+pub mod gates;
+pub mod market;
+pub mod pipeline;
+pub mod replay;
+pub mod slippage;
 
 pub use detect::LaunchDetector;
+pub use entry::EntryOutcome;
+pub use event::{LaunchEvent, LaunchProtocol};
+pub use pipeline::{EntryRoute, RejectReason, SniperStage};
 
 /// The sniper. One instance owns the detection feeds, the execution path and
 /// the exit sweeper for Module 1.
@@ -74,6 +95,8 @@ pub struct Sniper {
     /// server. When present, every money path claims its logical execution
     /// identity before broadcasting; `None` = single-instance/legacy.
     ownership: Option<Arc<bot_core::ownership::OwnershipRegistry>>,
+    /// Sweeper-local exit bookkeeping (mark failures, retry backoff).
+    exits: exit::ExitTracker,
 }
 
 impl Sniper {
@@ -90,7 +113,8 @@ impl Sniper {
     ) -> BotResult<Self> {
         let cfg = state.config_snapshot().await;
         let policy = exec_policy(&cfg);
-        let mut executor = Executor::new(rpc.clone(), wallet.clone(), policy);
+        let mut executor = Executor::new(rpc.clone(), wallet.clone(), policy)
+            .with_fee_policy(solana_kit::execute::fee_policy_from_config(&cfg));
         if let Some(reg) = &signers {
             executor = executor.with_signer_registry(Arc::clone(reg));
         }
@@ -118,6 +142,7 @@ impl Sniper {
             signers,
             intents: None,
             ownership: None,
+            exits: exit::ExitTracker::default(),
         })
     }
 
@@ -187,6 +212,10 @@ impl Sniper {
     async fn refresh_policy(&mut self) {
         let cfg = self.state.config_snapshot().await;
         self.executor.set_policy(exec_policy(&cfg));
+        let fees = solana_kit::execute::fee_policy_from_config(&cfg);
+        if *self.executor.fee_policy() != fees {
+            self.executor.set_fee_policy(fees);
+        }
     }
 
     /// Run the module until the process is shut down.
@@ -201,11 +230,13 @@ impl Sniper {
         // The exit sweeper runs independently of launch detection: even if the
         // feeds drop, open positions must still be managed.
         let sweeper = {
+            let sweeper_cfg = self.state.config_snapshot().await;
             let mut sweeper_executor = Executor::new(
                 self.rpc.clone(),
                 self.wallet.clone(),
-                exec_policy(&self.state.config_snapshot().await),
-            );
+                exec_policy(&sweeper_cfg),
+            )
+            .with_fee_policy(solana_kit::execute::fee_policy_from_config(&sweeper_cfg));
             if let Some(reg) = &self.signers {
                 sweeper_executor = sweeper_executor.with_signer_registry(Arc::clone(reg));
             }
@@ -219,12 +250,13 @@ impl Sniper {
                 signers: self.signers.clone(),
                 intents: self.intents.clone(),
                 ownership: self.ownership.clone(),
+                exits: exit::ExitTracker::default(),
             };
             tokio::spawn(async move { this.exit_sweeper().await })
         };
 
-        // Launch detection produces a merged stream of TokenLaunch.
-        let mut launches: mpsc::Receiver<TokenLaunch> =
+        // Launch detection produces a merged stream of normalised events.
+        let mut launches: mpsc::Receiver<LaunchEvent> =
             match LaunchDetector::spawn(self.state.clone(), self.rpc.clone()).await {
                 Ok(rx) => rx,
                 Err(e) => {
@@ -278,13 +310,30 @@ impl Sniper {
                 continue;
             }
 
-            if let Err(e) = self.consider_launch(launch).await {
+            let outcome = self.consider_event(launch).await;
+            if outcome.infra_failure() {
                 // A single failed snipe is not fatal; record and carry on.
+                let detail = outcome
+                    .rejection
+                    .as_ref()
+                    .map(|r| r.detail.clone())
+                    .unwrap_or_default();
                 self.state
-                    .record_error(BotModule::Sniper, &e.to_string())
+                    .record_error(
+                        BotModule::Sniper,
+                        &format!("snipe {}: {detail}", outcome.mint),
+                    )
                     .await;
-                warn!(error = %e, "snipe attempt failed");
+                warn!(mint = %outcome.mint, %detail, "snipe attempt failed");
             } else {
+                if let Some(r) = &outcome.rejection {
+                    debug!(
+                        event = %outcome.event_id,
+                        reason = %r.reason,
+                        stage = %r.stage,
+                        "launch not traded"
+                    );
+                }
                 self.state.clear_error(BotModule::Sniper).await;
             }
         }

@@ -71,6 +71,10 @@ pub struct ApiState {
     pub health: Arc<HealthRegistry>,
     /// When false, `/metrics` is 404 and HTTP request metrics are not recorded.
     pub metrics_enabled: bool,
+    /// TASK 7A — the SaaS control plane (tenants, users, memberships,
+    /// sessions, tenant API keys, plans, entitlements, usage, provisioning).
+    /// Always present; it holds no trading truth.
+    pub saas: Arc<crate::saas::SaasStore>,
 }
 
 /// Build the full router.
@@ -88,6 +92,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/config", get(config_view))
         .route("/api/orders", get(orders))
         .route("/api/orders/:id", get(order_by_id))
+        .route("/api/executions", get(executions))
+        .route("/api/executions/:id", get(execution_by_id))
         .route("/api/audit", get(audit_list))
         .route("/api/audit/verify", get(audit_verify))
         .route("/api/keys", get(keys_list).post(keys_add))
@@ -101,6 +107,19 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/mode", post(set_mode))
         .route("/api/modules/:name/enable", post(enable_module))
         .route("/api/modules/:name/disable", post(disable_module))
+        .route("/api/accounting/portfolio", get(accounting_portfolio))
+        .route(
+            "/api/accounting/events",
+            get(accounting_events).post(accounting_event_post),
+        )
+        .route("/api/accounting/findings", get(accounting_findings))
+        .route("/api/risk/global", get(risk_global))
+        .route("/api/risk/kill-switch", post(risk_kill_switch))
+        .route("/api/ha", get(ha_status))
+        // TASK 7A — the multi-tenant control plane. Mounted here so it
+        // shares the rate limiter, the audit trail and the request-id
+        // middleware with the existing API.
+        .merge(crate::saas::routes())
         .route("/api/events", get(events_ws))
         // route_layer (not layer): runs after routing, so handlers see the
         // MatchedPath and the middleware can label metrics with the bounded
@@ -525,6 +544,102 @@ async fn order_by_id(
 }
 
 // ---------------------------------------------------------------------------
+// Execution lifecycle ledger
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ExecutionsQuery {
+    limit: Option<usize>,
+    /// Optional state filter (`pending`, `confirmed`, `failed`, …).
+    state: Option<String>,
+    /// `true` = only attempts that are still live (created … pending).
+    open: Option<bool>,
+}
+
+/// The execution lifecycle ledger: every transaction intent with its current
+/// state, attempt count, signature, fee and failure class. In-memory mirror
+/// (bounded); older settled intents live in `execution_lifecycle`.
+async fn executions(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<ExecutionsQuery>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "executions_read").await {
+        return e;
+    }
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let state_filter = match q.state.as_deref() {
+        Some(filter) => match bot_core::execution::ExecutionState::parse(filter) {
+            Some(st) => Some(st),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown execution state '{filter}'"),
+                )
+                    .into_response()
+            }
+        },
+        None => None,
+    };
+    let ledger = bot_core::execution::ledger();
+    let mut list = if q.open.unwrap_or(false) {
+        ledger.open().await
+    } else {
+        ledger.list(limit).await
+    };
+    if let Some(st) = state_filter {
+        list.retain(|r| r.state == st);
+    }
+    list.truncate(limit);
+    let counts = ledger.counts().await;
+    let counts: serde_json::Map<String, Value> = counts
+        .into_iter()
+        .map(|(k, v)| (k.as_str().to_string(), json!(v)))
+        .collect();
+    Json(json!({
+        "count": list.len(),
+        "states": counts,
+        "executions": list,
+    }))
+    .into_response()
+}
+
+async fn execution_by_id(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "execution_read").await {
+        return e;
+    }
+    let ledger = bot_core::execution::ledger();
+    // Accept either an intent id or a transaction signature.
+    let record = match ledger.get(&id).await {
+        Some(r) => Some(r),
+        None => ledger.get_by_signature(&id).await,
+    };
+    if let Some(record) = record {
+        return Json(record).into_response();
+    }
+    // Fall back to the durable ledger for evicted (old settled) intents.
+    if let Some(db) = &state.db {
+        let repo = bot_core::db::execution::ExecutionRepo::new(db.clone());
+        let found = match repo.get(&id).await {
+            Ok(Some(r)) => Some(r),
+            _ => repo.get_by_signature(&id).await.ok().flatten(),
+        };
+        if let Some(record) = found {
+            let events = repo
+                .events(&record.intent_id, 100)
+                .await
+                .unwrap_or_default();
+            return Json(json!({ "record": record, "events": events })).into_response();
+        }
+    }
+    (StatusCode::NOT_FOUND, format!("execution '{id}' not found")).into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 
@@ -930,6 +1045,512 @@ async fn handle_socket(socket: WebSocket, shared: Shared) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TASK 5 — global risk / accounting
+// ---------------------------------------------------------------------------
+
+/// `GET /api/accounting/portfolio` — the aggregated portfolio view
+/// (exposure / PnL / fees / utilization per venue, wallet, strategy, asset,
+/// module; native per quote asset; missing reference rates).
+async fn accounting_portfolio(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "portfolio_read").await {
+        return e;
+    }
+    let marks = state.shared.marks().await;
+    let view = state.shared.global_risk().portfolio(marks).await;
+    Json(view).into_response()
+}
+
+#[derive(Deserialize)]
+struct LimitQuery {
+    limit: Option<usize>,
+}
+
+/// `GET /api/accounting/events?limit=` — recent ledger events (newest
+/// first), counts by kind and the ids not yet durably journaled.
+async fn accounting_events(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<LimitQuery>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "ledger_read").await {
+        return e;
+    }
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let ledger = state.shared.ledger();
+    let mut events = ledger.events().await;
+    events.reverse();
+    events.truncate(limit);
+    let counts: serde_json::Map<String, Value> = ledger
+        .count_by_kind()
+        .await
+        .into_iter()
+        .map(|(k, n)| (k.as_str().to_string(), json!(n)))
+        .collect();
+    Json(json!({
+        "count": events.len(),
+        "total": ledger.len().await,
+        "by_kind": counts,
+        "pending": ledger.pending().await,
+        "events": events,
+    }))
+    .into_response()
+}
+
+/// Operator-entered financial event. Fills and settlements are NOT
+/// accepted here — they come from the modules that observed them.
+#[derive(Deserialize)]
+struct AccountingEventBody {
+    /// `deposit` | `withdrawal` | `transfer` | `funding_adjustment` | `fee` | `correction`.
+    kind: String,
+    wallet: String,
+    /// Base asset for corrections; the cash asset otherwise (defaults to
+    /// `quote_asset`).
+    asset: Option<String>,
+    quote_asset: String,
+    /// `buy` / `sell` (corrections, negative funding adjustments).
+    side: Option<String>,
+    quantity: Option<f64>,
+    price: Option<f64>,
+    quote_amount: Option<f64>,
+    fee: Option<f64>,
+    /// Unique reference of the fact (bank / exchange reference, ticket id).
+    reference_id: String,
+    /// Finding / ticket the entry answers (required for corrections).
+    correlation_id: Option<String>,
+    position_id: Option<String>,
+    counterparty_wallet: Option<String>,
+    venue: Option<String>,
+    strategy: Option<String>,
+    detail: Option<String>,
+}
+
+/// `POST /api/accounting/events` — book one operator-entered event through
+/// the global ledger (same idempotency, postings, audit as module events).
+async fn accounting_event_post(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<AccountingEventBody>,
+) -> Response {
+    use bot_core::accounting::{AccountingEvent, Applied, EventKind, EventSide};
+    use bot_core::models::Venue;
+    let principal = match require_role(&state, &headers, Role::Operator, "ledger_event").await {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let Some(kind) = EventKind::parse(body.kind.trim()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown event kind '{}'", body.kind),
+        )
+            .into_response();
+    };
+    if matches!(kind, EventKind::Fill | EventKind::Settlement) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "fills and settlements are booked by the module that observed them, not over the API",
+        )
+            .into_response();
+    }
+    let side = match body.side.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(s) => match EventSide::parse(s) {
+            Some(side) => Some(side),
+            None => {
+                return (StatusCode::BAD_REQUEST, format!("unknown side '{s}'")).into_response()
+            }
+        },
+    };
+    let venue = match body.venue.as_deref().map(str::trim) {
+        None | Some("") => Venue::Paper,
+        Some(v) => match Venue::parse(v) {
+            Some(venue) => venue,
+            None => {
+                return (StatusCode::BAD_REQUEST, format!("unknown venue '{v}'")).into_response()
+            }
+        },
+    };
+    let actor = actor_of(Some(&principal));
+    let event = AccountingEvent {
+        kind,
+        module: BotModule::Telegram,
+        venue,
+        wallet: body.wallet.trim().to_string(),
+        strategy: body
+            .strategy
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("operator")
+            .to_string(),
+        asset: body
+            .asset
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(body.quote_asset.trim())
+            .to_string(),
+        quote_asset: body.quote_asset.trim().to_string(),
+        side,
+        quantity: body.quantity.unwrap_or(0.0),
+        price: body.price,
+        quote_amount: body.quote_amount.unwrap_or(0.0),
+        fee: body.fee.unwrap_or(0.0),
+        mode: state.shared.execution_mode().await,
+        reference_id: body.reference_id.trim().to_string(),
+        correlation_id: body.correlation_id.clone(),
+        position_id: body.position_id.clone(),
+        trade_id: None,
+        counterparty_wallet: body.counterparty_wallet.clone(),
+        ts: chrono::Utc::now(),
+        detail: format!(
+            "operator={} {}",
+            actor,
+            body.detail.clone().unwrap_or_default()
+        ),
+    };
+    let event_id = event.event_id();
+    let applied = state.shared.ledger().submit(event).await;
+    let (outcome, status) = match &applied {
+        Applied::New(_) => ("new", StatusCode::OK),
+        Applied::Duplicate => ("duplicate", StatusCode::OK),
+        Applied::Rejected(_) => ("rejected", StatusCode::BAD_REQUEST),
+    };
+    state
+        .audit
+        .record(
+            &actor,
+            "ledger_event",
+            Some(&event_id),
+            if status == StatusCode::OK {
+                AuditOutcome::Success
+            } else {
+                AuditOutcome::Failure
+            },
+            json!({ "kind": kind.as_str(), "outcome": outcome }),
+        )
+        .await;
+    match applied {
+        Applied::New(effect) => Json(json!({
+            "ok": true,
+            "outcome": outcome,
+            "event_id": event_id,
+            "effect": effect,
+        }))
+        .into_response(),
+        Applied::Duplicate => Json(json!({
+            "ok": true,
+            "outcome": outcome,
+            "event_id": event_id,
+        }))
+        .into_response(),
+        Applied::Rejected(reason) => (
+            status,
+            Json(json!({ "ok": false, "outcome": outcome, "reason": reason })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/accounting/findings?limit=` — recent accounting reconciliation
+/// findings (from the journal in use).
+async fn accounting_findings(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<LimitQuery>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "findings_read").await {
+        return e;
+    }
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let store = state.shared.ledger().store().await;
+    match store.recent_findings(limit).await {
+        Some(findings) => {
+            Json(json!({ "count": findings.len(), "findings": findings })).into_response()
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "accounting findings journal unavailable",
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/risk/global` — the global risk configuration in force, the
+/// active venue / strategy kill switches, the portfolio totals and the
+/// most recent decisions.
+async fn risk_global(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<LimitQuery>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "risk_global_read").await {
+        return e;
+    }
+    let engine = state.shared.global_risk();
+    let limit = q.limit.unwrap_or(50).clamp(1, 256);
+    let view = engine.portfolio(state.shared.marks().await).await;
+    Json(json!({
+        "config": engine.config().await,
+        "global_kill_switch": state.shared.kill_switch(),
+        "kill_switches": engine.switches().active(),
+        "portfolio": {
+            "reference_asset": view.reference_asset,
+            "total_exposure_ref": view.total_exposure_ref,
+            "open_positions": view.open_positions,
+            "realized_today_ref": view.realized_today_ref,
+            "drawdown_ref": view.drawdown_ref(),
+            "utilization": view.utilization,
+            "missing_rates": view.missing_rates,
+        },
+        "recent_decisions": engine.recent_decisions(limit).await,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct KillSwitchBody {
+    /// `venue:<venue>` or `strategy:<label>`.
+    scope: String,
+    engaged: bool,
+    reason: Option<String>,
+}
+
+/// `POST /api/risk/kill-switch` — engage or release a venue / strategy
+/// kill switch (durable, audited). Configuration-pinned switches cannot be
+/// released here.
+async fn risk_kill_switch(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<KillSwitchBody>,
+) -> Response {
+    use bot_core::global_risk::{KillScope, SwitchOutcome};
+    let principal = match require_role(&state, &headers, Role::Operator, "kill_switch_scope").await
+    {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let Some(scope) = KillScope::parse(&body.scope) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unknown scope '{}' (use venue:<venue> or strategy:<label>)",
+                body.scope
+            ),
+        )
+            .into_response();
+    };
+    let actor = actor_of(Some(&principal));
+    let reason = body
+        .reason
+        .clone()
+        .unwrap_or_else(|| "api /risk/kill-switch".into());
+    let engine = state.shared.global_risk();
+    let outcome = if body.engaged {
+        engine.engage(scope.clone(), &reason, &actor).await
+    } else {
+        engine.release(scope.clone(), &reason, &actor).await
+    };
+    let (label, ok) = match outcome {
+        SwitchOutcome::Changed => ("changed", true),
+        SwitchOutcome::Unchanged => ("unchanged", true),
+        SwitchOutcome::PinnedByConfig => ("pinned_by_config", false),
+    };
+    state
+        .audit
+        .record(
+            &actor,
+            if body.engaged {
+                "kill_switch_engage"
+            } else {
+                "kill_switch_release"
+            },
+            Some(&scope.as_string()),
+            if ok {
+                AuditOutcome::Success
+            } else {
+                AuditOutcome::Denied
+            },
+            json!({ "outcome": label, "reason": reason }),
+        )
+        .await;
+    let status = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::CONFLICT
+    };
+    (
+        status,
+        Json(json!({
+            "ok": ok,
+            "scope": scope.as_string(),
+            "outcome": label,
+            "active": engine.switches().get(&scope).map(|s| s.is_active()).unwrap_or(false),
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /api/ha` — TASK 6 distributed state: this worker's identity,
+/// generation, state and readiness (with reasons), the roles it holds, the
+/// cluster registry with heartbeat ages, every lease with holder /
+/// generation / expiry, the durable feed cursors with lag, unresolved feed
+/// gaps and the most recent recovery records.
+async fn ha_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<LimitQuery>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "ha_read").await {
+        return e;
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let ha = state.shared.ha();
+    let store = ha.store().await;
+    let now = store.now().await.unwrap_or_else(|_| chrono::Utc::now());
+    let settings = ha.settings().await;
+    let timeout = settings.heartbeat_timeout;
+    let readiness = ha.readiness().await;
+    let registration = ha.registration().await;
+
+    let workers: Vec<Value> = store
+        .workers()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|w| {
+            json!({
+                "worker_id": w.worker_id,
+                "generation": w.generation,
+                "mode": w.mode,
+                "state": w.state.as_str(),
+                "host": w.host,
+                "pid": w.pid,
+                "version": w.version,
+                "detail": w.detail,
+                "last_seen_at": w.last_seen_at,
+                "age_secs": w.age_secs(now),
+                "health": bot_core::ha::WorkerHealth::of(&w, now, timeout).as_str(),
+            })
+        })
+        .collect();
+
+    let leases: Vec<Value> = store
+        .leases()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|l| {
+            json!({
+                "role": l.role.as_string(),
+                "holder": l.holder,
+                "generation": l.generation,
+                "acquired_at": l.acquired_at,
+                "expires_at": l.expires_at,
+                "ttl_secs": l.ttl_secs(now),
+                "takeover_count": l.takeover_count,
+                "previous_holder": l.previous_holder,
+                "released": l.released,
+                "live": l.is_live(now),
+            })
+        })
+        .collect();
+
+    let cursors: Vec<Value> = store
+        .cursors()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| {
+            json!({
+                "key": c.key(),
+                "feed": c.feed.as_str(),
+                "scope": c.scope,
+                "position": c.position,
+                "token": c.token,
+                "lag_secs": c.lag_secs(now),
+                "processed": c.processed_count,
+                "duplicates": c.duplicate_count,
+                "gaps": c.gap_count,
+                "worker_id": c.worker_id,
+                "updated_at": c.updated_at,
+            })
+        })
+        .collect();
+
+    let gaps: Vec<Value> = store
+        .gaps(true, limit)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|g| {
+            json!({
+                "feed": g.feed.as_str(),
+                "scope": g.scope,
+                "from_position": g.from_position,
+                "to_position": g.to_position,
+                "missing": g.len(),
+                "status": g.status.as_str(),
+                "worker_id": g.worker_id,
+                "detected_at": g.detected_at,
+            })
+        })
+        .collect();
+
+    let recovery: Vec<Value> = store
+        .recovery_records(limit)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            json!({
+                "worker_id": r.worker_id,
+                "generation": r.generation,
+                "trigger": r.trigger,
+                "scope": r.scope,
+                "subject": r.subject,
+                "action": r.action.as_str(),
+                "detail": r.detail,
+                "ts": r.ts,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "worker": {
+            "worker_id": ha.worker_id(),
+            "generation": ha.generation().await,
+            "state": ha.state().await.as_str(),
+            "mode": settings.mode.as_str(),
+            "backend": store.backend(),
+            "draining": ha.is_draining(),
+            "recovery_complete": ha.recovery_complete().await,
+            "registered": registration.is_some(),
+            "held_roles": ha.held_roles().await,
+            "required_roles": settings
+                .required_roles
+                .iter()
+                .map(|r| r.as_string())
+                .collect::<Vec<_>>(),
+        },
+        "readiness": {
+            "ready": readiness.ready,
+            "detail": readiness.detail(),
+            "reasons": readiness
+                .reasons
+                .iter()
+                .map(|r| json!({ "kind": r.as_str(), "detail": r.to_string() }))
+                .collect::<Vec<_>>(),
+        },
+        "workers": workers,
+        "leases": leases,
+        "cursors": cursors,
+        "unresolved_gaps": gaps,
+        "recent_recovery": recovery,
+    }))
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -954,6 +1575,7 @@ mod tests {
             serve_dashboard: false,
             health: Arc::new(HealthRegistry::new()),
             metrics_enabled,
+            saas: crate::saas::SaasStore::shared(),
         }
     }
 
@@ -1418,6 +2040,178 @@ mod tests {
             request(app, "GET", "/api/wallets", &[("x-api-key", &owner)], None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"available\":false"), "{body}");
+    }
+
+    // ------------------------------------------------------------------
+    // TASK 5 — global risk / accounting routes
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn accounting_routes_expose_portfolio_events_and_findings() {
+        let (state, _owner, op, ro) = rbac_state().await;
+        let app = router(state.clone());
+        // Portfolio starts empty and is readable by any role.
+        let (status, _, body) = get(
+            app.clone(),
+            "/api/accounting/portfolio",
+            &[("x-api-key", &ro)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"open_positions\":0"), "{body}");
+        assert!(body.contains("\"reference_asset\":\"USD\""), "{body}");
+        // Read-only keys cannot book operator events.
+        let deposit = json!({
+            "kind": "deposit", "wallet": "treasury", "quote_asset": "USDC",
+            "quote_amount": 250.0, "reference_id": "bank-ref-1"
+        });
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/events",
+            &[("x-api-key", &ro)],
+            Some(deposit.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // An operator can; the same reference twice is a duplicate, not a
+        // second booking.
+        let (status, _, body) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/events",
+            &[("x-api-key", &op)],
+            Some(deposit.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"outcome\":\"new\""), "{body}");
+        let (status, _, body) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/events",
+            &[("x-api-key", &op)],
+            Some(deposit),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"outcome\":\"duplicate\""), "{body}");
+        assert_eq!(state.shared.ledger().len().await, 1);
+        // Fills are never accepted over the API; malformed events are 400.
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/events",
+            &[("x-api-key", &op)],
+            Some(json!({
+                "kind": "fill", "wallet": "w", "quote_asset": "SOL",
+                "quote_amount": 1.0, "reference_id": "x"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/events",
+            &[("x-api-key", &op)],
+            Some(json!({
+                "kind": "correction", "wallet": "w", "quote_asset": "SOL",
+                "quantity": 1.0, "side": "buy", "reference_id": "fix-1"
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "correction without correlation"
+        );
+        // Events and findings are readable.
+        let (status, _, body) = get(
+            app.clone(),
+            "/api/accounting/events?limit=5",
+            &[("x-api-key", &ro)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"total\":1"), "{body}");
+        assert!(body.contains("\"deposit\":1"), "{body}");
+        let (status, _, body) = get(app, "/api/accounting/findings", &[("x-api-key", &ro)]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"count\":0"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn kill_switch_scopes_are_operator_actions_and_audited() {
+        let (state, _owner, op, ro) = rbac_state().await;
+        let app = router(state.clone());
+        let body = json!({ "scope": "venue:polymarket", "engaged": true, "reason": "incident" });
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/risk/kill-switch",
+            &[("x-api-key", &ro)],
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, text) = request(
+            app.clone(),
+            "POST",
+            "/api/risk/kill-switch",
+            &[("x-api-key", &op)],
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(text.contains("\"outcome\":\"changed\""), "{text}");
+        assert!(state
+            .shared
+            .global_risk()
+            .switches()
+            .venue_killed(bot_core::models::Venue::PolymarketClob)
+            .is_some());
+        // Visible on the read route; unknown scopes are 400.
+        let (status, _, text) = get(app.clone(), "/api/risk/global", &[("x-api-key", &ro)]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            text.contains("venue:polymarket") || text.contains("\"scope\":\"venue\""),
+            "{text}"
+        );
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/risk/kill-switch",
+            &[("x-api-key", &op)],
+            Some(json!({ "scope": "exchange:nowhere", "engaged": true })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Release.
+        let (status, _, text) = request(
+            app.clone(),
+            "POST",
+            "/api/risk/kill-switch",
+            &[("x-api-key", &op)],
+            Some(json!({ "scope": "venue:polymarket", "engaged": false })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(state
+            .shared
+            .global_risk()
+            .switches()
+            .venue_killed(bot_core::models::Venue::PolymarketClob)
+            .is_none());
+        let audit = state.audit.recent(20).await;
+        assert!(
+            audit.iter().any(|r| r.action == "kill_switch_engage"),
+            "{audit:?}"
+        );
+        assert!(
+            audit.iter().any(|r| r.action == "kill_switch_release"),
+            "{audit:?}"
+        );
     }
 
     #[tokio::test]

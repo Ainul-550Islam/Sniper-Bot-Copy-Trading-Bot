@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// The five modules described in the product spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
+#[derive(Default, PartialOrd, Ord)]
 pub enum BotModule {
     /// Module 1 — new-launch sniper (Pump.fun bonding curve + Raydium).
     #[default]
@@ -97,7 +97,7 @@ impl fmt::Display for Chain {
 /// Where an order actually goes. `Paper` is the default and the safe mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
+#[derive(Default, PartialOrd, Ord)]
 pub enum ExecutionMode {
     /// Build and log the order, fill it against a local model. No network writes.
     #[default]
@@ -145,7 +145,7 @@ impl FromStr for ExecutionMode {
 }
 
 /// Execution venue for a trade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Venue {
     /// Pump.fun bonding curve (pre-graduation).

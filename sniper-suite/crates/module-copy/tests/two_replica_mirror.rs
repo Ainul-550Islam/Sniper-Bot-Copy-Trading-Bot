@@ -71,6 +71,9 @@ async fn build_ctx(replica: &str) -> Option<Ctx> {
         buys_only: false,
         slippage_pct: None,
         max_staleness_secs: 0,
+        paused: false,
+        max_exposure_sol: 0.0,
+        max_open_positions: 0,
     }];
     // Dead port with no retries/fallbacks: the winner's curve load fails
     // fast and deterministically once it is past the claim gate.

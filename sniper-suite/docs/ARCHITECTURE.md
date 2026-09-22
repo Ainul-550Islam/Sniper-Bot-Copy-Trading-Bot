@@ -33,9 +33,9 @@ timelock and two-step admin transfer.
 |---|---|
 | `bot-core` | config (deny-unknown-keys, env overrides), models, error, event bus, risk engine, OMS (idempotent, DB-backed), dedup (L1 bounded set + L2 postgres/redis), auth (sha256 keys, roles, rate limit), audit (hash-chained), lifecycle (orderly shutdown phases), recovery (startup restore), storage (JSONL journal), db (sqlx, all ops timed), redis_kv |
 | `solana-kit` | nonblocking RPC wrapper, tx build/sign/send/confirm, signer abstraction + registry (`signer.rs`), block+geyser feed plumbing, pump.fun/raydium account decoders |
-| `module-sniper` | pump.fun launch detection → snipe buys → exit strategies (TP/SL/trailing/time) |
-| `module-copy` | tracked-wallet mirroring (fixed or fractional sizing, staleness guards) |
-| `module-polymarket` | CLOB v2 (EIP-712 orders, neg-risk), Gamma market data, paper fills |
+| `module-sniper` | launch detection (pump.fun / PumpSwap / Raydium AMM v4) → staged entry pipeline (safety gates, slippage engine, exposure) → exit strategies (TP/SL/trailing/time); `docs/SNIPER-ENGINE.md` |
+| `module-copy` | tracked-wallet mirroring through a staged, deterministic pipeline (leader lifecycle, dedup, ordering, policy, sizing, intents, reconciliation, recovery); `docs/COPY-TRADING-ENGINE.md` |
+| `module-polymarket` | CLOB v2 (EIP-712 orders, neg-risk), Gamma market data; staged order pipeline with one risk decision, live order lifecycle (status poll + user websocket + cancel/TTL/reprice), local-vs-venue reconciliation, journaled restart recovery; paper fills by default; `docs/POLYMARKET-ENGINE.md` |
 | `module-telegram` | remote control bot with roles (owner/operator/readonly) |
 | `sniper-suite` (server) | orchestration, Axum API + dashboard, persistence pumps, reconciliation, observability, WS event feed |
 | `programs/staking-suite` | native Solana staking program (see docs/STAKING.md) |

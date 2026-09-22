@@ -114,7 +114,7 @@ recovery should bring positions/orders back without manual SQL.
 | Postgres | startup: continues if not `required` (journal-only mode); runtime: persistence pump queues/backs off, DB-backed API routes report `{"available":false}`, dedup falls back to L1 + degraded metric |
 | Redis | dedup L2 → L1 verdicts (metric records degradation); rate limiter unaffected (in-process) |
 | RPC/WS feed | module marked unhealthy, consecutive-error counter climbs, retries with backoff; no trades are placed on stale data (staleness guards) |
-| Polymarket (CLOB/Gamma/WS) | order flow fails closed (nothing broadcasts on venue/auth errors); an ambiguous submit hands the claim off with grace so no second replica resubmits; reconciliation polls CLOB order status as a truth source; sustained failures trip `max_consecutive_failures` → module auto-disabled with a fatal error event |
+| Polymarket (CLOB/Gamma/WS) | order flow fails closed (nothing broadcasts on venue/auth errors); an ambiguous submit is journaled before the POST, held as `AMBIGUOUS` and handed off with grace so no second replica resubmits; resting orders keep being polled (`order_poll_interval_secs`) when the user websocket is down and are cancelled on shutdown (`cancel_on_shutdown`); reconciliation polls CLOB order status as a truth source and the module's own sweep (`reconcile_interval_secs`) reports/cancels orphans; sustained failures trip `max_consecutive_failures` → module auto-disabled with a fatal error event. Runbook: `docs/POLYMARKET-OPERATIONS.md` |
 | Telegram | alerts queue/drop per config; trading unaffected |
 
 ## Upgrades & rollbacks

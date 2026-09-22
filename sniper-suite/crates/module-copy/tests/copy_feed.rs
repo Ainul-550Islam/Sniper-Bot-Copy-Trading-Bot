@@ -4,6 +4,11 @@
 //! subscribes to `subscribeAccountTrade` for the tracked wallets, and maps
 //! wire trades into [`WalletTrade`] values (side + venue inference included).
 //! Offline and deterministic.
+//!
+//! TASK 3: also proves the authoritative single-mark dedup contract for
+//! PumpPortal deliveries — the feed does not pre-mark anything, the
+//! pipeline's `copy_event` mark decides each trade exactly once, and a
+//! buy and a sell of the same mint are distinct events.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -22,6 +27,8 @@ use solana_kit::rpc::Rpc;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 
+use module_copy::event::{EventSource, LeaderTradeEvent};
+use module_copy::event_dedup::{self, DedupOutcome};
 use module_copy::feeds::CopyFeed;
 
 async fn spawn_mock(script: Vec<String>) -> (SocketAddr, Arc<Mutex<Vec<Value>>>) {
@@ -119,6 +126,9 @@ async fn copy_feed_subscribes_tracked_wallets_and_maps_trades() {
         buys_only: false,
         max_staleness_secs: 300,
         slippage_pct: Some(15.0),
+        paused: false,
+        max_exposure_sol: 0.0,
+        max_open_positions: 0,
     }];
     // The copy feed reuses the sniper PumpPortal URL setting.
     cfg.sniper.pumpportal_ws_url = format!("ws://{addr}/");
@@ -166,6 +176,24 @@ async fn copy_feed_subscribes_tracked_wallets_and_maps_trades() {
         .expect("channel closed");
     assert!(matches!(t2.side, PositionSide::Short), "sell => Short");
     assert!(matches!(t2.venue, Venue::PumpSwap), "pump-amm => PumpSwap");
+
+    // Authoritative single-mark dedup: the PumpPortal feed pre-marks nothing
+    // (`sig` namespace untouched), the pipeline's `copy_event` mark is fresh
+    // exactly once per event, and the buy / sell are distinct events.
+    assert!(
+        state.mark_signature_seen(&t1.signature).await,
+        "the pumpportal feed does not mark the sig namespace"
+    );
+    let e1 = LeaderTradeEvent::from_wallet_trade(&t1, EventSource::PumpPortal, 1);
+    let e2 = LeaderTradeEvent::from_wallet_trade(&t2, EventSource::PumpPortal, 2);
+    assert_ne!(e1.event_id, e2.event_id);
+    assert_eq!(event_dedup::claim(&state, &e1).await, DedupOutcome::Fresh);
+    assert_eq!(
+        event_dedup::claim(&state, &e1).await,
+        DedupOutcome::Duplicate
+    );
+    assert_eq!(event_dedup::claim(&state, &e2).await, DedupOutcome::Fresh);
+    assert_eq!(state.seen_copy_event_count().await, 2);
 
     // Side effect: the feed heartbeats the copy module (readiness probe data).
     let status = state.module_status(BotModule::Copy).await;

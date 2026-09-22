@@ -640,12 +640,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "bincode",
  "bs58",
  "chrono",
  "dotenvy",
  "futures",
  "hex",
+ "hmac 0.12.1",
  "once_cell",
  "rand 0.8.8",
  "redis",
@@ -2602,11 +2604,14 @@ dependencies = [
 name = "module-copy"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "bincode",
  "bot-core",
+ "bs58",
  "chrono",
  "futures-util",
+ "module-sniper",
  "serde",
  "serde_json",
  "solana-kit",
@@ -2623,6 +2628,7 @@ name = "module-polymarket"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bincode",
@@ -2654,9 +2660,11 @@ name = "module-sniper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "bincode",
  "bot-core",
+ "bs58",
  "chrono",
  "futures",
  "futures-util",
@@ -4045,6 +4053,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -7696,6 +7705,7 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
