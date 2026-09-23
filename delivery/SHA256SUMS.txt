@@ -1,1 +1,0 @@
-ca00a02b1689cf6ba5bfd3158f612313a81f51090e03b40c1f80c3fbfb8e6c5f  sniper-suite-0.1.0-src.tar.gz
