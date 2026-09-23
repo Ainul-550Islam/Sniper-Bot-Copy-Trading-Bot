@@ -12,7 +12,8 @@
 //!
 //! Authorization rules do NOT live here. Roles and permissions are
 //! [`crate::membership`]; the combined decision (tenant + role + permission
-//! + entitlement) is [`crate::authorization`]. This module answers only
+//! + entitlement) is [`crate::authorization`]. This module answers only:
+//!
 //! "who owns it" and "is the tenant itself allowed to act".
 //!
 //! # Not a source of truth for trading

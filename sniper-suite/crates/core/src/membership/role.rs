@@ -309,7 +309,10 @@ mod tests {
         for p in v.permissions() {
             assert!(p.is_read_only(), "viewer must not hold {p}");
         }
-        assert!(!v.grants(Permission::AuditRead), "audit is not a plain read");
+        assert!(
+            !v.grants(Permission::AuditRead),
+            "audit is not a plain read"
+        );
         assert!(!v.grants(Permission::BillingRead));
     }
 
@@ -328,9 +331,7 @@ mod tests {
         for r in MembershipRole::ALL {
             let expected = matches!(
                 r,
-                MembershipRole::PlatformAdmin
-                    | MembershipRole::OrgOwner
-                    | MembershipRole::OrgAdmin
+                MembershipRole::PlatformAdmin | MembershipRole::OrgOwner | MembershipRole::OrgAdmin
             );
             assert_eq!(r.grants(Permission::TenantUpdate), expected, "{r}");
         }
@@ -371,8 +372,17 @@ mod tests {
                 assert_eq!(r.to_legacy(), L::Readonly, "{r}");
             }
         }
-        assert_eq!(MembershipRole::from_legacy(L::Owner), MembershipRole::OrgOwner);
-        assert_eq!(MembershipRole::from_legacy(L::Operator), MembershipRole::Trader);
-        assert_eq!(MembershipRole::from_legacy(L::Readonly), MembershipRole::Viewer);
+        assert_eq!(
+            MembershipRole::from_legacy(L::Owner),
+            MembershipRole::OrgOwner
+        );
+        assert_eq!(
+            MembershipRole::from_legacy(L::Operator),
+            MembershipRole::Trader
+        );
+        assert_eq!(
+            MembershipRole::from_legacy(L::Readonly),
+            MembershipRole::Viewer
+        );
     }
 }

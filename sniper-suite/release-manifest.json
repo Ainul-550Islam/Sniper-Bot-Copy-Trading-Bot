@@ -23,12 +23,28 @@
       "programs/staking-suite (native Solana program, own lockfile, built with cargo build-sbf / agave 2.1.21)"
     ],
     "database_migrations": {
-      "count": 16,
-      "high_water_mark": "0016",
+      "count": 18,
+      "high_water_mark": "0018",
       "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)"
     },
     "api_endpoints_documented": 35,
-    "docs_count": 63
+    "docs_count": 66,
+    "web_apps": [
+      {
+        "name": "apps/control-plane",
+        "description": "SaaS tenant console (Next.js 15 App Router): auth, tenant switching (own organizations only), wallets, team, audit, billing, usage, settings; session token in tab memory only",
+        "gates": "npm run typecheck && npm run build (strict TS + noUncheckedIndexedAccess)"
+      }
+    ],
+    "saas_modules_7b": [
+      "crates/server/src/saas/provider.rs (provider-neutral billing adapter boundary)",
+      "crates/server/src/saas/billing_webhook.rs (verified, idempotent provider webhooks)",
+      "crates/server/src/saas/openapi.rs (GET /api/saas/openapi.json contract)",
+      "crates/server/src/saas/wallet_access.rs (tenant\u2192wallet\u2192strategy authorization boundary)",
+      "crates/server/src/saas/export.rs (deterministic tenant-scoped exports)",
+      "crates/server/src/security/headers.rs (CSP/XCTO/referrer/frame/permissions/HSTS)",
+      "crates/server/src/security/websocket.rs (authenticated tenant-scoped event stream)"
+    ]
   },
   "toolchain": {
     "rust": "1.98.1",
@@ -42,8 +58,8 @@
     "solana_cli": "solana-cli 2.1.21 (src:8a085eeb; feat:1416569292) \u2014 official anza-xyz/agave release tarball, SHA-256 5da3359e296f1e6c13522b874317cb4cfe33e73301a9dc60b1e1435cc133b397"
   },
   "test_counts": {
-    "workspace_total": 1026,
-    "workspace_total_run": "global-risk-accounting pass 2026-09-21 (TASK 5): cargo test --workspace -j 2 -- --test-threads=1 \u2192 1026 passed / 0 failed / 1 ignored (replay fixture generator) across 50 test binaries, hermetic sandbox (no PostgreSQL / Redis / network: the gated suites executed in their self-skipping mode; module suites against in-process mocks)",
+    "workspace_total": 1153,
+    "workspace_total_run": "TASK 7A conformance pass 2026-09-22: CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace -j 2 -- --test-threads=1 with PostgreSQL 17.11 live -> 1153 passed / 0 failed / 1 ignored (opt-in replay fixture generator) across 51 test binaries; db_integration 26/26, two_replica_mirror, both durable SaaS tests and the A-L SaaS suite executed against PostgreSQL; Redis-dependent and explicitly live-network/broadcast gates self-skipped as designed. Adds: unit-level SaaS/TASK-5 and SaaS/TASK-6 boundary proofs in bot_core::authorization, and durable API-key restart/revocation/expiry assertions in the SaasStore restart test.",
     "workspace_total_at_polymarket_layout_pass_2026-09-21": 901,
     "workspace_total_run_at_polymarket_layout_pass": "polymarket-engine module-layout pass 2026-09-21 (TASK 4 structure aligned with TASK 1-3; no behaviour change): cargo test --workspace -j 2 -- --test-threads=1 \u2192 901 passed / 0 failed / 1 ignored (replay fixture generator) across 48 test binaries, hermetic sandbox (no PostgreSQL / Redis / network: the gated suites executed in their self-skipping mode; the Polymarket suites run against an in-process mock CLOB / Gamma / RPC / user websocket)",
     "workspace_total_at_polymarket_completeness_pass_2026-09-21": 895,
@@ -83,7 +99,8 @@
       "detect_feed": 1,
       "geyser_detect": 2,
       "total_passed": 126
-    }
+    },
+    "workspace_total_at_saas_durability_pass_2026_09_22": 1028
   },
   "verification_status": {
     "verified_final_pass": [
@@ -109,7 +126,11 @@
       "GLOBAL-RISK-ACCOUNTING PASS 2026-09-21 (TASK 5, Rust 1.98.1, hermetic sandbox): one global risk decision (GlobalRiskEngine, step 2b of RiskEngine::check_entry: process / venue / strategy kill switches, reference-rate presence, open-position, order-notional, portfolio / wallet / venue / strategy / asset exposure, daily loss, drawdown; 14 deterministic reasons, journaled snapshots) + the global double-entry ledger (typed AccountingEvents from every sniper / copy / Polymarket fill site, ONE deterministic event id, balanced postings, PositionBook aggregation, PortfolioView, 8-kind accounting reconciliation that never repairs, replay-safe recovery) + migration 0015 (7 additive tables) + 5 API routes; cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -j 2 -- --test-threads=1 \u2192 962 passed / 0 failed / 1 ignored across 49 binaries (bot-core 209 unit + global_risk_accounting 18 + db_integration 26 gated, server 36, module suites unchanged plus ledger assertions); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree (297 tracked files, 15 migrations, 60 docs); the PostgreSQL repository round-trip is gated on POSTGRES_URL and was NOT executed in the sandbox; no live venue, funded wallet, database or price feed used \u2014 not a claim of safety or profitability",
       "GLOBAL-RISK-ACCOUNTING COMPLETENESS PASS 2026-09-22 (TASK 5 file-by-file audit): every declared module, every spec item and every config key re-checked against the tree; ONE gap found and closed \u2014 accounting reconciliation now compares all FOUR record layers required by \u00a75 (OMS orders \u2192 module trades/fills \u2192 ledger events \u2192 positions): ReconInputs gained `orders`, a filled / partially-filled OMS order that no ledger event references is reported (unresolved_financial_event, or missing_ledger_entry when its trade is also unbooked), intent-only order states are never reported, a ledger event explained only by its order is no longer an orphan, findings carry `order_id` (migration 0015 column, repository + API), server feeds the last 5,000 orders per pass; 4 new tests (3 unit + `the_order_layer_is_reconciled_against_the_ledger` against a real OrderManager) + a PostgreSQL order_id round-trip assertion; fmt/clippy clean; cargo test --workspace \u2192 966 passed / 0 failed / 1 ignored across 49 binaries; verify-delivery 7 PASS / 0 FAIL (297 files, 15 migrations, 60 docs); bundle tree repaired (4 dot-directory files the snapshot cycle had dropped from the expanded copy; the tarball was always complete)",
       "HA-DISTRIBUTED-RELIABILITY PASS 2026-09-22 (TASK 6, Rust 1.98.1, hermetic sandbox): worker identity + registration + heartbeat with per-life generations and a 9-state machine; SINGLETON role leases (reconciliation, recovery, accounting_maintenance, state_sync, feed:<name>) with strictly increasing fencing generations, one-statement atomic acquisition, CAS renew/release/verify and deterministic FenceError (fenced / expired / store_unavailable); durable feed cursors with duplicate suppression, gap detection that is never silently skipped and deliberate replay; the pure crash-boundary x order-recovery matrix (12 boundaries, 5 local x 7 venue evidence pairs, exactly one action each, NO action that resubmits); restart rebuild of ledger / positions / risk state through the TASK 5 idempotent path; failover reconciliation that reports and never repairs; readiness that is never true without state + recovery + required leases (re-verified against the store) + healthy dependencies; graceful shutdown that persists cursors and releases leases; migration 0016 (7 additive tables) + HaRepo + DbHaStore + LeasedWorker + GET /api/ha; fmt clean; clippy --workspace --all-targets -D warnings clean; cargo test --workspace -j 2 -- --test-threads=1 \u2192 1025 passed / 0 failed / 1 ignored across 50 binaries (bot-core 253 unit + ha_distributed 17 + global_risk_accounting 19 + db_integration 26 gated, server 37); scripts/verify-delivery.sh 7 PASS / 0 FAIL (313 tracked files, 16 migrations, 63 docs); the PostgreSQL HaStore path is gated on POSTGRES_URL and was NOT executed in the sandbox; no live venue, funded wallet, database or multi-host cluster used \u2014 not a claim of safety, profitability or institutional production readiness",
-      "HA-DISTRIBUTED COMPLETENESS PASS 2026-09-22 (TASK 6 integration audit): two integration gaps found and closed \u2014 (1) the cluster-singleton jobs still ran unleased on every replica, so the venue/chain reconciliation sweep, the hourly retention housekeeping and the periodic position re-verification now run as fenced LeasedWorkers under the reconciliation / recovery / state_sync leases (4 leased singletons in total with accounting_maintenance); (2) the durable feed cursors existed but no feed used them, so module-copy's poll loop now resumes each leader wallet from its durable signature instead of re-seeding with \"newest signature now\" (which silently skipped every trade that happened while the process was down) and module-polymarket's authenticated user channel now continues its delivery numbering across process lives and records skipped deliveries as gaps; the three remaining unleased loops (recon-backlog snapshot, runtime-flag sync, position-book sync) are per-worker local views by design; 1 new integration test (feed_wiring_shapes_survive_a_restart); fmt/clippy clean; cargo test --workspace \u2192 1026 passed / 0 failed / 1 ignored across 50 binaries; verify-delivery 7 PASS / 0 FAIL (313 files, 16 migrations, 63 docs); bundle tree repaired again (the same 4 dot-directory files the snapshot cycle drops from expanded copies; the tarball was always complete)"
+      "HA-DISTRIBUTED COMPLETENESS PASS 2026-09-22 (TASK 6 integration audit): two integration gaps found and closed \u2014 (1) the cluster-singleton jobs still ran unleased on every replica, so the venue/chain reconciliation sweep, the hourly retention housekeeping and the periodic position re-verification now run as fenced LeasedWorkers under the reconciliation / recovery / state_sync leases (4 leased singletons in total with accounting_maintenance); (2) the durable feed cursors existed but no feed used them, so module-copy's poll loop now resumes each leader wallet from its durable signature instead of re-seeding with \"newest signature now\" (which silently skipped every trade that happened while the process was down) and module-polymarket's authenticated user channel now continues its delivery numbering across process lives and records skipped deliveries as gaps; the three remaining unleased loops (recon-backlog snapshot, runtime-flag sync, position-book sync) are per-worker local views by design; 1 new integration test (feed_wiring_shapes_survive_a_restart); fmt/clippy clean; cargo test --workspace \u2192 1026 passed / 0 failed / 1 ignored across 50 binaries; verify-delivery 7 PASS / 0 FAIL (313 files, 16 migrations, 63 docs); bundle tree repaired again (the same 4 dot-directory files the snapshot cycle drops from expanded copies; the tarball was always complete)",
+      "TASK-7A COMPLETENESS PASS 2026-09-22: restored 6 omitted delivery/audit documents; fixed deployment-organization bootstrap, platform-admin cross-tenant context resolution, API-key permission-subset validation (no size-only privilege comparison), unknown scope/empty label refusal, migration gate 0001-0017, script executable bits, formatting and clippy defects; cargo fmt clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test -p bot-core -p sniper-suite -> 492 passed / 0 failed; verify-delivery 7 PASS / 0 FAIL (63 docs, 17 migrations). Full all-crate test linking was attempted but the 25 GB sandbox filled; the directly changed core/server surface passed completely. PostgreSQL-backed SaaS persistence remains outside the current in-memory TASK-7A server adapter.",
+      "SAAS-DURABILITY PASS 2026-09-22: migration 0018 and the PostgreSQL runtime-record repository make users, organizations, memberships, sessions/revocations, tenant API keys, plans, subscriptions, entitlements, usage idempotency and provisioning jobs restart-safe and replica-visible; subscription plus entitlement replacement is atomic; production startup uses PostgreSQL-authoritative reads while no-database tests retain memory mode; fmt, server check, server all-target Clippy -D warnings and 49 server tests pass; PostgreSQL 17.11 executed the all-record restart/two-replica test, restart-safe plan seeding/atomic entitlement test, and all 26 core database integration tests; release metadata advances to 18 migrations.",
+      "FILE-BY-FILE INTEGRITY PASS 2026-09-22: the canonical tree was re-inventoried file by file \u2014 342 files, 18 contiguous migrations 0001-0018, 63 docs; every Rust mod / #[path] / include_str! / include_bytes! declaration resolves (209 .rs files, zero missing module files; the three tests/common/mod.rs harnesses are declared by their integration tests), all 7 workspace members exist, no TODO/FIXME/todo!/unimplemented!/placeholder markers in code or config, no empty files, all release scripts executable; completion and limitation documentation re-synchronised with current evidence (docs/TESTING.md, docs/EVIDENCE-INDEX.md, docs/BUYER-DUE-DILIGENCE.md, docs/FINAL-KNOWN-LIMITATIONS.md, docs/REPOSITORY-MAP.md, docs/DELIVERY-MANIFEST.md) so historical counts are dated and the current state is recorded where a reader looks first; fmt --check / cargo check / clippy --workspace --all-targets -D warnings / verify-delivery 7 PASS / 0 FAIL re-run; workspace test evidence stands at 1028 passed / 0 failed / 1 ignored with PostgreSQL 17.11 (SaaS durability pass, same day); no live venue, funded wallet, or production database used \u2014 not a claim of safety or profitability",
+      "TASK-7A SPEC CONFORMANCE PASS 2026-09-22: all 25 phase files re-checked one by one (migration 0017 12 tables hash-only, tenant/membership/session/billing/provisioning/authorization modules, server saas boundary; 8 roles, 22+1 permissions, 8 decisions, 7 provisioning states, 4 plan tiers) plus the A-L matrix in crates/core/tests/saas_control_plane.rs (19 tests); TWO new unit-level boundary proofs in bot_core::authorization (SaaS ALLOW cannot move the TASK 5 global-risk verdict; no authorization decision can renew/verify/release a TASK 6 lease it does not hold and stale generations stay fenced) and the durable store restart test extended with API-key restart/revocation/expiry assertions executed against real PostgreSQL 17.11; fmt --check / clippy --workspace --all-targets -D warnings clean; full workspace 1153 passed / 0 failed / 1 ignored across 51 binaries with PostgreSQL live; server 49/49; verify-delivery re-run on the clean tree; no live venue, funded wallet or production database used - not a claim of safety or profitability"
     ],
     "previously_verified_identical_source": [
       "recon_crash_e2e against a local solana-test-validator",
@@ -146,5 +167,15 @@
     "determinism": "rebuild after `touch src/lib.rs` with freshly installed platform-tools \u2192 identical SHA-256 (bit-for-bit on same toolchain/OS; cross-OS reproducibility NOT claimed)",
     "program_id": "3vEEMMFmdA88n8ApgZ3b9L3BXEh75yCeMbHbmUjR9mfy \u2014 PRE-DEPLOYMENT PLACEHOLDER (no keypair exists for it). Final identity is an operator action: solana-keygen new \u2192 scripts/staking-identity.sh set-id <kp> \u2192 deploy. scripts/staking-identity.sh verify/deploy refuse mismatches and refuse deploying the placeholder to public clusters.",
     "superseded_artifacts": "the freeze-era 5,440-byte .so and the pre-fix 9e113678\u2026 .so are superseded and MUST NOT be deployed"
+  },
+  "verification": {
+    "last_full_suite": {
+      "command": "POSTGRES_URL=\u2026 cargo test --workspace -j 2 -- --test-threads=1",
+      "postgres": "17.11",
+      "binaries": 51,
+      "passed": 1183,
+      "failed": 0,
+      "ignored": 1
+    }
   }
 }

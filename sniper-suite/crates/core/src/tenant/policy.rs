@@ -126,9 +126,7 @@ impl TenantDenyReason {
             TenantDenyReason::PastDue => {
                 "the subscription is past due; reading and reducing risk stay available"
             }
-            TenantDenyReason::CrossTenant => {
-                "the resource belongs to a different organization"
-            }
+            TenantDenyReason::CrossTenant => "the resource belongs to a different organization",
         }
     }
 }
@@ -204,10 +202,7 @@ pub fn check(org: &Organization, action: TenantAction) -> TenantVerdict {
 /// This is the rule that makes two organizations with identical-looking
 /// resource ids unable to read each other: the comparison is on the tenant
 /// id, never on the resource id.
-pub fn check_ownership(
-    acting: OrganizationId,
-    resource_owner: OrganizationId,
-) -> TenantVerdict {
+pub fn check_ownership(acting: OrganizationId, resource_owner: OrganizationId) -> TenantVerdict {
     if acting == resource_owner {
         TenantVerdict::Allow
     } else {

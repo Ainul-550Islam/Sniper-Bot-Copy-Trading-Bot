@@ -117,11 +117,11 @@ impl std::fmt::Display for SessionRejection {
 ///
 /// Pure: the caller does the I/O, this decides. Returning the record on
 /// success keeps the "check then use" pattern from drifting apart.
-pub fn validate<'a>(
-    session: Option<&'a SessionRecord>,
+pub fn validate(
+    session: Option<&SessionRecord>,
     required_tenant: Option<OrganizationId>,
     now: DateTime<Utc>,
-) -> Result<&'a SessionRecord, SessionRejection> {
+) -> Result<&SessionRecord, SessionRejection> {
     let Some(s) = session else {
         return Err(SessionRejection::Unknown);
     };
@@ -145,7 +145,14 @@ mod tests {
 
     fn session(now: DateTime<Utc>, org: Option<OrganizationId>) -> SessionRecord {
         let t = generate_token("ses");
-        SessionRecord::new(UserId::new(), org, t.hash, t.prefix, Duration::hours(1), now)
+        SessionRecord::new(
+            UserId::new(),
+            org,
+            t.hash,
+            t.prefix,
+            Duration::hours(1),
+            now,
+        )
     }
 
     #[test]

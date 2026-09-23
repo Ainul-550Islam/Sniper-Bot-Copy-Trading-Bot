@@ -78,15 +78,20 @@ step "toolchain pin consistency (rust-toolchain == Dockerfile == CI program job)
 
 # ------------------------------------------------------------ migrations ---
 migration_check() {
-    local files prev n
-    files="$(ls crates/core/migrations/*.sql | xargs -n1 basename | sort)"
-    prev=0
+    local files expected n decimal
+    files="$(find crates/core/migrations -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort)"
+    expected=1
     while read -r f; do
         n="${f%%_*}"
-        [ "$n" -gt "$prev" ] 2>/dev/null || { echo "non-monotonic migration: $f (after $prev)"; return 1; }
-        prev="$n"
+        decimal=$((10#$n))
+        [ "$decimal" -eq "$expected" ] || {
+            printf 'migration gap/duplicate: expected %04d, found %s\n' "$expected" "$f"
+            return 1
+        }
+        expected=$((expected + 1))
     done <<< "$files"
-    echo "$(echo "$files" | wc -l) migrations, monotonic 0001..$(printf '%04d' "$prev")"
+    [ "$expected" -gt 1 ] || { echo "no migrations found"; return 1; }
+    printf '%d migrations, contiguous 0001..%04d\n' "$((expected - 1))" "$((expected - 1))"
 }
 step "migrations monotonic + uniquely versioned" migration_check
 

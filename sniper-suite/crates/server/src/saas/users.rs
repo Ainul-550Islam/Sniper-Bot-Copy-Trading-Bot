@@ -46,7 +46,9 @@ pub fn valid_email(email: &str) -> bool {
     }
     match e.split_once('@') {
         Some((local, domain)) => {
-            !local.is_empty() && domain.contains('.') && !domain.starts_with('.')
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
                 && !domain.ends_with('.')
         }
         None => false,
@@ -152,11 +154,17 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
     let mut organization_id = None;
     if let Some(slug) = body.organization.as_deref() {
         let Some(org) = state.saas.organization_by_slug(slug).await else {
-            return (StatusCode::FORBIDDEN, Json(json!({ "error": "no_membership" })))
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "no_membership" })),
+            )
                 .into_response();
         };
         if state.saas.membership(org.id, user.id).await.is_none() {
-            return (StatusCode::FORBIDDEN, Json(json!({ "error": "no_membership" })))
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "no_membership" })),
+            )
                 .into_response();
         }
         organization_id = Some(org.id);
@@ -414,7 +422,10 @@ mod tests {
         assert!(!u.password_hash.contains("correct"));
         assert!(verify_password("correct horse battery", &u.password_hash));
         assert!(!u.email_verified);
-        assert!(!u.platform_admin, "registration never grants platform scope");
+        assert!(
+            !u.platform_admin,
+            "registration never grants platform scope"
+        );
         assert_eq!(u.status, UserStatus::Active);
         // The serialisable profile has no hash.
         let json = serde_json::to_string(&u.profile()).unwrap();

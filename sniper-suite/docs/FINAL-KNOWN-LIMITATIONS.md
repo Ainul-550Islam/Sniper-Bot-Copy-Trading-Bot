@@ -9,9 +9,15 @@ re-verification fields).
 
 ## 1. VERIFIED (executed with artifacts — see evidence index)
 
-* Workspace tests 537/537 (and `--all-features` 537/537) against real
-  PostgreSQL 17.11 + Redis 8.0.2; gated db/redis/distributed/two-replica
-  suites executed, not skipped.
+* **Latest source pass (2026-09-22):** 1028 workspace tests passed, 0
+  failed, 1 intentionally ignored replay-fixture generator; PostgreSQL 17.11
+  was live, including 26/26 core DB integration tests, the all-record SaaS
+  two-replica test, and the durable-store restart/atomic-plan test. Workspace
+  check and all-target Clippy with `-D warnings` passed. Redis-specific suites
+  were not enabled in this latest run.
+* **Historical hardening pass (2026-09-18):** workspace tests 537/537 (and
+  `--all-features` 537/537) against real PostgreSQL 17.11 + Redis 8.0.2;
+  gated db/redis/distributed/two-replica suites executed, not skipped.
 * Staking host tests 71/71 on the final source; clippy `-D warnings` clean
   (app + program).
 * `cargo build-sbf` artifact 187,504 B, SHA-256 `57a890fa…`; byte-identical
@@ -90,8 +96,15 @@ re-verification fields).
   jurisdiction(s).
 * Optional: penetration test / fuzzing campaign (not performed).
 
-## 6. FUTURE ENHANCEMENT (not defects; scoped out by design)
+## 6. FUTURE ENHANCEMENT / CURRENT ADAPTER BOUNDARIES
 
+* **SaaS control-plane records use a JSON PostgreSQL projection.** Migration
+  0018 adds the authoritative runtime projection used by `SaasStore`, while
+  migration 0017 retains the normalized relational schema. This deliberate
+  duplication keeps all runtime record classes durable and replica-visible,
+  but a future consolidation should move the repository onto the normalized
+  tables. Database failures on legacy `Option`/`Vec` read APIs fail closed as
+  missing/empty results rather than exposing a typed availability error.
 * Signer backends vault/kms/hsm: currently FAIL STARTUP by design
   (local-keypair-only signer registry). Integrating a real HSM/KMS is a
   scoped future project, not a configuration switch.

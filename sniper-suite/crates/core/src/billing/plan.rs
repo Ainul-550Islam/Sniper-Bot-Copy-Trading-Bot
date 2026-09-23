@@ -382,7 +382,7 @@ mod tests {
             FeatureLimit::Disabled,
             "an unlisted feature is off, never on by omission"
         );
-        assert_eq!(p.limit_for("feature.invented").is_enabled(), false);
+        assert!(!p.limit_for("feature.invented").is_enabled());
     }
 
     #[test]

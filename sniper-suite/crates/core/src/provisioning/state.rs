@@ -90,9 +90,7 @@ impl ProvisioningState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            ProvisioningState::Completed
-                | ProvisioningState::Cancelled
-                | ProvisioningState::Failed
+            ProvisioningState::Completed | ProvisioningState::Cancelled | ProvisioningState::Failed
         )
     }
 
@@ -250,7 +248,11 @@ impl ProvisioningJob {
     pub const MAX_ATTEMPTS: i32 = 5;
 
     /// A fresh job in [`ProvisioningState::Requested`].
-    pub fn new(request_key: impl Into<String>, plan_code: impl Into<String>, now: DateTime<Utc>) -> Self {
+    pub fn new(
+        request_key: impl Into<String>,
+        plan_code: impl Into<String>,
+        now: DateTime<Utc>,
+    ) -> Self {
         ProvisioningJob {
             id: Uuid::new_v4(),
             organization_id: None,
@@ -419,7 +421,10 @@ mod tests {
         let a = ProvisioningJob::request_key_for("Person@Example.com", "n1");
         let b = ProvisioningJob::request_key_for(" person@example.com ", "n1");
         assert_eq!(a, b, "a retried signup resumes the same job");
-        assert_ne!(a, ProvisioningJob::request_key_for("person@example.com", "n2"));
+        assert_ne!(
+            a,
+            ProvisioningJob::request_key_for("person@example.com", "n2")
+        );
         assert!(a.starts_with("prov_"));
     }
 

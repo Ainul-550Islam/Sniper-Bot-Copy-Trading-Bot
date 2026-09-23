@@ -10,6 +10,262 @@ fails the release if they ever disagree.
 
 ## [Unreleased]
 
+### TASK 7B — SaaS product surface (2026-09-23)
+
+Exactly 21 new source paths were added — 20 numbered files plus the tree's
+`apps/control-plane/public/logo.svg` — and 5 existing files received the
+minimal integration edits required for compilation/routing. No existing
+public path, type or behaviour was changed.
+
+#### Added — tenant web console (`apps/control-plane`, Next.js 15 App Router)
+- `package.json` (dev/build/start/lint/typecheck scripts, no bloat),
+  `tsconfig.json` (strict + `noUncheckedIndexedAccess` + `@/*` aliases),
+  `next.config.ts` (env-driven API origin only; no secrets in client env).
+- `src/app/layout.tsx` (metadata/providers/global styles), `src/app/page.tsx`
+  (auth-aware landing: sign-in/sign-up when signed out, the shell when in).
+- `src/lib/api.ts` — typed API client: every refusal becomes a typed
+  `ApiError {kind, reason, status}`; the session token and tenant hint travel
+  ONLY in headers (`Authorization`, `x-organization`), never in URLs.
+- `src/lib/auth.ts` — session get/login/register/logout/refresh/expiry wired
+  to the TASK 7A model; the token lives in tab memory only (no
+  localStorage/sessionStorage/cookies); the tenant selector is restricted to
+  the memberships the server itself reports.
+- `src/components/AppShell.tsx` — fourteen sections (Dashboard, Bots,
+  Orders, Positions, Risk, Accounting, Reconciliation, Workers, Wallets,
+  Team, Audit, Billing, Usage, Settings); trading-truth sections call only
+  endpoints that exist and explain the operator-console boundary when a
+  tenant session is refused. No routes are invented.
+- `src/components/TenantSwitcher.tsx` — the ONLY tenant chooser: the user's
+  own organizations, no free-text organization id (the browser is never an
+  authorization boundary).
+- `src/styles/globals.css` (responsive + a11y: skip link, focus rings,
+  semantic structure; no inline style blocks in components) and
+  `public/logo.svg`.
+
+#### Added — server SaaS layer (`crates/server/src/saas/`)
+- `provider.rs` — the provider-neutral billing adapter boundary REUSING the
+  TASK 7A `BillingProvider`/`Subscription` types (no competing abstraction):
+  `BillingProviderAdapter` with a default HMAC webhook verification
+  (`hex(HMAC-SHA256(secret, "{timestamp}.{body}"))`, ±300 s freshness,
+  constant-time compare), a `ManualProvider` adapter that honestly has no
+  checkout and no webhooks, a `ProviderRegistry`, and a redacted-`Debug`
+  `WebhookSecret`.
+- `billing_webhook.rs` — `POST /api/saas/billing/webhooks/:provider`:
+  verify-signature → parse `{id,type,data}` → idempotency by durable
+  provider event id (migration-0018 runtime records; process-local only
+  without a database, documented) → whitelisted transitions
+  (`plan.changed`, `subscription.payment_failed|renewed|canceled|expired`)
+  through the existing TASK 7A domain methods → entitlements (via the plan
+  assignment) → audit → 200 `applied|ignored|duplicate`. Invalid signature =
+  401 with zero state change; unknown type = deterministic `ignored`;
+  client-supplied status is never trusted; the accounting ledger is never
+  touched.
+- `openapi.rs` — `GET /api/saas/openapi.json`: stable `operationId`s, typed
+  request/response schemas, `writeOnly` one-time secrets, no internal
+  endpoint and no secret material in the document.
+- `wallet_access.rs` — the tenant → wallet → strategy boundary:
+  public-data-only bindings (no field exists for signing material), every
+  answer = ownership ∧ live binding ∧ `wallet.manage` ∧ module entitlement;
+  cross-tenant access is refused before existence is disclosed. Durable via
+  the runtime-record store when PostgreSQL is attached.
+- `export.rs` — `GET /api/saas/exports?kind=…`: seven deterministic,
+  tenant-scoped sections (`profile`, `members`, `api_keys` as metadata only,
+  `usage`, `subscription`, `wallets`, `audit` bounded at 500 rows), each
+  audited; session rows, hashes and secrets are unrepresentable in the
+  output.
+
+#### Added — server security (`crates/server/src/security/`)
+- `headers.rs` — CSP (no wildcard hosts; the dashboard's single inline
+  script is the documented reason for `script-src 'unsafe-inline'`),
+  `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`,
+  `Permissions-Policy`, HSTS when TLS, `Cache-Control: no-store` on `/api/*`.
+  Appends headers only; never blocks the websocket upgrade.
+- `websocket.rs` — `GET /api/saas/events`, the PRIMARY tenant event stream:
+  session/API-key auth before the upgrade (401, no socket) or a browser
+  first-frame auth (10 s window); tenant-scoped delivery (`saas.*` frames
+  carry the organization; market-global frames pass); 60 s revalidation
+  closes revoked/expired credentials with 1008. The legacy `/api/events`
+  keeps its exact previous behaviour.
+
+#### Added — documentation (`docs/`)
+- `SAAS-PRODUCT.md`, `SAAS-SECURITY.md`, `SAAS-OPERATIONS.md` — describing
+  ONLY implemented behaviour; both security and operations docs state
+  explicitly that NO external security audit has been performed and no
+  institutional production-readiness is claimed.
+
+#### Changed (minimal integration edits)
+- `crates/server/src/main.rs`: inline `mod security { … }` parent (keeps the
+  mandated file tree — no extra `security/mod.rs`).
+- `crates/server/src/api.rs`: one `route_layer` for the security headers.
+- `crates/server/src/saas/mod.rs`: five `pub mod` declarations + route
+  merges (openapi.json, webhooks, wallet-access, exports, saas events).
+- `crates/server/Cargo.toml`: `hmac`, `sha2`, `hex` (already workspace deps
+  used by bot-core) for webhook signature verification.
+- `Cargo.lock` follows.
+
+#### Verification
+- Frontend: `tsc --noEmit` clean under `strict` +
+  `noUncheckedIndexedAccess`; `next build` succeeds (types validated,
+  static prerender).
+- Backend: `cargo fmt --all --check` PASS; `cargo clippy -p sniper-suite
+  --all-targets` — 0 warnings; new-file unit/integration tests: webhook
+  idempotency & replay, signature tampering, WS auth resolution, wallet
+  isolation & entitlement gate, export determinism & isolation, header set.
+- Full workspace with the TASK-7A methodology (`cargo test --workspace -j 2
+  -- --test-threads=1`, PostgreSQL 17.11 live): **1183 passed / 0 failed /
+  1 ignored** across 51 test binaries (1153 → 1183).
+- Environment note (pre-existing, not a TASK 7B change; `crates/core` is
+  byte-identical to the previous deliverable): the three
+  `db_integration` `audit_chain_*` tests verify the SHARED audit table and
+  can transiently observe each other's deliberate tamper when run in
+  parallel against one database; under the established
+  `--test-threads=1` methodology (and in isolation) they are deterministic
+  and green — 26/26.
+
+#### Corrected (same-day continuation audit)
+
+- The audit continuation (FILE 14/15 of the line-by-line pass) surfaced that
+  the 7B contract, product doc and web console referenced four billing-read
+  endpoints that the server never mounted (`/api/saas/plans`,
+  `/api/saas/subscription`, `/api/saas/entitlements`, `/api/saas/usage/:period` —
+  the TASK 7A store has the methods but 7A scoped its routes to
+  identity/organizations/api-keys). Removed all four from
+  `crates/server/src/saas/openapi.rs` (with their now-orphaned schemas) and
+  from `docs/SAAS-PRODUCT.md`; the console's Billing and Usage sections now
+  read the REAL deterministic exports (`?kind=subscription`, `?kind=usage`),
+  and the contract's description states where billing/usage reads live.
+  Every documented route now exists on the server. Gates re-run: fmt,
+  clippy, `cargo test -p sniper-suite`, `tsc --noEmit`, `next build` — all
+  green (20 operations remain in the public contract).
+
+### TASK 7A specification conformance pass (2026-09-22)
+
+#### Verified
+- All 25 TASK 7A files were re-checked one by one against the phase spec:
+  migration 0017 (12 tables, hash-only secrets), the tenant / membership /
+  session / billing / provisioning / authorization domain modules, the
+  server `saas/` boundary, vocabulary completeness (8 roles, 22+1
+  permissions, 8-value decision set, 7 provisioning states, 4 plan tiers),
+  and the A–L test matrix in `crates/core/tests/saas_control_plane.rs`.
+- The SaaS/TASK-5 and SaaS/TASK-6 boundaries gained unit-level regression
+  tests inside the authorization module itself: an `ALLOW` from the SaaS
+  layer cannot move the TASK 5 global-risk verdict, and no authorization
+  decision can renew, verify, or release a TASK 6 lease it does not hold
+  (stale generations stay fenced after takeover).
+- The durable restart test now also proves the API-key guarantees against
+  real PostgreSQL: a key created before the restart still authenticates
+  after it (hash-only lookup), a cross-replica revocation stops the key
+  with the stable `api_key_revoked` reason, and an expired key stops with
+  `api_key_expired`.
+
+#### Verification
+- `cargo fmt --all -- --check`: PASS.
+- `cargo clippy --workspace --all-targets -- -D warnings`: PASS.
+- Full workspace (`CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace -j 2
+  -- --test-threads=1`) with PostgreSQL 17.11 live: **1153 passed /
+  0 failed / 1 ignored** across 51 test binaries; the ignored test is the
+  opt-in replay fixture generator. Executed against PostgreSQL:
+  `db_integration` 26/26, the copy two-replica mirror, both durable SaaS
+  tests, and the A–L SaaS suite; Redis-dependent and explicitly
+  live-network/broadcast gates self-skipped as designed.
+- Full server suite: **49 passed / 0 failed**; bot-core: 349 unit tests
+  green.
+
+### File-by-file integrity pass (2026-09-22)
+
+#### Verified
+- The canonical tree was re-inventoried file by file (342 files): every Rust
+  `mod`, `#[path]`, `include_str!`, and `include_bytes!` declaration resolves
+  (209 Rust files, zero missing module files; the three
+  `tests/common/mod.rs` harnesses are declared by their integration tests),
+  all 7 workspace members exist, all 18 migrations are contiguous
+  `0001`–`0018`, no `TODO`/`FIXME`/`todo!()`/`unimplemented!()`/placeholder
+  markers remain in code or config, no tracked file is empty, and all release
+  scripts are executable.
+- Completion and limitation documentation was re-synchronised with the
+  current evidence (`docs/TESTING.md`, `docs/EVIDENCE-INDEX.md`,
+  `docs/BUYER-DUE-DILIGENCE.md`, `docs/FINAL-KNOWN-LIMITATIONS.md`,
+  `docs/REPOSITORY-MAP.md`, `docs/DELIVERY-MANIFEST.md`): the historical
+  537-test counts are now explicitly dated, and the current 1028-test
+  PostgreSQL-verified state is recorded where a reader looks first.
+- `release-manifest.json` gained the integrity-pass record; documented counts
+  now match the tree (342 files, 18 migrations, 63 docs).
+
+#### Verification
+- `cargo fmt --all -- --check`: PASS.
+- `cargo check --workspace`: PASS.
+- `cargo clippy --workspace --all-targets -- -D warnings`: PASS.
+- `scripts/verify-delivery.sh`: **7 PASS / 0 FAIL** (342 files, 18
+  migrations, 63 docs).
+- Workspace test evidence stands at **1028 passed / 0 failed / 1 ignored**
+  with PostgreSQL 17.11 from the SaaS durability pass earlier the same day;
+  this pass changed documentation and metadata only, so that run remains the
+  current code evidence.
+
+### SaaS durability completion (2026-09-22)
+
+#### Added
+- Migration `0018_saas_runtime_records.sql` and a PostgreSQL repository for
+  users, organizations, memberships, sessions, tenant API keys, plans,
+  subscriptions, entitlements, usage events, and provisioning jobs.
+- PostgreSQL-gated restart and replica tests for the durable SaaS projection.
+
+#### Fixed
+- Production `SaasStore` reads now use PostgreSQL as the authority; runtime
+  identities, revocations, usage idempotency, and provisioning request keys
+  therefore survive restarts and are shared between replicas.
+- Subscription assignment and replacement of plan-derived entitlements now
+  commit atomically. Plan catalogue seeding is restart-safe and race-safe.
+- Release migration checks and metadata now cover contiguous `0001` through
+  `0018`.
+
+#### Verification
+- PostgreSQL 17.11: 26/26 core database integration tests passed.
+- Server: 49/49 tests passed, including the PostgreSQL-gated all-record
+  two-replica test and durable-store restart/atomic-plan test.
+- Full workspace: **1028 passed / 0 failed / 1 ignored** with PostgreSQL
+  17.11; the ignored test is the opt-in replay fixture generator.
+- Workspace check and all-target Clippy with `-D warnings`: passed.
+
+### TASK 7A completeness and repository-integrity pass (2026-09-22)
+
+#### Fixed
+- Restored six files omitted from the canonical `sniper-suite/` tree:
+  `AUDIT.md`, `docs/{DELIVERY-MANIFEST,EVIDENCE-INDEX,FINAL-DELIVERY,
+  FINAL-RELEASE-AUDIT,FORENSIC-FILE-INVENTORY}.md`. This repairs every
+  broken handover path and brings the manifest's 63-document count back in
+  sync with the tree.
+- The deployment organization was described as startup-created but was never
+  created. Startup now seeds it before the API is served, so legacy
+  deployment credentials can use `/api/saas/*` as documented.
+- Human platform administrators could not actually cross tenant boundaries:
+  middleware required a membership in the target tenant before it could
+  construct platform scope. A persisted `platform_admin` user now receives a
+  genuine platform context for the path/header target; ordinary users still
+  require exact membership and receive the same non-enumerating refusal.
+- Tenant API-key creation compared permission-set *lengths*, which can miss
+  different privileges of equal cardinality. Creation now proves the
+  requested effective permission set is a subset of the creator's effective
+  set, rejects platform roles, unknown scopes, and empty labels.
+- Release migration checks now cover contiguous `0001` through `0017` and no
+  longer print `0017` as octal `0015`. Delivery/release scripts are executable.
+- Formatted the previously unformatted TASK 7A files and resolved every new
+  Rust 1.98.1 `clippy -D warnings` finding without changing trading logic.
+
+#### Verification
+- `cargo fmt --all -- --check`: PASS.
+- `cargo clippy --workspace --all-targets -- -D warnings`: PASS.
+- `cargo test -p bot-core -p sniper-suite -j 1 -- --test-threads=1`:
+  **492 passed / 0 failed** (all directly changed core/server surfaces).
+- `scripts/verify-delivery.sh`: **7 PASS / 0 FAIL**, 63 docs, 17 migrations.
+- A full all-crate test link was attempted; the sandbox's 25 GB filesystem
+  filled while linking the Solana integration binaries. This is recorded as
+  an environment limit, not converted into a passing claim. The unchanged
+  staking host suite had already passed 71/71 in this audit session.
+- Known boundary kept explicit: migration 0017 defines durable SaaS tables,
+  but the current server `SaasStore` adapter remains in-process memory and is
+  not yet wired to PostgreSQL; runtime SaaS identities do not survive restart.
+
 ### HA — TASK 6 integration completeness pass (2026-09-22)
 
 Audit of the TASK 6 layer against its own specification. Two integration

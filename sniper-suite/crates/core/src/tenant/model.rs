@@ -404,7 +404,10 @@ mod tests {
         assert!(!json.contains("pbkdf2"), "{json}");
         assert!(!json.contains("password"), "{json}");
         assert!(json.contains("Person@Example.COM"));
-        assert_eq!(User::normalize_email(" Person@Example.COM "), "person@example.com");
+        assert_eq!(
+            User::normalize_email(" Person@Example.COM "),
+            "person@example.com"
+        );
         assert!(u.can_authenticate());
     }
 

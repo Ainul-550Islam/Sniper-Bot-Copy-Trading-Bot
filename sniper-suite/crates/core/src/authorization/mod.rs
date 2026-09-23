@@ -172,15 +172,12 @@ pub fn authorize(
     }
 
     // 3. Tenant state.
-    if let TenantVerdict::Deny(reason) = policy::check_status(ctx.organization_status, request.action)
+    if let TenantVerdict::Deny(reason) =
+        policy::check_status(ctx.organization_status, request.action)
     {
         // A cross-tenant answer already returned above; everything here is
         // about the caller's own tenant being unable to act.
-        return Decision::suspended(format!(
-            "{} ({})",
-            reason.detail(),
-            reason.as_str()
-        ));
+        return Decision::suspended(format!("{} ({})", reason.detail(), reason.as_str()));
     }
 
     // 4. Permission (which subsumes the role: the role IS its permissions).
@@ -221,11 +218,21 @@ pub fn require(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounting::GlobalLedger;
     use crate::billing::plan::{features, FeatureLimit, Plan, PlanCode};
     use crate::billing::subscription::Subscription;
+    use crate::config::GlobalRiskConfig;
+    use crate::events::EventBus;
+    use crate::global_risk::{
+        DecisionContext, GlobalRejectReason, GlobalRiskEngine, GlobalRiskRequest,
+    };
+    use crate::ha::{HaStore, LeaseRequest, LeaseRole, MemoryHaStore};
     use crate::membership::{Membership, MembershipRole};
+    use crate::models::{BotModule, ExecutionMode, Venue};
     use crate::tenant::{Organization, OrganizationStatus, UserId};
     use chrono::Utc;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn org(status: OrganizationStatus) -> Organization {
         let mut o = Organization::new(
@@ -297,7 +304,11 @@ mod tests {
             None,
         );
         assert_eq!(d.kind, DecisionKind::DenyResource);
-        assert_eq!(d.http_status(), 403, "must not 404 — that would confirm existence");
+        assert_eq!(
+            d.http_status(),
+            403,
+            "must not 404 — that would confirm existence"
+        );
 
         // A caller who also lacks the permission still gets DENY_RESOURCE,
         // so the answer does not depend on their role.
@@ -327,18 +338,31 @@ mod tests {
             DecisionKind::DenySuspended
         );
         assert_eq!(
-            authorize(Some(&c), &AccessRequest::manage(Permission::TenantUpdate), None).kind,
+            authorize(
+                Some(&c),
+                &AccessRequest::manage(Permission::TenantUpdate),
+                None
+            )
+            .kind,
             DecisionKind::DenySuspended
         );
         assert!(authorize(Some(&c), &AccessRequest::read(Permission::BotRead), None).is_allowed());
         assert!(
-            authorize(Some(&c), &AccessRequest::reduce_risk(Permission::BotStop), None)
-                .is_allowed(),
+            authorize(
+                Some(&c),
+                &AccessRequest::reduce_risk(Permission::BotStop),
+                None
+            )
+            .is_allowed(),
             "a suspended customer must still be able to stop a bot"
         );
         assert!(
-            authorize(Some(&c), &AccessRequest::billing(Permission::BillingManage), None)
-                .is_allowed(),
+            authorize(
+                Some(&c),
+                &AccessRequest::billing(Permission::BillingManage),
+                None
+            )
+            .is_allowed(),
             "…and to pay the invoice"
         );
     }
@@ -358,7 +382,12 @@ mod tests {
         // A trader cannot administer keys.
         let t = ctx(&o, MembershipRole::Trader);
         assert_eq!(
-            authorize(Some(&t), &AccessRequest::manage(Permission::ApiKeyCreate), None).kind,
+            authorize(
+                Some(&t),
+                &AccessRequest::manage(Permission::ApiKeyCreate),
+                None
+            )
+            .kind,
             DecisionKind::DenyPermission
         );
     }
@@ -390,15 +419,21 @@ mod tests {
         // Counted limit.
         let d = authorize(
             Some(&c),
-            &AccessRequest::manage(Permission::ApiKeyCreate)
-                .consuming(features::MAX_API_KEYS, 2.0, 1.0),
+            &AccessRequest::manage(Permission::ApiKeyCreate).consuming(
+                features::MAX_API_KEYS,
+                2.0,
+                1.0,
+            ),
             Some(&ents),
         );
         assert_eq!(d.kind, DecisionKind::DenyEntitlement);
         assert!(authorize(
             Some(&c),
-            &AccessRequest::manage(Permission::ApiKeyCreate)
-                .consuming(features::MAX_API_KEYS, 1.0, 1.0),
+            &AccessRequest::manage(Permission::ApiKeyCreate).consuming(
+                features::MAX_API_KEYS,
+                1.0,
+                1.0
+            ),
             Some(&ents)
         )
         .is_allowed());
@@ -494,5 +529,181 @@ mod tests {
             .kind,
             DecisionKind::DenyResource
         );
+    }
+
+    // ------------------------------------------------------ task boundaries --
+    // The module doc promises: an ALLOW here means "this caller may ask",
+    // never "the system will comply". These two tests pin that promise
+    // against the two authorities the control plane must never displace:
+    // the TASK 5 global-risk engine and the TASK 6 lease fencing.
+
+    fn trade_request() -> GlobalRiskRequest {
+        GlobalRiskRequest {
+            module: BotModule::Sniper,
+            venue: Venue::PumpFun,
+            wallet: "w1".into(),
+            strategy: "sniper".into(),
+            asset: "MINT-K".into(),
+            quote_asset: "SOL".into(),
+            requested_quote: 0.1,
+            mode: ExecutionMode::Paper,
+        }
+    }
+
+    /// K: a SaaS `ALLOW` cannot bypass TASK 5. The global-risk engine owns
+    /// the trade verdict and decides from its own state alone — an ALLOW
+    /// from this layer does not move it, and a DENY here is not a risk
+    /// control either. Both layers must pass in the real stack.
+    #[tokio::test]
+    async fn an_allow_here_cannot_bypass_the_task5_global_risk_engine() {
+        let o = org(OrganizationStatus::Active);
+        let owner = ctx(&o, MembershipRole::OrgOwner);
+        let saas = authorize(
+            Some(&owner),
+            &AccessRequest::trade(Permission::BotStart),
+            None,
+        );
+        assert!(saas.is_allowed(), "{saas}");
+
+        let engine = GlobalRiskEngine::new(
+            GlobalRiskConfig::default(),
+            Arc::new(GlobalLedger::new(EventBus::new(64), "authz-boundary")),
+            EventBus::new(64),
+            "authz-boundary",
+        );
+
+        // SaaS says yes … TASK 5 still says no under its own kill switch.
+        let killed = engine
+            .decide(
+                &trade_request(),
+                &DecisionContext {
+                    global_kill: true,
+                    marks: HashMap::new(),
+                },
+            )
+            .await;
+        assert!(!killed.accepted(), "{killed:?}");
+        assert_eq!(killed.reason, Some(GlobalRejectReason::GlobalKillSwitch));
+
+        // … and the mirror direction: with the SaaS layer refusing outright,
+        // the TASK 5 engine still evaluates on its own inputs (it would
+        // allow this small paper request). Neither layer substitutes for
+        // the other; neither can silence the other.
+        let refused_here = authorize(None, &AccessRequest::trade(Permission::BotStart), None);
+        assert!(!refused_here.is_allowed());
+        let open = engine
+            .decide(
+                &trade_request(),
+                &DecisionContext {
+                    global_kill: false,
+                    marks: HashMap::new(),
+                },
+            )
+            .await;
+        assert!(open.accepted(), "{open:?}");
+    }
+
+    /// L: a SaaS `ALLOW` cannot bypass TASK 6 fencing. Lease mutations are
+    /// answered by the HaStore from `(role, holder, generation)` alone —
+    /// there is no API path that lets an authorization decision renew,
+    /// verify, or release a lease it does not hold, and a stale generation
+    /// stays fenced after takeover.
+    #[tokio::test]
+    async fn an_allow_here_cannot_bypass_the_task6_lease_fencing() {
+        let store = MemoryHaStore::new();
+        let ttl = chrono::Duration::seconds(60);
+
+        // Worker 1 legitimately holds the reconciliation lease.
+        let first = store
+            .acquire_lease(&LeaseRequest {
+                role: LeaseRole::Reconciliation,
+                holder: "w1".into(),
+                ttl,
+            })
+            .await
+            .expect("store answers");
+        let lease = first.acquired().expect("first worker wins").clone();
+        assert_eq!(lease.generation, 1);
+        assert_eq!(lease.holder, "w1");
+
+        // The SaaS layer fully trusts this caller — a platform administrator
+        // whose cross-tenant requests are allowed everywhere.
+        let mine = org(OrganizationStatus::Active);
+        let m = crate::membership::Membership::new(
+            mine.id,
+            UserId::new(),
+            MembershipRole::PlatformAdmin,
+            None,
+            Utc::now(),
+        );
+        let staff = AuthorizationContext::from_membership(
+            Principal::UserSession {
+                session_id: "s".into(),
+            },
+            &mine,
+            &m,
+            None,
+            true,
+            Utc::now(),
+        );
+        let saas = authorize(
+            Some(&staff),
+            &AccessRequest::read(Permission::RiskManage),
+            None,
+        );
+        assert!(saas.is_allowed(), "{saas}");
+
+        // Even so, the allowed caller cannot renew, verify, or release a
+        // lease it does not hold: the store answers from the lease record,
+        // never from the authorization decision.
+        assert!(!store
+            .renew_lease(&LeaseRole::Reconciliation, "w2", 1, ttl)
+            .await
+            .expect("store answers"));
+        assert!(!store
+            .verify_lease(&LeaseRole::Reconciliation, "w2", 1)
+            .await
+            .expect("store answers"));
+        assert!(!store
+            .release_lease(&LeaseRole::Reconciliation, "w2", 1)
+            .await
+            .expect("store answers"));
+        let still = store
+            .get_lease(&LeaseRole::Reconciliation)
+            .await
+            .expect("store answers")
+            .expect("lease is live");
+        assert_eq!(still.holder, "w1");
+        assert_eq!(still.generation, 1);
+
+        // The rightful holder still succeeds with its own generation.
+        assert!(store
+            .renew_lease(&LeaseRole::Reconciliation, "w1", 1, ttl)
+            .await
+            .expect("store answers"));
+
+        // After expiry + takeover by w2, a delayed w1 write under the OLD
+        // generation is fenced — even though w1 was also SaaS-allowed.
+        store.advance_clock(chrono::Duration::seconds(120));
+        let takeover = store
+            .acquire_lease(&LeaseRequest {
+                role: LeaseRole::Reconciliation,
+                holder: "w2".into(),
+                ttl,
+            })
+            .await
+            .expect("store answers");
+        assert!(takeover.is_acquired());
+        assert!(!store
+            .renew_lease(&LeaseRole::Reconciliation, "w1", 1, ttl)
+            .await
+            .expect("store answers"));
+        let now_held = store
+            .get_lease(&LeaseRole::Reconciliation)
+            .await
+            .expect("store answers")
+            .expect("lease is live");
+        assert_eq!(now_held.holder, "w2");
+        assert_eq!(now_held.generation, 2);
     }
 }

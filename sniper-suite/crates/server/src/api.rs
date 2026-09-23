@@ -24,7 +24,7 @@ use axum::{
         ConnectInfo, Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
-    middleware::{from_fn_with_state, Next},
+    middleware::{from_fn, from_fn_with_state, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -126,6 +126,10 @@ pub fn router(state: ApiState) -> Router {
         // route pattern instead of the raw path.
         .route_layer(from_fn_with_state(state.clone(), obs::request_context))
         .route_layer(from_fn_with_state(state.clone(), ip_rate_limit))
+        // TASK 7B — security response headers on EVERY response (CSP,
+        // XCTO, frame/referrer/permissions policy, HSTS over TLS). Appends
+        // headers only; it never rewrites bodies or blocks the WS upgrade.
+        .route_layer(from_fn(crate::security::headers::apply_security_headers))
         .with_state(state)
 }
 

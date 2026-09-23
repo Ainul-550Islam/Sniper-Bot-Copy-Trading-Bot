@@ -22,7 +22,14 @@ mod ha;
 mod obs;
 mod persist;
 mod recon;
-mod saas;
+pub mod saas;
+// TASK 7B — response-header hardening and the authenticated, tenant-scoped
+// event stream. The two files live under src/security/; this inline parent
+// module keeps the mandated file tree (no extra security/mod.rs).
+mod security {
+    pub mod headers;
+    pub mod websocket;
+}
 mod ws;
 
 use std::sync::Arc;
@@ -679,7 +686,10 @@ async fn main() -> anyhow::Result<()> {
     // organization exists on the first request. A single-tenant operator
     // keeps using their deployment key; it maps to this organization and
     // can never reach another one.
-    let saas = Arc::new(saas::SaasStore::new());
+    let saas = Arc::new(saas::SaasStore::with_database(db.clone()).await?);
+    if saas::ensure_deployment_organization(&saas).await.is_none() {
+        anyhow::bail!("failed to initialize the deployment organization");
+    }
 
     // ---- control plane -----------------------------------------------------
     let api_handle = if cfg.api.enabled {

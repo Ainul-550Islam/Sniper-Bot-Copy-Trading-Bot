@@ -161,9 +161,7 @@ impl SubscriptionStatus {
     pub fn grants_entitlements(&self) -> bool {
         matches!(
             self,
-            SubscriptionStatus::Trialing
-                | SubscriptionStatus::Active
-                | SubscriptionStatus::PastDue
+            SubscriptionStatus::Trialing | SubscriptionStatus::Active | SubscriptionStatus::PastDue
         )
     }
 
@@ -210,11 +208,7 @@ pub struct Subscription {
 
 impl Subscription {
     /// A manual, active subscription starting now.
-    pub fn manual(
-        organization_id: OrganizationId,
-        plan_id: PlanId,
-        now: DateTime<Utc>,
-    ) -> Self {
+    pub fn manual(organization_id: OrganizationId, plan_id: PlanId, now: DateTime<Utc>) -> Self {
         Subscription {
             id: SubscriptionId::new(),
             organization_id,
@@ -327,7 +321,10 @@ mod tests {
     fn effectiveness_considers_status_and_period() {
         let t0 = Utc::now();
         let mut s = sub(t0);
-        assert!(s.is_effective(t0 + Duration::days(365)), "manual is open-ended");
+        assert!(
+            s.is_effective(t0 + Duration::days(365)),
+            "manual is open-ended"
+        );
 
         s.current_period_end = Some(t0 + Duration::days(30));
         assert!(s.is_effective(t0 + Duration::days(29)));
@@ -351,7 +348,11 @@ mod tests {
         let mut at_end = sub(t0);
         at_end.current_period_end = Some(t0 + Duration::days(10));
         at_end.cancel(true, t0);
-        assert_eq!(at_end.status, SubscriptionStatus::Active, "still active until the end");
+        assert_eq!(
+            at_end.status,
+            SubscriptionStatus::Active,
+            "still active until the end"
+        );
         assert!(at_end.cancel_at_period_end);
         assert!(at_end.is_effective(t0 + Duration::days(9)));
         assert!(!at_end.is_effective(t0 + Duration::days(11)));

@@ -2,9 +2,9 @@
 
 The actual delivered tree (no invented directories). Generated from the real
 file listing; counts are exact. Annotated by role. The tree below is the
-**current** one (after the execution-engine, sniper-engine, copy-trading and
-Polymarket engine passes — TASK 1–4); the historical count table of the
-frozen delivery package is kept at the end for provenance.
+**current** one after TASK 1–7A and the SaaS durability completion pass; the
+historical count table of the frozen delivery package is kept at the end for
+provenance.
 
 ```
 sniper-suite/
@@ -46,7 +46,7 @@ sniper-suite/
 ├─ crates/
 │  ├─ core/                       bot-core — shared kernel
 │  │  ├─ Cargo.toml
-│  │  ├─ migrations/              16 forward-only PostgreSQL migrations (0001–0016):
+│  │  ├─ migrations/              18 forward-only PostgreSQL migrations (0001–0018):
 │  │  │                           bootstrap; orders/executions; positions/trades;
 │  │  │                           dedup/risk/audit; reconciliation; tx attribution;
 │  │  │                           intent journal; intent claim kind; execution claims;
@@ -60,7 +60,9 @@ sniper-suite/
 │  │  │                           accounting_recon_findings (TASK 5);
 │  │  │                           0016 ha_workers (+ events) / ha_leases (+ events,
 │  │  │                           fencing generations) / ha_cursors / ha_feed_gaps /
-│  │  │                           ha_recovery_records (TASK 6)
+│  │  │                           ha_recovery_records (TASK 6); 0017 normalized SaaS
+│  │  │                           control-plane schema; 0018 authoritative SaaS runtime
+│  │  │                           record projection (TASK 7A durability)
 │  │  ├─ src/
 │  │  │  ├─ lib.rs                crate surface
 │  │  │  ├─ config.rs             typed config, validation, env overrides, deny_unknown_fields
@@ -94,7 +96,13 @@ sniper-suite/
 │  │  │  ├─ execution.rs          ExecutionLedger — one venue-agnostic tx lifecycle state machine for every money-moving attempt (TASK 1)
 │  │  │  ├─ oms.rs                order state machine + idempotency keys
 │  │  │  ├─ dedup.rs              3-level restart-safe dedup (memory/Redis/PG)
-│  │  │  ├─ auth.rs               API/RBAC authorization
+│  │  │  ├─ auth.rs               deployment-key API/RBAC authorization
+│  │  │  ├─ authorization/        tenant authorization context, decisions, ordered gate
+│  │  │  ├─ tenant/               users, organizations, typed tenant/user identifiers
+│  │  │  ├─ membership/           tenant roles, statuses, permissions
+│  │  │  ├─ session/              password/token handling and durable session records
+│  │  │  ├─ billing/              plans, subscriptions, entitlements, usage metering
+│  │  │  ├─ provisioning/         durable signup/provisioning state machine
 │  │  │  ├─ audit.rs              hash-chained append-only audit trail
 │  │  │  ├─ ownership.rs          PER-EXECUTION claims/leases/epochs/fencing + GlobalRiskOracle
 │  │  │  ├─ ha/                   TASK 6 high availability — one concern per file:
@@ -213,7 +221,14 @@ sniper-suite/
 │        ├─ persist.rs            persistence pumps (state → PostgreSQL; Solana + Polymarket order attribution)
 │        ├─ accounting.rs         TASK 5 wiring: DbLedgerStore / DbRiskStore, startup recovery, maintenance pass
 │        ├─ ha.rs                 TASK 6 wiring: DbHaStore, registration + recovery journalling, heartbeat loop, LeasedWorker, graceful shutdown
-│        └─ recon.rs              reconciliation tasks (venue truth) + DbCopyStore / DbPolyStore journals
+│        ├─ recon.rs              reconciliation tasks (venue truth) + DbCopyStore / DbPolyStore journals
+│        └─ saas/                 TASK 7A HTTP boundary and durable control-plane store:
+│           ├─ users.rs           register/login/profile/logout
+│           ├─ organizations.rs   provisioning, membership, tenant lifecycle
+│           ├─ api_keys.rs        tenant-scoped key issue/list/revoke/authentication
+│           ├─ middleware.rs      tenant resolution + authorization/entitlement gates
+│           ├─ store.rs           PostgreSQL-authoritative store + memory test mode
+│           └─ postgres.rs        migration-0018 repository + atomic plan assignment
 │
 │  ── standalone on-chain program (Module 4) ────────────────────────
 ├─ programs/
@@ -268,14 +283,14 @@ sniper-suite/
 
 | Category | Files |
 |---|---|
-| Root metadata / release identity (incl. root `Cargo.toml`, `Cargo.lock`, `deny.toml`, `rust-toolchain.toml`, `.cargo/audit.toml`) | 12 |
-| Deployment assets (Dockerfile, compose, templates, ignores) | 6 |
-| Scripts (`release-check.sh`, `verify-delivery.sh`, `staking-identity.sh`) | 3 |
-| CI workflow | 1 |
-| App workspace `crates/` — Rust (136 src + 40 test files) + 7 crate Cargo.tomls + 16 SQL migrations + 19 replay fixtures | 218 |
-| Staking program `programs/staking-suite/` (5 src + 1 test + Cargo.toml + Cargo.lock + 2 `.cargo/` files) | 10 |
+| Root-level files | 17 |
+| Root `.cargo/` policy | 1 |
+| Scripts (`scripts/`) | 3 |
+| CI (`.github/`) | 1 |
+| App workspace `crates/` — 162 source Rust + 41 test Rust + 7 crate manifests + 18 SQL migrations + 19 replay fixtures | 247 |
+| Staking program `programs/staking-suite/` (5 source Rust + 1 test Rust + 3 TOML + lockfile) | 10 |
 | Docs (`docs/`) | 63 |
-| **Total tracked files** | **313** |
+| **Total files (excluding generated targets and Git metadata)** | **342** |
 
 ## Counts (historical, at the final delivery package)
 

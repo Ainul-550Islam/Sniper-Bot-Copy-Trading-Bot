@@ -5,9 +5,10 @@
 //! event must produce exactly one metering effect**, whichever worker
 //! reports it and however many times it is retried.
 //!
-//! The identity is `(organization_id, idempotency_key)`, enforced by a
-//! UNIQUE index in migration 0017 and mirrored by the in-memory
-//! [`UsageLedger`] used in tests and no-database runs. Callers build the
+//! The identity is `(organization_id, idempotency_key)`, enforced by the
+//! normalized schema in migration 0017 and by the runtime projection in
+//! migration 0018. [`UsageLedger`] mirrors it for tests and no-database runs.
+//! Callers build the
 //! key deterministically from the fact being metered
 //! ([`UsageEvent::key_for`]), so a retry produces the same key rather than
 //! a second row.
@@ -288,12 +289,7 @@ impl UsageLedger {
     }
 
     /// Total of one metric for one tenant in one `YYYY-MM` period.
-    pub fn total(
-        &self,
-        organization_id: OrganizationId,
-        metric: UsageMetric,
-        period: &str,
-    ) -> f64 {
+    pub fn total(&self, organization_id: OrganizationId, metric: UsageMetric, period: &str) -> f64 {
         self.events
             .iter()
             .filter(|e| {
@@ -384,7 +380,10 @@ mod tests {
         let b = OrganizationId::new();
         let now = Utc::now();
         let mut ledger = UsageLedger::new();
-        assert_eq!(ledger.record(event(a, "order-1", 1.0, now)), UsageOutcome::Recorded);
+        assert_eq!(
+            ledger.record(event(a, "order-1", 1.0, now)),
+            UsageOutcome::Recorded
+        );
         assert_eq!(
             ledger.record(event(b, "order-1", 1.0, now)),
             UsageOutcome::Recorded,
@@ -415,10 +414,16 @@ mod tests {
         let now = Utc::now();
         let mut ledger = UsageLedger::new();
         let mut bad = event(org, "", 1.0, now);
-        assert!(matches!(ledger.record(bad.clone()), UsageOutcome::Rejected(_)));
+        assert!(matches!(
+            ledger.record(bad.clone()),
+            UsageOutcome::Rejected(_)
+        ));
         bad.idempotency_key = "ok".into();
         bad.quantity = -1.0;
-        assert!(matches!(ledger.record(bad.clone()), UsageOutcome::Rejected(_)));
+        assert!(matches!(
+            ledger.record(bad.clone()),
+            UsageOutcome::Rejected(_)
+        ));
         bad.quantity = f64::NAN;
         assert!(matches!(ledger.record(bad), UsageOutcome::Rejected(_)));
         assert!(ledger.is_empty());
@@ -442,15 +447,24 @@ mod tests {
             jan,
         ));
 
-        assert_eq!(ledger.total(org, UsageMetric::OrdersSubmitted, "2026-01"), 5.0);
-        assert_eq!(ledger.total(org, UsageMetric::OrdersSubmitted, "2026-02"), 7.0);
+        assert_eq!(
+            ledger.total(org, UsageMetric::OrdersSubmitted, "2026-01"),
+            5.0
+        );
+        assert_eq!(
+            ledger.total(org, UsageMetric::OrdersSubmitted, "2026-02"),
+            7.0
+        );
         let totals = ledger.totals(org, "2026-01");
         assert_eq!(totals[&UsageMetric::OrdersSubmitted], 5.0);
         assert_eq!(totals[&UsageMetric::ApiRequests], 10.0);
         assert_eq!(totals.len(), 2);
         // Another tenant sees nothing.
         let other = OrganizationId::new();
-        assert_eq!(ledger.total(other, UsageMetric::OrdersSubmitted, "2026-01"), 0.0);
+        assert_eq!(
+            ledger.total(other, UsageMetric::OrdersSubmitted, "2026-01"),
+            0.0
+        );
         assert!(ledger.events_of(other).is_empty());
     }
 

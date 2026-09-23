@@ -176,13 +176,7 @@ mod tests {
     use super::*;
 
     fn membership(role: MembershipRole, status: MembershipStatus) -> Membership {
-        let mut m = Membership::new(
-            OrganizationId::new(),
-            UserId::new(),
-            role,
-            None,
-            Utc::now(),
-        );
+        let mut m = Membership::new(OrganizationId::new(), UserId::new(), role, None, Utc::now());
         m.status = status;
         m
     }
@@ -205,10 +199,7 @@ mod tests {
 
         for s in [MembershipStatus::Suspended, MembershipStatus::Removed] {
             let m = membership(MembershipRole::OrgOwner, s);
-            assert!(
-                m.permissions().is_empty(),
-                "a {s} owner must hold nothing"
-            );
+            assert!(m.permissions().is_empty(), "a {s} owner must hold nothing");
             assert!(!m.grants(Permission::TenantRead));
         }
     }

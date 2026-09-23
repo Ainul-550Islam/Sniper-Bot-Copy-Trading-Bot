@@ -1,5 +1,15 @@
 # Testing guide
 
+## Latest verified source state (2026-09-22)
+
+The current tree passed `cargo fmt --all -- --check`, `cargo check
+--workspace`, strict workspace Clippy, and the complete workspace test run:
+**1028 passed, 0 failed, 1 intentionally ignored**. PostgreSQL 17.11 was live;
+26/26 `db_integration` tests and both new SaaS durability tests executed.
+The ignored test is the opt-in replay-fixture generator. Redis-specific and
+explicitly live-network/broadcast gates were not enabled in this run. Older
+counts below are retained as dated historical evidence, not current totals.
+
 ## Layers
 
 | Layer | Command | Needs |

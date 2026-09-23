@@ -112,7 +112,11 @@ mod tests {
             assert!(j.complete_step(step, now));
         }
         assert_eq!(plan_next(&j), ProvisioningAction::Done);
-        assert_eq!(executed.len(), 6, "signup is the starting point, not a step");
+        assert_eq!(
+            executed.len(),
+            6,
+            "signup is the starting point, not a step"
+        );
         assert_eq!(executed[0], ProvisioningStep::UserCreated);
         assert_eq!(executed[5], ProvisioningStep::Ready);
         assert!(j.is_ready());

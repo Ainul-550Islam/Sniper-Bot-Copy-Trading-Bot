@@ -19,7 +19,9 @@ use bot_core::billing::{
     entitlements_from_plan, features, Entitlement, EntitlementSet, EntitlementSource, FeatureLimit,
     Plan, PlanCode, Subscription, UsageEvent, UsageLedger, UsageMetric, UsageOutcome, UsageSource,
 };
-use bot_core::membership::{Membership, MembershipRole, MembershipStatus, Permission, PermissionSet};
+use bot_core::membership::{
+    Membership, MembershipRole, MembershipStatus, Permission, PermissionSet,
+};
 use bot_core::provisioning::{plan_next, ProvisioningAction, ProvisioningJob, ProvisioningStep};
 use bot_core::session::token::{generate_token, hash_password, hash_token, verify_password};
 use bot_core::session::{validate, SessionRecord, SessionRejection};
@@ -244,10 +246,18 @@ fn d_a_role_without_the_permission_is_denied() {
     .is_allowed());
 
     // A suspended membership holds nothing at all.
-    let mut m = Membership::new(a.id, UserId::new(), MembershipRole::OrgOwner, None, Utc::now());
+    let mut m = Membership::new(
+        a.id,
+        UserId::new(),
+        MembershipRole::OrgOwner,
+        None,
+        Utc::now(),
+    );
     m.status = MembershipStatus::Suspended;
     let suspended = AuthorizationContext::from_membership(
-        Principal::UserSession { session_id: "s".into() },
+        Principal::UserSession {
+            session_id: "s".into(),
+        },
         &a,
         &m,
         None,
@@ -314,10 +324,9 @@ fn e_an_api_key_created_before_a_restart_still_works_after_it() {
     // "After the restart": the process starts with an EMPTY in-memory
     // registry and reloads from the durable records — the previous
     // behaviour lost the key here.
-    let mut registry: std::collections::HashMap<String, KeyRow> =
-        std::collections::HashMap::new();
+    let mut registry: std::collections::HashMap<String, KeyRow> = std::collections::HashMap::new();
     assert!(
-        registry.get(&hash_token(&plaintext)).is_none(),
+        !registry.contains_key(&hash_token(&plaintext)),
         "a fresh process knows nothing"
     );
     for k in durable {
@@ -418,7 +427,10 @@ fn sessions_expire_revoke_and_never_store_the_token() {
         Err(SessionRejection::Revoked)
     );
     // Password verification is real.
-    assert!(verify_password("correct horse battery staple", &u.password_hash));
+    assert!(verify_password(
+        "correct horse battery staple",
+        &u.password_hash
+    ));
     assert!(!verify_password("wrong", &u.password_hash));
     assert!(!u.password_hash.contains("correct"));
 }
@@ -449,7 +461,10 @@ fn h_the_same_usage_event_cannot_be_counted_twice() {
     let mut retry = event.clone();
     retry.quantity = 100.0;
     assert_eq!(ledger.record(retry), UsageOutcome::Duplicate);
-    assert_eq!(ledger.total(a.id, UsageMetric::OrdersSubmitted, &event.period()), 1.0);
+    assert_eq!(
+        ledger.total(a.id, UsageMetric::OrdersSubmitted, &event.period()),
+        1.0
+    );
 
     // The same key in ANOTHER tenant is a different fact.
     let other = UsageEvent::new(
@@ -461,7 +476,10 @@ fn h_the_same_usage_event_cannot_be_counted_twice() {
         now,
     );
     assert_eq!(ledger.record(other), UsageOutcome::Recorded);
-    assert_eq!(ledger.total(b.id, UsageMetric::OrdersSubmitted, &event.period()), 1.0);
+    assert_eq!(
+        ledger.total(b.id, UsageMetric::OrdersSubmitted, &event.period()),
+        1.0
+    );
     assert_eq!(ledger.len(), 2);
 }
 
@@ -497,7 +515,11 @@ fn i_provisioning_resumes_after_a_crash_without_duplicating() {
         assert!(resumed.complete_step(step, now), "{step}");
     }
     assert!(resumed.is_ready());
-    assert_eq!(resumed.organization_id, Some(created_org), "exactly one tenant");
+    assert_eq!(
+        resumed.organization_id,
+        Some(created_org),
+        "exactly one tenant"
+    );
     assert_eq!(plan_next(&resumed), ProvisioningAction::Done);
 
     // A duplicated worker replaying an old step cannot rewind the cursor.
@@ -609,8 +631,8 @@ async fn k_the_saas_layer_cannot_bypass_the_task5_global_risk_engine() {
 
 #[tokio::test]
 async fn l_the_saas_layer_cannot_bypass_task6_ha_fencing() {
-    use bot_core::ha::{HaRuntime, HaSettings, LeaseRole, MemoryHaStore};
     use bot_core::events::EventBus;
+    use bot_core::ha::{HaRuntime, HaSettings, LeaseRole, MemoryHaStore};
 
     // Two workers, one shared HA store.
     let store = Arc::new(MemoryHaStore::new());
@@ -678,8 +700,11 @@ fn plan_entitlements_gate_features_and_limits() {
     assert_eq!(
         authorize(
             Some(&c),
-            &AccessRequest::manage(Permission::ApiKeyCreate)
-                .consuming(features::MAX_API_KEYS, 1.0, 1.0),
+            &AccessRequest::manage(Permission::ApiKeyCreate).consuming(
+                features::MAX_API_KEYS,
+                1.0,
+                1.0
+            ),
             Some(&starter)
         )
         .kind,
@@ -696,8 +721,11 @@ fn plan_entitlements_gate_features_and_limits() {
     .is_allowed());
     assert!(authorize(
         Some(&c),
-        &AccessRequest::manage(Permission::ApiKeyCreate)
-            .consuming(features::MAX_API_KEYS, 1.0, 1.0),
+        &AccessRequest::manage(Permission::ApiKeyCreate).consuming(
+            features::MAX_API_KEYS,
+            1.0,
+            1.0
+        ),
         Some(&business)
     )
     .is_allowed());

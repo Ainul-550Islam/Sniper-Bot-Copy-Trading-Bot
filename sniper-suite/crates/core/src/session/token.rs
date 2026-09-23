@@ -242,7 +242,10 @@ mod tests {
         let t = generate_token("sk");
         assert!(verify_token(&t.plaintext, &t.hash));
         assert!(!verify_token(&format!("{}x", t.plaintext), &t.hash));
-        assert!(!verify_token(&t.plaintext[..t.plaintext.len() - 1], &t.hash));
+        assert!(!verify_token(
+            &t.plaintext[..t.plaintext.len() - 1],
+            &t.hash
+        ));
         assert!(!verify_token("", &t.hash));
         assert!(!verify_token(&t.plaintext, ""));
         // A different token never matches.

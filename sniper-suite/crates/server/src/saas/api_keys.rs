@@ -14,9 +14,11 @@
 //!    which is exactly what a multi-tenant product cannot allow.
 //!
 //! This module adds the SaaS credential: owned by an organization, carrying
-//! a SaaS role and optional narrowing scopes, stored as a hash, and
-//! **reconstructed from its durable record at startup**
-//! ([`super::store::SaasStore::reload_api_keys`]).
+//! a SaaS role and optional narrowing scopes, and stored as a hash. Production
+//! startup connects [`super::store::SaasStore`] to PostgreSQL, and every
+//! authentication lookup reads the durable projection. Revocation therefore
+//! takes effect across replicas and runtime-created tenant keys survive a
+//! restart. Database-disabled test fixtures retain the in-memory adapter.
 //!
 //! The existing deployment keys are untouched: they keep their own
 //! registry, their own `[auth]` configuration and their own role gate. A
@@ -44,7 +46,7 @@ use uuid::Uuid;
 
 use bot_core::authorization::{AccessRequest, Principal};
 use bot_core::billing::features;
-use bot_core::membership::{MembershipRole, Permission};
+use bot_core::membership::{MembershipRole, Permission, PermissionSet};
 use bot_core::session::token::{generate_token, hash_token};
 use bot_core::tenant::{OrganizationId, UserId};
 
@@ -220,7 +222,7 @@ pub async fn create_key(
     headers: HeaderMap,
     Json(body): Json<CreateKeyBody>,
 ) -> Response {
-    let existing_keys = |ctx: &SaasContext| ctx.organization.id;
+    let existing_keys = |ctx: &SaasContext| ctx.organization_id();
     let ctx = match authorize_request(
         &state,
         &headers,
@@ -244,13 +246,13 @@ pub async fn create_key(
         .saas
         .entitlements_of(ctx.organization.id, Utc::now())
         .await;
-    let request = AccessRequest::manage(Permission::ApiKeyCreate)
-        .consuming(features::MAX_API_KEYS, current, 1.0);
-    let decision = bot_core::authorization::authorize(
-        Some(&ctx.authorization),
-        &request,
-        Some(&entitlements),
+    let request = AccessRequest::manage(Permission::ApiKeyCreate).consuming(
+        features::MAX_API_KEYS,
+        current,
+        1.0,
     );
+    let decision =
+        bot_core::authorization::authorize(Some(&ctx.authorization), &request, Some(&entitlements));
     if !decision.is_allowed() {
         return deny_response(&state, &decision).await;
     }
@@ -262,11 +264,40 @@ pub async fn create_key(
         )
             .into_response();
     };
-    // A key may never be stronger than the member who created it.
-    if role.permissions().len() > ctx.authorization.permissions.len() {
+    if body.label.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "label must not be empty").into_response();
+    }
+    if let Some(unknown) = body
+        .scopes
+        .iter()
+        .find(|scope| Permission::parse(scope).is_none())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown permission scope '{unknown}'"),
+        )
+            .into_response();
+    }
+    if let Err(decision) = super::middleware::require_role_at_least(&ctx, role) {
+        return deny_response(&state, &decision).await;
+    }
+    // A key may never be stronger than the effective permissions of the
+    // credential creating it. Comparing set sizes is insufficient because
+    // two roles can have the same number of different permissions.
+    let requested_permissions = if body.scopes.is_empty() {
+        role.permissions()
+    } else {
+        role.permissions()
+            .intersect(&PermissionSet::parse_list(&body.scopes))
+    };
+    if !ctx
+        .authorization
+        .permissions
+        .contains_all(requested_permissions.as_slice())
+    {
         return (
             StatusCode::FORBIDDEN,
-            "a key may not grant more than its creator holds",
+            "a key may not grant permissions its creator does not hold",
         )
             .into_response();
     }
@@ -403,7 +434,10 @@ mod tests {
         assert!(json.contains(&created.key.secret_hash));
         let meta = created.key.metadata().to_string();
         assert!(!meta.contains(&created.plaintext));
-        assert!(!meta.contains(&created.key.secret_hash), "not even the hash leaks to clients");
+        assert!(
+            !meta.contains(&created.key.secret_hash),
+            "not even the hash leaks to clients"
+        );
         assert!(meta.contains(&created.key.key_prefix));
         assert!(!created.key.summary().contains(&created.plaintext));
     }

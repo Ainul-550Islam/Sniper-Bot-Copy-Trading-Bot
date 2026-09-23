@@ -43,9 +43,7 @@ pub use entitlement::{
     EntitlementVerdict,
 };
 pub use plan::{default_catalogue, features, FeatureLimit, Plan, PlanCode, PlanId, PlanStatus};
-pub use subscription::{
-    BillingProvider, Subscription, SubscriptionId, SubscriptionStatus,
-};
+pub use subscription::{BillingProvider, Subscription, SubscriptionId, SubscriptionStatus};
 pub use usage::{UsageEvent, UsageLedger, UsageMetric, UsageOutcome, UsageSource};
 
 use async_trait::async_trait;
@@ -89,10 +87,8 @@ pub trait BillingStore: Send + Sync {
     async fn upsert_entitlement(&self, ent: &Entitlement) -> BotResult<()>;
 
     /// Every stored entitlement row of one tenant.
-    async fn entitlements_of(
-        &self,
-        organization_id: OrganizationId,
-    ) -> BotResult<Vec<Entitlement>>;
+    async fn entitlements_of(&self, organization_id: OrganizationId)
+        -> BotResult<Vec<Entitlement>>;
 
     /// Record one usage event. `Ok(true)` = counted, `Ok(false)` = the
     /// `(tenant, idempotency_key)` pair was already recorded.
@@ -174,7 +170,10 @@ mod tests {
             assert_eq!(r.source, EntitlementSource::Plan);
             assert!(r.is_active(now));
         }
-        let sniper = rows.iter().find(|r| r.feature == features::MODULE_SNIPER).unwrap();
+        let sniper = rows
+            .iter()
+            .find(|r| r.feature == features::MODULE_SNIPER)
+            .unwrap();
         assert!(sniper.enabled);
         assert_eq!(sniper.limit_value, None, "unlimited has no ceiling");
         let poly = rows
@@ -182,7 +181,10 @@ mod tests {
             .find(|r| r.feature == features::MODULE_POLYMARKET)
             .unwrap();
         assert!(!poly.enabled, "a disabled plan feature stays disabled");
-        let members = rows.iter().find(|r| r.feature == features::MAX_MEMBERS).unwrap();
+        let members = rows
+            .iter()
+            .find(|r| r.feature == features::MAX_MEMBERS)
+            .unwrap();
         assert_eq!(members.limit_value, Some(5.0));
 
         // The derived rows resolve back to the same limits.
@@ -190,7 +192,10 @@ mod tests {
         let set = EntitlementSet::resolve(Some(&plan), Some(&sub), &rows, now);
         assert!(set.allows(features::MODULE_SNIPER));
         assert!(!set.allows(features::MODULE_POLYMARKET));
-        assert_eq!(set.limit_for(features::MAX_MEMBERS), FeatureLimit::Limited(5.0));
+        assert_eq!(
+            set.limit_for(features::MAX_MEMBERS),
+            FeatureLimit::Limited(5.0)
+        );
     }
 
     #[test]

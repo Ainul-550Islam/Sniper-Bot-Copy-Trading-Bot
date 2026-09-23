@@ -290,7 +290,11 @@ mod tests {
         assert_eq!(s.organization_id, Some(org));
         s.touch(t0 + Duration::seconds(10));
         assert_eq!(s.last_seen_at, t0 + Duration::seconds(10));
-        assert_eq!(s.expires_at, t0 + Duration::seconds(3600), "absolute expiry");
+        assert_eq!(
+            s.expires_at,
+            t0 + Duration::seconds(3600),
+            "absolute expiry"
+        );
     }
 
     #[test]

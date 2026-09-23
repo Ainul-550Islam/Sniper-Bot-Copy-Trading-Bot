@@ -68,6 +68,9 @@ pub struct SaasContext {
 impl SaasContext {
     /// Non-secret actor label for the audit trail.
     pub fn actor_label(&self) -> String {
+        if let Some(key) = &self.api_key {
+            return key.summary();
+        }
         format!(
             "{}:{}",
             self.authorization.principal.kind(),
@@ -86,7 +89,10 @@ impl SaasContext {
 fn presented_credential(headers: &HeaderMap) -> Option<String> {
     if let Some(v) = headers.get(AUTH_HEADER).and_then(|v| v.to_str().ok()) {
         let v = v.trim();
-        if let Some(rest) = v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")) {
+        if let Some(rest) = v
+            .strip_prefix("Bearer ")
+            .or_else(|| v.strip_prefix("bearer "))
+        {
             if !rest.trim().is_empty() {
                 return Some(rest.trim().to_string());
             }
@@ -123,7 +129,7 @@ pub async fn authorize_request(
     let requested_org = requested_organization(headers);
 
     // ---- 1. A tenant API key? ------------------------------------------
-    if let Some(key) = state.saas.api_key_by_hash(&hash_token(&presented)).await {
+    if let Some(key) = super::api_keys::resolve_key(state, &presented).await {
         if let Some(reason) = key.rejection(now) {
             return Err(Decision::unauthenticated(reason));
         }
@@ -182,36 +188,44 @@ pub async fn authorize_request(
             return Err(Decision::unauthenticated("the account is not active"));
         }
 
-        // Which tenant is this request for? The session's own scope, or the
-        // requested one — but only if the user is a member of it.
-        let target = requested_org.or(validated.organization_id);
+        // The explicit header wins; otherwise a path/resource owner supplied
+        // by the handler wins; finally use the session's selected tenant.
+        // This order lets platform staff operate on a path-named tenant while
+        // ordinary users still have to prove membership in that exact tenant.
+        let target = requested_org
+            .or(request.resource_owner)
+            .or(validated.organization_id);
         let Some(target) = target else {
             return Err(Decision::tenant(
                 "no organization context: select an organization first",
             ));
         };
-        let Some(membership) = state.saas.membership(target, user.id).await else {
-            // No membership: this is a cross-tenant attempt, and the answer
-            // must not reveal whether the organization exists.
-            return Err(Decision::resource(
-                "no membership in the requested organization",
-            ));
-        };
         let Some(org) = state.saas.organization(target).await else {
-            return Err(Decision::tenant("the organization no longer exists"));
+            // Keep the response indistinguishable from a missing membership
+            // for ordinary callers; platform staff may receive the same safe
+            // resource refusal without confirming existence.
+            return Err(Decision::resource(
+                "no access to the requested organization",
+            ));
         };
         if !bot_core::tenant::can_authenticate(org.status) {
             return Err(Decision::tenant("the organization is closed"));
         }
-        let ctx = build_context(
-            Principal::UserSession {
-                session_id: validated.id.to_string(),
-            },
-            &org,
-            &membership,
-            &user,
-            now,
-        );
+        let principal = Principal::UserSession {
+            session_id: validated.id.to_string(),
+        };
+        let ctx = if user.platform_admin {
+            AuthorizationContext::from_platform_admin(principal, &org, user.id, now)
+        } else {
+            let Some(membership) = state.saas.membership(target, user.id).await else {
+                // No membership: this is a cross-tenant attempt, and the
+                // answer must not reveal whether the organization exists.
+                return Err(Decision::resource(
+                    "no membership in the requested organization",
+                ));
+            };
+            build_context(principal, &org, &membership, &user, now)
+        };
         let entitlements = state.saas.entitlements_of(org.id, now).await;
         let decision = authorize(Some(&ctx), &request, Some(&entitlements));
         if !decision.is_allowed() {

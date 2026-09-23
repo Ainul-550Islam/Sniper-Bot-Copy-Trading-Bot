@@ -31,7 +31,7 @@ document: every check is reproducible from the source tree.
 
 | Check | How | Last known result |
 |---|---|---|
-| Exact latest counts | `release-manifest.json` `test_counts`; `docs/TESTING.md`; `AUDIT.md` §26–28 | Audit pass (current tree): workspace 537/537 (38 gated executed vs real PG 17.11 + Redis 8.0.2), db_integration 23/23, redis_integration 10/10, distributed_integration 4/4, two_replica_mirror 1/1, staking host 71/71, release-check 20 PASS / 0 FAIL / 0 SKIP, 0 failures anywhere. Freeze gate (0e139c3): 521/521 + staking 48/48 |
+| Exact latest counts | `release-manifest.json` `test_counts`; `docs/TESTING.md`; `CHANGELOG.md` | Latest source pass (2026-09-22): workspace 1028 passed / 0 failed / 1 intentionally ignored; PostgreSQL 17.11 live; db_integration 26/26; both SaaS durability tests executed; workspace check and strict Clippy passed. Historical hardening pass: 537/537 with PostgreSQL + Redis; freeze gate: 521/521 + staking 48/48. |
 | Reproduce yourself | `./scripts/release-check.sh` with `POSTGRES_URL` + `REDIS_URL` exported (procedure: `docs/HANDOVER.md` §2) | One command re-runs the entire gate |
 | Historical external verification | PREVIOUSLY VERIFIED on identical source: `build-sbf`, validator e2e 2/2 (incl. funded stake→reward→unstake on local validator), `recon_crash_e2e`, devnet `devnet_e2e` read-only, `latency_bench`, deterministic ledger replay | Listed with labels in `docs/HANDOVER.md` §3 and `release-manifest.json` `verification_status` |
 | Gated checks | Env-gated suites announce themselves and skip cleanly (`POSTGRES_URL`, `REDIS_URL`, `STAKING_E2E`, `E2E_NETWORK`, `E2E_LIVE`); rule: a skipped test must never look like a pass | `docs/TESTING.md` §Rules |

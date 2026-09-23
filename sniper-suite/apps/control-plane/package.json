@@ -1,0 +1,29 @@
+{
+  "name": "control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sniper Suite SaaS control plane: the multi-tenant web UI over the TASK 7A SaaS API. The browser owns NO secrets beyond the in-memory session token, and is never an authorization boundary.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "15.5.4",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.9",
+    "@types/react": "19.1.8",
+    "@types/react-dom": "19.1.6",
+    "eslint": "9.30.1",
+    "eslint-config-next": "15.5.4",
+    "typescript": "5.8.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -12,7 +12,8 @@
 //! | `users.rs` | register, login, current user, safe profile updates, logout |
 //! | `organizations.rs` | create (through the provisioning state machine), read, update, members, suspension |
 //! | `api_keys.rs` | tenant-scoped keys: create (secret shown once), list, revoke, restart-safe lookup |
-//! | `store.rs` | the in-process control-plane store with the durable semantics of migration 0017 |
+//! | `postgres.rs` | PostgreSQL runtime-record repository and atomic plan assignment |
+//! | `store.rs` | PostgreSQL-authoritative production store with an in-memory test mode |
 //!
 //! # What this boundary must never do
 //!
@@ -23,10 +24,16 @@
 //! cursors — those stay in TASK 1–6.
 
 pub mod api_keys;
+pub mod billing_webhook;
+pub mod export;
 pub mod middleware;
+pub mod openapi;
 pub mod organizations;
+pub mod postgres;
+pub mod provider;
 pub mod store;
 pub mod users;
+pub mod wallet_access;
 
 #[allow(unused_imports)]
 pub use middleware::{authorize_request, deny_response, SaasContext, DEPLOYMENT_ORG_SLUG};
@@ -78,10 +85,17 @@ pub fn routes() -> Router<ApiState> {
         // --- tenant API keys ---------------------------------------------
         .route("/api/saas/api-keys", post(api_keys::create_key))
         .route("/api/saas/api-keys", get(api_keys::list_keys))
-        .route(
-            "/api/saas/api-keys/:prefix",
-            delete(api_keys::revoke_key),
-        )
+        .route("/api/saas/api-keys/:prefix", delete(api_keys::revoke_key))
+        // --- TASK 7B: the public contract --------------------------------
+        .route("/api/saas/openapi.json", get(openapi::serve))
+        // --- TASK 7B: verified, idempotent provider webhooks -------------
+        .merge(billing_webhook::routes())
+        // --- TASK 7B: the tenant→wallet→strategy boundary ----------------
+        .merge(wallet_access::routes())
+        // --- TASK 7B: deterministic tenant-scoped exports ----------------
+        .merge(export::routes())
+        // --- TASK 7B: the authenticated tenant-scoped event stream -------
+        .merge(crate::security::websocket::routes())
 }
 
 /// Resolve the user behind a presented session token, without requiring a
@@ -122,8 +136,8 @@ pub async fn session_user(state: &ApiState, headers: &axum::http::HeaderMap) -> 
 /// deployment key maps to, on the Business plan so every module the
 /// operator already runs stays enabled. Idempotent: calling it twice
 /// returns the existing row.
-pub async fn ensure_deployment_organization(state: &ApiState) -> Option<Organization> {
-    if let Some(existing) = state.saas.organization_by_slug(DEPLOYMENT_ORG_SLUG).await {
+pub async fn ensure_deployment_organization(store: &SaasStore) -> Option<Organization> {
+    if let Some(existing) = store.organization_by_slug(DEPLOYMENT_ORG_SLUG).await {
         return Some(existing);
     }
     let now = Utc::now();
@@ -134,23 +148,20 @@ pub async fn ensure_deployment_organization(state: &ApiState) -> Option<Organiza
         None,
         now,
     );
-    state.saas.create_organization(&org).await.ok()?;
+    store.create_organization(&org).await.ok()?;
     // Business tier: the deployment operator already had every module.
-    let _ = state
-        .saas
-        .assign_plan(org.id, PlanCode::Business, now)
-        .await;
+    let _ = store.assign_plan(org.id, PlanCode::Business, now).await;
     Some(org)
 }
 
 /// Attach an owner membership for a bootstrap user (used by tests and by
 /// operators seeding the first account).
 pub async fn attach_owner(
-    state: &ApiState,
+    store: &SaasStore,
     organization_id: OrganizationId,
     user: &User,
 ) -> Option<Membership> {
-    if let Some(existing) = state.saas.membership(organization_id, user.id).await {
+    if let Some(existing) = store.membership(organization_id, user.id).await {
         return Some(existing);
     }
     let m = Membership::new(
@@ -160,6 +171,6 @@ pub async fn attach_owner(
         None,
         Utc::now(),
     );
-    state.saas.create_membership(&m).await.ok()?;
+    store.create_membership(&m).await.ok()?;
     Some(m)
 }

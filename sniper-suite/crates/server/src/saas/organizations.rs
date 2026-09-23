@@ -20,7 +20,7 @@ use serde_json::json;
 
 use bot_core::authorization::AccessRequest;
 use bot_core::billing::{features, PlanCode};
-use bot_core::membership::{Membership, MembershipRole, Permission};
+use bot_core::membership::Permission;
 use bot_core::provisioning::{plan_next, ProvisioningAction, ProvisioningJob, ProvisioningStep};
 use bot_core::tenant::{Organization, OrganizationId, OrganizationStatus};
 
@@ -98,14 +98,20 @@ pub async fn create_organization(
 
     let now = Utc::now();
     let request_key = ProvisioningJob::request_key_for(&user.email, &slug);
-    let mut job = state
+    let mut job = match state
         .saas
         .upsert_job(&ProvisioningJob::new(
             request_key.clone(),
             plan.as_str(),
             now,
         ))
-        .await;
+        .await
+    {
+        Ok(job) => job,
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    };
     // The user already exists (they are authenticated), so that step is done.
     job.user_id = Some(user.id);
     if job.step == ProvisioningStep::Signup {
@@ -142,6 +148,7 @@ pub async fn create_organization(
 
 /// Execute the remaining provisioning steps. Each step is idempotent, so a
 /// resumed job converges instead of duplicating.
+#[allow(clippy::result_large_err)]
 async fn run_provisioning(
     state: &ApiState,
     job: &mut ProvisioningJob,
@@ -186,14 +193,26 @@ async fn run_provisioning(
             }
             ProvisioningStep::MembershipCreated => {
                 let org_id = job.organization_id.expect("set by the previous step");
-                if state.saas.membership(org_id, user_id).await.is_none() {
-                    let m =
-                        Membership::new(org_id, user_id, MembershipRole::OrgOwner, None, now);
-                    if let Err(e) = state.saas.create_membership(&m).await {
-                        job.record_failure(e.to_string(), now);
-                        let _ = state.saas.update_job(job).await;
-                        return Err((StatusCode::CONFLICT, e.to_string()).into_response());
-                    }
+                if state.saas.membership(org_id, user_id).await.is_none()
+                    && super::attach_owner(
+                        &state.saas,
+                        org_id,
+                        &state.saas.user(user_id).await.ok_or_else(|| {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "provisioning user vanished",
+                            )
+                                .into_response()
+                        })?,
+                    )
+                    .await
+                    .is_none()
+                {
+                    job.record_failure("could not create owner membership", now);
+                    let _ = state.saas.update_job(job).await;
+                    return Err(
+                        (StatusCode::CONFLICT, "could not create owner membership").into_response()
+                    );
                 }
                 job.complete_step(step, now);
             }
@@ -226,9 +245,13 @@ async fn run_provisioning(
         let _ = state.saas.update_job(job).await;
     }
 
-    let org_id = job
-        .organization_id
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "provisioning produced no organization").into_response())?;
+    let org_id = job.organization_id.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "provisioning produced no organization",
+        )
+            .into_response()
+    })?;
     state
         .saas
         .organization(org_id)
@@ -393,8 +416,9 @@ pub async fn suspend_organization(
         &state,
         &headers,
         // Reading is enough at the permission level; platform scope is the
-        // real gate below.
-        AccessRequest::read(Permission::TenantRead),
+        // real gate below. Naming the resource here also lets the middleware
+        // resolve the path tenant without trusting a separate header.
+        AccessRequest::read(Permission::TenantRead).on_resource(requested),
     )
     .await
     {

@@ -124,6 +124,28 @@ impl AuthorizationContext {
         }
     }
 
+    /// Build a genuine human platform-administrator context for a target
+    /// organization. The caller must verify the persisted user flag before
+    /// using this constructor; unlike an API key, this context may cross
+    /// tenant boundaries.
+    pub fn from_platform_admin(
+        principal: Principal,
+        organization: &Organization,
+        user_id: UserId,
+        now: DateTime<Utc>,
+    ) -> Self {
+        AuthorizationContext {
+            principal,
+            user_id: Some(user_id),
+            organization_id: organization.id,
+            organization_status: organization.status,
+            role: MembershipRole::PlatformAdmin,
+            permissions: MembershipRole::PlatformAdmin.permissions(),
+            platform_admin: true,
+            issued_at: now,
+        }
+    }
+
     /// Build for a machine credential that has no membership row: the
     /// tenant API key carries its own role, which the key's owner chose.
     pub fn from_api_key(
@@ -224,8 +246,7 @@ mod tests {
     fn context_carries_the_role_permissions() {
         let o = org(OrganizationStatus::Active);
         let m = membership(o.id, MembershipRole::Trader);
-        let ctx =
-            AuthorizationContext::from_membership(session(), &o, &m, None, false, Utc::now());
+        let ctx = AuthorizationContext::from_membership(session(), &o, &m, None, false, Utc::now());
         assert_eq!(ctx.organization_id, o.id);
         assert_eq!(ctx.role, MembershipRole::Trader);
         assert!(ctx.has(Permission::BotStart));
@@ -264,8 +285,7 @@ mod tests {
         let o = org(OrganizationStatus::Active);
         let mut m = membership(o.id, MembershipRole::OrgOwner);
         m.status = MembershipStatus::Suspended;
-        let ctx =
-            AuthorizationContext::from_membership(session(), &o, &m, None, true, Utc::now());
+        let ctx = AuthorizationContext::from_membership(session(), &o, &m, None, true, Utc::now());
         assert!(ctx.permissions.is_empty());
         assert!(!ctx.has(Permission::TenantRead));
     }
@@ -277,8 +297,7 @@ mod tests {
 
         // Role says platform admin but the user flag is false.
         let m = membership(o.id, MembershipRole::PlatformAdmin);
-        let ctx =
-            AuthorizationContext::from_membership(session(), &o, &m, None, false, Utc::now());
+        let ctx = AuthorizationContext::from_membership(session(), &o, &m, None, false, Utc::now());
         assert!(!ctx.is_platform_scope());
         assert!(!ctx.owns(other), "a role alone must not cross tenants");
 
@@ -320,8 +339,7 @@ mod tests {
     fn summary_is_single_line_and_secret_free() {
         let o = org(OrganizationStatus::Suspended);
         let m = membership(o.id, MembershipRole::Auditor);
-        let ctx =
-            AuthorizationContext::from_membership(session(), &o, &m, None, false, Utc::now());
+        let ctx = AuthorizationContext::from_membership(session(), &o, &m, None, false, Utc::now());
         let s = ctx.summary();
         assert!(!s.contains('\n'));
         assert!(s.contains("role=auditor"));

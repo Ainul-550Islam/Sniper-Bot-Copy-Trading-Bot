@@ -188,14 +188,6 @@ impl PermissionSet {
         PermissionSet(Vec::new())
     }
 
-    /// Build from anything iterable; duplicates are collapsed.
-    pub fn from_iter<I: IntoIterator<Item = Permission>>(items: I) -> Self {
-        let mut v: Vec<Permission> = items.into_iter().collect();
-        v.sort();
-        v.dedup();
-        PermissionSet(v)
-    }
-
     /// Every permission (the full-power set).
     pub fn all() -> Self {
         PermissionSet::from_iter(Permission::ALL)
@@ -244,6 +236,15 @@ impl PermissionSet {
     }
 }
 
+impl FromIterator<Permission> for PermissionSet {
+    fn from_iter<I: IntoIterator<Item = Permission>>(items: I) -> Self {
+        let mut permissions: Vec<Permission> = items.into_iter().collect();
+        permissions.sort();
+        permissions.dedup();
+        PermissionSet(permissions)
+    }
+}
+
 impl IntoIterator for PermissionSet {
     type Item = Permission;
     type IntoIter = std::vec::IntoIter<Permission>;
@@ -284,7 +285,10 @@ mod tests {
         }
         assert!(Permission::BotStart.is_money_affecting());
         assert!(Permission::OrderManage.is_money_affecting());
-        assert!(!Permission::BotStop.is_money_affecting(), "stopping reduces risk");
+        assert!(
+            !Permission::BotStop.is_money_affecting(),
+            "stopping reduces risk"
+        );
         assert_eq!(Permission::ApiKeyCreate.resource(), "api_key");
         assert_eq!(Permission::BotRead.resource(), "bot");
     }
@@ -325,7 +329,10 @@ mod tests {
         ]);
         let effective = role.intersect(&scopes);
         assert!(effective.contains(Permission::BotRead));
-        assert!(!effective.contains(Permission::RiskManage), "scopes cannot add power");
+        assert!(
+            !effective.contains(Permission::RiskManage),
+            "scopes cannot add power"
+        );
         assert!(!effective.contains(Permission::BotStart));
         assert_eq!(effective.len(), 1);
     }

@@ -460,8 +460,12 @@ mod tests {
             EntitlementSource::Trial,
             now,
         );
-        let set = EntitlementSet::resolve(Some(&plan), Some(&sub), &[trial.clone()], now);
-        assert_eq!(set.limit_for(features::MAX_MEMBERS), FeatureLimit::Limited(50.0));
+        let set =
+            EntitlementSet::resolve(Some(&plan), Some(&sub), std::slice::from_ref(&trial), now);
+        assert_eq!(
+            set.limit_for(features::MAX_MEMBERS),
+            FeatureLimit::Limited(50.0)
+        );
 
         let over = Entitlement::new(
             sub.organization_id,
@@ -549,12 +553,7 @@ mod tests {
         for r in EntitlementDenyReason::ALL {
             assert_eq!(EntitlementDenyReason::parse(r.as_str()), Some(r));
         }
-        assert!(
-            EntitlementSource::Override.precedence()
-                > EntitlementSource::Trial.precedence()
-        );
-        assert!(
-            EntitlementSource::Trial.precedence() > EntitlementSource::Plan.precedence()
-        );
+        assert!(EntitlementSource::Override.precedence() > EntitlementSource::Trial.precedence());
+        assert!(EntitlementSource::Trial.precedence() > EntitlementSource::Plan.precedence());
     }
 }
