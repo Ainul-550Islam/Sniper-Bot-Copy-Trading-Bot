@@ -1,0 +1,9 @@
+# Keep the lockfile compatible with the Agave `cargo build-sbf` toolchain.
+#
+# platform-tools (Agave 2.3.x) ships Rust 1.84, which cannot even parse
+# manifests declaring `edition = "2024"`. With the resolver's MSRV fallback,
+# `cargo generate-lockfile` / `cargo update` prefer crate versions compatible
+# with this package's declared `rust-version` and only use newer ones when no
+# compatible version satisfies the requirement.
+[resolver]
+incompatible-rust-versions = "fallback"
