@@ -1,0 +1,46 @@
+# cargo-audit configuration — justified ignore list.
+#
+# Policy: an advisory is ignored ONLY when (a) no semver-compatible fix
+# exists anywhere upstream, AND (b) the exposure is understood and
+# documented below. Every entry must be re-reviewed when the pinned
+# upstream (solana 2.3 generation / sqlx 0.8) moves. `cargo audit` output
+# minus these IDs must stay empty — CI fails on anything new.
+
+[advisories]
+ignore = [
+    # ed25519-dalek 1.0.1 — "double public key signing oracle".
+    # Pulled by solana-keypair -> ed25519-dalek-bip32 0.2.0 (upstream pins
+    # dalek 1.x; no compatible fix exists). The oracle attack requires the
+    # expanded-key double-signing API pattern; this codebase only loads
+    # keypairs and signs normally via solana-sdk. Not exploitable here.
+    "RUSTSEC-2022-0093",
+
+    # curve25519-dalek 3.2.0 — timing variability in Scalar sub.
+    # Same chain as above (dalek 3.x is pinned by ed25519-dalek 1.x; fix is
+    # 4.x). Side-channel-relevant only for secret-scalar arithmetic in
+    # adversarial timing environments; signing goes through solana-sdk's
+    # standard paths.
+    "RUSTSEC-2024-0344",
+
+    # rsa 0.9.10 — Marvin timing attack.
+    # Phantom dependency: present in Cargo.lock only because lockfiles are
+    # feature-agnostic and sqlx has an OPTIONAL mysql driver (sqlx-mysql ->
+    # rsa). This workspace uses sqlx with default-features=false + postgres
+    # ONLY; rsa is never compiled into any binary (`cargo tree -e all -i rsa`
+    # is empty). Cannot be pruned from the lock without sqlx changing its
+    # optional-dep layout.
+    "RUSTSEC-2023-0071",
+
+    # rustls-webpki 0.101.7 — name-constraint bypasses + CRL parse panic
+    # (RUSTSEC-2026-0098 / -0099 / -0104).
+    # Chain: solana-client -> solana-pubsub-client -> tokio-tungstenite
+    # 0.20.1 -> tokio-rustls 0.24 -> rustls 0.21.12 -> webpki 0.101.7.
+    # 0.101.7 is the LAST 0.101 release — no patched version exists; fixes
+    # live in webpki 0.102+/0.103+ which rustls 0.21 cannot consume.
+    # Exposure: only TLS server-cert validation on solana pubsub
+    # connections, which this bot makes exclusively to operator-chosen RPC
+    # endpoints. Re-check when solana-pubsub-client updates its tungstenite.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]

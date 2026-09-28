@@ -1,0 +1,13 @@
+{
+  "validation_id": "funded-preflight",
+  "gap_id": "GAP-004",
+  "provider": "funded",
+  "environment": "test",
+  "timestamp": "2026-09-27T11:56:54Z",
+  "command": "cargo test -p sniper-suite --lib funded_mode_guard",
+  "mode": "all-safe",
+  "status": "NOT_RUN",
+  "evidence_hash": "f766aed547e9ece7e8174a73a822f43658ef7946740e3fa717c03e378fa112ed",
+  "redacted_metadata": {"live_funded":false},
+  "endpoint_ref": "funded ref"
+}
