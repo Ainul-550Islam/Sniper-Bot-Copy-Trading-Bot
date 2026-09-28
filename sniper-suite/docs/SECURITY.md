@@ -3,7 +3,50 @@
 This document describes the security controls that are **implemented and
 tested** in this repository. It is not an external audit — no third-party
 audit has been performed (see AUDIT.md for the honest status of assurance
-claims).
+claims; a future audit's deliverables have a defined handover slot in
+`docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006).
+
+### Frontend dependency advisories (remediated 2026-09-27)
+
+Two batches of remediation, both verified in this repository's own gates:
+
+* **Batch 10** — `apps/control-plane` pinned `next 15.5.4`, affected by the CVSS 10.0
+  remote-code-execution advisory `CVE-2025-66478` (React Server Components / App Router, upstream
+  `CVE-2025-55182`). The pin was raised to the patched `next 15.5.26` for the 15.5 line (superseded the same day by Batch 11 — see below).
+* **Batch 11 (F-2)** — the 15.5 line still resolved `postcss 8.4.31`, which `npm audit` rates high
+  (unescaped `</style>` output; `sourceMappingURL` `.map` disclosure) and whose fix ships only in
+  `next >= 16.3.6`. The control plane now pins **`next 16.3.6`** with **`eslint-config-next 16.3.6`**,
+  which resolves **`postcss 8.5.23`**; the shipped dependency graph now audits clean (`0 vulnerabilities`).
+
+Verification for the current state (`npm ci` = clean dependency state):
+
+* `npm ci --ignore-scripts` → 354 packages, exit 0; lockfile/package.json consistency check as in
+  `.github/workflows/frontend-ci.yml` → `lockfile consistent`.
+* `npm audit` → **`found 0 vulnerabilities`** (critical 0, high 0, moderate 0, low 0).
+* `npx tsc --noEmit` → exit 0 · `npx next build` → exit 0 (Next.js 16, 5 routes prerendered static).
+* `npm run lint` → exit 0, non-interactive (ESLint 9 flat config, `eslint-config-next/core-web-vitals`
+  + `/typescript`); the 12 pre-existing findings are reported as warnings and enumerated in
+  `docs/KNOWN-LIMITATIONS.md` row 16 — no rule is disabled.
+* Regression guard: `release_manifest_integration::frontend_lockfile_pins_patched_nextjs` fails if the
+  shipped tree is reverted to `next 15.5.26` / `15.5.4` or to a `postcss < 8.5.23` resolution.
+
+### Six tracked gaps — single source of truth (never inferred from hermetic tests)
+
+Source: `crates/server/src/ops/final_gap_ledger.rs` + `docs/FINAL-BUYER-GAP-LEDGER.md`; live evidence records:
+`evidence/external/*.json` (`NOT_RUN` in hermetic). None of the six is `VERIFIED`; the registry promotes only via
+`mark_verified(id, evidence_ref, verified_at, detail)` after the real command ran in the required environment.
+Documented commands are asserted to match the executable harnesses by the test `ledger_commands_match_documented_harnesses`.
+
+| Gap | Area | Ledger status (hermetic) | Buyer/operator command or deliverable |
+|---|---|---|---|
+| GAP-001 | Live billing (Stripe / Paddle) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `LIVE_BILLING=1 STRIPE_API_KEY=... cargo test -p sniper-suite --test live_billing_contract -- --ignored --nocapture` (Paddle: `PADDLE_API_KEY=...`) |
+| GAP-002 | Remote custody (Vault / KMS / HSM) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `LIVE_CUSTODY=1 VAULT_ADDR=... VAULT_TOKEN=... cargo test -p sniper-suite --test live_custody_contract -- --ignored --nocapture` |
+| GAP-003 | Deployment smoke (staging / production) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `DEPLOYMENT_BASE_URL=https://<real> cargo test -p sniper-suite --test deployment_smoke -- --nocapture` (missing URL ⇒ fail safe, no `localhost` substitution) |
+| GAP-004 | Funded live trading transition | `EXTERNAL_REQUIRED` / operator-only | Guard evidence: `cargo test -p sniper-suite --lib funded_mode_guard`; funded result only from a supervised operator run |
+| GAP-005 | Staking validator E2E | `EXTERNAL_REQUIRED` / `NOT_RUN` | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` |
+| GAP-006 | External security audit | `EXTERNAL_REQUIRED` / `BUYER_ACTION` — no report exists | Handover slot: `docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006 (findings/severity/remediation/retest/sign-off) |
+
+All live modes: `bash scripts/run-external-validation.sh all-safe` → `6/6 NOT_RUN` in a credential-free sandbox (correct, not a failure).
 
 ## Threat model (summary)
 

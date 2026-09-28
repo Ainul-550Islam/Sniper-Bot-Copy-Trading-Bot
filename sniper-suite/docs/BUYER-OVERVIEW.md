@@ -97,7 +97,7 @@ runtime flags (migration `0010_runtime_flags.sql`).
 ## 7. Persistence
 
 PostgreSQL is the durable source of truth for orders, executions, positions,
-trades, intents, claims, flags and the audit trail — 11 forward-only
+trades, intents, claims, flags and the audit trail — 21 forward-only
 migrations (`crates/core/migrations/0001`–`0011`, embedded in the binary via
 sqlx, applied at startup when `auto_migrate` is on). Redis is explicitly
 non-authoritative (dedup L2, coordination, cache) and may die without losing

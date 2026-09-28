@@ -150,7 +150,7 @@ Then, as admin (payer of initialize becomes admin):
   mainnet-beta, tag `token-metadata@v1.14.0`, and then against the real
   cloned program). The earlier freeze-pass run (2/2, 84 s) remains valid
   as historical evidence for the two tests it covered.
-  Run: `STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1`.
+  Run: `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` (excluded workspace — the `cd` is required).
 * **NOT done:** third-party audit, mainnet deployment, fuzzing. Reward math
   is linear/simple by design; caps are enforced at both queue and apply
   time. Do not claim this program is "audited" — it is well-tested, not

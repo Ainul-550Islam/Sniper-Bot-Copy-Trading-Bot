@@ -1,3 +1,9 @@
+#![allow(
+    clippy::match_like_matches_macro,
+    clippy::new_without_default,
+    path_statements,
+    dropping_copy_types
+)]
 //! `bot-core` — shared kernel for every module in the sniper suite.
 //!
 //! Contains:
@@ -32,6 +38,7 @@ pub mod auth;
 pub mod authorization;
 pub mod billing;
 pub mod config;
+pub mod custody;
 pub mod db;
 pub mod dedup;
 pub mod error;

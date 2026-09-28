@@ -175,9 +175,9 @@ applied (automatic at startup with `auto_migrate`), release build:
 - **Prerequisites:** Rust toolchain (host tests need nothing else).
 - **Command:**
   ```bash
-  cd programs/staking-suite && cargo test        # 71 host tests
+  (cd programs/staking-suite && cargo test)      # 71 host tests
   # full on-chain lifecycle (requires Solana CLI/agave 2.1.21 toolchain):
-  cargo build-sbf && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1
+  (cd programs/staking-suite && cargo build-sbf && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1)
   ```
 - **Expected:** 71/71 host tests pass anywhere (validation layer, caps,
   pause, timelock queue/apply/cancel, two-step admin, genesis latch +

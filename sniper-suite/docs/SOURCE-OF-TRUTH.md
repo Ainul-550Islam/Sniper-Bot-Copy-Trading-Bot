@@ -1,5 +1,9 @@
 # Source of truth (Phase 1, 2026-09-19)
 
+> **INTERNAL PROVENANCE (seller-side).** The absolute paths below are the seller's forensic record of
+> the 2026-09-19 baseline; they are not buyer instructions. Buyer-facing paths are repository-relative
+> (see `docs/FINAL-BUYER-DATA-ROOM.md`).
+
 ## 1. Canonical repository
 
 **The one and only canonical source tree is `/home/user/sniper-suite/`.**

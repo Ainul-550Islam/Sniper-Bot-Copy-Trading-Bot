@@ -11,7 +11,7 @@ not application source and are intentionally not reproduced here.
 The only editable application source is the repository's `sniper-suite/`
 directory. In that tree:
 
-- `crates/` is the seven-crate Rust application workspace;
+- `crates/` is the eight-crate Rust application workspace;
 - `programs/staking-suite/` is the separately locked Solana program;
 - `crates/core/migrations/` is the ordered PostgreSQL migration set;
 - `scripts/`, `.github/`, root configuration, and `docs/` are release and

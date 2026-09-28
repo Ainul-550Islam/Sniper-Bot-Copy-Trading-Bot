@@ -18,6 +18,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+pub mod openapi_billing;
+pub mod openapi_commercial;
+pub mod openapi_custody;
+pub mod openapi_ops;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},

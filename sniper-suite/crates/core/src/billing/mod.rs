@@ -33,10 +33,21 @@
 //! positions. Billing records what the CUSTOMER owes the platform; the
 //! ledger records what the market did to the customer. The two never merge.
 
+pub mod billing_state;
+pub mod checkout;
+pub mod dunning;
 pub mod entitlement;
+pub mod invoice;
+pub mod payment;
 pub mod plan;
+pub mod pricing;
+pub mod provider;
+pub mod provider_config;
+pub mod provider_events;
+pub mod reconciliation;
 pub mod subscription;
 pub mod usage;
+pub mod usage_policy;
 
 pub use entitlement::{
     Entitlement, EntitlementDenyReason, EntitlementId, EntitlementSet, EntitlementSource,

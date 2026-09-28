@@ -136,6 +136,33 @@ modules via `config.toml`, the API, or Telegram.
 
 ## 11. Verify health / readiness
 
+> **Deployment levels — do not conflate.** (1) *Local container smoke*: `docker build` + `docker run`
+> + `curl -s localhost:8080/api/health` proves the image serves HTTP on your machine — it is
+> **never** production verification. (2) *Buyer staging*: run the read-only smoke harness against
+> your staging URL: `DEPLOYMENT_BASE_URL=https://staging.example.com cargo test --test deployment_smoke -- --nocapture`.
+> (3) *Production*: the same harness against the production URL, run by the operator during the
+> handover window — only this counts as GAP-003 verification. The harness refuses to substitute
+> `localhost` for a real `DEPLOYMENT_BASE_URL` (guarded by a test). A missing
+> `DEPLOYMENT_BASE_URL` fails safe (NOT_RUN — no deployment claim).
+
+### Six tracked gaps — single source of truth (never inferred from hermetic tests)
+
+Source: `crates/server/src/ops/final_gap_ledger.rs` + `docs/FINAL-BUYER-GAP-LEDGER.md`; live evidence records:
+`evidence/external/*.json` (`NOT_RUN` in hermetic). None of the six is `VERIFIED`; the registry promotes only via
+`mark_verified(id, evidence_ref, verified_at, detail)` after the real command ran in the required environment.
+Documented commands are asserted to match the executable harnesses by the test `ledger_commands_match_documented_harnesses`.
+
+| Gap | Area | Ledger status (hermetic) | Buyer/operator command or deliverable |
+|---|---|---|---|
+| GAP-001 | Live billing (Stripe / Paddle) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `LIVE_BILLING=1 STRIPE_API_KEY=... cargo test -p sniper-suite --test live_billing_contract -- --ignored --nocapture` (Paddle: `PADDLE_API_KEY=...`) |
+| GAP-002 | Remote custody (Vault / KMS / HSM) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `LIVE_CUSTODY=1 VAULT_ADDR=... VAULT_TOKEN=... cargo test -p sniper-suite --test live_custody_contract -- --ignored --nocapture` |
+| GAP-003 | Deployment smoke (staging / production) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `DEPLOYMENT_BASE_URL=https://<real> cargo test -p sniper-suite --test deployment_smoke -- --nocapture` (missing URL ⇒ fail safe, no `localhost` substitution) |
+| GAP-004 | Funded live trading transition | `EXTERNAL_REQUIRED` / operator-only | Guard evidence: `cargo test -p sniper-suite --lib funded_mode_guard`; funded result only from a supervised operator run |
+| GAP-005 | Staking validator E2E | `EXTERNAL_REQUIRED` / `NOT_RUN` | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` |
+| GAP-006 | External security audit | `EXTERNAL_REQUIRED` / `BUYER_ACTION` — no report exists | Handover slot: `docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006 (findings/severity/remediation/retest/sign-off) |
+
+All live modes: `bash scripts/run-external-validation.sh all-safe` → `6/6 NOT_RUN` in a credential-free sandbox (correct, not a failure).
+
 ```bash
 curl -s localhost:8080/health | jq   # liveness: always 200 while HTTP is served
 curl -s localhost:8080/ready  | jq   # readiness: 200 only when every component is ready, else 503 + report
@@ -197,7 +224,10 @@ Live trading requires **all** of the following, deliberately:
    configured.
 4. Funded live-trading validation performed **gradually, under operator
    supervision** — this was never executed in the delivery environment
-   (documented NOT EXECUTED item) and is your responsibility.
+   (documented NOT EXECUTED item) and is your responsibility. Related
+   guard (default never funded, `live_unfunded` denied):
+   `cargo test -p sniper-suite --lib funded_mode_guard`; policy details in
+   `docs/LIVE-VALIDATION.md` § GAP-004.
 5. For the staking program specifically: program deployed under a finalized
    id **and an independent external security audit passed** — until then,
    mainnet deployment is blocked by documentation and should be blocked by

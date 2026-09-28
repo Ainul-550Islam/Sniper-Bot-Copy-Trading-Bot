@@ -16,7 +16,7 @@ is repository-backed (pointers in `docs/SELLER-FACT-SHEET.md` and
 2. "Rust trading suite: pump.fun sniper, copy trading, Polymarket CLOB,
    Telegram control, native Solana staking program — verified test evidence,
    MIT source transfer"
-3. "Complete Rust crypto-trading codebase (7 crates + on-chain program) —
+3. "Complete Rust crypto-trading codebase (8 crates + on-chain program) —
    paper-safe defaults, distributed execution ownership, audit chain, 20/20
    release gates, buyer due-diligence package included"
 
@@ -32,7 +32,7 @@ Jupiter exit routing, wallet copy trading, Polymarket CLOB trading with
 EIP-712 v2 order signing, a native Solana staking/reward program, and
 deny-by-default Telegram remote control) behind a single Axum control plane
 with REST, WebSocket, dashboard, Prometheus metrics, and liveness/readiness
-probes. Financial truth lives in PostgreSQL (11 forward-only migrations);
+probes. Financial truth lives in PostgreSQL (21 forward-only migrations);
 Redis is non-authoritative. Money paths follow one invariant pipeline —
 risk → ownership claim → idempotency → intent journal → execution →
 persistence → reconciliation → append-only hash-chained audit — and

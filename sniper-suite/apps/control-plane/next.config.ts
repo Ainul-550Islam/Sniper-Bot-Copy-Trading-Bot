@@ -18,8 +18,10 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   // Linting is an explicit `npm run lint` step with the repository's shared
-  // configuration — never an implicit, version-dependent build side effect.
-  eslint: { ignoreDuringBuilds: true },
+  // configuration (`eslint.config.mjs` + eslint-config-next) — never an
+  // implicit, version-dependent build side effect. Next.js 16 removed both the
+  // `next lint` command and the `eslint` key in this config, so the rule is now
+  // enforced by the framework itself plus `.github/workflows/frontend-ci.yml`.
   env: {
     NEXT_PUBLIC_API_ORIGIN: apiOrigin,
   },

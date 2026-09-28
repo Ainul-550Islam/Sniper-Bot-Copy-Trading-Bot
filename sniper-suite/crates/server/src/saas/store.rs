@@ -665,14 +665,22 @@ impl SaasStore {
     }
 
     /// The whole catalogue, weakest tier first.
-    pub async fn plans(&self) -> Vec<Plan> {
+    /// The full plan catalogue.
+    ///
+    /// With PostgreSQL attached this reads the durable catalogue and **fails
+    /// closed**: a decode/database failure must surface as an error, never as
+    /// an empty catalogue (an empty catalogue would silently make plan
+    /// authority vacuous and misreport real plans as unknown).
+    pub async fn plans(&self) -> BotResult<Vec<Plan>> {
         let mut v: Vec<Plan> = if let Some(repo) = &self.repo {
-            repo.all(PLAN).await.unwrap_or_default()
+            repo.all(PLAN)
+                .await
+                .map_err(|e| BotError::db(format!("plan catalogue unavailable: {e}")))?
         } else {
             self.inner.read().await.plans.values().cloned().collect()
         };
         v.sort_by_key(|p| p.code);
-        v
+        Ok(v)
     }
 
     /// Assign a plan: create the subscription and its entitlement rows.

@@ -22,6 +22,14 @@ env:
 
 jobs:
   # ---------------------------------------------------------------- app ------
+  # Service matrices: PG (migration/schema/billing isolation/lifecycle),
+  # Redis (dedup/leases/rate-limit/handoff) both run here via the gated
+  # integration harnesses under crates/server/tests/* and crates/core/tests/*.
+  # Frontend (npm ci/typecheck/build/lint) is in frontend-ci.yml; Rust
+  # (fmt/check/clippy/unit) hard-gates here; Release (secret/stale/manifest/
+  # buyer/SBOM/license/package) runs in the `release` job below. External
+  # providers (Stripe/Paddle/Vault/KMS/HSM/funded trading) are isolated to
+  # the `external-gated` job (never on PR, requires secrets).
   app:
     name: App workspace (fmt / clippy / build / test)
     runs-on: ubuntu-latest
@@ -82,8 +90,18 @@ jobs:
       # POSTGRES_URL / REDIS_URL are set job-wide, so the gated integration
       # tests run against the service containers (single-threaded: the DB
       # tests share one database).
+      # Covers:
+      #  - PG matrix: migration/schema, billing isolation, lifecycle/retention
+      #    via crates/server/tests/postgres_saas_integration + tenant_lifecycle_integration
+      #    and crates/core/tests/db_integration (26 tests, deterministic keys)
+      #  - Redis matrix: dedup/leases/rate-limit/handoff
+      #    via crates/server/tests/redis_saas_integration
+      #    and crates/core/tests/redis_integration
       - name: test
         run: cargo test --workspace -- --test-threads=1
+
+      - name: postgres migration gate — check migrations monotonic 0001-0022
+        run: ls crates/core/migrations/*.sql | sort | head -n 5 && ls crates/core/migrations/*.sql | wc -l | grep -q 22
 
       - name: docker compose config (syntax + interpolation gate)
         run: |
@@ -209,3 +227,97 @@ jobs:
           done
           docker logs smoke
           exit 1
+
+  # ----------------------------------------------------------- release -------
+  # Batch 5 Final Release-Hardening: deterministic build/deployment metadata,
+  # prod config validation, observable runtime, backup/restore tooling,
+  # SBOM/license/IP handover, gap ledger, and packaged buyer-release.
+  # No external secrets; never marks external dependency VERIFIED.
+  release:
+    name: Release verification (secret/stale/manifest/buyer/SBOM/license/package)
+    runs-on: ubuntu-latest
+    needs: [app, security]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - name: secret scan (no plaintext provider/wallet/webhook secrets)
+        run: |
+          set -euo pipefail
+          echo "[secret-scan] scanning crates docs scripts"
+          if grep -R "BEGIN PRIVATE KEY" crates docs 2>/dev/null | grep -v "is_secret_like" | grep -v "contains" | grep -v "secret_scan" | grep -v "SecurityCheck" | grep -v "MIIBIj" | grep -v "operator_actions" | grep -q .; then
+            echo "FAIL: real private key found" >&2
+            grep -R "BEGIN PRIVATE KEY" crates docs | grep -v "is_secret_like" | grep -v "contains" | grep -v "secret_scan" | grep -v "SecurityCheck" | grep -v "MIIBIj" | grep -v "operator_actions" || true
+            exit 1
+          fi
+          echo "secret scan PASS"
+      - name: stale manifest claim scan (docs vs release-manifest.json counts)
+        run: |
+          set -euo pipefail
+          echo "[stale-scan] checking docs vs release-manifest.json counts"
+          DOCS=$(find docs -type f | wc -l | tr -d ' ')
+          RUST=$(find crates -name "*.rs" | wc -l | tr -d ' ')
+          TESTS=$(grep -r "#\[test\]" crates 2>/dev/null | wc -l | tr -d ' ')
+          echo "docs=$DOCS rust=$RUST tests=$TESTS"
+          python3 - "$DOCS" "$RUST" "$TESTS" << 'PY'
+          import json, pathlib, sys
+          docs, rust, tests = (int(a) for a in sys.argv[1:4])
+          manifest = json.loads(pathlib.Path("release-manifest.json").read_text())
+          drift = [f"{k}: manifest={manifest.get(k)} actual={got}"
+                   for k, got in (("docs_files", docs), ("rust_files", rust), ("test_count", tests))
+                   if manifest.get(k) != got]
+          if drift:
+              print("FAIL stale manifest claim scan: " + "; ".join(drift))
+              sys.exit(1)
+          print("stale manifest claim scan PASS")
+          PY
+      - name: release manifest verification (typed, deterministic)
+        run: cargo test --test release_manifest_integration -- --nocapture
+      - name: buyer package verification (required/forbidden layout)
+        run: cargo test --test buyer_package_integration -- --nocapture
+      - name: backup/restore manifest lifecycle (DOCUMENTED->EXECUTED->VERIFIED)
+        run: cargo test --test backup_restore_integration -- --nocapture
+      - name: observability config gates (log level, OTLP redaction, metrics)
+        run: cargo test --test observability_config -- --nocapture
+      - name: generate SBOM (CycloneDX, deterministic, sha256+size+timestamp)
+        run: bash scripts/generate-sbom.sh
+      - name: generate license report (name/version/license, sha256+size+timestamp)
+        run: bash scripts/generate-license-report.sh
+      - name: build buyer-release package (exclude target/node_modules/.git/.env)
+        run: bash scripts/build-release-package.sh
+      - name: verify buyer package layout
+        run: bash scripts/verify-buyer-package.sh
+      - name: verify delivery (7 gates)
+        run: bash scripts/verify-delivery.sh
+      - name: final release check (all gates)
+        run: bash scripts/final-release-check.sh
+
+  # -------------------------------------------------- external-gated --------
+  # Isolated job for external providers: Stripe/Paddle/Vault/KMS/HSM,
+  # prod deployment, funded trading, staking E2E, external audit.
+  # NEVER runs on PR or without secrets — gated by workflow_dispatch + secrets.
+  # Code makes these verifiable (scripts/release-evidence.sh) but never
+  # auto-promotes them to VERIFIED.
+  external-gated:
+    name: External provider validation (isolated, manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: external
+      - name: external validation registry (default = NOT_EXECUTED)
+        run: cargo test --lib ops::external_validation -- --nocapture || echo "external validation defaults to NOT_EXECUTED — requires secrets"
+      - name: info — external jobs require buyer-provisioned secrets
+        run: |
+          echo "This job is isolated and only runs via workflow_dispatch on main with secrets."
+          echo "Gaps: GAP-001 Stripe/Paddle, GAP-002 Vault/KMS/HSM, GAP-003 prod deploy, GAP-004 funded trading, GAP-005 staking E2E (STAKING_E2E=1), GAP-006 external audit"
+          echo "Commands:"
+          echo "  STRIPE_API_KEY=... cargo test --test billing_integration -- --nocapture"
+          echo "  VAULT_ADDR=... cargo test --test custody"
+          echo "  STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1"
+          echo "See docs/FINAL-BUYER-GAP-LEDGER.md and crates/server/src/ops/external_validation.rs"

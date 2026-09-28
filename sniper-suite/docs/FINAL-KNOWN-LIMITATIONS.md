@@ -122,6 +122,19 @@ re-verification fields).
   beyond `LayoutStore`) — future scope; drift risk is registered in
   `docs/BUYER-RISK-REGISTER.md`.
 
+## 7. Batch7 External Validation Harness — HARNESS READY, LIVE NOT_RUN (2026-09-24)
+
+External validation is now **reproducible via harness**, but every live external check still defaults to **NOT_RUN/EXTERNAL_REQUIRED/BLOCKED** without buyer-provisioned credentials/network/validator. The harness itself is verified; the live external systems are not.
+
+* **24-file harness:** `crates/server/src/ops/{provider_contract,provider_contract_runner,deployment_smoke,network_policy,external_evidence,external_evidence_verify,live_gate,funded_mode_guard}.rs` (8) + `crates/server/src/solana/{connection_contract,geyser_contract}.rs` (2) + `crates/server/src/staking/{deployment_contract,validator_contract}.rs` (2) + `crates/server/src/billing/{live_provider_contract,live_provider_fixture}.rs` (2) + `crates/server/src/custody/{live_provider_contract,live_provider_fixture}.rs` (2) + `crates/server/tests/{provider_contracts,deployment_smoke,solana_contract,staking_contract,live_billing_contract,live_custody_contract}.rs` (6) + `scripts/run-external-validation.sh` + `docs/EXTERNAL-VALIDATION-RUNBOOK.md`
+* **Wiring:** `crates/server/src/ops/mod.rs` (8 new mods) + `crates/server/src/main.rs` (inline pub mods `solana/staking/billing/custody`) + `crates/server/src/lib.rs` (library crate for `sniper_suite::` integration tests) — exact 24 paths are listed in `release-manifest.json:components.external_validation_batch7_24`
+* **Truthful status:** Stripe/Paddle **ADAPTER READY LIVE NOT_RUN** (requires `LIVE_BILLING=1`), Vault/KMS/HSM **BOUNDARY READY NOT_RUN** (requires `LIVE_CUSTODY=1`), deployment **SMOKE HARNESS READY NOT_RUN** (requires `DEPLOYMENT_BASE_URL`), Solana RPC/WS/Geyser **READ-ONLY HARNESS READY NOT_RUN** (requires `RPC_URL`/`WS_URL`), staking **DEPLOYMENT/VALIDATOR HARNESS READY NOT_RUN** (requires `STAKING_E2E=1` + validator), funded **GUARD READY NOT_RUN** (live-funded requires explicit config+auth, never default), audit **NOT DONE**
+* **Safety invariants verified:** `provider_contract` never default PASS; `provider_contract_runner` never silently enables live; `deployment_smoke` never claims deployment without tested URL; `network_policy` prevents accidental live in unit tests; `external_evidence` never persists secrets, `external_evidence_verify` rejects tampered and never upgrades NOT_RUN to PASS on file existence; `live_gate` fail closed; `funded_mode_guard` never default live-funded nor expose keys; Solana `connection_contract`/`geyser_contract` read-only no trading; `staking` placeholder is BLOCKED; `billing`/`custody` live require explicit enablement else NOT_RUN/EXTERNAL_REQUIRED, fixtures are NON-LIVE
+* **Execution taxonomy:** every test declares `HERMETIC/SERVICE_BACKED/LIVE_EXTERNAL/PRODUCTION_SMOKE`; live tests (`live_billing_contract`, `live_custody_contract`) are `#[ignore]` and require `LIVE_BILLING=1`/`LIVE_CUSTODY=1` with real provider — `cargo test --workspace` (normal) does **not** run them
+* **Evidence:** `bash scripts/run-external-validation.sh all-safe` (modes `billing/custody/deployment/solana/staking/funded-preflight/all-safe`) prints `PASS/FAIL/NOT_RUN/EXTERNAL_REQUIRED` truthfully, redacts secrets, saves `evidence/external/*.json` with `validation_id/gap_id/provider/environment/timestamp/command/mode/status/evidence_hash/redacted_metadata/endpoint_ref` (canonical timestamp-excluded hash); verified in hermetic as `6/6 NOT_RUN`; `cargo test -p sniper-suite --lib 263/263 (3 ignored)` + 6 integration harnesses `32/32 (6 ignored live)` — re-run 2026-09-27 Batch 10; `cargo clippy --workspace --all-targets -- -D warnings` clean
+* **Failure classification:** external network failure vs app failure is distinguished; no secrets in logs/URLs/JSON/audit/errors/persisted plaintext; `EXTERNAL_REQUIRED` is not a failure of the app
+* **Buyer action:** follow `docs/EXTERNAL-VALIDATION-RUNBOOK.md` per validation (prerequisites / env var by NAME only / command / expected result / evidence / failure interpretation / security) — fixture vs service-backed vs live external vs production is explicitly distinguished
+
 ## Explicit non-claims (policy)
 
 No production deployments, customers, revenue, ROI, transaction volume,
@@ -129,4 +142,4 @@ valuation, security certification, latency guarantee, profit guarantee,
 execution guarantee, or mainnet-proven status is claimed anywhere in this
 delivery. Bench figures are measurements of the documented sandbox
 environment, not product guarantees. Historical (freeze-era) evidence stays
-labeled historical and is never re-presented as current.
+labeled historical and is never re-presented as current. Batch7 external harnesses are **READY and reproducible**, but live external validations are **NOT_RUN until buyer provisions credentials/network/validator per runbook** — no live Stripe/Paddle/Vault/KMS/HSM/deployment/funded/audit claim is made in this delivery.

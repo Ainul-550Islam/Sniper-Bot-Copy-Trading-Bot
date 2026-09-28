@@ -34,16 +34,15 @@ The buyer verifies per `docs/BUYER-QUICKSTART.md` §1 (clone from bundle →
 
 ## INCLUDE (must be present — all are tracked files)
 
-- [ ] **Source** — `crates/` (7 crates: 71 src `.rs` + 14 test `.rs` +
-      7 Cargo.tomls) and `programs/staking-suite/` (5 src + 1 test +
+- [ ] **Source** — `crates/` (8 crates: 287 src `.rs` + 56 test `.rs` +
+      8 Cargo.tomls) and `programs/staking-suite/` (5 src + 1 test +
       Cargo.toml + `.cargo/` configs).
-- [ ] **Lockfiles** — root `Cargo.lock` (706 packages) **and**
+- [ ] **Lockfiles** — root `Cargo.lock` (707 packages) **and**
       `programs/staking-suite/Cargo.lock` (580 packages). Both are
       mandatory: they are the authoritative dependency record and the
       reproducibility basis.
-- [ ] **Migrations** — `crates/core/migrations/0001`–`0011` (all 11 `.sql`).
-- [ ] **Docs** — all 36 files under `docs/` (13 engineering + 14 buyer
-      package + 9 final delivery), plus root `README.md`, `CHANGELOG.md`,
+- [ ] **Migrations** — `crates/core/migrations/0001`–`0022` (all 22 `.sql`).
+- [ ] **Docs** — all 101 files under `docs/`, plus root `README.md`, `CHANGELOG.md`,
       `AUDIT.md` (evidence trail — never strip it), `SECURITY.md`.
 - [ ] **Config examples** — `config.toml.example`, `.env.template`,
       `rust-toolchain.toml`, `deny.toml`, root `.cargo/audit.toml`.

@@ -14,7 +14,7 @@ detail), `docs/THIRD-PARTY.md` (service dependencies), `LICENSE` (MIT).
 |---|---|
 | License file | `LICENSE` — MIT, "Copyright (c) 2026 sniper-suite authors" |
 | Copyright holder | Generic placeholder "sniper-suite authors" — the concrete legal entity is a **documented buyer/seller fill-in** (`docs/HANDOVER.md` §5); never fabricated |
-| Project-owned source | All Rust in `crates/` (7 crates, 44,088 lines of src + tests) and `programs/staking-suite/` (5 src + 1 e2e test), all SQL migrations (11), all shell tooling (3 scripts), Dockerfile/compose/CI, and all documentation — written for this project |
+| Project-owned source | All Rust in `crates/` (8 crates, 158,769 lines of src + tests) and `programs/staking-suite/` (5 src + 1 e2e test), all SQL migrations (22), all shell tooling (10 scripts), Dockerfile/compose/CI, and all documentation — written for this project |
 | Vendored/copied third-party source inside the repo | **None.** No vendored crates, no copied protocol source files. External protocols are accessed via published crates or hand-written wire code (below) |
 | Generated code | None committed (borsh/serde derives expand at compile time; no codegen output in the tree) |
 

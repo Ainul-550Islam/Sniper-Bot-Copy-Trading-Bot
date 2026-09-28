@@ -22,7 +22,7 @@ document: every check is reproducible from the source tree.
 | Check | How | Last known result |
 |---|---|---|
 | Toolchain pin | `rust-toolchain.toml` (1.98.1 + rustfmt + clippy); Dockerfile base `rust:1.98.1-bookworm`; CI `dtolnay/rust-toolchain@1.98.1`; MSRV `rust-version = 1.82` (app) / `1.79` (program, for agave platform-tools resolver) | Three-way pin consistency is a release-check gate |
-| Lockfiles | `Cargo.lock` (706 packages) and `programs/staking-suite/Cargo.lock` (580 packages), both committed | `cargo build --locked` reproducible dependency graph |
+| Lockfiles | `Cargo.lock` (707 packages) and `programs/staking-suite/Cargo.lock` (580 packages), both committed | `cargo build --locked` reproducible dependency graph |
 | Build from zero | Fresh machine: rustup → `cargo build --release`; full procedure in `docs/HANDOVER.md` §2 | VERIFIED — whole suite rebuilt and re-gated from source alone on a wiped machine (fresh rustup, PG 16.4 from official tarball, Redis 7.2.10 from source, empty target dir, empty database) |
 | Reproducibility caveats | `docs/RELEASE.md` §reproducible-build analysis: no build timestamps embedded; `release-manifest.json` deliberately omits timestamps and its own commit hash | Bit-for-bit binary reproducibility NOT claimed (rustc/OS toolchain variance); source-level reproducibility is what is verified |
 | On-chain build | `cd programs/staking-suite && cargo build-sbf` | EXECUTED on the audit-pass source (hardening pass 2026-09-18, agave 2.1.21 / platform-tools v1.43): 187,504-byte `staking_suite.so`, SHA-256 `57a890fae273f2c569fc814c43f0645311b6983dd30782126a9844ee193b5564`; all 3 validator e2e EXECUTED and PASSED against this exact binary. (The freeze-era 5,440-byte figure refers to the superseded freeze source.) |
@@ -52,7 +52,7 @@ document: every check is reproducible from the source tree.
 
 | Check | How | Last known result |
 |---|---|---|
-| PostgreSQL | Required ≥ 16 (verified on 16.4); 11 forward-only migrations embedded via sqlx; `auto_migrate` at startup | db_integration 23/23 + pg_dump→restore round-trip VERIFIED |
+| PostgreSQL | Required ≥ 16 (verified on 16.4); 22 forward-only migrations (0001–0022) embedded via sqlx; `auto_migrate` at startup | db_integration 26/26 on PostgreSQL 17.11 (2026-09-26; earlier 23/23 on 16.4) + pg_dump→restore round-trip VERIFIED |
 | Redis | Required 7.x (verified on 7.2.10); non-authoritative only | redis_integration 10/10 VERIFIED; Redis-loss behavior in `docs/BACKUP-RESTORE.md` |
 | RPC / WebSocket | Solana JSON-RPC + WS configured via `RPC_URL`/`WS_URL`; retry/failover/fan-out in `crates/solana-kit/src/rpc.rs` | Mock-verified; production provider is buyer-supplied |
 | Geyser | Yellowstone-compatible `transactionSubscribe` endpoint via `GEYSER_WS_URL`; poll fallback when absent | Mock-verified (`geyser_detect`, `geyser_feed`); real provider NOT EXECUTED |

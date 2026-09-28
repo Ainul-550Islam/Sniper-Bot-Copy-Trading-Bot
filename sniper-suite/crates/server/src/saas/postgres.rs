@@ -409,6 +409,16 @@ mod tests {
             assert_eq!(winner, first);
         }
 
+        // Clean up the probe rows this test created. Every row is prefixed with
+        // this run's id, so a shared integration database is left exactly as it
+        // was found and later tests (billing plan catalogue, checkout) are
+        // unaffected by the synthetic records above.
+        sqlx::query("DELETE FROM saas_runtime_records WHERE id LIKE $1 OR lookup_key LIKE $1")
+            .bind(format!("{run}-%"))
+            .execute(db.pool())
+            .await
+            .expect("cleanup probe rows");
+
         db.close().await;
     }
 }

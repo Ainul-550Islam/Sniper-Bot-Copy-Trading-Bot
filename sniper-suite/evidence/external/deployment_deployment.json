@@ -1,0 +1,13 @@
+{
+  "validation_id": "deployment",
+  "gap_id": "GAP-003",
+  "provider": "deployment",
+  "environment": "test",
+  "timestamp": "2026-09-27T11:56:54Z",
+  "command": "DEPLOYMENT_BASE_URL=<redacted> cargo test --test deployment_smoke",
+  "mode": "all-safe",
+  "status": "NOT_RUN",
+  "evidence_hash": "d85a36c3bcaa38afe47b19975adb3149a837cae9ac8dece938fd642c1e4e4557",
+  "redacted_metadata": {"health":null},
+  "endpoint_ref": "deployment ref"
+}

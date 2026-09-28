@@ -24,16 +24,34 @@
 //! cursors — those stay in TASK 1–6.
 
 pub mod api_keys;
+pub mod audit_export;
+pub mod backup_status;
+pub mod billing;
+pub mod billing_reconciliation;
+pub mod billing_status;
 pub mod billing_webhook;
+pub mod checkout;
+pub mod commercial_state;
+pub mod custody;
+pub mod custody_health;
+pub mod custody_rotation;
+pub mod data_lifecycle;
 pub mod export;
+pub mod invoices;
 pub mod middleware;
 pub mod openapi;
 pub mod organizations;
+pub mod payment_webhooks;
 pub mod postgres;
 pub mod provider;
+pub mod readiness;
+pub mod security_summary;
 pub mod store;
+pub mod tenant_lifecycle;
+pub mod usage_limits;
 pub mod users;
 pub mod wallet_access;
+pub mod websocket_auth;
 
 #[allow(unused_imports)]
 pub use middleware::{authorize_request, deny_response, SaasContext, DEPLOYMENT_ORG_SLUG};
@@ -96,6 +114,26 @@ pub fn routes() -> Router<ApiState> {
         .merge(export::routes())
         // --- TASK 7B: the authenticated tenant-scoped event stream -------
         .merge(crate::security::websocket::routes())
+        // --- BATCH: billing, checkout, invoices, custody, lifecycle -----
+        .merge(checkout::routes())
+        .merge(invoices::routes())
+        .merge(payment_webhooks::routes())
+        .merge(custody::routes())
+        .merge(tenant_lifecycle::routes())
+        // --- BATCH 2: reconciliation, health, audit export, data lifecycle, WS auth ---
+        .merge(billing_reconciliation::routes())
+        .merge(custody_health::routes())
+        .merge(audit_export::routes())
+        .merge(data_lifecycle::routes())
+        // --- BATCH 3: commercial, readiness, usage, rotation ---
+        .merge(billing_status::routes())
+        .merge(usage_limits::routes())
+        .merge(custody_rotation::routes())
+        .merge(readiness::routes())
+        .merge(commercial_state::routes())
+        // --- BATCH 4: security summary + backup status ---
+        .merge(security_summary::routes())
+        .merge(backup_status::routes())
 }
 
 /// Resolve the user behind a presented session token, without requiring a

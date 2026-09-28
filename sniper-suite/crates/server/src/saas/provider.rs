@@ -110,6 +110,9 @@ pub struct CheckoutSession {
 pub enum ProviderError {
     /// The provider exists but no adapter is implemented in this build.
     NotImplemented(BillingProvider),
+    /// The provider was requested but its required configuration (API key / webhook secret) is missing.
+    /// Typed so callers can distinguish \"not configured\" from transport failures and never silently fall back to manual.
+    Configuration(String),
     /// The webhook did not verify (bad/missing signature, stale timestamp,
     /// malformed envelope). Always a 401 — never a 500.
     Verification(&'static str),
@@ -122,6 +125,7 @@ impl ProviderError {
     pub fn status(&self) -> StatusCode {
         match self {
             ProviderError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            ProviderError::Configuration(_) => StatusCode::NOT_IMPLEMENTED,
             ProviderError::Verification(_) => StatusCode::UNAUTHORIZED,
             ProviderError::Transport(_) => StatusCode::BAD_GATEWAY,
         }
@@ -131,6 +135,7 @@ impl ProviderError {
     pub fn code(&self) -> &'static str {
         match self {
             ProviderError::NotImplemented(_) => "provider_not_implemented",
+            ProviderError::Configuration(_) => "provider_not_configured",
             ProviderError::Verification(_) => "webhook_verification_failed",
             ProviderError::Transport(_) => "provider_transport_error",
         }
@@ -143,6 +148,7 @@ impl IntoResponse for ProviderError {
             ProviderError::NotImplemented(p) => {
                 format!("no {} adapter is implemented in this build", p.as_str())
             }
+            ProviderError::Configuration(msg) => msg.clone(),
             ProviderError::Verification(reason) => (*reason).to_string(),
             ProviderError::Transport(_) => "the provider could not be reached".to_string(),
         };

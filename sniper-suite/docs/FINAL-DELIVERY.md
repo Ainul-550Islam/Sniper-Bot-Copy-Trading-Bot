@@ -20,7 +20,7 @@ labels used throughout (taxonomy defined in `docs/HANDOVER.md` §3):
 - Complete Rust source: 7-crate application workspace (`crates/`) + one
   standalone native Solana staking program (`programs/staking-suite/`, own
   lockfile).
-- 11 forward-only PostgreSQL migrations (`crates/core/migrations/`).
+- 21 forward-only PostgreSQL migrations (`crates/core/migrations/`).
 - The full test suite: 521 workspace tests (incl. 38 gated integration tests
   against real PostgreSQL/Redis), 48 staking host tests + 2 gated validator
   e2e tests, all protocol-mock harnesses. (Post-delivery audit pass on the

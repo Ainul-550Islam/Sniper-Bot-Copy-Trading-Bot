@@ -84,6 +84,8 @@ pub fn document() -> Value {
         "tags": [
             { "name": "auth" }, { "name": "users" }, { "name": "organizations" },
             { "name": "api-keys" }, { "name": "billing" },
+            { "name": "checkout" }, { "name": "invoices" },
+            { "name": "custody" }, { "name": "lifecycle" },
             { "name": "wallet-access" }, { "name": "exports" }, { "name": "events" },
             { "name": "contract" },
         ],
@@ -419,6 +421,133 @@ pub fn document() -> Value {
                     }),
                 ),
             },
+            "/api/saas/billing/payment-webhooks/{provider}": {
+                "parameters": [ { "name": "provider", "in": "path", "required": true, "schema": { "type": "string", "enum": ["stripe", "paddle"] } } ],
+                "post": operation(
+                    "saas.billingPaymentWebhook",
+                    "Provider-neutral payment/invoice event entry. Signature-verified and idempotent; not user-authenticated.",
+                    &["billing"], false,
+                    json!({ "type": "object", "required": ["id", "type"], "properties": {
+                        "id": { "type": "string" }, "type": { "type": "string" }, "data": { "type": "object" },
+                    } }),
+                    json!({
+                        "200": json_response("applied | ignored | duplicate", json!({ "$ref": "#/components/schemas/WebhookAck" })),
+                        "401": error_ref(), "422": json_response("rejected", json!({ "$ref": "#/components/schemas/WebhookAck" })),
+                        "501": error_ref(),
+                    }),
+                ),
+            },
+            "/api/saas/checkout": {
+                "post": operation(
+                    "saas.createCheckout",
+                    "Create a provider-neutral checkout session for the caller's own tenant. Price authority is server-side plan definitions; client-supplied amounts are never trusted.",
+                    &["checkout"], true,
+                    json!({ "type": "object", "required": ["plan_code", "idempotency_key"], "properties": {
+                        "plan_code": { "type": "string", "enum": ["starter", "pro", "business", "enterprise"] },
+                        "provider": { "type": "string", "enum": ["manual", "stripe", "paddle"] },
+                        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 },
+                        "success_url": { "type": "string", "format": "uri" },
+                        "cancel_url": { "type": "string", "format": "uri" },
+                    } }),
+                    json!({
+                        "201": json_response("Checkout created.", json!({ "type": "object", "properties": {
+                            "id": { "type": "string", "format": "uuid" },
+                            "organization_id": { "type": "string", "format": "uuid" },
+                            "plan_code": { "type": "string" },
+                            "provider": { "type": "string" },
+                            "status": { "type": "string" },
+                            "checkout_url": { "type": ["string", "null"] },
+                            "expires_at": { "type": ["string", "null"], "format": "date-time" },
+                        } })),
+                        "400": error_ref(), "401": error_ref(), "403": error_ref(), "409": error_ref(),
+                    }),
+                ),
+            },
+            "/api/saas/invoices": {
+                "get": operation(
+                    "saas.listInvoices",
+                    "List invoices for the caller's own tenant (tenant-scoped query).",
+                    &["invoices"], true, json!(null),
+                    guarded_responses("Invoice list.", json!({ "type": "object", "properties": {
+                        "organization_id": { "type": "string", "format": "uuid" },
+                        "invoices": { "type": "array", "items": { "type": "object" } },
+                        "count": { "type": "integer" },
+                    } })),
+                ),
+            },
+            "/api/saas/invoices/{id}": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "get": operation(
+                    "saas.getInvoice",
+                    "Get one invoice. Uses organization_id predicate so cross-tenant access returns 404, not 403, to avoid existence oracle.",
+                    &["invoices"], true, json!(null),
+                    json!({
+                        "200": json_response("The invoice.", json!({ "type": "object" })),
+                        "401": error_ref(), "403": error_ref(), "404": error_ref(),
+                    }),
+                ),
+            },
+            "/api/saas/custody/profiles": {
+                "post": operation(
+                    "saas.createCustodyProfile",
+                    "Create a custody profile for the caller's tenant. Stores only public metadata, never private keys.",
+                    &["custody"], true,
+                    json!({ "type": "object", "required": ["name", "provider_type"], "properties": {
+                        "name": { "type": "string" },
+                        "provider_type": { "type": "string", "enum": ["local", "vault", "kms", "hsm"] },
+                        "description": { "type": "string" },
+                    } }),
+                    json!({ "201": json_response("Profile created.", json!({ "type": "object" })), "400": error_ref(), "403": error_ref() }),
+                ),
+                "get": operation(
+                    "saas.listCustodyProfiles",
+                    "List custody profiles for the caller's tenant.",
+                    &["custody"], true, json!(null),
+                    guarded_responses("Profiles.", json!({ "type": "object" })),
+                ),
+            },
+            "/api/saas/custody/profiles/{id}/activate": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "post": operation("saas.activateCustodyProfile", "Activate a custody profile (pending -> active). Closed tenants cannot activate.", &["custody"], true, json!(null), guarded_responses("Activated.", json!({ "type": "object" }))),
+            },
+            "/api/saas/custody/signers": {
+                "post": operation(
+                    "saas.createSigner",
+                    "Create a logical signer under a custody profile. Public address only — never private key material.",
+                    &["custody"], true,
+                    json!({ "type": "object", "required": ["custody_profile_id", "logical_identity", "public_address"], "properties": {
+                        "custody_profile_id": { "type": "string", "format": "uuid" },
+                        "logical_identity": { "type": "string" },
+                        "public_address": { "type": "string" },
+                        "capabilities": { "type": "array", "items": { "type": "string" } },
+                    } }),
+                    json!({ "201": json_response("Signer created.", json!({ "type": "object" })), "400": error_ref(), "403": error_ref(), "404": error_ref() }),
+                ),
+            },
+            "/api/saas/custody/signers/{id}/activate": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "post": operation("saas.activateSigner", "Activate a signer. Fails closed if provider not configured; no local fallback when remote configured.", &["custody"], true, json!(null), guarded_responses("Activated.", json!({ "type": "object" }))),
+            },
+            "/api/saas/custody/signers/{id}": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "get": operation("saas.getSigner", "Get signer public view (address/status/capabilities, never private key).", &["custody"], true, json!(null), guarded_responses("Signer view.", json!({ "type": "object" }))),
+            },
+            "/api/saas/custody/signers/{id}/resolve": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "get": operation("saas.resolveSigner", "Resolve active signer for trading. Enforces tenant ownership, active status, capabilities, provider match.", &["custody"], true, json!(null), json!({ "200": json_response("Resolved signer.", json!({ "type": "object" })), "403": error_ref(), "404": error_ref(), "501": error_ref() })),
+            },
+            "/api/saas/organizations/{id}/lifecycle": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "get": operation("saas.getLifecycleStatus", "Inspect tenant lifecycle status (suspend/close/retention).", &["lifecycle"], true, json!(null), guarded_responses("Lifecycle status.", json!({ "type": "object" }))),
+            },
+            "/api/saas/organizations/{id}/close": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "post": operation("saas.requestClose", "Request tenant close. Trading disabled, credentials revoked, custody revoked, retention scheduled. Restorable only via retention policy, not via race.", &["lifecycle"], true, json!({ "type": "object", "properties": { "reason": { "type": "string" } } }), json!({ "202": json_response("Close accepted.", json!({ "type": "object" })), "403": error_ref(), "409": error_ref() })),
+            },
+            "/api/saas/lifecycle/jobs/{id}/advance": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "post": operation("saas.advanceLifecycleJob", "Advance deprovisioning job phase. Restart-safe and idempotent.", &["lifecycle"], true, json!(null), guarded_responses("Advanced.", json!({ "type": "object" }))),
+            },
         },
     })
 }
@@ -502,7 +631,10 @@ mod tests {
                 }
                 let public = matches!(
                     op["operationId"].as_str().unwrap(),
-                    "saas.registerUser" | "saas.login" | "saas.billingWebhook"
+                    "saas.registerUser"
+                        | "saas.login"
+                        | "saas.billingWebhook"
+                        | "saas.billingPaymentWebhook"
                 );
                 let has_security = op.get("security").is_some() || doc.get("security").is_some();
                 assert!(has_security, "{path} {method} must declare its auth");

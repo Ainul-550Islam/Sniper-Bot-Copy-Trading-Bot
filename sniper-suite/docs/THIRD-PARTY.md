@@ -9,7 +9,7 @@ crate by hand; the tooling below does that reproducibly.
 
 | Artifact | Scope | Size |
 |---|---|---|
-| `Cargo.lock` | Application workspace (7 crates) — full resolved graph | 706 packages |
+| `Cargo.lock` | Application workspace (8 crates) — full resolved graph | 707 packages |
 | `programs/staking-suite/Cargo.lock` | Staking program — independent lockfile (own workspace root, MSRV-aware resolution for the agave platform-tools compiler) | 580 packages |
 | `deny.toml` | cargo-deny policy: advisories, bans, licenses, sources | — |
 | `rust-toolchain.toml` | Pinned Rust 1.98.1 for both host projects | — |

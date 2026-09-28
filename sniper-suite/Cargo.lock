@@ -648,17 +648,20 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.12.1",
+ "http 1.5.0",
  "once_cell",
  "rand 0.8.8",
  "redis",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "solana-sdk",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -3682,6 +3685,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "saas-sdk"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4038,11 +4055,13 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.12.1",
+ "http 1.5.0",
  "http-body-util",
  "module-copy",
  "module-polymarket",
  "module-sniper",
  "module-telegram",
+ "redis",
  "reqwest",
  "serde",
  "serde_json",
@@ -4057,6 +4076,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

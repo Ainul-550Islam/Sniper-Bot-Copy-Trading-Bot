@@ -41,3 +41,7 @@ Key facts a reporter should know up front:
 No external security audit, penetration test, or formal verification has
 been performed on any component of this repository. Nothing here or in
 `docs/` claims otherwise.
+
+When an audit is commissioned, its report/findings/remediation/retest/sign-off
+belong in the agreed handover slot: `docs/EXTERNAL-VALIDATION-RUNBOOK.md`
+§ GAP-006. Until then the machine-readable status stays `NOT_EXECUTED`.

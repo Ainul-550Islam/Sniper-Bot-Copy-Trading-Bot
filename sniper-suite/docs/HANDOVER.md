@@ -13,7 +13,7 @@ plane) at version `0.1.0` (see `VERSION`, `CHANGELOG.md`):
   module-copy, module-polymarket, module-telegram, server).
 - `programs/staking-suite/` — standalone native Solana program (own
   lockfile; built with `cargo build-sbf`, agave 2.1.21).
-- `crates/core/migrations/` — 11 forward-only Postgres migrations (embedded
+- `crates/core/migrations/` — 21 forward-only Postgres migrations (embedded
   in the binary; applied at startup when `auto_migrate` is on).
 - `docs/` — 13 engineering documents: ARCHITECTURE, API, SECURITY,
   DEPLOYMENT, OPERATIONS, MODULES, STAKING, TESTING, RECONCILIATION,

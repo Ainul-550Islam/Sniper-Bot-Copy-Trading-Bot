@@ -1667,7 +1667,7 @@ preserve all working architecture, and re-run the full gate suite honestly.
   mid-download on ENOSPC again (disk reached 0 bytes; result invalid, cleaned 2.8G of
   incremental artifacts); #4 = the clean **20/0/0** run cited above. No gate result from
   an ENOSPC-corrupted run was ever recorded as a pass.
-* The delivered 0.1.0 snapshot archive (`/home/user/delivery/`) intentionally still reflects the
+* [Seller-side historical path — process evidence, not a buyer instruction] The delivered 0.1.0 snapshot archive (seller sandbox path `/home/user/delivery/`) intentionally still reflects the
   PRE-audit 170-file tree; the current tree is 171 files / 3,135,466 bytes / 84,108 lines (post-§28-append;
   pre-append 171 / 3,125,115 / 83,977; original baseline 170 / 3,021,664 / 81,583).
 

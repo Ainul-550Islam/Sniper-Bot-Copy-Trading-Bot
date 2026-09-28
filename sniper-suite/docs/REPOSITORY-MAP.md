@@ -18,7 +18,7 @@ sniper-suite/
 ├─ README.md                      product overview, quick start, config/API/observability reference
 ├─ release-manifest.json          machine-readable delivery manifest (versions, counts, statuses)
 ├─ Cargo.toml                     workspace root: 7 members, [workspace.dependencies] pins
-├─ Cargo.lock                     app dependency lockfile (706 packages)
+├─ Cargo.lock                     app dependency lockfile (707 packages)
 ├─ rust-toolchain.toml            pinned Rust 1.98.1 + rustfmt + clippy
 ├─ deny.toml                      cargo-deny policy (advisories/bans/licenses/sources)
 ├─ .cargo/
@@ -42,7 +42,7 @@ sniper-suite/
 │  └─ workflows/
 │     └─ ci.yml                   4 jobs: app workspace / staking program / security / docker
 │
-│  ── application workspace (7 crates) ─────────────────────────────
+│  ── application workspace (8 crates) ─────────────────────────────
 ├─ crates/
 │  ├─ core/                       bot-core — shared kernel
 │  │  ├─ Cargo.toml
@@ -247,7 +247,7 @@ sniper-suite/
 │     └─ tests/
 │        └─ validator_e2e.rs      STAKING_E2E-gated on-chain lifecycle (3 tests; all 3 executed + passed in the hardening pass)
 │
-│  ── documentation (63 files under docs/) ──────────────────────────
+│  ── documentation (101 files under docs/) ─────────────────────────
 └─ docs/
    │  # engine passes (14, TASK 1–6):
    ├─ EXECUTION-RELIABILITY.md  SNIPER-ENGINE.md
@@ -283,14 +283,19 @@ sniper-suite/
 
 | Category | Files |
 |---|---|
-| Root-level files | 17 |
+> Recomputed **2026-09-27** with `find . -path ./target -prune -o -path ./buyer-release -prune -o -path ./.git -prune -o -type f -print | wc -l` → **564**.
+
+| Root-level files | 22 |
 | Root `.cargo/` policy | 1 |
-| Scripts (`scripts/`) | 3 |
-| CI (`.github/`) | 1 |
-| App workspace `crates/` — 162 source Rust + 41 test Rust + 7 crate manifests + 18 SQL migrations + 19 replay fixtures | 247 |
+| Scripts (`scripts/`) | 10 |
+| CI (`.github/`) | 2 |
+| App workspace `crates/` — 287 source Rust + 56 test Rust + 8 crate manifests + 22 SQL migrations + 19 replay fixtures | 392 |
 | Staking program `programs/staking-suite/` (5 source Rust + 1 test Rust + 3 TOML + lockfile) | 10 |
-| Docs (`docs/`) | 63 |
-| **Total files (excluding generated targets and Git metadata)** | **342** |
+| Frontend `apps/control-plane/` (Next.js 16 control plane) | 19 |
+| Runtime data `data/` (`events.jsonl`) | 1 |
+| Evidence `evidence/external/` (redacted JSON snapshots) | 6 |
+| Docs (`docs/`) | 101 |
+| **Total files (excluding generated targets, the `buyer-release/` mirror and Git metadata)** | **564** |
 
 ## Counts (historical, at the final delivery package)
 

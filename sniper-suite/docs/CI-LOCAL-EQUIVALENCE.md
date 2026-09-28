@@ -39,7 +39,7 @@ No version drift: the local hardening pass ran the exact versions CI pins.
 | unit tests (host) | `cargo test` | same | 71/71 (+3 gated e2e compile) |
 | install Solana tools | `solana_version: '2.1.21'` | official agave v2.1.21 release tarball (SHA-256 `5da3359e…`) | `solana --version` = 2.1.21 |
 | build-sbf | `cargo build-sbf` | same (platform-tools v1.43) | 187,504-byte .so, SHA-256 `57a890fa…`; byte-identical rebuild |
-| validator e2e | `STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` | EXACT same command | **3/3 passed, 160.72 s** — `evidence/phase5-full-batch.log` |
+| validator e2e | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` | EXACT same command (CI job sets `working-directory: programs/staking-suite`) | **3/3 passed, 160.72 s** — `evidence/phase5-full-batch.log` |
 
 ## Job: security (cargo-audit ×2, cargo-deny ×2)
 

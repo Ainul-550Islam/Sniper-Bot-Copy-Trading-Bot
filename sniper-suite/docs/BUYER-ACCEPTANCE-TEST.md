@@ -20,6 +20,25 @@ resource) / HUMAN ACTION (only the buyer can perform it).
 Placeholders: `<REPO>` = unpacked source root; `<PKG>` = release package
 root; `<ANGLE>` = operator-supplied value.
 
+**Package layout used by this test (aligned 2026-09-27 by the round-4 audit).**
+The tests below were written for the vendor packaging pipeline's layout. The package produced by this
+repository's `scripts/build-release-package.sh` carries the same information under the names listed on
+the right — use whichever set exists in your package:
+
+| Vendor-pipeline name used below | Shipped package equivalent |
+|---|---|
+| `<PKG>/BUYER-FINAL-RELEASE-MANIFEST.json` | `<PKG>/manifests/release-manifest.json` |
+| `<PKG>/provenance/SOURCE-PROVENANCE.json` | `<PKG>/checksums/all-files.sha256` (per-file SHA-256 for every packaged file) + `<PKG>/checksums/SOURCE-TREE.sha256` (tree digest) |
+| `<PKG>/checksums/SHA256SUMS.json` | `<PKG>/checksums/SHA256SUMS` (text, `sha256sum -c` format) |
+| `<PKG>/source-tree/` | `<PKG>/source/` (mirror of the repository at packaging time) |
+| `<PKG>/source/sniper-suite-FINAL-src.tar.gz` | not embedded in this package — the vendor archive ships separately; A3 applies only when it is available |
+
+`checksums/SOURCE-TREE.sha256` records the exact command behind its digest
+(`cd <PKG>/source && find . -type f | sort | xargs sha256sum | sha256sum`). A clean package's
+`source/` contains no `target/` directories, so the A1 command above and the recorded method produce
+the same value. No repository file was renamed or removed for this note: the vendor-pipeline names
+describe artifacts that pipeline produced outside this repository snapshot.
+
 ---
 
 ## A. Source verification
@@ -224,7 +243,7 @@ root; `<ANGLE>` = operator-supplied value.
 ### P1 — Round-trip
 - COMMAND: `docs/BACKUP-RESTORE.md` §2–§3 (pg_dump -Fc → fresh DB → pg_restore --no-owner), then H1 + audit-verify against the restored DB, then start the app against it.
 - EXPECTED: tables/migrations/rowcounts identical; audit chain verifies (`intact`, or `not_chained` on an empty chain); app starts and serves H2 endpoints; clean shutdown.
-- Vendor-recorded evidence: PASS — dump `5989ecf1…`, 24 tables/68 rows/11 migrations identical ×3, 23/23 suite ON the restored DB, app ran against it (`evidence/db/`, `evidence/app-startup/`).
+- Vendor-recorded evidence: PASS — dump `5989ecf1…`, 24 tables/68 rows/21 migrations identical ×3, 23/23 suite ON the restored DB, app ran against it (`evidence/db/`, `evidence/app-startup/`). <!-- HISTORICAL 2026-09-26: recorded against 21 migrations; current count 22 -->
 - ACTUAL RESULT: ______  PASS / FAIL: ____  INITIALS: ____  DATE: ______
 
 ## Q. Security evidence

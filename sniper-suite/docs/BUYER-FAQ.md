@@ -47,7 +47,7 @@ by `storage_lifecycle`, `db_integration` restart-recovery tests, and
 **Where is financial state stored?**
 PostgreSQL is the durable source of truth: orders, executions, positions,
 trades, intent journal, execution claims, runtime flags, and the audit chain
-(11 forward-only migrations). Redis is explicitly non-authoritative
+(21 forward-only migrations). Redis is explicitly non-authoritative
 (coordination, dedup L2, cache). The local JSONL journal is a crash-recovery
 aid, not the truth (`docs/BACKUP-RESTORE.md`, `docs/RECONCILIATION.md`).
 

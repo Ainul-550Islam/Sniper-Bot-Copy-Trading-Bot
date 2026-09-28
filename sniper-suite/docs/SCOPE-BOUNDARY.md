@@ -14,7 +14,7 @@ guess where the software ends.
 - **Tests** — 521 workspace tests (incl. 38 gated integration tests),
   48 + 2 staking host/e2e tests, all mock harnesses (`tests/` dirs across
   crates).
-- **Database migrations** — 11 forward-only PostgreSQL migrations
+- **Database migrations** — 21 forward-only PostgreSQL migrations
   (`crates/core/migrations/`).
 - **Deployment configuration** — `Dockerfile`, `docker-compose.yml`,
   `.dockerignore`, `.env.template`, `config.toml.example`,

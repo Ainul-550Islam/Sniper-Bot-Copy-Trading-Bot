@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+#![allow(dead_code)]
 //! sniper-suite — the control-plane binary.
 //!
 //! Loads config, opens the optional persistence backends (PostgreSQL,
@@ -17,18 +19,45 @@
 
 mod accounting;
 mod api;
+pub mod backup;
 mod dashboard;
 mod ha;
 mod obs;
+pub mod ops;
 mod persist;
+pub mod provisioning;
 mod recon;
 pub mod saas;
 // TASK 7B — response-header hardening and the authenticated, tenant-scoped
 // event stream. The two files live under src/security/; this inline parent
 // module keeps the mandated file tree (no extra security/mod.rs).
+// BATCH — production-safe CORS and reusable tenant-context extraction.
 mod security {
+    pub mod cors_policy;
     pub mod headers;
+    pub mod legacy_websocket_guard;
+    pub mod security_headers;
+    pub mod tenant_context;
     pub mod websocket;
+}
+pub mod solana {
+    pub mod connection_contract;
+    pub mod geyser_contract;
+}
+pub mod staking {
+    pub mod deployment_contract;
+    pub mod validator_contract;
+}
+pub mod billing {
+    pub mod live_provider_contract;
+    pub mod live_provider_fixture;
+    pub mod paddle_adapter;
+    pub mod provider_registry;
+    pub mod stripe_adapter;
+}
+pub mod custody {
+    pub mod live_provider_contract;
+    pub mod live_provider_fixture;
 }
 mod ws;
 
@@ -997,24 +1026,20 @@ fn serve_api(
 }
 
 /// Attach a CORS layer from the configured origins.
+/// Production-safe: wildcard is NOT the default for authenticated SaaS APIs; empty means no CORS.
 fn with_cors(router: axum::Router, origins: &[String]) -> axum::Router {
-    use tower_http::cors::{Any, CorsLayer};
-    let layer = if origins.iter().any(|o| o.trim() == "*") || origins.is_empty() {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    } else {
-        let parsed: Vec<axum::http::HeaderValue> = origins
-            .iter()
-            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
-            .collect();
-        CorsLayer::new()
-            .allow_origin(parsed)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    };
-    router.layer(layer)
+    // Use the hardened policy resolver so invalid config fails loud and default is closed.
+    match crate::security::cors_policy::CorsPolicy::from_config(origins) {
+        Ok(policy) => router.layer(policy.into_layer()),
+        Err(e) => {
+            tracing::warn!(error = %e, "invalid CORS config — failing closed with no CORS");
+            router.layer(
+                crate::security::cors_policy::CorsPolicy::from_config(&[])
+                    .unwrap()
+                    .into_layer(),
+            )
+        }
+    }
 }
 
 /// Load the Solana wallet from config/env, or generate an ephemeral one.

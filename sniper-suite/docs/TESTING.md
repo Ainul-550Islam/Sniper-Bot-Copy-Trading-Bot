@@ -23,7 +23,7 @@ counts below are retained as dated historical evidence, not current totals.
 | Sniper engine suites (unit, pipeline, failure injection, exit sweeper, concurrency, replay, property) | `cargo test -p module-sniper -- --test-threads=1` | nothing (mock JSON-RPC node + mock websocket feed on loopback, test-only) |
 | Replay fixture regeneration (only after an intentional generator change) | `cargo test -p module-sniper --test replay -- --ignored regenerate_replay_fixtures` | nothing |
 | Staking program host tests | `cd programs/staking-suite && cargo test` | nothing |
-| Staking validator e2e | `cargo build-sbf && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` | agave 2.1.21 tools |
+| Staking validator e2e | `cd programs/staking-suite && cargo build-sbf && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` | agave 2.1.21 tools |
 | Latency benchmark | `cargo run --release -p sniper-suite --bin latency_bench` (see §6 report) | nothing |
 | Devnet e2e (read-only) | `cargo run --bin devnet_e2e` — env-gated network tests | internet |
 | Crash-recovery e2e | `E2E_NETWORK=1 E2E_LIVE=1 E2E_URL=http://127.0.0.1:8899 cargo test -p solana-kit --test recon_crash_e2e` | local validator (no real funds) |

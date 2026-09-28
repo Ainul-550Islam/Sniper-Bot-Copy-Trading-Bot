@@ -172,3 +172,42 @@ is recovered by startup reconciliation (`docs/BACKUP-RESTORE.md` §3).
   evidence, NOT a mainnet deployment.
 * No funded live order, canary, or mainnet deployment was executed by the
   vendor. Those remain operator actions.
+
+## 4. GAP-004 — funded live transition (operator-only; never default)
+
+The funded step is **not executable by the vendor** and must never be inferred
+from paper/simulate/devnet results:
+
+* Default is paper (`EXECUTION_MODE` unset ⇒ paper/dry_run). A live request
+  without `allow_live_trading=true` is downgraded and never broadcast.
+* The guard is proven by `cargo test -p sniper-suite --lib funded_mode_guard`:
+  `default_is_not_funded`, `dry_run_is_not_funded`, `live_unfunded_denied`
+  (LIVE_UNFUNDED is denied), `live_funded_requires_all_gates`,
+  `never_expose_private_keys`.
+* Moving to funded live requires **all** of: `EXECUTION_MODE=live`,
+  `execution.allow_live_trading=true`, owner-only `/mode live` approval, a
+  funded wallet, and the risk limits of §15 in `docs/BUYER-DEPLOYMENT.md`.
+* Evidence labels are strict (§0): `simulate`, `live read` and
+  `funded devnet canary` results are **never** funded-live evidence; only the
+  operator can produce `funded live` evidence, staged and supervised.
+* GAP-004 stays `EXTERNAL_REQUIRED` until the operator records such evidence;
+  the registry only promotes through `mark_verified` with a real evidence file
+  + timestamp (`crates/server/src/ops/external_validation.rs`).
+
+### Six tracked gaps — single source of truth (never inferred from hermetic tests)
+
+Source: `crates/server/src/ops/final_gap_ledger.rs` + `docs/FINAL-BUYER-GAP-LEDGER.md`; live evidence records:
+`evidence/external/*.json` (`NOT_RUN` in hermetic). None of the six is `VERIFIED`; the registry promotes only via
+`mark_verified(id, evidence_ref, verified_at, detail)` after the real command ran in the required environment.
+Documented commands are asserted to match the executable harnesses by the test `ledger_commands_match_documented_harnesses`.
+
+| Gap | Area | Ledger status (hermetic) | Buyer/operator command or deliverable |
+|---|---|---|---|
+| GAP-001 | Live billing (Stripe / Paddle) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `LIVE_BILLING=1 STRIPE_API_KEY=... cargo test -p sniper-suite --test live_billing_contract -- --ignored --nocapture` (Paddle: `PADDLE_API_KEY=...`) |
+| GAP-002 | Remote custody (Vault / KMS / HSM) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `LIVE_CUSTODY=1 VAULT_ADDR=... VAULT_TOKEN=... cargo test -p sniper-suite --test live_custody_contract -- --ignored --nocapture` |
+| GAP-003 | Deployment smoke (staging / production) | `EXTERNAL_REQUIRED` / `NOT_RUN` | `DEPLOYMENT_BASE_URL=https://<real> cargo test -p sniper-suite --test deployment_smoke -- --nocapture` (missing URL ⇒ fail safe, no `localhost` substitution) |
+| GAP-004 | Funded live trading transition | `EXTERNAL_REQUIRED` / operator-only | Guard evidence: `cargo test -p sniper-suite --lib funded_mode_guard`; funded result only from a supervised operator run |
+| GAP-005 | Staking validator E2E | `EXTERNAL_REQUIRED` / `NOT_RUN` | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` |
+| GAP-006 | External security audit | `EXTERNAL_REQUIRED` / `BUYER_ACTION` — no report exists | Handover slot: `docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006 (findings/severity/remediation/retest/sign-off) |
+
+All live modes: `bash scripts/run-external-validation.sh all-safe` → `6/6 NOT_RUN` in a credential-free sandbox (correct, not a failure).

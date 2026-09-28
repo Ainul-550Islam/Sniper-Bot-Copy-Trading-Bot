@@ -48,7 +48,7 @@ idempotency and wallet bindings survive restarts.
 
 ## The web console
 
-`apps/control-plane` (Next.js 15 App Router):
+`apps/control-plane` (Next.js 16 App Router):
 
 ```bash
 cd apps/control-plane

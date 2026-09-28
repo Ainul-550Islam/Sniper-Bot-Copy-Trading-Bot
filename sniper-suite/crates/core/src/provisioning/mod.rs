@@ -14,8 +14,12 @@
 //! billing stores); this module owns the vocabulary, the transitions and
 //! the storage contract.
 
+pub mod deprovision;
+pub mod retention;
 pub mod state;
 
+pub use deprovision::{DeprovisionJob, DeprovisionPhase, DeprovisionState};
+pub use retention::{is_purge_eligible, RetentionCategory, RetentionPolicy, RetentionState};
 pub use state::{ProvisioningJob, ProvisioningState, ProvisioningStep};
 
 use async_trait::async_trait;

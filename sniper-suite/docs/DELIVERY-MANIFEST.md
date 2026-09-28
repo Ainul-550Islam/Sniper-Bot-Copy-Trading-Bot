@@ -26,13 +26,18 @@ this document is the human map and does not duplicate source code.
   manifest's package tables below describe the earlier `buyer-release/`
   package and remain valid for that labeled historical artifact, while the
   final package is `buyer-release-final/` (own README + manifest).
-- **Current canonical tree (2026-09-22):** 342 files — 18 contiguous
+- **Canonical tree at 2026-09-22 (HISTORICAL):** 342 files — 18 contiguous
   migrations `0001`–`0018`, 63 docs, 162 source + 41 test Rust files, and
   the standalone staking program — after TASK 1–7A, the SaaS durability
-  pass, and the file-by-file integrity pass. `docs/REPOSITORY-MAP.md`
-  §Counts is authoritative for the current breakdown, and
-  `release-manifest.json` `verification_status.verified_final_pass` records
-  the dated evidence, including the latest 1028-test workspace run against
+  pass, and the file-by-file integrity pass. This paragraph records that
+  date; the numbers below it are no longer current.
+- **Current canonical tree (2026-09-27):** 564 files — 22 contiguous
+  migrations `0001`–`0022`, 101 docs, 287 source + 56 test Rust files (8
+  workspace crates), the standalone staking program, the Next.js control
+  plane, `data/` and `evidence/external/`. `docs/REPOSITORY-MAP.md`
+  §Counts (recomputed 2026-09-27) is authoritative for the current
+  breakdown, and `release-manifest.json` records the dated evidence,
+  including the 2026-09-26 workspace run (70 suites / 2077 passed) against
   real PostgreSQL 17.11.
 
 ## Root artifacts
@@ -47,7 +52,7 @@ this document is the human map and does not duplicate source code.
 | [`LICENSE`](../LICENSE) | MIT text with the documented copyright-holder placeholder + handover note. |
 | [`VERSION`](../VERSION) | Release identity (`0.1.0`), gated for consistency with `Cargo.toml` + manifest. |
 | [`scripts/release-check.sh`](../scripts/release-check.sh) | One-command, 20-gate local release validation (fmt → tests against real PG/Redis → staking → audit/deny → consistency). |
-| [`rust-toolchain.toml`](../rust-toolchain.toml), [`deny.toml`](../deny.toml), [`Cargo.lock`](../Cargo.lock) | Pinned toolchain, supply-chain policy, locked app dependency graph (706 packages). |
+| [`rust-toolchain.toml`](../rust-toolchain.toml), [`deny.toml`](../deny.toml), [`Cargo.lock`](../Cargo.lock) | Pinned toolchain, supply-chain policy, locked app dependency graph (707 packages). |
 | [`Dockerfile`](../Dockerfile), [`docker-compose.yml`](../docker-compose.yml), [`.env.template`](../.env.template), [`config.toml.example`](../config.toml.example) | Deployment assets (image build NOT EXECUTED in delivery sandbox — CI covers it). |
 | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | 4-job CI: app workspace (services: PG16/Redis7), staking program (build-sbf + gated validator e2e), security (audit/deny), docker (build + smoke). |
 

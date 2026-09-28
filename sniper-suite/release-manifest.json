@@ -17,22 +17,24 @@
       "crates/module-copy",
       "crates/module-polymarket",
       "crates/module-telegram",
-      "crates/server (sniper-suite binary)"
+      "crates/server (sniper-suite binary)",
+      "crates/saas-sdk (saas-sdk: typed SaaS client — billing/custody/audit/lifecycle, secret-free Debug/URLs)"
     ],
     "standalone_programs": [
       "programs/staking-suite (native Solana program, own lockfile, built with cargo build-sbf / agave 2.1.21)"
     ],
     "database_migrations": {
-      "count": 18,
-      "high_water_mark": "0018",
-      "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)"
+      "count": 22,
+      "high_water_mark": "0022",
+      "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)",
+      "added_0019_0022": "0019_saas_billing_provider (plan/subscription/entitlement/usage/checkout/invoice/payment + billing pricing), 0020_saas_custody (profile + keys + address), 0021_saas_lifecycle (retention policy, purge lifecycle, job claims) — forward-only, Batch 1; 0022_checkout_url (durable provider checkout_url persistence for Stripe/Paddle end-to-end wiring) — forward_only"
     },
-    "api_endpoints_documented": 35,
-    "docs_count": 66,
+    "api_endpoints_documented": 55,
+    "docs_count": 101,
     "web_apps": [
       {
         "name": "apps/control-plane",
-        "description": "SaaS tenant console (Next.js 15 App Router): auth, tenant switching (own organizations only), wallets, team, audit, billing, usage, settings; session token in tab memory only",
+        "description": "SaaS tenant console (Next.js 16 App Router): auth, tenant switching (own organizations only), wallets, team, audit, billing, usage, settings; session token in tab memory only",
         "gates": "npm run typecheck && npm run build (strict TS + noUncheckedIndexedAccess)"
       }
     ],
@@ -40,11 +42,174 @@
       "crates/server/src/saas/provider.rs (provider-neutral billing adapter boundary)",
       "crates/server/src/saas/billing_webhook.rs (verified, idempotent provider webhooks)",
       "crates/server/src/saas/openapi.rs (GET /api/saas/openapi.json contract)",
-      "crates/server/src/saas/wallet_access.rs (tenant\u2192wallet\u2192strategy authorization boundary)",
+      "crates/server/src/saas/wallet_access.rs (tenant→wallet→strategy authorization boundary)",
       "crates/server/src/saas/export.rs (deterministic tenant-scoped exports)",
       "crates/server/src/security/headers.rs (CSP/XCTO/referrer/frame/permissions/HSTS)",
       "crates/server/src/security/websocket.rs (authenticated tenant-scoped event stream)"
-    ]
+    ],
+    "saas_modules_batch2_10": [
+      "crates/core/src/billing/pricing.rs (immutable pricing snapshot, interval, amount, entitlements — 7 tests)",
+      "crates/core/src/billing/provider_events.rs (normalized provider events, idempotency, secret stripping — 7 tests)",
+      "crates/core/src/billing/reconciliation.rs (provider vs internal compare, never invent success — 11 tests)",
+      "crates/core/src/custody/credentials.rs / health.rs / resolve.rs (indirect refs, fail-closed Vault/KMS/HSM boundary, signer resolution — 7+5+7 tests)",
+      "crates/server/src/saas/billing_reconciliation.rs + custody_health.rs + audit_export.rs + data_lifecycle.rs + websocket_auth.rs (reconciliation service, health, audit export, lifecycle orchestration, WS header/first-frame — 3+3+4+3+7 tests)",
+      "crates/server/src/security/legacy_websocket_guard.rs + security_headers.rs (legacy ?key= guard disabled/compat/legacy-enabled + deprecation headers, CSP/HSTS — 7+3 tests)",
+      "crates/server/src/provisioning/lifecycle_worker.rs + retention_worker.rs + job_claim.rs (lease, retry bounded backoff, retention/purge, SELECT ... SKIP LOCKED leasing — 5+7+5 tests)",
+      "crates/server/src/api/openapi_billing.rs + openapi_custody.rs (OpenAPI schemas billing/custody — 3+3 tests)",
+      "crates/saas-sdk/src/billing.rs + custody.rs + error.rs + models.rs (typed SDK, safe Debug, no secrets in URLs — 2+3+6+7 tests)",
+      "apps/control-plane/package-lock.json (REAL, generated 2026-09-23 via npm install --package-lock-only, re-verified 2026-09-27 by npm ci (354 packages, Batch 11); 6171 lines, lockfileVersion 3) + .github/workflows/frontend-ci.yml (deterministic ci/lint/typecheck/build)"
+    ],
+    "batch2_delivery": {
+      "date": "2026-09-23",
+      "files_added": 25,
+      "rust_files": "find crates -name '*.rs' | wc -l = 253 (212 src)",
+      "migrations": 21,
+      "tests_grep_count": "grep -r '#[test]' crates --include='*.rs' | wc -l = 914",
+      "workspace_tests_executed": "cargo test -p saas-sdk (9/9) + cargo test -p sniper-suite (105/105) + cargo test -p bot-core --lib (>200) — full --workspace with Postgres/Redis not re-executed in this batch (historical 1153 at 2026-09-22)",
+      "frontend": "npm install --package-lock-only (npm 10.8.2, lockfileVersion 3, next 16.3.6 (Batch-11 F-2 remediation 2026-09-27: CVE-2025-66478 + resolved postcss 8.5.23; was 15.5.26, originally 15.5.4)) + frontend-ci.yml (setup-node 20, cache npm, npm ci, npm ls consistency, typecheck, build)",
+      "register": "docs/BUYER-TRUTH-REGISTER.md — single source with DATE+COMMAND, DONE/PARTIAL/NOT DONE, unexecuted validations, limitations, NEVER stale numbers"
+    },
+    "saas_modules_batch3_25": [
+      "crates/core/src/billing/billing_state.rs (BillingState aggregate plan+subscription+payment/invoice+usage+dunning+grace+suspension + validate_consistency — 6 tests)",
+      "crates/core/src/billing/dunning.rs (7-state machine Current→PaymentFailed→RetryPending→GracePeriod→BillingSuspended→Recovered/ManuallyResolved, recovered requires provider evidence — 8 tests)",
+      "crates/core/src/billing/usage_policy.rs (server-authoritative evaluate_feature/evaluate_all, 80%/100% thresholds, Unlimited/Disabled — 8 tests)",
+      "crates/core/src/billing/provider_config.rs (Stripe/Paddle Vault/KMS/HSM refs, no secrets, 4-state readiness, no local fallback — 8 tests)",
+      "crates/core/src/custody/provider_config.rs (Vault/KMS/HSM refs, no secrets, 4-state readiness, local_fallback_allowed=false — 7 tests)",
+      "crates/core/src/custody/rotation.rs (Pending→Active→Draining→Revoked with force emergency, safety old not revoked before replacement — 7 tests)",
+      "crates/server/src/saas/billing_status.rs + usage_limits.rs + custody_rotation.rs + readiness.rs + commercial_state.rs (tenant-scoped BillingRead/WalletManage, audit, server-authoritative, public minimal vs operator redacted, commercial_consistent — 4+4+4+2+3 tests)",
+      "crates/server/src/ops/release_readiness.rs + evidence_snapshot.rs + health_report.rs + audit_attestation.rs + integration_matrix.rs + stale_claims.rs (GATE PASS/WARN/BLOCK/NOT_RUN 8 gates, deterministic hash, Healthy/Degraded/Blocked/ExternalUnavailable, HMAC-SHA256, EXTERNAL_REQUIRED/PASS/NOT_RUN/BLOCKED, stale phrase scanner — 5+3+4+4+3+5 tests)",
+      "crates/server/src/api/openapi_commercial.rs (BillingStatus/UsageLimits/CommercialState/Readiness schemas, no credentials, tenant-scoped contract — 3 tests)",
+      "crates/saas-sdk/src/commercial.rs (typed billing_status/usage_limits/commercial_state/readiness/lifecycle, typed errors, no secrets in URLs — 4 tests)",
+      "apps/control-plane/src/app/billing/page.tsx + custody/page.tsx + settings/data-lifecycle/page.tsx + lib/commercial.ts + lib/release-status.ts (server-authoritative fetch, loading/error/empty, never secrets, public vs operator — typecheck+build PASS)"
+    ],
+    "batch3_delivery": {
+      "date": "2026-09-23",
+      "files_added": 25,
+      "header_says": 24,
+      "list_contains": 25,
+      "rust_files": "find crates -type f -name '*.rs' | sort -u | wc -l = 273",
+      "docs_count": 68,
+      "migrations": 21,
+      "tests_grep_count": "grep -r '#[test]' crates --include='*.rs' | wc -l = 1010",
+      "workspace_tests_executed": "cargo test -p saas-sdk 23/23 (incl. commercial) + cargo test -p bot-core --lib 461/461 (incl. billing_state/dunning/usage_policy/provider_config) — hermetic; full --workspace with PG/Redis NOT EXECUTED in sandbox (historical 1153)",
+      "frontend": "npm ci --ignore-scripts (354 packages) + npm run typecheck PASS + npm run build PASS (Next.js 16: 5 routes prerendered static, billing/custody/data-lifecycle) + package-lock.json lockfileVersion 3",
+      "register": "docs/BUYER-TRUTH-REGISTER.md + docs/BUYER-EVIDENCE-PACK.md — single source, buyer-proof taxonomy VERIFIED/PARTIAL/NOT EXECUTED/REQUIRES BUYER ACTION, no live Stripe/Paddle/Vault/KMS/HSM/audit/trading claims without execution",
+      "wiring": "core/billing/mod.rs + core/custody/mod.rs + server/saas/mod.rs (5 routes) + server/ops/mod.rs + server/api.rs + server/main.rs + saas-sdk lib + frontend 5 files; cargo check/runtime requires Rust 1.98.1, npm 10.8.2",
+      "truth_rules": "server owns plan/price/currency/entitlement/limits/subscription/payment; custody remote→fail-closed no local fallback, rotation old valid until safe replacement; readiness public minimal safe vs operator redacted; no secrets in logs/URLs/JSON/audit; tenant rule org+membership+permission+lifecycle at app+query"
+    },
+    "saas_modules_batch5_25": [
+      "crates/server/src/ops/observability_config.rs (typed log level/mode/metrics/tracing/OTLP/sampling/service name-version, rejects unsafe prod, safe JSON/Debug — 5 tests)",
+      "crates/server/src/ops/metrics_snapshot.rs (stable snapshot only measurable requests/errors/orders/trades/billing/ws/lifecycle/queue/retries, deterministic serde_json — 4 tests)",
+      "crates/server/src/ops/trace_context.rs (correlation/request ID 8-64 alnum-hyphen-underscore, secret substring reject, redacted helper, HTTP header propagate — 5 tests)",
+      "crates/server/src/ops/rate_limit_report.rs (policy names/thresholds only, no Redis credentials, configured/not-configured distinction — 4 tests)",
+      "crates/server/src/ops/container_metadata.rs (version/build/platform/rust/migration high-water/startup ts, no secrets — 3 tests)",
+      "crates/server/src/ops/reproducibility.rs (toolchain/Cargo.lock hash/source tree hash/build flags/target triple, byte-for-byte verification — 4 tests)",
+      "crates/server/src/ops/config_diff.rs (compare safe runtime config vs expected schema, REQUIRED/OPTIONAL/UNSAFE/UNKNOWN — 5 tests)",
+      "crates/server/src/ops/external_validation.rs (canonical registry Stripe/Paddle/Vault/KMS/HSM/Postgres/Redis/staking/deployment/funded trading/audit, VERIFIED/NOT_EXECUTED/BLOCKED/REQUIRES_EXTERNAL — 5 tests)",
+      "crates/server/src/ops/final_gap_ledger.rs (6 genuine gaps only, ID/area/status/severity/evidence/owner/external-dep/command/detail, deterministic sort, duplicates rejected — 5 tests)",
+      "crates/server/src/ops/release_lock.rs (version/git rev/locked_at/pinned entries sha256/size/built_at, deterministic sort — 4 tests)",
+      "crates/server/src/ops/release_manifest_verify.rs (recompute docs/rust/test/migration/VERSION vs manifest, stale detection — 4 tests)",
+      "crates/server/src/ops/buyer_package_verify.rs (required/expected/forbidden layout, target/node_modules/.git/.env/secrets/private_key exclusion — 4 tests)",
+      "crates/server/src/backup/export_manifest.rs + restore_manifest.rs + preflight.rs + commands.rs (DOCUMENTED→EXECUTED→VERIFIED strict, no plaintext secrets, safe pg_dump/pg_restore/redis-dump commands — 3+3+3+4 tests)",
+      "crates/server/tests/observability_config.rs + release_manifest_integration.rs + buyer_package_integration.rs + backup_restore_integration.rs (5+3+3+4 integration tests, hermetic)",
+      "scripts/build-release-package.sh + generate-sbom.sh + generate-license-report.sh + final-release-check.sh (buyer-release/ source/docs/evidence/sbom/licenses/checksums/manifests, SHA256+size+timestamp per artifact, no target/node_modules/.git/.env)",
+      "docs/FINAL-BUYER-GAP-LEDGER.md (human-readable ledger, 6 gaps, status/severity/owner/verification command, deterministic sort, no CLOSED gaps)"
+    ],
+    "batch5_delivery": {
+      "date": "2026-09-24",
+      "files_added": 25,
+      "header_says": 25,
+      "list_contains": 25,
+      "rust_files": "find crates -type f -name '*.rs' | sort -u | wc -l = 316 (includes 33 ops + 5 backup)",
+      "docs_count": 70,
+      "migrations": 21,
+      "tests_grep_count": "grep -r '#[test]' crates --include='*.rs' | wc -l = 1169",
+      "workspace_tests_executed": "cargo check --workspace PASS (1.98.1, 2m04s); cargo test -p saas-sdk + cargo test -p sniper-suite --lib hermetic; integration harnesses postgres_saas/redis_saas/tenant_lifecycle/billing_integration gated on POSTGRES_URL/REDIS_URL; release/observability/backup integration 4 harnesses added",
+      "wiring": "server/src/ops/mod.rs (12 new mods) + server/src/backup/mod.rs (4 mods) + server/src/main.rs (pub mod backup) + .github/workflows/ci.yml (release + external-gated jobs) + scripts (4 executables) + docs/FINAL-BUYER-GAP-LEDGER.md; cargo fmt --check / check / clippy -D warnings clean",
+      "truth_rules": "reproducibility never claims byte-for-byte without two builds; backup/restore strictly DOCUMENTED/EXECUTED/VERIFIED never auto-promote; observability only real counters no synthetic; never expose private key IDs/credentials/tokens/URLs; SBOM/license per-artifact SHA256+size+timestamp; package excludes target/node_modules/.git/.env/secrets/private keys/caches; final gap ledger no CLOSED gaps, 6 externals verified"
+    },
+    "transaction_readiness_batch6_25": [
+      "docs/DATA-ROOM-INDEX.md (buyer navigation source/build/architecture/testing/security/deployment/backup/SBOM/verification, crosswalk, per-artifact sha256+size+timestamp)",
+      "docs/ARCHITECTURE-OVERVIEW.md (8 members, 316->317 rs, 21 migrations, control-plane/billing/custody/HA/boundary table, verification per area)",
+      "docs/SECURITY-THREAT-MODEL.md (11 threat areas, controls/remaining exposure/evidence, EXTERNAL_REQUIRED for live providers)",
+      "docs/SECURITY-CONTROLS-MATRIX.md (controls PASS/PARTIAL/NOT_EXECUTED/EXTERNAL_REQUIRED with verification commands per control)",
+      "docs/PENETRATION-TEST-READINESS.md (scope/accounts/endpoints/WS/billing-custody, no external pentest claim, commissioning checklist)",
+      "docs/PRODUCTION-READINESS-MATRIX.md (readiness per area READY/EXTERNAL_REQUIRED, DB/Redis/billing/custody distinction)",
+      "docs/OPERATIONS-RUNBOOK.md (startup/shutdown/migration/health/dependency/queue/billing/custody/backup/restore/rollback with real commands)",
+      "docs/INCIDENT-RESPONSE-RUNBOOK.md (severity/detect/classify/contain/preserve/recover/validate workflow, operator decision points)",
+      "docs/ROLLBACK-RUNBOOK.md (artifact selection, app/frontend rollback, forward-only migration 0001-0021, config rollback, smoke, irreversible flags)",
+      "docs/DEPLOYMENT-ENVIRONMENT-MATRIX.md (local/CI actually tested vs staging/prod NOT_EXECUTED, Postgres16/Redis7/RPC/Billing/Custody matrix)",
+      "docs/SECRETS-MANAGEMENT-MATRIX.md (per-secret storage/reference, exposure risk, rotation, test evidence, storage method)",
+      "docs/THIRD-PARTY-SOFTWARE-INVENTORY.md (sbom.json 200 comps sha fd837e42…, licenses.json 707 entries sha c1c051…, direct vs transitive)",
+      "docs/OPEN-SOURCE-COMPLIANCE.md (MIT workspace, MIT/Apache/BSD inventory, MPL weak copyleft, UNKNOWN stays unknown LEGAL_REVIEW_REQUIRED)",
+      "docs/IP-HANDOVER-CHECKLIST.md (seller-provided vs buyer-created: source/docs/trademark/domain/registry/CI/custody/cloud/data/licenses/SBOM)",
+      "docs/IP-OWNERSHIP-REGISTER.md (per-component origin internal/external, license, ownership evidence, builder/toolchain, unresolved LEGAL_REVIEW)",
+      "docs/TRADEMARK-DOMAIN-REGISTER.md (project name/logo/domain/social/registry NOT INCLUDED/NOT VERIFIED, no brand sale)",
+      "docs/ENVIRONMENT-VARIABLE-REGISTER.md (DATABASE_URL/REDIS_URL/VAULT/STRIPE/RPC/TELEGRAM required/optional secret/default/failure)",
+      "docs/API-COMPATIBILITY-MATRIX.md (version 0.1.0, REST 55 endpoints STABLE, OpenAPI 0.1.0, WS with legacy ?key= deprecated LEGACY_ENABLED)",
+      "docs/WEBHOOK-COMPATIBILITY-MATRIX.md (Stripe/Paddle inbound HMAC+idempotency fixture-tested vs EXTERNAL_REQUIRED live, outbound Telegram/Vault)",
+      "docs/BUYER-VERIFICATION-SCRIPT.md (HERMETIC cargo fmt/check/clippy/test+frontend, SERVICE-BACKED PG/Redis, EXTERNAL Stripe/Vault/prod/funded/staking)",
+      "docs/KNOWN-LIMITATIONS.md (14 rows current-only: 6 external gaps + PG/Redis NOT_RUN + UNKNOWN licenses + trademark NOT INCLUDED + placeholder program_id)",
+      "docs/TRANSACTION-READINESS-REPORT.md (code completeness/security/commercial/deployment/operations/IP/limitations/buyer actions/external validations)",
+      "docs/FINAL-EVIDENCE-CROSSWALK.md (per-requirement source impl test doc status PASS/EXTERNAL_REQUIRED, orphaned claim/impl check, counts 316/21/95)",
+      "docs/RELEASE-NOTES-CURRENT.md (0.1.0 2026-09-24, Batch6 25 docs hygiene fix 6/7->7/7, Batch5 25 files, upgrade notes, known limitations)",
+      "docs/BUILD-OUTPUT-HYGIENE-RESOLUTION.md (root cause target/ vs real contamination, fix scripts/verify-delivery.sh build INFO vs secret FAIL, verify 7/7 with+without target/, buyer-release excludes target confirmed)"
+    ],
+    "batch6_delivery": {
+      "date": "2026-09-24",
+      "files_added": 25,
+      "header_says": 25,
+      "list_contains": 25,
+      "rust_files": "find crates -type f -name '*.rs' | sort -u | wc -l = 317 (316 + batch6_transaction_readiness rs, 33 ops + 5 backup + 1 batch6 test)",
+      "docs_count": 95,
+      "migrations": 21,
+      "tests_grep_count": "grep -r '#[test]' crates --include='*.rs' | wc -l = 1181 (1169 + 12 batch6 env/api/webhook/sbom/crosswalk/package)",
+      "workspace_tests_executed": "cargo check --workspace PASS (1.98.1); cargo test -p saas-sdk 32/32 + cargo test -p sniper-suite --test batch6_transaction_readiness 12/12 (hermetic env/api/webhook/sbom/crosswalk/package) + existing 6+7 API/webhook controls; hermetic PG/Redis NOT_RUN, frontend npm ci/typecheck/build PASS",
+      "verification": "bash scripts/verify-delivery.sh 7/7 PASS (with dummy target/debug/ present INFO excluded, without clean PASS), bash scripts/build-release-package.sh buyer-release/source/target absent confirmed, bash scripts/verify-buyer-package.sh PASS",
+      "wiring": "docs/*.md 25 new (70->95) + crates/server/tests/batch6_transaction_readiness.rs (12 tests env_registry/API/webhook/SBOM/crosswalk/package) + scripts/verify-delivery.sh hygiene patch (build INFO vs secret FAIL); release-manifest.json docs_files 95 rust_files 317 test_count 1181",
+      "truth_rules": "hygiene ignores build output target/node_modules/.git in verification, excludes from package, never weakens secret scan (BEGIN PRIVATE KEY/*.pem/*keypair*.json still hard FAIL); verification separated HERMETIC/SERVICE-BACKED/EXTERNAL; self-reported counts verified before write; legal unresolved stays LEGAL_REVIEW_REQUIRED; never claim no vulnerabilities"
+    },
+    "external_validation_batch7_24": [
+      "crates/server/src/ops/provider_contract.rs (canonical Model h, provider name/capability/required config refs/verification command/expected evidence/status PASS/FAIL/NOT_RUN/EXTERNAL_REQUIRED/BLOCKED never default PASS — 5 tests)",
+      "crates/server/src/ops/provider_contract_runner.rs (executes only explicitly enabled checks, never silently enables live, timeout + failure classification external network vs app, no secrets in output — 4 tests)",
+      "crates/server/src/ops/deployment_smoke.rs (validates /api/health, readiness, OpenAPI, migration state, Redis where required, CORS/security headers, frontend; never claim deployment without tested URL — 5 tests)",
+      "crates/server/src/ops/network_policy.rs (classifies local/internal/external/restricted/blocked to prevent accidental live use in unit tests — 4 tests)",
+      "crates/server/src/ops/external_evidence.rs (evidence record: provider/environment/test ID/timestamp/command/result/redacted endpoint/evidence hash; never persist secrets — 4 tests)",
+      "crates/server/src/ops/external_evidence_verify.rs (verifies hash/schema, rejects tampered, never upgrades NOT_RUN to PASS on file existence — 4 tests)",
+      "crates/server/src/ops/live_gate.rs (validates explicit enablement + env + owner/admin + provider/custody/audit/risk readiness, fail closed with denied-combination tests — 5 tests)",
+      "crates/server/src/ops/funded_mode_guard.rs (detects simulate/paper/dry-run/live-unfunded/live-funded, live-funded needs explicit config+auth, never default, never expose keys — 5 tests)",
+      "crates/server/src/solana/connection_contract.rs (read-only reachable/auth/latency/slot, no trading, no creds exposure — 5 tests)",
+      "crates/server/src/solana/geyser_contract.rs (read-only subscription decode, external creds required, no trading — 4 tests)",
+      "crates/server/src/staking/deployment_contract.rs (verifies program ID/account executable/hash with real RPC evidence — 4 tests)",
+      "crates/server/src/staking/validator_contract.rs (wrapper only when STAKING_E2E=1 and validator available else NOT_RUN — 4 tests)",
+      "crates/server/src/billing/live_provider_contract.rs (provider-neutral credentials/signature/checkout/event/idempotency/subscription sync, no hardcoded success — 4 tests)",
+      "crates/server/src/billing/live_provider_fixture.rs (deterministic local success/failure/retry/duplicate/unavailable/unauthorized/revoked/timeout, labeled NON-LIVE, never used as live evidence — 3 tests)",
+      "crates/server/src/custody/live_provider_contract.rs (live Vault/KMS/HSM contract, checks credential_ref_valid, sign_capability, no local fallback, no private key extraction — 5 tests)",
+      "crates/server/src/custody/live_provider_fixture.rs (custody fixtures unavailable/unauthorized/success/revoked/timeout, redacted public key, NON-LIVE — 5 tests)",
+      "crates/server/tests/provider_contracts.rs (HERMETIC test canonical statuses never PASS without evidence, missing creds EXTERNAL_REQUIRED — 7 tests)",
+      "crates/server/tests/deployment_smoke.rs (PRODUCTION_SMOKE test NOT_RUN without DEPLOYMENT_BASE_URL, not auto PASS with URL — 5 tests)",
+      "crates/server/tests/solana_contract.rs (LIVE_EXTERNAL read-only RPC/WS/Geyser NOT_RUN without URL, redact credentials, no trading — 7 tests)",
+      "crates/server/tests/staking_contract.rs (LIVE_EXTERNAL validator NOT_RUN without STAKING_E2E=1, placeholder BLOCKED, never convert historical — 7 tests)",
+      "crates/server/tests/live_billing_contract.rs (#[ignore] LIVE_EXTERNAL requires LIVE_BILLING=1 real provider, hermetic NOT_RUN — 5 tests 3 ignored)",
+      "crates/server/tests/live_custody_contract.rs (#[ignore] LIVE_EXTERNAL requires LIVE_CUSTODY=1, no local fallback, never private key — 5 tests 3 ignored)",
+      "scripts/run-external-validation.sh (entrypoint modes billing/custody/deployment/solana/staking/funded-preflight/all-safe, never enables funded trading, prints PASS/FAIL/NOT_RUN/EXTERNAL_REQUIRED, redacts secrets, saves evidence/external/*.json with validation_id/gap_id/provider/environment/timestamp/command/mode/status/evidence_hash (canonical, timestamp excluded)/redacted_metadata/endpoint_ref, never funded trade)",
+      "docs/EXTERNAL-VALIDATION-RUNBOOK.md (per validation prerequisites/env vars by NAME only/command/expected result/evidence/failure interpretation/security, distinguishing fixture vs service-backed vs live external vs production, all-safe mode)"
+    ],
+    "batch7_delivery": {
+      "date": "2026-09-24",
+      "files_added": 24,
+      "header_says": 24,
+      "list_contains": 24,
+      "wiring": "server/src/ops/mod.rs (8 new mods) + server/src/main.rs (inline pub mods solana/staking/billing/custody) + server/src/lib.rs (library crate for integration tests sniper_suite::) — exact 24 paths; lib.rs is wiring for crates/server/tests/*.rs harness",
+      "rust_files": "find crates -type f -name '*.rs' | sort -u | wc -l = 340 (317 + 23 batch7: 16 src +6 tests +1 lib.rs)",
+      "docs_count": 96,
+      "migrations": 21,
+      "tests_grep_count": "grep -r '#[test]' crates --include='*.rs' | wc -l = 1302 (1181 +121 batch7)",
+      "workspace_tests_executed": "cargo check --workspace PASS (1.98.1); cargo test -p sniper-suite --lib 224/224; cargo test -p sniper-suite --test provider_contracts 7/7 + deployment_smoke 5/5 + solana_contract 7/7 + staking_contract 7/7 + live_billing_contract 2/2 (+3 ignored) + live_custody_contract 2/2 (+3 ignored); bash scripts/run-external-validation.sh all-safe 6/6 NOT_RUN (no live creds); cargo clippy --workspace --all-targets -- -D warnings clean; cargo fmt --all --check clean",
+      "verification": "external validation harness reproducible: provider_contract never default PASS, runner never silently enables live, deployment smoke never claims without URL, network policy prevents accidental live in unit tests, evidence hash sha256 redacted no secrets, live gate fail closed, funded guard never default live-funded, solana read-only no trading, staking placeholder BLOCKED, billing/custody live require explicit flag else NOT_RUN/EXTERNAL_REQUIRED, fixtures NON-LIVE never live evidence, live tests #[ignore] not run on normal cargo test",
+      "runbook": "docs/EXTERNAL-VALIDATION-RUNBOOK.md 13K 7 sections + all-safe mode; script modes 7; evidence dir evidence/external/*.json with validation_id/gap_id/provider/environment/timestamp/command/mode/status/evidence_hash (canonical, deterministic)/redacted_metadata/endpoint_ref, no DATABASE_URL/REDIS_URL/keys/secrets",
+      "truth_rules": "Stripe/Paddle ADAPTER READY LIVE NOT_RUN (explicit LIVE_BILLING=1 required), Vault/KMS BOUNDARY READY NOT_RUN (LIVE_CUSTODY=1), deployment SMOKE HARNESS READY NOT_RUN (DEPLOYMENT_BASE_URL), funded GUARD READY NOT_RUN (explicit live-funded config+auth), audit NOT DONE; gaps mapped to ledger GAP-001..GAP-006 (crates/server/src/ops/final_gap_ledger.rs); every result has validation_id/gap_id/provider/environment/timestamp/command/mode/status/evidence_hash (canonical, timestamp excluded)/redacted_metadata/endpoint_ref, never persist secrets"
+    }
   },
   "toolchain": {
     "rust": "1.98.1",
@@ -54,14 +219,14 @@
       ".github/workflows/ci.yml (program job dtolnay/rust-toolchain@1.98.1)",
       "scripts/release-check.sh gate"
     ],
-    "solana_program_toolchain": "agave 2.1.21 / platform-tools v1.43 / sbf rustc 1.79.0 \u2014 cargo build-sbf EXECUTED on the audit-pass source (hardening pass 2026-09-18); incremental rebuild after touching the source with freshly-installed platform-tools produced a BYTE-IDENTICAL .so",
-    "solana_cli": "solana-cli 2.1.21 (src:8a085eeb; feat:1416569292) \u2014 official anza-xyz/agave release tarball, SHA-256 5da3359e296f1e6c13522b874317cb4cfe33e73301a9dc60b1e1435cc133b397"
+    "solana_program_toolchain": "agave 2.1.21 / platform-tools v1.43 / sbf rustc 1.79.0 — cargo build-sbf EXECUTED on the audit-pass source (hardening pass 2026-09-18); incremental rebuild after touching the source with freshly-installed platform-tools produced a BYTE-IDENTICAL .so",
+    "solana_cli": "solana-cli 2.1.21 (src:8a085eeb; feat:1416569292) — official anza-xyz/agave release tarball, SHA-256 5da3359e296f1e6c13522b874317cb4cfe33e73301a9dc60b1e1435cc133b397"
   },
   "test_counts": {
     "workspace_total": 1153,
     "workspace_total_run": "TASK 7A conformance pass 2026-09-22: CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace -j 2 -- --test-threads=1 with PostgreSQL 17.11 live -> 1153 passed / 0 failed / 1 ignored (opt-in replay fixture generator) across 51 test binaries; db_integration 26/26, two_replica_mirror, both durable SaaS tests and the A-L SaaS suite executed against PostgreSQL; Redis-dependent and explicitly live-network/broadcast gates self-skipped as designed. Adds: unit-level SaaS/TASK-5 and SaaS/TASK-6 boundary proofs in bot_core::authorization, and durable API-key restart/revocation/expiry assertions in the SaasStore restart test.",
     "workspace_total_at_polymarket_layout_pass_2026-09-21": 901,
-    "workspace_total_run_at_polymarket_layout_pass": "polymarket-engine module-layout pass 2026-09-21 (TASK 4 structure aligned with TASK 1-3; no behaviour change): cargo test --workspace -j 2 -- --test-threads=1 \u2192 901 passed / 0 failed / 1 ignored (replay fixture generator) across 48 test binaries, hermetic sandbox (no PostgreSQL / Redis / network: the gated suites executed in their self-skipping mode; the Polymarket suites run against an in-process mock CLOB / Gamma / RPC / user websocket)",
+    "workspace_total_run_at_polymarket_layout_pass": "polymarket-engine module-layout pass 2026-09-21 (TASK 4 structure aligned with TASK 1-3; no behaviour change): cargo test --workspace -j 2 -- --test-threads=1 → 901 passed / 0 failed / 1 ignored (replay fixture generator) across 48 test binaries, hermetic sandbox (no PostgreSQL / Redis / network: the gated suites executed in their self-skipping mode; the Polymarket suites run against an in-process mock CLOB / Gamma / RPC / user websocket)",
     "workspace_total_at_polymarket_completeness_pass_2026-09-21": 895,
     "workspace_total_at_polymarket_engine_pass_2026-09-21": 893,
     "workspace_total_at_copy_engine_reconciliation_2026-09-21": 816,
@@ -84,7 +249,7 @@
     },
     "failures": 0,
     "staking_validator_e2e_executed_passed": 3,
-    "staking_validator_e2e_run": "hardening pass 2026-09-18: STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1 \u2192 3 passed / 0 failed in 160.72s on solana-test-validator 2.1.21 (metadata e2e against the real mainnet-cloned mpl-token-metadata)",
+    "staking_validator_e2e_run": "hardening pass 2026-09-18: STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1 → 3 passed / 0 failed in 160.72s on solana-test-validator 2.1.21 (metadata e2e against the real mainnet-cloned mpl-token-metadata)",
     "workspace_total_all_features": 537,
     "workspace_total_all_features_note": "audit-pass figure; --all-features was not re-run in the sniper-engine pass",
     "module_sniper": {
@@ -100,52 +265,57 @@
       "geyser_detect": 2,
       "total_passed": 126
     },
-    "workspace_total_at_saas_durability_pass_2026_09_22": 1028
+    "workspace_total_at_saas_durability_pass_2026_09_22": 1028,
+    "workspace_total_at_batch5_2026-09-24": 1169
   },
   "verification_status": {
     "verified_final_pass": [
-      "AUDIT PASS 2026-09-18 (current tree): cargo fmt --check / cargo check --workspace --all-targets / cargo clippy --workspace --all-targets --all-features -D warnings \u2014 all clean",
+      "AUDIT PASS 2026-09-18 (current tree): cargo fmt --check / cargo check --workspace --all-targets / cargo clippy --workspace --all-targets --all-features -D warnings — all clean",
       "cargo test --workspace -- --test-threads=1 (537/537, gated suites executed against real PostgreSQL 17.11 + Redis 8.0.2; the freeze-gate run was 521/521 against PG 16.4 + Redis 7.2.10)",
       "db_integration 23/23, redis_integration 10/10, distributed_integration 4/4, two_replica_mirror 1/1",
       "staking fmt + clippy --all-targets -D warnings + host tests 71/71 (was 48/48 at freeze)",
-      "cargo audit (both lockfiles, 0 errors, 9 pre-existing allow-listed warnings), cargo deny check (advisories/bans/licenses/sources ok); Cargo.lock package counts unchanged (706/580) \u2014 no dependency drift",
-      "audit-chain tamper evidence: modification, reorder, missing, duplicate detection + linear chain under 8 concurrent appenders (advisory-lock serialization) \u2014 inside db_integration",
+      "cargo audit (both lockfiles, 0 errors, 9 pre-existing allow-listed warnings), cargo deny check (advisories/bans/licenses/sources ok); Cargo.lock package counts unchanged (706/580) — no dependency drift",
+      "audit-chain tamper evidence: modification, reorder, missing, duplicate detection + linear chain under 8 concurrent appenders (advisory-lock serialization) — inside db_integration",
       "telegram bot-token redaction in all API error paths (closed-port regression test)",
       "secret scan + TODO/stub-marker scan clean; migrations monotonic 0001-0011; version + toolchain-pin consistency (release-check.sh)",
-      "HARDENING PASS 2026-09-18: cargo build-sbf on the audit-pass source \u2192 187,504-byte staking_suite.so (SHA-256 57a890fa\u2026), byte-identical on incremental rebuild with fresh platform-tools",
-      "HARDENING PASS: ALL 3 staking validator e2e EXECUTED + PASSED (solana-test-validator 2.1.21; governance lifecycle, funded stake\u2192reward\u2192unstake lifecycle, max-supply cap + metadata against the REAL mainnet-cloned mpl-token-metadata via --clone-upgradeable-program) \u2014 found and fixed two real defects (mpl discriminant 19\u219233; harness clone flag)",
+      "HARDENING PASS 2026-09-18: cargo build-sbf on the audit-pass source → 187,504-byte staking_suite.so (SHA-256 57a890fa…), byte-identical on incremental rebuild with fresh platform-tools",
+      "HARDENING PASS: ALL 3 staking validator e2e EXECUTED + PASSED (solana-test-validator 2.1.21; governance lifecycle, funded stake→reward→unstake lifecycle, max-supply cap + metadata against the REAL mainnet-cloned mpl-token-metadata via --clone-upgradeable-program) — found and fixed two real defects (mpl discriminant 19→33; harness clone flag)",
       "HARDENING PASS: cargo test --workspace 537/537 exit 0 AND cargo test --workspace --all-features 537/537 exit 0 (real PG 17.11 + Redis 8.0.2)",
-      "HARDENING PASS: pg_dump\u2192restore round-trip RE-EXECUTED on PostgreSQL 17.11 (dump SHA-256 5989ecf1\u2026, tables/migrations/rowcounts identical, db_integration 23/23 against the restored DB, app startup + /health + /ready + /api/status(paper, live_allowed=false) + /api/audit/verify + clean SIGTERM shutdown against the restored DB)",
-      "HARDENING PASS: latency_bench network benches executed against public devnet (read-only + simulate; no broadcasts): getSlot p50=65ms/p95=211ms n=30, getLatestBlockhash p50=65ms/p95=67ms n=30, simulateTransaction p50=66ms/p95=275ms n=10 \u2014 sandbox-network figures, NOT product guarantees",
-      "HARDENING PASS: scripts/staking-identity.sh verify/set-id/deploy guards tested (set-id round-trip tree-hash identical; deploy refuses keypair\u2260declare_id mismatch and placeholder-on-public-cluster)",
-      "SNIPER-ENGINE PASS 2026-09-21 (Rust 1.98.1, hermetic sandbox): cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -- --test-threads=1 \u2192 723 passed / 0 failed / 1 ignored; cargo test -p module-sniper \u2192 126 passed (+1 ignored generator); staking fmt/clippy/host tests 71/71 re-run on the untouched program; scripts/verify-delivery.sh 7 PASS / 0 FAIL; secret + TODO/stub-marker scans clean",
-      "POLYMARKET-ENGINE PASS 2026-09-21 (Rust 1.98.1, hermetic sandbox): cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -- --test-threads=1 \u2192 893 passed / 0 failed / 1 ignored across 48 binaries; cargo test -p module-polymarket \u2192 91 unit + 49 integration (order_pipeline 10, order_lifecycle 9, user_ws 4, idempotency_concurrency 4, reconciliation 6, crash_recovery 6, strategy_sizing 5, mock_clob_gamma 5) against the in-process mock venue; migration 0014 + PolyRepo round-trips inside db_integration (25); no live venue, no real order, no funded wallet was used \u2014 not a claim of safety or profitability",
-      "POLYMARKET-ENGINE COMPLETENESS PASS 2026-09-21 (TASK 4 follow-up): polymarket_position claim kind (settled CTF balance truth for live Polymarket positions, shared correction policy with Solana positions), EOA funder/signer guard in sign_order_bundle, repository documents re-synchronised with the current tree (REPOSITORY-MAP 262 tracked files, 14 migrations, 57 docs); fmt/clippy clean; cargo test --workspace \u2192 895 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 92 unit + 49 integration, server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree; the position truth source is exercised offline through the shared engine's unit tests only \u2014 not against a live Polygon node",
-      "POLYMARKET-ENGINE VERIFICATION PASS 2026-09-21 (TASK 4 buyer-grade verification, no new features): FAK `matched` no longer fabricates the killed remainder into a fill (explicit venue quantity only; immediate GET /data/order after a FAK matched POST; acknowledged-but-absent orders held unknown instead of failed), unrecognised DELETE /order answers are never a cancel confirmation (status re-read; cancel_all closes only venue-listed ids), user-channel trade replays after a restart no longer advance the local cumulative (durable fill journal is the replay authority), per-trade deltas are reconciled against polled cumulatives (trade_matched + associate_trades: a trade a poll already captured is never booked twice); fmt/clippy clean; cargo test --workspace \u2192 901 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 94 unit + 53 integration: order_pipeline 10, order_lifecycle 11, user_ws 5, idempotency_concurrency 4, reconciliation 6, crash_recovery 7, strategy_sizing 5, mock_clob_gamma 5; server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree; the venue's FAK partial-fill reporting has not been observed against the live CLOB \u2014 not a claim of safety or profitability",
-      "POLYMARKET-ENGINE MODULE-LAYOUT PASS 2026-09-21 (TASK 4 structure aligned with the TASK 1-3 layout; no behaviour change, no new features, no public API change): crates/module-polymarket/src/lib.rs (3,892 lines) split into lib.rs + discover.rs, pipeline.rs, lifecycle.rs, reconcile.rs, recovery.rs, funding.rs, store.rs, metrics.rs, audit.rs, venue.rs \u2014 function bodies moved verbatim, pub(crate) visibility where a sibling file calls a helper, inline metric registrations routed through one helper per series (same names / help / labels); fmt/clippy clean; cargo test --workspace -j 2 \u2192 901 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 94 unit + 53 integration unchanged, server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree (272 tracked files under sniper-suite/); no live venue, order, wallet or Polygon node used \u2014 not a claim of safety or profitability",
-      "GLOBAL-RISK-ACCOUNTING PASS 2026-09-21 (TASK 5, Rust 1.98.1, hermetic sandbox): one global risk decision (GlobalRiskEngine, step 2b of RiskEngine::check_entry: process / venue / strategy kill switches, reference-rate presence, open-position, order-notional, portfolio / wallet / venue / strategy / asset exposure, daily loss, drawdown; 14 deterministic reasons, journaled snapshots) + the global double-entry ledger (typed AccountingEvents from every sniper / copy / Polymarket fill site, ONE deterministic event id, balanced postings, PositionBook aggregation, PortfolioView, 8-kind accounting reconciliation that never repairs, replay-safe recovery) + migration 0015 (7 additive tables) + 5 API routes; cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -j 2 -- --test-threads=1 \u2192 962 passed / 0 failed / 1 ignored across 49 binaries (bot-core 209 unit + global_risk_accounting 18 + db_integration 26 gated, server 36, module suites unchanged plus ledger assertions); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree (297 tracked files, 15 migrations, 60 docs); the PostgreSQL repository round-trip is gated on POSTGRES_URL and was NOT executed in the sandbox; no live venue, funded wallet, database or price feed used \u2014 not a claim of safety or profitability",
-      "GLOBAL-RISK-ACCOUNTING COMPLETENESS PASS 2026-09-22 (TASK 5 file-by-file audit): every declared module, every spec item and every config key re-checked against the tree; ONE gap found and closed \u2014 accounting reconciliation now compares all FOUR record layers required by \u00a75 (OMS orders \u2192 module trades/fills \u2192 ledger events \u2192 positions): ReconInputs gained `orders`, a filled / partially-filled OMS order that no ledger event references is reported (unresolved_financial_event, or missing_ledger_entry when its trade is also unbooked), intent-only order states are never reported, a ledger event explained only by its order is no longer an orphan, findings carry `order_id` (migration 0015 column, repository + API), server feeds the last 5,000 orders per pass; 4 new tests (3 unit + `the_order_layer_is_reconciled_against_the_ledger` against a real OrderManager) + a PostgreSQL order_id round-trip assertion; fmt/clippy clean; cargo test --workspace \u2192 966 passed / 0 failed / 1 ignored across 49 binaries; verify-delivery 7 PASS / 0 FAIL (297 files, 15 migrations, 60 docs); bundle tree repaired (4 dot-directory files the snapshot cycle had dropped from the expanded copy; the tarball was always complete)",
-      "HA-DISTRIBUTED-RELIABILITY PASS 2026-09-22 (TASK 6, Rust 1.98.1, hermetic sandbox): worker identity + registration + heartbeat with per-life generations and a 9-state machine; SINGLETON role leases (reconciliation, recovery, accounting_maintenance, state_sync, feed:<name>) with strictly increasing fencing generations, one-statement atomic acquisition, CAS renew/release/verify and deterministic FenceError (fenced / expired / store_unavailable); durable feed cursors with duplicate suppression, gap detection that is never silently skipped and deliberate replay; the pure crash-boundary x order-recovery matrix (12 boundaries, 5 local x 7 venue evidence pairs, exactly one action each, NO action that resubmits); restart rebuild of ledger / positions / risk state through the TASK 5 idempotent path; failover reconciliation that reports and never repairs; readiness that is never true without state + recovery + required leases (re-verified against the store) + healthy dependencies; graceful shutdown that persists cursors and releases leases; migration 0016 (7 additive tables) + HaRepo + DbHaStore + LeasedWorker + GET /api/ha; fmt clean; clippy --workspace --all-targets -D warnings clean; cargo test --workspace -j 2 -- --test-threads=1 \u2192 1025 passed / 0 failed / 1 ignored across 50 binaries (bot-core 253 unit + ha_distributed 17 + global_risk_accounting 19 + db_integration 26 gated, server 37); scripts/verify-delivery.sh 7 PASS / 0 FAIL (313 tracked files, 16 migrations, 63 docs); the PostgreSQL HaStore path is gated on POSTGRES_URL and was NOT executed in the sandbox; no live venue, funded wallet, database or multi-host cluster used \u2014 not a claim of safety, profitability or institutional production readiness",
-      "HA-DISTRIBUTED COMPLETENESS PASS 2026-09-22 (TASK 6 integration audit): two integration gaps found and closed \u2014 (1) the cluster-singleton jobs still ran unleased on every replica, so the venue/chain reconciliation sweep, the hourly retention housekeeping and the periodic position re-verification now run as fenced LeasedWorkers under the reconciliation / recovery / state_sync leases (4 leased singletons in total with accounting_maintenance); (2) the durable feed cursors existed but no feed used them, so module-copy's poll loop now resumes each leader wallet from its durable signature instead of re-seeding with \"newest signature now\" (which silently skipped every trade that happened while the process was down) and module-polymarket's authenticated user channel now continues its delivery numbering across process lives and records skipped deliveries as gaps; the three remaining unleased loops (recon-backlog snapshot, runtime-flag sync, position-book sync) are per-worker local views by design; 1 new integration test (feed_wiring_shapes_survive_a_restart); fmt/clippy clean; cargo test --workspace \u2192 1026 passed / 0 failed / 1 ignored across 50 binaries; verify-delivery 7 PASS / 0 FAIL (313 files, 16 migrations, 63 docs); bundle tree repaired again (the same 4 dot-directory files the snapshot cycle drops from expanded copies; the tarball was always complete)",
+      "HARDENING PASS: pg_dump→restore round-trip RE-EXECUTED on PostgreSQL 17.11 (dump SHA-256 5989ecf1…, tables/migrations/rowcounts identical, db_integration 23/23 against the restored DB, app startup + /health + /ready + /api/status(paper, live_allowed=false) + /api/audit/verify + clean SIGTERM shutdown against the restored DB)",
+      "HARDENING PASS: latency_bench network benches executed against public devnet (read-only + simulate; no broadcasts): getSlot p50=65ms/p95=211ms n=30, getLatestBlockhash p50=65ms/p95=67ms n=30, simulateTransaction p50=66ms/p95=275ms n=10 — sandbox-network figures, NOT product guarantees",
+      "HARDENING PASS: scripts/staking-identity.sh verify/set-id/deploy guards tested (set-id round-trip tree-hash identical; deploy refuses keypair≠declare_id mismatch and placeholder-on-public-cluster)",
+      "SNIPER-ENGINE PASS 2026-09-21 (Rust 1.98.1, hermetic sandbox): cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -- --test-threads=1 → 723 passed / 0 failed / 1 ignored; cargo test -p module-sniper → 126 passed (+1 ignored generator); staking fmt/clippy/host tests 71/71 re-run on the untouched program; scripts/verify-delivery.sh 7 PASS / 0 FAIL; secret + TODO/stub-marker scans clean",
+      "POLYMARKET-ENGINE PASS 2026-09-21 (Rust 1.98.1, hermetic sandbox): cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -- --test-threads=1 → 893 passed / 0 failed / 1 ignored across 48 binaries; cargo test -p module-polymarket → 91 unit + 49 integration (order_pipeline 10, order_lifecycle 9, user_ws 4, idempotency_concurrency 4, reconciliation 6, crash_recovery 6, strategy_sizing 5, mock_clob_gamma 5) against the in-process mock venue; migration 0014 + PolyRepo round-trips inside db_integration (25); no live venue, no real order, no funded wallet was used — not a claim of safety or profitability",
+      "POLYMARKET-ENGINE COMPLETENESS PASS 2026-09-21 (TASK 4 follow-up): polymarket_position claim kind (settled CTF balance truth for live Polymarket positions, shared correction policy with Solana positions), EOA funder/signer guard in sign_order_bundle, repository documents re-synchronised with the current tree (REPOSITORY-MAP 262 tracked files, 14 migrations, 57 docs); fmt/clippy clean; cargo test --workspace → 895 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 92 unit + 49 integration, server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree; the position truth source is exercised offline through the shared engine's unit tests only — not against a live Polygon node",
+      "POLYMARKET-ENGINE VERIFICATION PASS 2026-09-21 (TASK 4 buyer-grade verification, no new features): FAK `matched` no longer fabricates the killed remainder into a fill (explicit venue quantity only; immediate GET /data/order after a FAK matched POST; acknowledged-but-absent orders held unknown instead of failed), unrecognised DELETE /order answers are never a cancel confirmation (status re-read; cancel_all closes only venue-listed ids), user-channel trade replays after a restart no longer advance the local cumulative (durable fill journal is the replay authority), per-trade deltas are reconciled against polled cumulatives (trade_matched + associate_trades: a trade a poll already captured is never booked twice); fmt/clippy clean; cargo test --workspace → 901 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 94 unit + 53 integration: order_pipeline 10, order_lifecycle 11, user_ws 5, idempotency_concurrency 4, reconciliation 6, crash_recovery 7, strategy_sizing 5, mock_clob_gamma 5; server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree; the venue's FAK partial-fill reporting has not been observed against the live CLOB — not a claim of safety or profitability",
+      "POLYMARKET-ENGINE MODULE-LAYOUT PASS 2026-09-21 (TASK 4 structure aligned with the TASK 1-3 layout; no behaviour change, no new features, no public API change): crates/module-polymarket/src/lib.rs (3,892 lines) split into lib.rs + discover.rs, pipeline.rs, lifecycle.rs, reconcile.rs, recovery.rs, funding.rs, store.rs, metrics.rs, audit.rs, venue.rs — function bodies moved verbatim, pub(crate) visibility where a sibling file calls a helper, inline metric registrations routed through one helper per series (same names / help / labels); fmt/clippy clean; cargo test --workspace -j 2 → 901 passed / 0 failed / 1 ignored across 48 binaries (module-polymarket 94 unit + 53 integration unchanged, server 34); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree (272 tracked files under sniper-suite/); no live venue, order, wallet or Polygon node used — not a claim of safety or profitability",
+      "GLOBAL-RISK-ACCOUNTING PASS 2026-09-21 (TASK 5, Rust 1.98.1, hermetic sandbox): one global risk decision (GlobalRiskEngine, step 2b of RiskEngine::check_entry: process / venue / strategy kill switches, reference-rate presence, open-position, order-notional, portfolio / wallet / venue / strategy / asset exposure, daily loss, drawdown; 14 deterministic reasons, journaled snapshots) + the global double-entry ledger (typed AccountingEvents from every sniper / copy / Polymarket fill site, ONE deterministic event id, balanced postings, PositionBook aggregation, PortfolioView, 8-kind accounting reconciliation that never repairs, replay-safe recovery) + migration 0015 (7 additive tables) + 5 API routes; cargo fmt --all --check clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test --workspace -j 2 -- --test-threads=1 → 962 passed / 0 failed / 1 ignored across 49 binaries (bot-core 209 unit + global_risk_accounting 18 + db_integration 26 gated, server 36, module suites unchanged plus ledger assertions); scripts/verify-delivery.sh 7 PASS / 0 FAIL on the clean tree (297 tracked files, 15 migrations, 60 docs); the PostgreSQL repository round-trip is gated on POSTGRES_URL and was NOT executed in the sandbox; no live venue, funded wallet, database or price feed used — not a claim of safety or profitability",
+      "GLOBAL-RISK-ACCOUNTING COMPLETENESS PASS 2026-09-22 (TASK 5 file-by-file audit): every declared module, every spec item and every config key re-checked against the tree; ONE gap found and closed — accounting reconciliation now compares all FOUR record layers required by §5 (OMS orders → module trades/fills → ledger events → positions): ReconInputs gained `orders`, a filled / partially-filled OMS order that no ledger event references is reported (unresolved_financial_event, or missing_ledger_entry when its trade is also unbooked), intent-only order states are never reported, a ledger event explained only by its order is no longer an orphan, findings carry `order_id` (migration 0015 column, repository + API), server feeds the last 5,000 orders per pass; 4 new tests (3 unit + `the_order_layer_is_reconciled_against_the_ledger` against a real OrderManager) + a PostgreSQL order_id round-trip assertion; fmt/clippy clean; cargo test --workspace → 966 passed / 0 failed / 1 ignored across 49 binaries; verify-delivery 7 PASS / 0 FAIL (297 files, 15 migrations, 60 docs); bundle tree repaired (4 dot-directory files the snapshot cycle had dropped from the expanded copy; the tarball was always complete)",
+      "HA-DISTRIBUTED-RELIABILITY PASS 2026-09-22 (TASK 6, Rust 1.98.1, hermetic sandbox): worker identity + registration + heartbeat with per-life generations and a 9-state machine; SINGLETON role leases (reconciliation, recovery, accounting_maintenance, state_sync, feed:<name>) with strictly increasing fencing generations, one-statement atomic acquisition, CAS renew/release/verify and deterministic FenceError (fenced / expired / store_unavailable); durable feed cursors with duplicate suppression, gap detection that is never silently skipped and deliberate replay; the pure crash-boundary x order-recovery matrix (12 boundaries, 5 local x 7 venue evidence pairs, exactly one action each, NO action that resubmits); restart rebuild of ledger / positions / risk state through the TASK 5 idempotent path; failover reconciliation that reports and never repairs; readiness that is never true without state + recovery + required leases (re-verified against the store) + healthy dependencies; graceful shutdown that persists cursors and releases leases; migration 0016 (7 additive tables) + HaRepo + DbHaStore + LeasedWorker + GET /api/ha; fmt clean; clippy --workspace --all-targets -D warnings clean; cargo test --workspace -j 2 -- --test-threads=1 → 1025 passed / 0 failed / 1 ignored across 50 binaries (bot-core 253 unit + ha_distributed 17 + global_risk_accounting 19 + db_integration 26 gated, server 37); scripts/verify-delivery.sh 7 PASS / 0 FAIL (313 tracked files, 16 migrations, 63 docs); the PostgreSQL HaStore path is gated on POSTGRES_URL and was NOT executed in the sandbox; no live venue, funded wallet, database or multi-host cluster used — not a claim of safety, profitability or institutional production readiness",
+      "HA-DISTRIBUTED COMPLETENESS PASS 2026-09-22 (TASK 6 integration audit): two integration gaps found and closed — (1) the cluster-singleton jobs still ran unleased on every replica, so the venue/chain reconciliation sweep, the hourly retention housekeeping and the periodic position re-verification now run as fenced LeasedWorkers under the reconciliation / recovery / state_sync leases (4 leased singletons in total with accounting_maintenance); (2) the durable feed cursors existed but no feed used them, so module-copy's poll loop now resumes each leader wallet from its durable signature instead of re-seeding with \"newest signature now\" (which silently skipped every trade that happened while the process was down) and module-polymarket's authenticated user channel now continues its delivery numbering across process lives and records skipped deliveries as gaps; the three remaining unleased loops (recon-backlog snapshot, runtime-flag sync, position-book sync) are per-worker local views by design; 1 new integration test (feed_wiring_shapes_survive_a_restart); fmt/clippy clean; cargo test --workspace → 1026 passed / 0 failed / 1 ignored across 50 binaries; verify-delivery 7 PASS / 0 FAIL (313 files, 16 migrations, 63 docs); bundle tree repaired again (the same 4 dot-directory files the snapshot cycle drops from expanded copies; the tarball was always complete)",
       "TASK-7A COMPLETENESS PASS 2026-09-22: restored 6 omitted delivery/audit documents; fixed deployment-organization bootstrap, platform-admin cross-tenant context resolution, API-key permission-subset validation (no size-only privilege comparison), unknown scope/empty label refusal, migration gate 0001-0017, script executable bits, formatting and clippy defects; cargo fmt clean; cargo clippy --workspace --all-targets -D warnings clean; cargo test -p bot-core -p sniper-suite -> 492 passed / 0 failed; verify-delivery 7 PASS / 0 FAIL (63 docs, 17 migrations). Full all-crate test linking was attempted but the 25 GB sandbox filled; the directly changed core/server surface passed completely. PostgreSQL-backed SaaS persistence remains outside the current in-memory TASK-7A server adapter.",
       "SAAS-DURABILITY PASS 2026-09-22: migration 0018 and the PostgreSQL runtime-record repository make users, organizations, memberships, sessions/revocations, tenant API keys, plans, subscriptions, entitlements, usage idempotency and provisioning jobs restart-safe and replica-visible; subscription plus entitlement replacement is atomic; production startup uses PostgreSQL-authoritative reads while no-database tests retain memory mode; fmt, server check, server all-target Clippy -D warnings and 49 server tests pass; PostgreSQL 17.11 executed the all-record restart/two-replica test, restart-safe plan seeding/atomic entitlement test, and all 26 core database integration tests; release metadata advances to 18 migrations.",
-      "FILE-BY-FILE INTEGRITY PASS 2026-09-22: the canonical tree was re-inventoried file by file \u2014 342 files, 18 contiguous migrations 0001-0018, 63 docs; every Rust mod / #[path] / include_str! / include_bytes! declaration resolves (209 .rs files, zero missing module files; the three tests/common/mod.rs harnesses are declared by their integration tests), all 7 workspace members exist, no TODO/FIXME/todo!/unimplemented!/placeholder markers in code or config, no empty files, all release scripts executable; completion and limitation documentation re-synchronised with current evidence (docs/TESTING.md, docs/EVIDENCE-INDEX.md, docs/BUYER-DUE-DILIGENCE.md, docs/FINAL-KNOWN-LIMITATIONS.md, docs/REPOSITORY-MAP.md, docs/DELIVERY-MANIFEST.md) so historical counts are dated and the current state is recorded where a reader looks first; fmt --check / cargo check / clippy --workspace --all-targets -D warnings / verify-delivery 7 PASS / 0 FAIL re-run; workspace test evidence stands at 1028 passed / 0 failed / 1 ignored with PostgreSQL 17.11 (SaaS durability pass, same day); no live venue, funded wallet, or production database used \u2014 not a claim of safety or profitability",
-      "TASK-7A SPEC CONFORMANCE PASS 2026-09-22: all 25 phase files re-checked one by one (migration 0017 12 tables hash-only, tenant/membership/session/billing/provisioning/authorization modules, server saas boundary; 8 roles, 22+1 permissions, 8 decisions, 7 provisioning states, 4 plan tiers) plus the A-L matrix in crates/core/tests/saas_control_plane.rs (19 tests); TWO new unit-level boundary proofs in bot_core::authorization (SaaS ALLOW cannot move the TASK 5 global-risk verdict; no authorization decision can renew/verify/release a TASK 6 lease it does not hold and stale generations stay fenced) and the durable store restart test extended with API-key restart/revocation/expiry assertions executed against real PostgreSQL 17.11; fmt --check / clippy --workspace --all-targets -D warnings clean; full workspace 1153 passed / 0 failed / 1 ignored across 51 binaries with PostgreSQL live; server 49/49; verify-delivery re-run on the clean tree; no live venue, funded wallet or production database used - not a claim of safety or profitability"
+      "FILE-BY-FILE INTEGRITY PASS 2026-09-22: the canonical tree was re-inventoried file by file — 342 files, 18 contiguous migrations 0001-0018, 63 docs; every Rust mod / #[path] / include_str! / include_bytes! declaration resolves (209 .rs files, zero missing module files; the three tests/common/mod.rs harnesses are declared by their integration tests), all 7 workspace members exist, no TODO/FIXME/todo!/unimplemented!/placeholder markers in code or config, no empty files, all release scripts executable; completion and limitation documentation re-synchronised with current evidence (docs/TESTING.md, docs/EVIDENCE-INDEX.md, docs/BUYER-DUE-DILIGENCE.md, docs/FINAL-KNOWN-LIMITATIONS.md, docs/REPOSITORY-MAP.md, docs/DELIVERY-MANIFEST.md) so historical counts are dated and the current state is recorded where a reader looks first; fmt --check / cargo check / clippy --workspace --all-targets -D warnings / verify-delivery 7 PASS / 0 FAIL re-run; workspace test evidence stands at 1028 passed / 0 failed / 1 ignored with PostgreSQL 17.11 (SaaS durability pass, same day); no live venue, funded wallet, or production database used — not a claim of safety or profitability",
+      "TASK-7A SPEC CONFORMANCE PASS 2026-09-22: all 25 phase files re-checked one by one (migration 0017 12 tables hash-only, tenant/membership/session/billing/provisioning/authorization modules, server saas boundary; 8 roles, 22+1 permissions, 8 decisions, 7 provisioning states, 4 plan tiers) plus the A-L matrix in crates/core/tests/saas_control_plane.rs (19 tests); TWO new unit-level boundary proofs in bot_core::authorization (SaaS ALLOW cannot move the TASK 5 global-risk verdict; no authorization decision can renew/verify/release a TASK 6 lease it does not hold and stale generations stay fenced) and the durable store restart test extended with API-key restart/revocation/expiry assertions executed against real PostgreSQL 17.11; fmt --check / clippy --workspace --all-targets -D warnings clean; full workspace 1153 passed / 0 failed / 1 ignored across 51 binaries with PostgreSQL live; server 49/49; verify-delivery re-run on the clean tree; no live venue, funded wallet or production database used - not a claim of safety or profitability",
+      "BATCH-2 BUYER-PROOF 2026-09-23: cargo fmt --all --check clean; cargo check --workspace 0 errors (10 unused warnings); cargo test -p saas-sdk 9/9 + cargo test -p sniper-suite 105/105 + core lib >200 (grep 914 #[test]); npm install --package-lock-only (REAL 5548-line lockfile) + frontend-ci.yml deterministic install/typecheck/build; BUYER-TRUTH-REGISTER single source with DATE+COMMAND counts; legacy WS guard, retention workers, Vault/KMS/HSM fail-closed boundaries, provider-neutral billing boundary — live Stripe/Paddle/Vault/KMS/HSM/production-deployment/external-audit NOT EXECUTED (declared in register §5)",
+      "BATCH-6 TRANSACTION-READINESS PASS 2026-09-24 (Rust 1.98.1, hermetic sandbox): FIXED scripts/verify-delivery.sh hygiene 6/7->7/7 (target/ .gitignore'd generated build output INFO not dirty, .env/*.log/*.dump/*keypair*.json/*.pem still FAIL, buyer-release --exclude target/ verified absent, scripts/build-release-package.sh 7/7); ADDED 25 docs (70->95) data-room/architecture/threat-model/controls-matrix/pentest-readiness/prod-readiness/operations/incident/rollback/deployment-env/secrets/third-party/OSS/IP-handover/IP-ownership/trademark-domain/env-register/API/webhook/buyer-verification/known-limitations/transaction-readiness/evidence-crosswalk/release-notes/hygiene-resolution (each reviewed, no stale claim); ADDED 12 batch6 integration tests (env_registry/API/webhook/SBOM-license/evidence-crosswalk/package-completeness, hermetic); cargo fmt --all --check clean; cargo check --workspace PASS (317 rs, 21 migrations); cargo test --test batch6_transaction_readiness 12/12; bash scripts/verify-delivery.sh 7/7 with+without target/ + verify-buyer-package PASS; no new business logic (billing/custody/tenant/SDK/WS/lifecycle untouched unless audit finds missing integration for existing claim)"
     ],
     "previously_verified_identical_source": [
       "recon_crash_e2e against a local solana-test-validator",
       "devnet_e2e read-only against public devnet",
-      "latency_bench local-pipeline benchmarks (the network-gated benches WERE executed in the hardening pass \u2014 see verified_final_pass)",
+      "latency_bench local-pipeline benchmarks (the network-gated benches WERE executed in the hardening pass — see verified_final_pass)",
       "deterministic ledger replay"
     ],
     "not_executed_environment_blocked": [
-      "funded live trading / devnet broadcasts (landing_rate bench, canary transactions) \u2014 requires operator-funded keys + explicit approval",
-      "docker build + container smoke (no Docker daemon in the sandbox; native-equivalent app startup/health/shutdown WAS executed \u2014 see verified_final_pass)",
-      "GitHub Actions CI run (no CI runner; every CI gate has a recorded local-equivalent execution \u2014 see docs/CI-LOCAL-EQUIVALENCE.md mapping in the evidence package)",
+      "funded live trading / devnet broadcasts (landing_rate bench, canary transactions) — requires operator-funded keys + explicit approval",
+      "docker build + container smoke (no Docker daemon in the sandbox; native-equivalent app startup/health/shutdown WAS executed — see verified_final_pass)",
+      "GitHub Actions CI run (no CI runner; every CI gate has a recorded local-equivalent execution — see docs/CI-LOCAL-EQUIVALENCE.md mapping in the evidence package)",
       "Polymarket live-read validation against Polygon mainnet (module is mock-tested 66+5; operator procedure in docs/LIVE-VALIDATION.md)",
       "cargo cyclonedx / cargo spdx formatted SBOM (tools not installed; cargo tree + both Cargo.lock files + cargo audit/deny outputs are recorded as the dependency evidence)",
-      "external security audit / penetration test / formal verification (none performed \u2014 do not claim 'audited')",
-      "SNIPER-ENGINE PASS 2026-09-21: gated PostgreSQL / Redis integration suites, cargo audit / cargo deny (tools absent) and the staking validator e2e were NOT executed in the build sandbox; the pass added no migration and did not touch the staking program"
+      "external security audit / penetration test / formal verification (none performed — do not claim 'audited')",
+      "SNIPER-ENGINE PASS 2026-09-21: gated PostgreSQL / Redis integration suites, cargo audit / cargo deny (tools absent) and the staking validator e2e were NOT executed in the build sandbox; the pass added no migration and did not touch the staking program",
+      "BATCH-2 live validations NOT EXECUTED (declared): live Stripe/Paddle webhook+checkout, live Vault/KMS/HSM sign, production docker deploy, external audit, PostgreSQL SKIP LOCKED concurrency, full --workspace with PG 17 + Redis + validator e2e",
+      "BATCH-7 EXTERNAL-VALIDATION HARNESS READY NOT_RUN (2026-09-24): 24-file reproducible harness (8 ops contracts + 2 solana +2 staking +2 billing +2 custody +6 tests + script + runbook) — every check defaults to NOT_RUN/EXTERNAL_REQUIRED/BLOCKED without explicit live credentials/URLs/flags, never default PASS, never silently enables live, never persists secrets, fixtures are NON-LIVE, live billing/custody #[ignore] require LIVE_BILLING=1/LIVE_CUSTODY=1, deployment smoke requires DEPLOYMENT_BASE_URL, staking requires STAKING_E2E=1 + validator, Solana RPC/WS/Geyser read-only no trading, funded guard never default live-funded; verified via bash scripts/run-external-validation.sh all-safe (6/6 NOT_RUN in hermetic) and cargo test -p sniper-suite --lib 224/224 + 6 integration harnesses 30/30 (3+3 ignored live)"
     ]
   },
   "external_handover_blockers": [
@@ -164,18 +334,22 @@
     "so_sha256": "57a890fae273f2c569fc814c43f0645311b6983dd30782126a9844ee193b5564",
     "built_from": "audit-pass + hardening-fix source (mpl CPI discriminant 33); tree inventory evidence/source-inventory.json",
     "built_with": "cargo build-sbf, agave 2.1.21, platform-tools v1.43 (sbf rustc 1.79.0), host cargo 1.98.1",
-    "determinism": "rebuild after `touch src/lib.rs` with freshly installed platform-tools \u2192 identical SHA-256 (bit-for-bit on same toolchain/OS; cross-OS reproducibility NOT claimed)",
-    "program_id": "3vEEMMFmdA88n8ApgZ3b9L3BXEh75yCeMbHbmUjR9mfy \u2014 PRE-DEPLOYMENT PLACEHOLDER (no keypair exists for it). Final identity is an operator action: solana-keygen new \u2192 scripts/staking-identity.sh set-id <kp> \u2192 deploy. scripts/staking-identity.sh verify/deploy refuse mismatches and refuse deploying the placeholder to public clusters.",
-    "superseded_artifacts": "the freeze-era 5,440-byte .so and the pre-fix 9e113678\u2026 .so are superseded and MUST NOT be deployed"
+    "determinism": "rebuild after `touch src/lib.rs` with freshly installed platform-tools → identical SHA-256 (bit-for-bit on same toolchain/OS; cross-OS reproducibility NOT claimed)",
+    "program_id": "3vEEMMFmdA88n8ApgZ3b9L3BXEh75yCeMbHbmUjR9mfy — PRE-DEPLOYMENT PLACEHOLDER (no keypair exists for it). Final identity is an operator action: solana-keygen new → scripts/staking-identity.sh set-id <kp> → deploy. scripts/staking-identity.sh verify/deploy refuse mismatches and refuse deploying the placeholder to public clusters.",
+    "superseded_artifacts": "the freeze-era 5,440-byte .so and the pre-fix 9e113678… .so are superseded and MUST NOT be deployed"
   },
   "verification": {
     "last_full_suite": {
-      "command": "POSTGRES_URL=\u2026 cargo test --workspace -j 2 -- --test-threads=1",
+      "command": "POSTGRES_URL=… cargo test --workspace -j 2 -- --test-threads=1",
       "postgres": "17.11",
       "binaries": 51,
       "passed": 1183,
       "failed": 0,
       "ignored": 1
     }
-  }
+  },
+  "docs_files": 101,
+  "rust_files": 343,
+  "test_count": 1331,
+  "migrations": 22
 }

@@ -32,6 +32,9 @@ async-trait.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 redis.workspace = true
+url.workspace = true
+http.workspace = true
+solana-sdk.workspace = true
 
 [lib]
 name = "bot_core"

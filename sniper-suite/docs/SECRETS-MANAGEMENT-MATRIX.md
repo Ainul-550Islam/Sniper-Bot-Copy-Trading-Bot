@@ -1,0 +1,20 @@
+# Secrets Management Matrix — sniper-suite 0.1.0
+
+> No actual secret values. Storage/reference method, exposure risk, rotation, test evidence per `LICENSE` MIT (2026).
+
+| Secret / Reference | Storage / Reference Method | Exposure Risk | Rotation Mechanism | Test Evidence | Status |
+|---|---|---|---|---|---|
+| **Session token** | Created `POST /api/saas/sessions`, hashed via `hash_token` (SHA256) in `crates/core/src/session.rs`, stored in `sessions` table (Postgres) + `redis` if present; frontend stores in **tab memory only** (`apps/control-plane` lib, not localStorage) | XSS → memory theft; not logged | `POST /api/saas/users/me/logout` (revoke), DB `sessions` revocation, `store.rs` expiry | `saas_control_plane` 19 tests, `store.rs` revocation | PASS |
+| **API key** | Created `POST /api/saas/api_keys` — secret shown **once**, stored as hash (`hash_token`) in `api_keys` table; verification via `api_keys::hash` | Logged if `x-api-key` printed; SDK debugs redacted | `DELETE /api/saas/api_keys/:hash` + restart test | `api_keys.rs` 3 tests, `saas-sdk/client.rs` secret-free | PASS |
+| **Webhook secret** | `WEBHOOK_SECRET` env (never committed, `.gitignore` .env), referenced via `billing_webhook.rs` HMAC verify | If env leaked in logs | Rotate env + restart; `provider_events.rs` secret stripping | `billing_webhook` 3 tests, `provider_events` 7 tests | PASS (hermetic), EXTERNAL_REQUIRED (live) |
+| **Database URL** | `DATABASE_URL` env, `crates/core/src/config.rs` `DatabaseConfig`, `.env.template` placeholder, not committed | URL contains password `@` → redacted in `health_report.rs`, `to_safe_json` | Rotate PG password + restart, `docker-compose.yml` `POSTGRES_PASSWORD` | `health_report` 4 tests, `verify-delivery` hygiene | PASS |
+| **Redis URL** | `REDIS_URL` env, `redis::Client::open` | Similar to DB | Rotate + restart | `redis_integration` | PASS |
+| **Billing provider (Stripe/Paddle)** | `core/billing/provider_config.rs` stores **indirect** `StripeRef`/`PaddleRef` (provider+key_id), never plaintext; `secrets` injected via `seed_secret_env` without clobber | If `provider_config.rs` allowed plaintext, leak | Rotate in Stripe dashboard → update env `STRIPE_API_KEY` → restart; no local fallback (`local_fallback_allowed=false`) | `provider_config.rs` 8 tests (`!dbg.contains("sk_live")`) | PASS (hermetic), EXTERNAL_REQUIRED (live) |
+| **Vault / KMS / HSM** | `core/custody/provider_config.rs` `VaultRef`/`KmsRef`/`HsmRef` (±cipher), `credentials.rs` indirect, `signer` built via `solana_kit::signer::build_signer_registry` | Remote signing bypass if fallback allowed | `custody/rotation.rs` Pending→Active→Draining→Revoked | `credentials` 7, `rotation` 7 | PASS (hermetic), EXTERNAL_REQUIRED |
+| **RPC URL** | `config.network.rpc_url` / `polymarket.ctf_rpc_url` env, `solana-kit/src/rpc.rs` | SSRF if arbitrary URL | Rotate env | `verify-delivery` not secrets | PARTIAL |
+| **Telegram bot token** | `secrets.telegram_bot_token` → env `TELEGRAM_BOT_TOKEN` via `seed_secret_env` | Token in env, not logs (redacted) | Rotate BotFather + env | `module-telegram` disabled if missing | PARTIAL |
+| **Signer (Solana keypair)** | `secrets.solana_keypair` or `SOLANA_KEYPAIR` env, loaded via `Wallet::load` in `main.rs::load_wallet`; ephemeral generated if missing (paper only) | Private key file `*keypair*.json` .gitignore'd, never in repo | `solana-keygen new` → update env → restart; `scripts/staking-identity.sh` guards | `credentials.rs` 7 tests, `verify-delivery` `*keypair*.json` hygiene | PASS |
+
+> **Global controls:** `.gitignore` (`/target`, `**/target`, `.env`, `*.keypair.json`, `*.pem`), `scripts/verify-buyer-package.sh` secret_scan (`BEGIN PRIVATE KEY` 0), `scripts/final-release-check.sh` secret scan, `is_secret_like` / `redacted` helpers in `crates/server/src/ops/*`, `saas-sdk` secret-free Debug.
+
+*Verification:* `grep -R "BEGIN PRIVATE KEY" crates docs | grep -v is_secret_like` 0, `bash scripts/verify-buyer-package.sh` PASS, `cargo test -p saas-sdk` secret-free.

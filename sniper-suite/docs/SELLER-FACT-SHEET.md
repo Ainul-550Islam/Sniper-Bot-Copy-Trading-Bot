@@ -20,7 +20,7 @@ Companion source-material file: `docs/SELLING-LISTING-SOURCE.md`.
 - 5 functional modules (sniper, copy trading, Polymarket, staking program,
   Telegram control) behind one Axum control plane (REST + WebSocket +
   embedded dashboard). Evidence: `crates/`, `docs/ARCHITECTURE.md`.
-- PostgreSQL = durable financial truth (11 forward-only migrations);
+- PostgreSQL = durable financial truth (21 forward-only migrations);
   Redis = non-authoritative coordination/cache; JSONL intent journal for
   crash recovery. Evidence: `crates/core/migrations/`,
   `docs/BACKUP-RESTORE.md`.

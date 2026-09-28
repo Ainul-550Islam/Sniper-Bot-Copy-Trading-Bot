@@ -119,7 +119,7 @@ function navGroupsOf(): Array<[string, NavItem[]]> {
 
 export function AppShell() {
   const [active, setActive] = useState<SectionId>("dashboard");
-  const navGroups = useMemo(navGroupsOf, []);
+  const navGroups = useMemo(() => navGroupsOf(), []);
   const state = sessionStore.getSnapshot();
   const [, forceRender] = useState(0);
   const [expired, setExpired] = useState(false);
@@ -521,7 +521,7 @@ function UsageSection() {
   const org = state.selectedOrganizationId;
   const [data, setData] = useState<Awaited<ReturnType<typeof exportsApi.get>> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const period = useMemo(currentPeriod, []);
+  const period = useMemo(() => currentPeriod(), []);
 
   useEffect(() => {
     if (!org) return;

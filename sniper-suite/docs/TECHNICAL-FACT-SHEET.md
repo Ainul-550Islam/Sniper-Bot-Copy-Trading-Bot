@@ -60,7 +60,7 @@ comparisons, no projections.
 
 | Fact | Value |
 |---|---|
-| Authoritative store | PostgreSQL ≥ 16 (verified 16.4); sqlx; 11 forward-only migrations 0001–0011 embedded in the binary |
+| Authoritative store | PostgreSQL ≥ 16 (verified 16.4); sqlx; 21 forward-only migrations 0001–0011 embedded in the binary |
 | Non-authoritative store | Redis 7 (verified 7.2.10): dedup L2, claims coordination, cache — may die without losing money-relevant truth |
 | Local journal | JSONL intent journal with rotation + corrupt-line tolerance |
 | Dedup | 3 levels: memory / Redis / Postgres, deterministic idempotency keys |
@@ -120,7 +120,7 @@ comparisons, no projections.
 
 | Fact | Value |
 |---|---|
-| Lockfiles | `Cargo.lock` (706 packages) + `programs/staking-suite/Cargo.lock` (580 packages), both committed |
+| Lockfiles | `Cargo.lock` (707 packages) + `programs/staking-suite/Cargo.lock` (580 packages), both committed |
 | cargo-audit | both lockfiles, 0 findings at freeze (cargo-audit 0.22.2) |
 | cargo-deny | advisories/bans/licenses/sources policy in `deny.toml`; license allow-list of 14 permissive licenses; unknown registries + all git deps denied; clean at freeze (cargo-deny 0.18.9) |
 | SBOM | generator not run (NOT EXECUTED); lockfiles are the authoritative record; command documented in `docs/RELEASE.md` / `docs/THIRD-PARTY.md` §7 |

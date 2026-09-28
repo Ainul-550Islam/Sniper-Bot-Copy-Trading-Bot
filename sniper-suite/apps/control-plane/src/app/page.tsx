@@ -127,7 +127,7 @@ function AuthLanding() {
           {busy ? "Working…" : mode === "login" ? "Sign in" : "Create account"}
         </button>
         <p className="muted small">
-          The session token is kept in this tab's memory only. Closing or
+          The session token is kept in this tab&apos;s memory only. Closing or
           reloading the page signs you out.
         </p>
       </form>

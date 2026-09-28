@@ -49,7 +49,7 @@ Machine-readable copy: `release-manifest.json` → `test_counts`.
   three-level restart-safe dedup, intent journal + startup reconciliation,
   hash-chained append-only audit trail, distributed execution ownership
   (claims/leases/epochs/fencing, tighten-only `GlobalRiskOracle`), PostgreSQL
-  as durable truth with 11 forward-only migrations, Redis strictly
+  as durable truth with 21 forward-only migrations, Redis strictly
   non-authoritative.
 - **Packaging:** Dockerfile (multi-stage, non-root, healthchecked) +
   compose stack, CI workflow (4 jobs), `deny.toml`, `release-check.sh`,

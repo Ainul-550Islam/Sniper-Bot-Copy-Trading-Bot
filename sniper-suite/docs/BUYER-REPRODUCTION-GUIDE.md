@@ -39,6 +39,13 @@ hashes: `sha256sum -c` against the package `checksums/SHA256SUMS` (files
 under `source-tree/`) or the provenance file list. Any mismatch → stop;
 the source is not the delivered source.
 
+> Shipped-package equivalents (added 2026-09-27, round-4 audit): the package built by
+> `scripts/build-release-package.sh` records the tree digest in `checksums/SOURCE-TREE.sha256`
+> (its method line is the command to run) with per-file hashes in `checksums/all-files.sha256`,
+> and the release metadata in `manifests/release-manifest.json`; the source mirror is `source/`.
+> `BUYER-FINAL-RELEASE-MANIFEST.json` / `provenance/SOURCE-PROVENANCE.json` are names from the
+> vendor packaging pipeline, not files inside this repository snapshot.
+
 ## 2. Install the pinned toolchain
 
 ```bash
@@ -102,7 +109,7 @@ cargo build --workspace --all-targets
 ```
 
 Expected: both exit 0. First build downloads the pinned dependency graph
-(706 packages) and takes 15–40 minutes on modest hardware. At most 6
+(707 packages) and takes 15–40 minutes on modest hardware. At most 6
 deprecation `allow` attributes are present (documented in
 `docs/HANDOVER.md`); no errors, no other warnings with `-D warnings` in
 step 5's clippy.
@@ -155,7 +162,7 @@ cold). A different OS/toolchain build may differ — then rely on the e2e
 below, not the hash.
 
 ```bash
-STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1
+cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1
 ```
 
 Expected: **3 passed; 0 failed** (~160 s). Starts a real
