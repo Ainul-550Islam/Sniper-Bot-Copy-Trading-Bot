@@ -1,4 +1,4 @@
-//! Backup/restore integration placeholder (Batch 5).
+//! Backup/restore integration tests (Batch 5; real assertions, not placeholders).
 
 #[test]
 fn export_manifest_exists() {

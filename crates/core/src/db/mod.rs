@@ -22,10 +22,18 @@
 pub mod accounting;
 pub mod claims;
 pub mod copy;
+pub mod deployment_org;
 pub mod execution;
 pub mod ha;
+pub mod mod_tenant_exports;
 pub mod polymarket;
 pub mod repo;
+pub mod tenant_idempotency;
+pub mod tenant_lock;
+pub mod tenant_pagination;
+pub mod tenant_query;
+pub mod tenant_row;
+pub mod tenant_tx;
 
 use std::time::Duration;
 

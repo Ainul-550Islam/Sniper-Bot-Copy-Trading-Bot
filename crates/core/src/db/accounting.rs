@@ -49,18 +49,24 @@ impl AccountingRepo {
     /// Guarded insert of one event and its postings (one transaction).
     /// `Ok(true)` = new, `Ok(false)` = the event id was already journaled.
     pub async fn record_event(&self, stored: &StoredEvent, entry: &Entry) -> RepoResult<bool> {
+        // 0033: ledger_events PK is the tenant composite
+        // (organization_id, event_id); ledger_postings carries the org to
+        // satisfy the rebuilt composite FK while keeping its GLOBAL
+        // chain-signature UNIQUE (event_id, seq).
         let e = &stored.event;
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
         let mut tx = self.db.pool().begin().await.map_err(TimedDbError::Error)?;
         let res = sqlx::query(
             r#"INSERT INTO ledger_events
-                   (event_id, kind, module, venue, wallet, strategy, asset, quote_asset,
-                    side, quantity, price, quote_amount, fee, mode, reference_id,
-                    correlation_id, position_id, trade_id, counterparty_wallet, detail,
-                    ts, recorded_at, replica_id)
+                   (organization_id, event_id, kind, module, venue, wallet, strategy,
+                    asset, quote_asset, side, quantity, price, quote_amount, fee, mode,
+                    reference_id, correlation_id, position_id, trade_id,
+                    counterparty_wallet, detail, ts, recorded_at, replica_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                       $16, $17, $18, $19, $20, $21, $22, $23)
-               ON CONFLICT (event_id) DO NOTHING"#,
+                       $16, $17, $18, $19, $20, $21, $22, $23, $24)
+               ON CONFLICT (organization_id, event_id) DO NOTHING"#,
         )
+        .bind(org)
         .bind(&stored.event_id)
         .bind(e.kind.as_str())
         .bind(e.module.as_str())
@@ -94,10 +100,12 @@ impl AccountingRepo {
         for p in &entry.postings {
             sqlx::query(
                 r#"INSERT INTO ledger_postings
-                       (event_id, seq, account, wallet, asset, side, amount, quantity, base_asset)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                       (organization_id, event_id, seq, account, wallet, asset, side,
+                        amount, quantity, base_asset)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    ON CONFLICT (event_id, seq) DO NOTHING"#,
             )
+            .bind(org)
             .bind(&p.event_id)
             .bind(p.seq as i32)
             .bind(p.account.as_str())
@@ -127,8 +135,10 @@ impl AccountingRepo {
                               correlation_id, position_id, trade_id, counterparty_wallet,
                               detail, ts, recorded_at, replica_id
                        FROM ledger_events
+                       WHERE organization_id = $1
                        ORDER BY ts ASC, recorded_at ASC, event_id ASC"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;
@@ -143,8 +153,11 @@ impl AccountingRepo {
                 "ledger_postings_load",
                 sqlx::query(
                     r#"SELECT event_id, seq, account, wallet, asset, side, amount, quantity, base_asset
-                       FROM ledger_postings WHERE event_id = $1 ORDER BY seq ASC"#,
+                       FROM ledger_postings
+                        WHERE organization_id = $1 AND event_id = $2
+                        ORDER BY seq ASC"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(event_id)
                 .fetch_all(self.db.pool()),
             )
@@ -164,9 +177,11 @@ impl AccountingRepo {
                               correlation_id, position_id, trade_id, counterparty_wallet,
                               detail, ts, recorded_at, replica_id
                        FROM ledger_events
+                       WHERE organization_id = $1
                        ORDER BY recorded_at DESC, event_id DESC
-                       LIMIT $1"#,
+                       LIMIT $2"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),
             )
@@ -183,13 +198,13 @@ impl AccountingRepo {
                 "global_position_upsert",
                 sqlx::query(
                     r#"INSERT INTO global_positions
-                           (position_key, module, venue, wallet, strategy, asset, quote_asset, mode,
-                            qty, cost_basis, realized, fees, bought_quote, sold_quote, bought_qty,
-                            sold_qty, last_price, event_count, last_event_id, position_ids,
-                            opened_at, updated_at)
+                           (organization_id, position_key, module, venue, wallet, strategy,
+                            asset, quote_asset, mode, qty, cost_basis, realized, fees,
+                            bought_quote, sold_quote, bought_qty, sold_qty, last_price,
+                            event_count, last_event_id, position_ids, opened_at, updated_at)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                               $16, $17, $18, $19, $20, $21, $22)
-                       ON CONFLICT (position_key) DO UPDATE SET
+                               $16, $17, $18, $19, $20, $21, $22, $23)
+                       ON CONFLICT (organization_id, position_key) DO UPDATE SET
                            qty = EXCLUDED.qty,
                            cost_basis = EXCLUDED.cost_basis,
                            realized = EXCLUDED.realized,
@@ -204,6 +219,7 @@ impl AccountingRepo {
                            position_ids = EXCLUDED.position_ids,
                            updated_at = EXCLUDED.updated_at"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(p.key.as_string())
                 .bind(p.key.module.as_str())
                 .bind(p.key.venue.as_str())
@@ -243,8 +259,11 @@ impl AccountingRepo {
                               qty, cost_basis, realized, fees, bought_quote, sold_quote, bought_qty,
                               sold_qty, last_price, event_count, last_event_id, position_ids,
                               opened_at, updated_at
-                       FROM global_positions ORDER BY position_key"#,
+                       FROM global_positions
+                        WHERE organization_id = $1
+                        ORDER BY position_key"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;
@@ -261,11 +280,13 @@ impl AccountingRepo {
                 "global_risk_decision_record",
                 sqlx::query(
                     r#"INSERT INTO global_risk_decisions
-                           (decision_id, ts, module, venue, wallet, strategy, asset, quote_asset,
-                            requested_quote, mode, verdict, reason, detail, snapshot, replica_id)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                       ON CONFLICT (decision_id) DO NOTHING"#,
+                           (organization_id, decision_id, ts, module, venue, wallet, strategy,
+                            asset, quote_asset, requested_quote, mode, verdict, reason,
+                            detail, snapshot, replica_id)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                       ON CONFLICT (organization_id, decision_id) DO NOTHING"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&d.decision_id)
                 .bind(d.ts)
                 .bind(d.request.module.as_str())
@@ -299,8 +320,11 @@ impl AccountingRepo {
                 sqlx::query(
                     r#"SELECT decision_id, ts, module, venue, wallet, strategy, asset, quote_asset,
                               requested_quote, mode, verdict, reason, detail, snapshot, replica_id
-                       FROM global_risk_decisions ORDER BY ts DESC LIMIT $1"#,
+                       FROM global_risk_decisions
+                        WHERE organization_id = $1
+                        ORDER BY ts DESC LIMIT $2"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),
             )
@@ -316,14 +340,16 @@ impl AccountingRepo {
             .timed(
                 "kill_switch_upsert",
                 sqlx::query(
-                    r#"INSERT INTO kill_switches (scope, engaged, reason, actor, updated_at)
-                       VALUES ($1, $2, $3, $4, $5)
-                       ON CONFLICT (scope) DO UPDATE SET
+                    r#"INSERT INTO kill_switches
+                           (organization_id, scope, engaged, reason, actor, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, $6)
+                       ON CONFLICT (organization_id, scope) DO UPDATE SET
                            engaged = EXCLUDED.engaged,
                            reason = EXCLUDED.reason,
                            actor = EXCLUDED.actor,
                            updated_at = EXCLUDED.updated_at"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(s.scope.as_string())
                 .bind(s.engaged)
                 .bind(&s.reason)
@@ -341,9 +367,11 @@ impl AccountingRepo {
             .timed(
                 "kill_switch_event_append",
                 sqlx::query(
-                    r#"INSERT INTO kill_switch_events (scope, action, reason, actor, replica_id, ts)
-                       VALUES ($1, $2, $3, $4, $5, $6)"#,
+                    r#"INSERT INTO kill_switch_events
+                           (organization_id, scope, action, reason, actor, replica_id, ts)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(e.scope.as_string())
                 .bind(&e.action)
                 .bind(&e.reason)
@@ -363,8 +391,10 @@ impl AccountingRepo {
             .timed(
                 "kill_switches_load",
                 sqlx::query(
-                    "SELECT scope, engaged, reason, actor, updated_at FROM kill_switches ORDER BY scope",
+                    "SELECT scope, engaged, reason, actor, updated_at FROM kill_switches \
+                     WHERE organization_id = $1 ORDER BY scope",
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;
@@ -393,10 +423,12 @@ impl AccountingRepo {
                 "accounting_finding_append",
                 sqlx::query(
                     r#"INSERT INTO accounting_recon_findings
-                           (finding_id, kind, module, venue, asset, position_id, event_id, trade_id,
-                            order_id, expected, actual, detail, action, replica_id, ts)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
+                           (organization_id, finding_id, kind, module, venue, asset,
+                            position_id, event_id, trade_id, order_id, expected, actual,
+                            detail, action, replica_id, ts)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&f.finding_id)
                 .bind(f.kind.as_str())
                 .bind(f.module.map(|m| m.as_str()))
@@ -427,8 +459,11 @@ impl AccountingRepo {
                 sqlx::query(
                     r#"SELECT finding_id, kind, module, venue, asset, position_id, event_id, trade_id,
                               order_id, expected, actual, detail, action, replica_id, ts
-                       FROM accounting_recon_findings ORDER BY ts DESC, id DESC LIMIT $1"#,
+                       FROM accounting_recon_findings
+                        WHERE organization_id = $1
+                        ORDER BY ts DESC, id DESC LIMIT $2"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),
             )

@@ -620,17 +620,20 @@ async fn fak_matched_books_only_the_venue_reported_quantity() {
     assert_eq!(store.fills().await.len(), 1);
 
     // When the venue CAN answer right after the POST, the quantity is
-    // booked from that answer in the same pipeline call. The other outcome:
-    // its venue id is deterministic, so script the answer first.
+    // booked from that answer in the same pipeline call. With the
+    // corrected V2 `timestamp` semantics (§D: creation-time
+    // milliseconds are the uniqueness field that replaced the nonce)
+    // every fresh signing derives a fresh order id, so the answer is
+    // scripted as the venue's catch-all instead of a precomputed hash.
     let sig = bot
         .build_signal(decision_for(NO, "No", 0.55, 20.0), "value", &market(), &cfg)
         .await;
-    let (bundle, _) = sign_for(&sig, 20.0, &cfg);
-    let no_id = bundle.derived_order_id().unwrap();
-    venue.set_order(&no_id, "matched", 12.0, 20.0);
+    venue.set_default_order(Some(venue_order("", "matched", 12.0, 20.0)));
     let out = bot.process_signal(&sig, &market(), &quotes(), &cfg).await;
+    venue.set_default_order(None);
     assert_eq!(out.stage, PolyStage::Filled, "{out:?}");
-    assert_eq!(out.venue_order_id.as_deref(), Some(no_id.as_str()));
+    let no_id = out.venue_order_id.clone().expect("venue order id assigned");
+    assert!(no_id.starts_with("0x") && no_id.len() == 66, "{no_id}");
     let t = bot
         .tracked_orders()
         .await

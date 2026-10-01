@@ -86,8 +86,22 @@ impl PostgresClaimStore {
                 "claim_event",
                 sqlx::query(
                     r#"INSERT INTO execution_claim_events
-                           (execution_id, event, owner_id, claim_epoch, previous_owner, detail)
-                       VALUES ($1, $2, $3, $4, $5, $6)"#,
+                           (organization_id, execution_id, event, owner_id, claim_epoch,
+                            previous_owner, detail)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                )
+                .bind(
+                    match crate::db::deployment_org::deployment_org_uuid(&self.db).await {
+                        Ok(org) => org,
+                        // Best-effort audit trail: if the deployment org
+                        // cannot be resolved the claim outcome is unaffected
+                        // (same discipline as the original error swallow).
+                        Err(e) => {
+                            warn!(execution_id, event, error = %e,
+                              "claim event attribution skipped (org unresolved)");
+                            return;
+                        }
+                    },
                 )
                 .bind(execution_id)
                 .bind(event)
@@ -108,9 +122,17 @@ impl PostgresClaimStore {
             .db
             .timed(
                 "claim_get",
-                sqlx::query("SELECT * FROM execution_claims WHERE execution_id = $1")
-                    .bind(execution_id)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM execution_claims \
+                     WHERE organization_id = $1 AND execution_id = $2",
+                )
+                .bind(
+                    crate::db::deployment_org::deployment_org_uuid(&self.db)
+                        .await
+                        .map_err(BotError::from)?,
+                )
+                .bind(execution_id)
+                .fetch_optional(self.db.pool()),
             )
             .await
             .map_err(BotError::from)?;
@@ -129,18 +151,25 @@ impl ClaimStore for PostgresClaimStore {
         // so a takeover (prev='claimed' with a lapsed lease) is distinguishable
         // from a plain re-acquisition (prev='released'/'handed_off') for
         // metrics — without a second round trip or a read-modify-write race.
+        // 0028: the claim arbiter is the tenant composite
+        // (organization_id, execution_id). The race SHAPE is preserved
+        // exactly — prev CTE, single-statement upsert, the same WHERE
+        // takeover conditions, the same retry loop — only the arbiter
+        // and the org bind ($1) changed. The legacy store claims FOR
+        // THE DEPLOYMENT ORGANIZATION explicitly.
         const SQL: &str = r#"
 WITH prev AS (
-    SELECT status AS prev_status FROM execution_claims WHERE execution_id = $1
+    SELECT status AS prev_status FROM execution_claims
+     WHERE organization_id = $1 AND execution_id = $2
 ), ins AS (
     INSERT INTO execution_claims
-        (execution_id, kind, module, strategy, symbol, owner_id, claim_epoch,
-         status, claimed_at, lease_until, last_heartbeat, takeover_count,
-         previous_owner, updated_at)
+        (organization_id, execution_id, kind, module, strategy, symbol, owner_id,
+         claim_epoch, status, claimed_at, lease_until, last_heartbeat,
+         takeover_count, previous_owner, updated_at)
     VALUES
-        ($1, $2, $3, $4, $5, $6, 1, 'claimed', now(),
-         now() + $7::bigint * interval '1 millisecond', now(), 0, NULL, now())
-    ON CONFLICT (execution_id) DO UPDATE SET
+        ($1, $2, $3, $4, $5, $6, $7, 1, 'claimed', now(),
+         now() + $8::bigint * interval '1 millisecond', now(), 0, NULL, now())
+    ON CONFLICT (organization_id, execution_id) DO UPDATE SET
         kind           = EXCLUDED.kind,
         module         = EXCLUDED.module,
         strategy       = EXCLUDED.strategy,
@@ -149,7 +178,7 @@ WITH prev AS (
         claim_epoch    = execution_claims.claim_epoch + 1,
         status         = 'claimed',
         claimed_at     = now(),
-        lease_until    = now() + $7::bigint * interval '1 millisecond',
+        lease_until    = now() + $8::bigint * interval '1 millisecond',
         last_heartbeat = now(),
         takeover_count = execution_claims.takeover_count
                          + CASE WHEN execution_claims.status = 'claimed' THEN 1 ELSE 0 END,
@@ -160,7 +189,7 @@ WITH prev AS (
            AND execution_claims.lease_until <= now())
        OR (execution_claims.status = 'handed_off'
            AND execution_claims.updated_at
-               + $8::bigint * interval '1 millisecond' <= now())
+               + $9::bigint * interval '1 millisecond' <= now())
     RETURNING execution_id, kind, module, strategy, symbol, owner_id,
               claim_epoch, status, claimed_at, lease_until, takeover_count,
               previous_owner
@@ -168,12 +197,16 @@ WITH prev AS (
 SELECT ins.*, COALESCE(prev.prev_status, '') AS prev_status
 FROM ins LEFT JOIN prev ON TRUE
 "#;
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db)
+            .await
+            .map_err(BotError::from)?;
         for attempt in 0..2 {
             let row = self
                 .db
                 .timed(
                     "claim_acquire",
                     sqlx::query(SQL)
+                        .bind(org)
                         .bind(&req.execution_id)
                         .bind(&req.kind)
                         .bind(&req.module)
@@ -260,7 +293,8 @@ SET lease_until    = now() + GREATEST(
     ) * interval '1 second',
     last_heartbeat = now(),
     updated_at     = now()
-WHERE execution_id = $1 AND owner_id = $2 AND claim_epoch = $3
+WHERE organization_id = $1 AND execution_id = $2
+  AND owner_id = $3 AND claim_epoch = $4
   AND status = 'claimed' AND lease_until > now()
 "#;
         let res = self
@@ -268,6 +302,11 @@ WHERE execution_id = $1 AND owner_id = $2 AND claim_epoch = $3
             .timed(
                 "claim_renew",
                 sqlx::query(SQL)
+                    .bind(
+                        crate::db::deployment_org::deployment_org_uuid(&self.db)
+                            .await
+                            .map_err(BotError::from)?,
+                    )
                     .bind(execution_id)
                     .bind(owner_id)
                     .bind(epoch)
@@ -303,7 +342,8 @@ WHERE execution_id = $1 AND owner_id = $2 AND claim_epoch = $3
     async fn verify(&self, execution_id: &str, owner_id: &str, epoch: i64) -> BotResult<bool> {
         const SQL: &str = r#"
 SELECT 1 FROM execution_claims
-WHERE execution_id = $1 AND owner_id = $2 AND claim_epoch = $3
+WHERE organization_id = $1 AND execution_id = $2
+  AND owner_id = $3 AND claim_epoch = $4
   AND status = 'claimed' AND lease_until > now()
 "#;
         let row = self
@@ -311,6 +351,11 @@ WHERE execution_id = $1 AND owner_id = $2 AND claim_epoch = $3
             .timed(
                 "claim_verify",
                 sqlx::query(SQL)
+                    .bind(
+                        crate::db::deployment_org::deployment_org_uuid(&self.db)
+                            .await
+                            .map_err(BotError::from)?,
+                    )
                     .bind(execution_id)
                     .bind(owner_id)
                     .bind(epoch)
@@ -348,8 +393,9 @@ WHERE execution_id = $1 AND owner_id = $2 AND claim_epoch = $3
         debug_assert!(mode != ClaimStatus::Claimed);
         const SQL: &str = r#"
 UPDATE execution_claims
-SET status = $4, last_heartbeat = now(), updated_at = now()
-WHERE execution_id = $1 AND owner_id = $2 AND claim_epoch = $3
+SET status = $5, last_heartbeat = now(), updated_at = now()
+WHERE organization_id = $1 AND execution_id = $2
+  AND owner_id = $3 AND claim_epoch = $4
   AND status = 'claimed'
 "#;
         let res = self
@@ -357,6 +403,11 @@ WHERE execution_id = $1 AND owner_id = $2 AND claim_epoch = $3
             .timed(
                 "claim_release",
                 sqlx::query(SQL)
+                    .bind(
+                        crate::db::deployment_org::deployment_org_uuid(&self.db)
+                            .await
+                            .map_err(BotError::from)?,
+                    )
                     .bind(execution_id)
                     .bind(owner_id)
                     .bind(epoch)
@@ -401,7 +452,13 @@ impl PostgresClaimStore {
             .timed(
                 "claim_events",
                 sqlx::query(
-                    "SELECT * FROM execution_claim_events WHERE execution_id = $1 ORDER BY id",
+                    "SELECT * FROM execution_claim_events \
+                     WHERE organization_id = $1 AND execution_id = $2 ORDER BY id",
+                )
+                .bind(
+                    crate::db::deployment_org::deployment_org_uuid(&self.db)
+                        .await
+                        .map_err(BotError::from)?,
                 )
                 .bind(execution_id)
                 .fetch_all(self.db.pool()),

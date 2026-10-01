@@ -35,8 +35,13 @@ is the buyer's judgment; that they exist is verifiable.
    than a sprawl of services.
 8. **Strict configuration contract** — `deny_unknown_fields`: a typo in
    `config.toml` fails startup instead of silently changing behavior;
-   unimplemented signing providers (`vault`/`kms`/`hsm`) fail startup rather
-   than falling back (`crates/core/src/config.rs`).
+   unimplemented signing providers (`vault`/`kms`/`hsm` in `[signing]
+   provider`) fail startup rather than falling back
+   (`crates/core/src/config.rs`). The multi-tenant custody boundary
+   separately ships real Vault-transit and AWS-KMS adapters — hand-rolled
+   SigV4 verified against the AWS-documented test vector, no SDK
+   dependency, unit-tested, fail-closed, not live-proven
+   (`crates/server/src/custody/{vault,kms}/`, `docs/CUSTODY-STATUS-2026.md`).
 
 ## Solana-specific engineering
 

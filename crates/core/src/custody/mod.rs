@@ -12,11 +12,14 @@ pub mod provider_config;
 pub mod resolve;
 pub mod rotation;
 
+pub use health::{CustodyHealthReport, HealthState, ProviderHealth};
 pub use model::{
     CustodyProfile, CustodyProfileId, CustodyStatus, ProviderType, SignerId, SignerRecord,
 };
 pub use policy::{check as check_custody, CustodyDenyReason, CustodyRequest, CustodyVerdict};
 pub use provider::{
     resolve_active_signer, CustodyProvider, CustodyProviderError, CustodyProviderRegistry,
-    HsmCustodyProvider, KmsCustodyProvider, LocalCustodyProvider, VaultCustodyProvider,
+    CustodySigner, HsmCustodyProvider, KmsCustodyProvider, LocalCustodyProvider, ResolvedSigner,
+    VaultCustodyProvider,
 };
+pub use resolve::{check_resolve, resolve_signer_handle, ResolveDenyReason, ResolveRequest};

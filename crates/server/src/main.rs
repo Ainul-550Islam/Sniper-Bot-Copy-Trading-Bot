@@ -22,12 +22,20 @@ mod api;
 pub mod backup;
 mod dashboard;
 mod ha;
+pub mod module_runtime;
 mod obs;
 pub mod ops;
 mod persist;
 pub mod provisioning;
 mod recon;
+pub mod runtime_registry;
 pub mod saas;
+pub mod tenant;
+pub mod tenant_background;
+pub mod tenant_config;
+pub mod tenant_observability;
+pub mod tenant_streams;
+pub mod trading_data_plane;
 // TASK 7B — response-header hardening and the authenticated, tenant-scoped
 // event stream. The two files live under src/security/; this inline parent
 // module keeps the mandated file tree (no extra security/mod.rs).
@@ -55,10 +63,7 @@ pub mod billing {
     pub mod provider_registry;
     pub mod stripe_adapter;
 }
-pub mod custody {
-    pub mod live_provider_contract;
-    pub mod live_provider_fixture;
-}
+pub mod custody;
 mod ws;
 
 use std::sync::Arc;
@@ -985,6 +990,16 @@ fn serve_api(
         );
     }
 
+    // PROMPT 3/10 — the tenant trading data plane exists exactly when
+    // the database is attached (routes answer 503 otherwise).
+    let trading = db.as_ref().map(|d| {
+        Arc::new(trading_data_plane::TenantTradingDataPlane::new(Arc::clone(
+            d,
+        )))
+    });
+    // §H — the live tenant module registry backing the customer bots
+    // surface. Starts empty; runtime module launches register into it.
+    let module_registry = Arc::new(module_runtime::module_registry::TenantModuleRegistry::new());
     let api_state = api::ApiState {
         shared: state.clone(),
         api_key: api_key.clone(),
@@ -997,6 +1012,8 @@ fn serve_api(
         health: Arc::clone(health),
         metrics_enabled: cfg.observability.metrics_enabled,
         saas: Arc::clone(&saas),
+        module_registry,
+        trading,
     };
     let app = with_cors(api::router(api_state), &cfg.api.cors_origins);
 

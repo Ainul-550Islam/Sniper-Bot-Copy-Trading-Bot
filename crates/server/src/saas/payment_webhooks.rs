@@ -385,7 +385,8 @@ fn memory_mark(provider: &BillingProviderKind, id: &str) {
 // Minimal md5 for payload hash (stable, not security-sensitive)
 mod md5 {
     pub fn compute(s: String) -> [u8; 16] {
-        // tiny placeholder using sha256 truncated for test determinism
+        // test-only deterministic signature substitute (real providers sign;
+        // tests just need a stable value to prove idempotent application)
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(s.as_bytes());

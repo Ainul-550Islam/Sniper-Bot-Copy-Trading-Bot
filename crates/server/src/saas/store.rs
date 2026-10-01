@@ -18,6 +18,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
+use bot_core::billing::payment::{PaymentId, PaymentTransaction};
 use bot_core::billing::{
     default_catalogue, entitlements_from_plan, Entitlement, EntitlementSet, Plan, PlanCode, PlanId,
     Subscription, UsageEvent, UsageMetric,
@@ -31,7 +32,7 @@ use bot_core::tenant::{Organization, OrganizationId, User, UserId};
 
 use super::api_keys::SaasApiKey;
 use super::postgres::{
-    PostgresSaasRepo, API_KEY, ENTITLEMENT, JOB, MEMBERSHIP, ORGANIZATION, PLAN, SESSION,
+    PostgresSaasRepo, API_KEY, ENTITLEMENT, JOB, MEMBERSHIP, ORGANIZATION, PAYMENT, PLAN, SESSION,
     SUBSCRIPTION, USAGE, USER,
 };
 
@@ -53,6 +54,8 @@ struct Inner {
     usage: Vec<UsageEvent>,
     usage_seen: std::collections::HashSet<(OrganizationId, String)>,
     jobs: HashMap<String, ProvisioningJob>,
+    payments: HashMap<PaymentId, PaymentTransaction>,
+    payments_by_idem: HashMap<(OrganizationId, String), PaymentId>,
 }
 
 /// The control-plane store.
@@ -864,6 +867,111 @@ impl SaasStore {
             })
             .map(|e| e.quantity)
             .sum()
+    }
+
+    // ---------------------------------------------------- payments --
+
+    /// Record a NEW payment transaction. `false` = an transaction with
+    /// the same `(organization, idempotency_key)` identity was already
+    /// recorded (idempotent re-delivery of a provider event).
+    pub async fn record_payment(&self, payment: &PaymentTransaction) -> BotResult<bool> {
+        if let Some(repo) = &self.repo {
+            let lookup = format!("{}:{}", payment.organization_id, payment.idempotency_key);
+            if !repo
+                .insert(
+                    PAYMENT,
+                    &payment.id.to_string(),
+                    Some(payment.organization_id),
+                    None,
+                    Some(&lookup),
+                    payment,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+        } else if self
+            .inner
+            .read()
+            .await
+            .payments_by_idem
+            .contains_key(&(payment.organization_id, payment.idempotency_key.clone()))
+        {
+            return Ok(false);
+        }
+        let mut inner = self.inner.write().await;
+        inner.payments_by_idem.insert(
+            (payment.organization_id, payment.idempotency_key.clone()),
+            payment.id,
+        );
+        inner.payments.insert(payment.id, payment.clone());
+        Ok(true)
+    }
+
+    /// Persist a payment transaction whose state changed (status
+    /// transitions, provider ids, failure detail). Upsert semantics keep
+    /// the memory and durable views in lockstep.
+    pub async fn update_payment(&self, payment: &PaymentTransaction) -> BotResult<()> {
+        if let Some(repo) = &self.repo {
+            let lookup = format!("{}:{}", payment.organization_id, payment.idempotency_key);
+            repo.upsert(
+                PAYMENT,
+                &payment.id.to_string(),
+                Some(payment.organization_id),
+                None,
+                Some(&lookup),
+                payment,
+            )
+            .await?;
+        }
+        let mut inner = self.inner.write().await;
+        inner.payments_by_idem.insert(
+            (payment.organization_id, payment.idempotency_key.clone()),
+            payment.id,
+        );
+        inner.payments.insert(payment.id, payment.clone());
+        Ok(())
+    }
+
+    /// One payment by id, ownership-checked: a foreign organization id
+    /// can never read another tenant's transaction.
+    pub async fn payment_of(
+        &self,
+        organization_id: OrganizationId,
+        id: PaymentId,
+    ) -> Option<PaymentTransaction> {
+        if let Some(repo) = &self.repo {
+            let found: Option<PaymentTransaction> =
+                repo.by_id(PAYMENT, &id.to_string()).await.ok().flatten();
+            return found.filter(|p| p.organization_id == organization_id);
+        }
+        self.inner
+            .read()
+            .await
+            .payments
+            .get(&id)
+            .filter(|p| p.organization_id == organization_id)
+            .cloned()
+    }
+
+    /// All payments for one tenant, oldest first.
+    pub async fn payments_of(&self, organization_id: OrganizationId) -> Vec<PaymentTransaction> {
+        let mut out: Vec<PaymentTransaction> = if let Some(repo) = &self.repo {
+            repo.by_organization(PAYMENT, organization_id)
+                .await
+                .unwrap_or_default()
+        } else {
+            self.inner
+                .read()
+                .await
+                .payments
+                .values()
+                .filter(|p| p.organization_id == organization_id)
+                .cloned()
+                .collect()
+        };
+        out.sort_by_key(|p| p.created_at);
+        out
     }
 
     // ----------------------------------------------------- provisioning --

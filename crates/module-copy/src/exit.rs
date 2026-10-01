@@ -57,6 +57,11 @@ pub struct ExitSweeper {
     /// Distributed execution ownership (Prompt 3 §F); exits claim
     /// `exit:{position.id}:{rule}` so exactly one replica sells.
     ownership: Option<Arc<bot_core::ownership::OwnershipRegistry>>,
+    /// Tenant context (PROMPT 4/10 §C): when present, every exit this
+    /// sweeper sells is stamped with the tenant identity and the
+    /// executor carries the tenant broadcast guard. `None` = operator
+    /// mode, unchanged.
+    tenant: Option<solana_kit::tenant_signing_context::TenantSigningContext>,
 }
 
 /// One journaled broadcast: the sink plus the pre-built intent record.
@@ -95,7 +100,22 @@ impl ExitSweeper {
             jupiter: Jupiter::new(),
             intents,
             ownership,
+            tenant: None,
         }
+    }
+
+    /// Bind the sweeper to ONE tenant (PROMPT 4/10 §C): attach the final
+    /// tenant broadcast guard to the sweeper's own executor and remember
+    /// the identity for stamping. The guard's wallet must be this
+    /// sweeper's wallet; on mismatch the sweeper is unusable (fail
+    /// closed — the caller must not run it unguarded).
+    pub fn with_tenant_context(
+        mut self,
+        guard: Arc<solana_kit::tenant_broadcast_guard::TenantBroadcastGuard>,
+    ) -> BotResult<Self> {
+        self.executor = self.executor.with_tenant_guard(Arc::clone(&guard))?;
+        self.tenant = Some(guard.context().clone());
+        Ok(self)
     }
 
     /// Run the sweeper until aborted.
@@ -200,6 +220,7 @@ impl ExitSweeper {
                 &self.rpc,
                 &self.wallet,
                 &mut self.executor,
+                self.tenant.as_ref(),
                 &self.layouts,
                 &self.risk,
                 &position,
@@ -252,11 +273,65 @@ pub async fn mark_price_sol(rpc: &Rpc, jupiter: &Jupiter, mint_str: &str) -> Bot
 /// (whale sold). Routes through the bonding curve while the token is on it,
 /// otherwise through Jupiter.
 #[allow(clippy::too_many_arguments)]
+/// Stamp tenant metadata onto a copy request (shared by the exit paths).
+/// Never overwrites an explicitly attached meta — the guard judges
+/// mismatches, a rewrite would mask them.
+fn stamp_copy_request(
+    tenant: Option<&solana_kit::tenant_signing_context::TenantSigningContext>,
+    req: solana_kit::tx::TxRequest,
+) -> solana_kit::tx::TxRequest {
+    if req.tenant.is_some() {
+        return req;
+    }
+    match tenant {
+        Some(ctx) => {
+            let meta = solana_kit::tenant_transaction::TenantTransactionMeta::from_context(
+                ctx.execution_context(),
+                &req.module,
+                req.intent_id.as_deref(),
+            );
+            req.tenant(meta)
+        }
+        None => req,
+    }
+}
+
+/// Stamp tenant metadata onto a prebuilt copy transaction.
+fn stamp_copy_built(
+    tenant: Option<&solana_kit::tenant_signing_context::TenantSigningContext>,
+    built: solana_kit::tx::BuiltTx,
+) -> solana_kit::tx::BuiltTx {
+    if built.tenant.is_some() {
+        return built;
+    }
+    match tenant {
+        Some(ctx) => {
+            let meta = solana_kit::tenant_transaction::TenantTransactionMeta::from_context(
+                ctx.execution_context(),
+                &built.module,
+                Some(built.intent_id.as_str()),
+            );
+            built.with_tenant(meta)
+        }
+        None => built,
+    }
+}
+
+/// Sell `fraction` of one mirrored position through the best available
+/// route (curve when incomplete, Jupiter otherwise). The exit is
+/// journaled, fenced (ownership permit re-checked immediately before
+/// the money-moving branch) and — when a tenant signing context is
+/// supplied — stamped with the tenant metadata so the tenant broadcast
+/// guard verifies the exit at the executor.
+#[allow(clippy::too_many_arguments)]
 pub async fn sell_position(
     state: &Shared,
     rpc: &Rpc,
     wallet: &Arc<Wallet>,
     executor: &mut Executor,
+    // Tenant signing context for this bot (PROMPT 4/10 §C). `None` =
+    // operator mode: the request is not stamped and runs unguarded.
+    tenant: Option<&solana_kit::tenant_signing_context::TenantSigningContext>,
     layouts: &Arc<RwLock<LayoutStore>>,
     risk: &RiskEngine,
     position: &Position,
@@ -307,6 +382,7 @@ pub async fn sell_position(
     let (quote_sol, signature, venue, status) = if !ctx.curve.complete {
         sell_on_curve(
             executor,
+            tenant,
             layouts,
             &ctx,
             &cfg,
@@ -320,6 +396,7 @@ pub async fn sell_position(
         sell_via_jupiter(
             state,
             executor,
+            tenant,
             rpc,
             wallet,
             mint,
@@ -439,6 +516,7 @@ pub async fn sell_position(
 #[allow(clippy::too_many_arguments)]
 async fn sell_on_curve(
     executor: &mut Executor,
+    tenant: Option<&solana_kit::tenant_signing_context::TenantSigningContext>,
     layouts: &Arc<RwLock<LayoutStore>>,
     ctx: &PumpContext,
     cfg: &bot_core::config::Config,
@@ -467,6 +545,7 @@ async fn sell_on_curve(
     if cfg.execution.use_jito {
         req = req.jito_tip(cfg.execution.jito_tip_lamports);
     }
+    let req = stamp_copy_request(tenant, req);
     let result = match journal {
         Some((sink, rec)) => {
             bot_core::recovery::with_intent(Some(sink), rec, executor.run(req), |r| {
@@ -490,6 +569,7 @@ async fn sell_on_curve(
 async fn sell_via_jupiter(
     state: &Shared,
     executor: &Executor,
+    tenant: Option<&solana_kit::tenant_signing_context::TenantSigningContext>,
     rpc: &Rpc,
     wallet: &Arc<Wallet>,
     mint: Pubkey,
@@ -539,6 +619,7 @@ async fn sell_via_jupiter(
             )?
             .with_intent_id(intent_id)
             .attributed("copy", mint.to_string());
+            let built = stamp_copy_built(tenant, built);
             let result = match journal {
                 Some((sink, rec)) => {
                     bot_core::recovery::with_intent(

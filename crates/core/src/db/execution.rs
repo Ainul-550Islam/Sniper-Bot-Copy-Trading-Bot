@@ -36,12 +36,12 @@ impl ExecutionRepo {
                 "execution_upsert",
                 sqlx::query(
                     r#"INSERT INTO execution_lifecycle
-                           (intent_id, module, label, wallet, symbol, state, attempts,
-                            signature, blockhash, last_valid_block_height,
+                           (organization_id, intent_id, module, label, wallet, symbol,
+                            state, attempts, signature, blockhash, last_valid_block_height,
                             priority_fee_micro_lamports, failure_class, error,
                             created_at, updated_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                       ON CONFLICT (intent_id) DO UPDATE SET
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                       ON CONFLICT (organization_id, intent_id) DO UPDATE SET
                            state = EXCLUDED.state,
                            attempts = GREATEST(execution_lifecycle.attempts, EXCLUDED.attempts),
                            signature = EXCLUDED.signature,
@@ -52,6 +52,7 @@ impl ExecutionRepo {
                            error = EXCLUDED.error,
                            updated_at = EXCLUDED.updated_at"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.intent_id)
                 .bind(&rec.module)
                 .bind(&rec.label)
@@ -80,10 +81,11 @@ impl ExecutionRepo {
                 "execution_event",
                 sqlx::query(
                     r#"INSERT INTO execution_lifecycle_events
-                           (intent_id, attempt, from_state, to_state, signature,
-                            failure_class, reason, ts)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+                           (organization_id, intent_id, attempt, from_state, to_state,
+                            signature, failure_class, reason, ts)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&t.intent_id)
                 .bind(t.attempt as i32)
                 .bind(t.from.map(|s| s.as_str()))
@@ -103,9 +105,13 @@ impl ExecutionRepo {
             .db
             .timed(
                 "execution_get",
-                sqlx::query("SELECT * FROM execution_lifecycle WHERE intent_id = $1")
-                    .bind(intent_id)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM execution_lifecycle \
+                     WHERE organization_id = $1 AND intent_id = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(intent_id)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.as_ref().map(record_from_row))
@@ -117,9 +123,11 @@ impl ExecutionRepo {
             .timed(
                 "execution_get_by_sig",
                 sqlx::query(
-                    "SELECT * FROM execution_lifecycle WHERE signature = $1 \
+                    "SELECT * FROM execution_lifecycle \
+                     WHERE organization_id = $1 AND signature = $2 \
                      ORDER BY updated_at DESC LIMIT 1",
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(signature)
                 .fetch_optional(self.db.pool()),
             )
@@ -135,9 +143,11 @@ impl ExecutionRepo {
                 "execution_open",
                 sqlx::query(
                     r#"SELECT * FROM execution_lifecycle
-                        WHERE state IN ('created', 'validated', 'submitted', 'pending')
+                        WHERE organization_id = $1
+                          AND state IN ('created', 'validated', 'submitted', 'pending')
                         ORDER BY updated_at ASC LIMIT 5000"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;
@@ -149,9 +159,13 @@ impl ExecutionRepo {
             .db
             .timed(
                 "execution_recent",
-                sqlx::query("SELECT * FROM execution_lifecycle ORDER BY updated_at DESC LIMIT $1")
-                    .bind(limit.clamp(1, 1000))
-                    .fetch_all(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM execution_lifecycle WHERE organization_id = $1 \
+                     ORDER BY updated_at DESC LIMIT $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(limit.clamp(1, 1000))
+                .fetch_all(self.db.pool()),
             )
             .await?;
         Ok(rows.iter().map(record_from_row).collect())
@@ -167,8 +181,10 @@ impl ExecutionRepo {
                     r#"SELECT id, intent_id, attempt, from_state, to_state, signature,
                               failure_class, reason, ts
                          FROM execution_lifecycle_events
-                        WHERE intent_id = $1 ORDER BY ts ASC, id ASC LIMIT $2"#,
+                        WHERE organization_id = $1 AND intent_id = $2
+                        ORDER BY ts ASC, id ASC LIMIT $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(intent_id)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),

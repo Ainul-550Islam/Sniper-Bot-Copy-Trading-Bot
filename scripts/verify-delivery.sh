@@ -74,12 +74,12 @@ if [ -z "$missing" ]; then
 else
   bad "missing required files:$missing"
 fi
-# migrations 0001-0022 (contiguous, forward-only) — 22 migrations
+# migrations 0001-0024 (contiguous, forward-only) — 24 migrations
 migmissing=""
-for i in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019 0020 0021 0022; do
+for i in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019 0020 0021 0022 0023 0024; do
   ls crates/core/migrations/${i}_*.sql >/dev/null 2>&1 || migmissing="$migmissing $i"
 done
-[ -z "$migmissing" ] && ok "migrations 0001-0022 present" || bad "missing migrations:$migmissing"
+[ -z "$migmissing" ] && ok "migrations 0001-0024 present" || bad "missing migrations:$migmissing"
 
 # ---------------------------------------------------------- 2. version id --
 V_FILE="$(tr -d '[:space:]' < VERSION)"

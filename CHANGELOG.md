@@ -10,6 +10,58 @@ fails the release if they ever disagree.
 
 ## [Unreleased]
 
+### PROMPT 2–5 arc — multi-tenant SaaS completion (consolidated 2026-09-30)
+
+#### PROMPT 5 — custody, billing, customer SaaS, buyer release (2026-09-30)
+- **Custody**: REAL Vault-transit and AWS-KMS adapters
+  (`server/src/custody/{vault,kms}/`; KMS SigV4 verified against the
+  AWS-documented test vector, Ed25519 `EDDSA_SHA_512`; redacted
+  credentials) wired through the provider registry behind
+  `CUSTODY_PROVIDER` + `LIVE_CUSTODY=1`; guard-ordered sign boundary;
+  HSM stays fail-closed unimplemented. P0 fix: custody rotation resolves
+  the REAL profile (synthetic ids impossible). No live round-trip
+  performed (GAP-002 narrows to live validation).
+- **Billing**: authoritative `BillingView` behind
+  `GET /api/saas/billing/status`; REAL Stripe/Paddle adapters
+  (signature-verified, idempotent provider events); idempotent
+  `POST /api/saas/checkout`; `GET /api/saas/invoices`;
+  `GET /api/saas/usage/limits` fully rewritten to store-derived data
+  (real subscription → plan, real usage totals, no-subscription →
+  `plan_code:"none"` — acceptance criterion I).
+- **Customer SaaS**: 21 authenticated `/api/tenant/*` routes + module
+  controls + telegram binding; 8 customer pages under `/trading/*` +
+  5 components + `lib/customer-trading-api.ts` (refuses paths outside
+  `/api/tenant/*`).
+- **Buyer release**: rebuild/integrity/parity/claims scripts + parity
+  regression test; evidence docs (`CUSTODY-STATUS-2026`,
+  `CURRENT-BUYER-STATE`, …); final acceptance audit A–T all PASS
+  (criterion I and P fixed); full workspace 3312 passed / 0 failed /
+  14 ignored; stale-documentation sweep + dated `AUDIT.md` remediation
+  notes (§13.8, §14.6, §15.5, §16).
+
+#### PROMPT 4 — the tenant execution boundary (2026-09-29/30)
+- Tenant signing context + transaction metadata (`solana-kit`), with the
+  fail-closed tenant broadcast guard at the executor; sniper/copy wired
+  for tenant-scoped execution; tenant-local dedup/counters; server
+  module factory with repository-backed sinks (proven against live
+  PostgreSQL).
+- Polymarket V3 + async surfaces (spec §A–D, as flat equivalents in
+  `module-polymarket`): `exchange_v3.rs` (domain `v"3"`, `positionID`
+  XOR `tokenID`), position orders, async commit/trade resolution
+  (`tradeIDs`), backfill, async reconciliation, tenant context/executor;
+  V2 regression green throughout.
+
+#### PROMPT 3 — enterprise tenant isolation of the trading core (STEP 10)
+- Tenant-scoped `trading_repository` (bot-core); authenticated tenant
+  trading data plane (`/api/tenant/*`); nine atomic PK/arbiter swaps
+  (migrations 0026–0034); cross-tenant attack program — 18 live-PG
+  tests + 2 route-level tests through the real axum router.
+
+#### PROMPT 2 — multi-tenant execution foundation (STEP 3)
+- 72 planned files audited file-by-file (runtime registry incl. the
+  dedicated reaper, tenant execution contexts, store surfaces); all
+  green incl. PostgreSQL-backed suites; zero regressions.
+
 ### TASK 7B — SaaS product surface (2026-09-23)
 
 Exactly 21 new source paths were added — 20 numbered files plus the tree's

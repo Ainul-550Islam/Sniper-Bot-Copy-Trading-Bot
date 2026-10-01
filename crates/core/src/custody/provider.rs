@@ -33,6 +33,14 @@ pub enum CustodyProviderError {
         expected: ProviderType,
         actual: ProviderType,
     },
+    /// The signer record's pinned public key does not match the key the
+    /// remote provider actually holds. Fail closed: a stale or wrong
+    /// public key must never be allowed to sign.
+    PubkeyMismatch {
+        signer: SignerId,
+        recorded: String,
+        provider_key: String,
+    },
     Transport(String),
 }
 
@@ -58,6 +66,15 @@ impl std::fmt::Display for CustodyProviderError {
                 "provider mismatch: expected {} but signer is {}",
                 expected.as_str(),
                 actual.as_str()
+            ),
+            CustodyProviderError::PubkeyMismatch {
+                signer,
+                recorded,
+                provider_key,
+            } => write!(
+                f,
+                "signer {} public key {} does not match provider key {} — refusing to sign",
+                signer, recorded, provider_key
             ),
             CustodyProviderError::Transport(m) => {
                 write!(f, "custody provider transport error: {}", m)

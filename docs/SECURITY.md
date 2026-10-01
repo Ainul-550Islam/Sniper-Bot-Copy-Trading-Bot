@@ -82,13 +82,24 @@ All live modes: `bash scripts/run-external-validation.sh all-safe` → `6/6 NOT_
   registry, and signatures are collected in message order. Mismatches,
   missing signers and backend failures abort the build (`SignerError::
   SignerMismatch / MissingSigner / ExtraSignerNotRequired / SigningFailed`).
-* **Key custody providers:** `[signing] provider` = `local` (implemented) |
-  `vault` | `kms` | `hsm` (**not implemented in this build** — selecting one
-  fails startup with `SignerError::UnsupportedBackend`; there is no silent
-  fallback to local keys). Adding a backend means implementing
-  `TransactionSigner` and extending `build_signer_registry`; no business
-  logic changes. Polymarket EVM signing (secp256k1/EIP-712) is deliberately
-  separate and not routed through this Solana abstraction.
+* **Key custody providers — two layers, both fail-closed:**
+  * *Transaction-signer layer* (`[signing] provider` →
+    `build_signer_registry`): `local` implemented; `vault`/`kms`/`hsm`
+    fail startup with `SignerError::UnsupportedBackend` — there is no
+    silent fallback to local keys. Adding a backend means implementing
+    `TransactionSigner` and extending `build_signer_registry`; no business
+    logic changes.
+  * *Multi-tenant custody boundary* (`CUSTODY_PROVIDER=local|vault|kms|hsm`
+    → `crates/server/src/custody/provider_registry.rs`): `vault` and `kms`
+    are REAL adapters — Vault transit engine (REST `transit/sign`,
+    redacted token) and AWS KMS (hand-rolled SigV4 verified against the
+    AWS-documented test vector, Ed25519 `EDDSA_SHA_512`) — unit-tested,
+    fail-closed, never live-proven in this workspace; `hsm` refuses with
+    its exact PKCS#11 dependency. Remote activation additionally requires
+    `LIVE_CUSTODY=1` (no silent remote activation). Current state:
+    `docs/CUSTODY-STATUS-2026.md`.
+  * Polymarket EVM signing (secp256k1/EIP-712) is deliberately
+    separate and not routed through this Solana abstraction.
 * **Redaction:** `SecretConfig` has a hand-written `Debug` emitting only
   `<set>`/`<unset>`; `Wallet` and `LocalKeypairSigner` `Debug` print public
   keys and load-source only; `/api/config` and the recorded config version

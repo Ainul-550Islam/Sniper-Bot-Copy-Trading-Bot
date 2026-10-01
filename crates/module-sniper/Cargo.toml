@@ -22,6 +22,7 @@ chrono.workspace = true
 rand.workspace = true
 solana-sdk.workspace = true
 bs58.workspace = true
+async-trait.workspace = true
 
 [lib]
 name = "module_sniper"

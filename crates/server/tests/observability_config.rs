@@ -1,4 +1,4 @@
-//! Observability config integration placeholder (Batch 5).
+//! Observability config integration tests (Batch 5; real assertions, not placeholders).
 //! Real unit coverage lives in `crates/server/src/ops/observability_config.rs`.
 //! This harness verifies the crate builds and the file exists — heavy logic is unit-tested.
 

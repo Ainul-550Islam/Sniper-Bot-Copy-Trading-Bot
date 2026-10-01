@@ -200,6 +200,7 @@ impl CopyBot {
             "buy",
             &amount.to_string(),
         );
+        let req = self.tenant_stamp(req);
         let result = bot_core::recovery::with_intent(
             self.intents.as_ref(),
             intent,
@@ -313,6 +314,7 @@ impl CopyBot {
                     "buy",
                     &lamports.to_string(),
                 );
+                let built = self.tenant_stamp_built(built);
                 bot_core::recovery::with_intent(
                     self.intents.as_ref(),
                     intent,

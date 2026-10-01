@@ -1,7 +1,14 @@
-//! Aggregate customer-facing commercial state (Batch 3).
+//! Aggregate customer-facing commercial state (Batch 3, §G Batch 8).
 //!
 //! Coordinates billing state, usage policy, entitlements, and lifecycle state.
 //! Provides a single stable service consumed by REST/OpenAPI/frontend/SDK.
+//!
+//! §G: the billing half of this response is assembled by
+//! [`crate::saas::billing_view::BillingView`] from the authoritative
+//! `SaasStore`. The lifecycle half comes from the organization row. There
+//! is no hardcoded plan, no hardcoded `active`/`past_due`, and no invented
+//! usage total in this path; `commercial_consistent` is COMPUTED by the
+//! view's consistency invariants, not asserted.
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -12,17 +19,18 @@ use serde::Serialize;
 use serde_json::json;
 
 use bot_core::authorization::AccessRequest;
-use bot_core::billing::dunning::DunningState;
 use bot_core::membership::Permission;
 use bot_core::tenant::OrganizationId;
 
 use crate::api::ApiState;
+use crate::saas::billing_view::BillingView;
 use crate::saas::middleware::{authorize_request, deny_response};
 
 #[derive(Debug, Serialize)]
 pub struct CommercialStateResponse {
     pub organization_id: String,
     pub plan_code: String,
+    pub plan_name: String,
     pub subscription_status: String,
     pub billing_provider: String,
     pub entitlements_active: bool,
@@ -30,6 +38,7 @@ pub struct CommercialStateResponse {
     pub usage: serde_json::Value,
     pub lifecycle_status: String,
     pub suspension_reason: Option<String>,
+    pub grace_until: Option<String>,
     pub commercial_consistent: bool,
     pub as_of: String,
 }
@@ -51,7 +60,8 @@ async fn my_state(State(state): State<ApiState>, headers: HeaderMap) -> Response
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
     };
-    render(ctx.organization.id, &state).await.into_response()
+    let org = ctx.organization.id;
+    render(org, &state).await.into_response()
 }
 
 async fn by_id(
@@ -89,81 +99,128 @@ async fn by_id(
     render(org, &state).await.into_response()
 }
 
+/// The authoritative commercial state: billing facts via [`BillingView`],
+/// lifecycle facts via the organization row, consistency COMPUTED.
 async fn render(org: OrganizationId, state: &ApiState) -> Json<serde_json::Value> {
-    let now = Utc::now();
-    let org_row = state.saas.organization(org).await;
-    let lifecycle_status = org_row
+    let view = BillingView::load(&state.saas, org, Utc::now()).await;
+    let lifecycle_status = view
+        .organization
         .as_ref()
         .map(|o| o.status.as_str().to_string())
-        .unwrap_or_else(|| "active".to_string());
-    // Use billing_state consistency logic if available; here we synthesize a consistent view
-    let suspended = lifecycle_status == "suspended" || lifecycle_status == "closed";
-    let val = json!(CommercialStateResponse {
+        .unwrap_or_else(|| "unknown".to_string());
+    let consistency = view.consistency();
+    let response = CommercialStateResponse {
         organization_id: org.to_string(),
-        plan_code: "pro".to_string(),
-        subscription_status: if suspended {
-            "past_due".to_string()
-        } else {
-            "active".to_string()
-        },
-        billing_provider: "manual".to_string(),
-        entitlements_active: !suspended,
-        dunning_state: if suspended {
-            DunningState::BillingSuspended.as_str().to_string()
-        } else {
-            DunningState::Current.as_str().to_string()
-        },
-        usage: json!({"period": now.format("%Y-%m").to_string(), "total_requests": 0}),
-        lifecycle_status: lifecycle_status.clone(),
-        suspension_reason: if suspended {
-            Some("payment_failed".to_string())
-        } else {
-            None
-        },
-        commercial_consistent: true, // would call validate_consistency
-        as_of: now.to_rfc3339(),
-    });
-    // Ensure suspended/closed tenants have consistent entitlements
-    let mut v = serde_json::to_value(&val).unwrap();
-    // Validate consistency: suspended must not have entitlements_active true
-    if suspended
-        && v.get("entitlements_active")
-            .and_then(|x| x.as_bool())
-            .unwrap_or(false)
-    {
-        v["commercial_consistent"] = json!(false);
-    }
-    Json(v)
+        plan_code: view.plan_code().to_string(),
+        plan_name: view.plan_name().to_string(),
+        subscription_status: view.subscription_status().to_string(),
+        billing_provider: view.billing_provider().to_string(),
+        entitlements_active: view.entitlements_active(),
+        dunning_state: view.dunning.as_str().to_string(),
+        usage: serde_json::to_value(&view.usage).unwrap_or_default(),
+        lifecycle_status,
+        suspension_reason: view.suspension_reason().map(|s| s.to_string()),
+        grace_until: view.grace_until().map(|t| t.to_rfc3339()),
+        commercial_consistent: consistency.consistent,
+        as_of: view.as_of.to_rfc3339(),
+    };
+    Json(json!(response))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bot_core::tenant::OrganizationId;
+    use crate::saas::store::SaasStore;
+    use bot_core::billing::plan::PlanCode;
+    use bot_core::billing::usage::{UsageEvent, UsageMetric, UsageSource};
+    use bot_core::tenant::{Organization, OrganizationStatus};
 
-    #[test]
-    fn suspended_has_no_entitlements() {
-        let _org = OrganizationId::new();
-        // Simulate suspended path
-        let lifecycle_status = "suspended";
-        let entitlements_active = lifecycle_status != "suspended" && lifecycle_status != "closed";
-        assert!(!entitlements_active);
+    async fn store_with_org(status: OrganizationStatus) -> (SaasStore, OrganizationId) {
+        let store = SaasStore::new();
+        let org_id = OrganizationId::new();
+        let mut org = Organization::new(
+            org_id,
+            format!("test-{}", org_id.as_uuid()),
+            "Test Org",
+            None,
+            Utc::now(),
+        );
+        org.status = status;
+        store.create_organization(&org).await.expect("org created");
+        (store, org_id)
+    }
+
+    #[tokio::test]
+    async fn active_tenant_with_plan_is_consistent_and_verbatim() {
+        let (store, org_id) = store_with_org(OrganizationStatus::Active).await;
+        store
+            .assign_plan(org_id, PlanCode::Starter, Utc::now())
+            .await
+            .expect("plan assigned");
+        store
+            .record_usage(&UsageEvent::new(
+                org_id,
+                UsageMetric::OrdersSubmitted,
+                4.0,
+                UsageSource::Sniper,
+                "commercial-1",
+                Utc::now(),
+            ))
+            .await
+            .expect("usage recorded");
+        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let consistency = view.consistency();
+        assert!(consistency.consistent);
+        assert!(consistency.entitlements_match_lifecycle);
+        assert!(consistency.plan_requires_subscription);
+        assert_eq!(view.plan_code(), "starter");
+        assert_eq!(view.usage.orders_submitted, 4.0);
+    }
+
+    #[tokio::test]
+    async fn tenant_without_subscription_has_no_plan_and_still_consistent() {
+        let (store, org_id) = store_with_org(OrganizationStatus::Active).await;
+        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        assert_eq!(view.plan_code(), "none");
+        assert!(view.consistency().consistent);
+    }
+
+    #[tokio::test]
+    async fn suspended_tenant_reflects_lifecycle_not_invented_past_due() {
+        let (store, org_id) = store_with_org(OrganizationStatus::Suspended).await;
+        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        // Dunning is DERIVED from the lifecycle row, never defaulted.
+        assert_eq!(
+            view.dunning,
+            bot_core::billing::dunning::DunningState::BillingSuspended
+        );
+        assert_eq!(view.suspension_reason(), Some("organization_suspended"));
+        // The old code invented "past_due" + "payment_failed" for any
+        // suspended org; the honest answer is the lifecycle reason.
+        assert_ne!(view.subscription_status(), "past_due");
     }
 
     #[test]
-    fn cross_tenant_not_leaked() {
-        let a = OrganizationId::new();
-        let b = OrganizationId::new();
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn commercial_consistency_flag() {
-        // suspended with entitlements_active true is inconsistent
-        let v = json!({"lifecycle_status":"suspended","entitlements_active": true});
-        let suspended = v["lifecycle_status"] == "suspended";
-        let ent = v["entitlements_active"].as_bool().unwrap();
-        let consistent = !(suspended && ent);
-        assert!(!consistent);
+    fn response_shape_carries_plan_name_and_grace() {
+        // Serialization contract: the new fields survive round-tripping.
+        let resp = CommercialStateResponse {
+            organization_id: OrganizationId::new().to_string(),
+            plan_code: "pro".to_string(),
+            plan_name: "Pro".to_string(),
+            subscription_status: "active".to_string(),
+            billing_provider: "manual".to_string(),
+            entitlements_active: true,
+            dunning_state: "current".to_string(),
+            usage: serde_json::json!({"period": "2026-09", "api_requests": 0.0}),
+            lifecycle_status: "active".to_string(),
+            suspension_reason: None,
+            grace_until: None,
+            commercial_consistent: true,
+            as_of: Utc::now().to_rfc3339(),
+        };
+        let v = serde_json::to_value(&resp).expect("serializes");
+        assert_eq!(v["plan_name"], "Pro");
+        assert_eq!(v["commercial_consistent"], true);
+        assert!(v["usage"]["period"].as_str().is_some());
     }
 }

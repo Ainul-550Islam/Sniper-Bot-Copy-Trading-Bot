@@ -321,6 +321,10 @@ mod tests {
             health: Arc::new(bot_core::obs::health::HealthRegistry::new()),
             metrics_enabled: false,
             saas: crate::saas::SaasStore::shared(),
+            module_registry: std::sync::Arc::new(
+                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
+            ),
+            trading: None,
         }
     }
 

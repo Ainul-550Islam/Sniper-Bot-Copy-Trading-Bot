@@ -23,7 +23,16 @@
 //! and a gate in front; it never becomes the record of *what happened*.
 
 pub mod model;
+pub mod module_kind;
 pub mod policy;
+pub mod runtime_generation;
+pub mod runtime_id;
+pub mod tenant_entitlement;
+pub mod tenant_id;
+pub mod tenant_module_state;
+pub mod tenant_signer_ref;
+pub mod tenant_state;
+pub mod tenant_wallet_ref;
 
 pub use model::{
     MembershipId, Organization, OrganizationId, OrganizationStatus, TenantId, TenantIdError, User,
@@ -33,6 +42,22 @@ pub use policy::{
     can_authenticate, check as check_tenant, check_ownership, check_resource, check_status,
     TenantAction, TenantDenyReason, TenantVerdict,
 };
+
+// STEP 3 — the tenant runtime-identity foundation. Each type reuses the
+// canonical ids above; none of them duplicates an existing concept.
+pub use module_kind::{
+    can_trade, feature_key, parse_module, ModuleKind, ALL_MODULES, TRADING_MODULES,
+};
+pub use runtime_generation::{FenceOrdering, RuntimeGeneration, FIRST_GENERATION};
+pub use runtime_id::RuntimeId;
+pub use tenant_entitlement::{EntitlementDenyReason, EntitlementVerdict, TenantEntitlementView};
+pub use tenant_id::{is_valid_tenant_id, parse_tenant_id, require_valid_tenant_id, TenantIdentity};
+pub use tenant_module_state::{
+    ModuleDisableReason, ModuleEnablement, ModuleVerdict, TenantModuleSet, TenantModuleState,
+};
+pub use tenant_signer_ref::{SignerProvider, TenantSignerRef, MAX_KEY_REF_LEN};
+pub use tenant_state::TenantStateSnapshot;
+pub use tenant_wallet_ref::{TenantWalletRef, MAX_ADDRESS_LEN};
 
 use async_trait::async_trait;
 

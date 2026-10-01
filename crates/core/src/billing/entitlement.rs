@@ -329,6 +329,15 @@ impl EntitlementSet {
         }
     }
 
+    /// Whether the subscription is currently granting entitlements.
+    ///
+    /// False when there is no subscription or it does not cover `now`
+    /// (expired period, non-granting status). Billing surfaces use this
+    /// to report entitlement state without re-deriving it.
+    pub fn is_subscription_effective(&self) -> bool {
+        self.subscription_effective
+    }
+
     /// The winning limit for `feature` (`Disabled` when nothing grants it).
     pub fn limit_for(&self, feature: &str) -> FeatureLimit {
         self.effective

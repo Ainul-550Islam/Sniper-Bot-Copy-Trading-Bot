@@ -35,6 +35,11 @@ pub const ORDER_TYPE_STR: &str = "Order(uint256 salt,address maker,address signe
 /// The EIP-712 domain name for the CTF exchange.
 pub const DOMAIN_NAME: &str = "Polymarket CTF Exchange";
 
+/// The CLOB V2 Exchange domain version (the 2026-04-28 cutover bumped
+/// it from `"1"`; V1-signed orders are rejected). Position-backed V3
+/// orders use [`crate::exchange_v3::V3_DOMAIN_VERSION`] instead.
+pub const V2_DOMAIN_VERSION: &str = "2";
+
 /// Cached `keccak256(ORDER_TYPE_STR)` — the V2 `Order` struct typehash used
 /// as the first word of the struct hash.
 pub static ORDER_TYPEHASH: Lazy<[u8; 32]> = Lazy::new(|| keccak256(ORDER_TYPE_STR.as_bytes()));

@@ -117,10 +117,11 @@ impl CopyRepo {
                 "copy_leader_upsert",
                 sqlx::query(
                     r#"INSERT INTO copy_leaders
-                           (address, label, status, source, followed_at, status_since,
-                            events_seen, mirrored, rejected, last_event_at, last_slot, updated_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                       ON CONFLICT (address) DO UPDATE SET
+                           (organization_id, address, label, status, source, followed_at,
+                            status_since, events_seen, mirrored, rejected, last_event_at,
+                            last_slot, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                       ON CONFLICT (organization_id, address) DO UPDATE SET
                            label = EXCLUDED.label,
                            status = EXCLUDED.status,
                            source = EXCLUDED.source,
@@ -132,6 +133,7 @@ impl CopyRepo {
                            last_slot = GREATEST(copy_leaders.last_slot, EXCLUDED.last_slot),
                            updated_at = EXCLUDED.updated_at"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.address)
                 .bind(&rec.label)
                 .bind(&rec.status)
@@ -155,9 +157,12 @@ impl CopyRepo {
             .db
             .timed(
                 "copy_leader_get",
-                sqlx::query("SELECT * FROM copy_leaders WHERE address = $1")
-                    .bind(address)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM copy_leaders WHERE organization_id = $1 AND address = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(address)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.as_ref().map(leader_from_row))
@@ -169,8 +174,12 @@ impl CopyRepo {
             .db
             .timed(
                 "copy_leader_list",
-                sqlx::query("SELECT * FROM copy_leaders ORDER BY followed_at ASC, address ASC")
-                    .fetch_all(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM copy_leaders WHERE organization_id = $1 \
+                     ORDER BY followed_at ASC, address ASC",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .fetch_all(self.db.pool()),
             )
             .await?;
         Ok(rows.iter().map(leader_from_row).collect())
@@ -181,9 +190,11 @@ impl CopyRepo {
             .timed(
                 "copy_leader_event",
                 sqlx::query(
-                    r#"INSERT INTO copy_leader_events (address, event, reason, replica_id, ts)
-                       VALUES ($1, $2, $3, $4, $5)"#,
+                    r#"INSERT INTO copy_leader_events
+                           (organization_id, address, event, reason, replica_id, ts)
+                       VALUES ($1, $2, $3, $4, $5, $6)"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.address)
                 .bind(&rec.event)
                 .bind(&rec.reason)
@@ -207,8 +218,10 @@ impl CopyRepo {
                 "copy_leader_events",
                 sqlx::query(
                     r#"SELECT * FROM copy_leader_events
-                        WHERE address = $1 ORDER BY ts ASC, id ASC LIMIT $2"#,
+                        WHERE organization_id = $1 AND address = $2
+                        ORDER BY ts ASC, id ASC LIMIT $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(address)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),
@@ -228,13 +241,14 @@ impl CopyRepo {
                 "copy_event_record",
                 sqlx::query(
                     r#"INSERT INTO copy_events
-                           (event_id, leader, signature, slot, mint, side, venue,
-                            token_amount, sol_amount, source, source_sequence,
-                            event_at, observed_at, stage, reject_reason, detail,
-                            intent_id, position_id, created_at, updated_at)
+                           (organization_id, event_id, leader, signature, slot, mint,
+                            side, venue, token_amount, sol_amount, source,
+                            source_sequence, event_at, observed_at, stage,
+                            reject_reason, detail, intent_id, position_id,
+                            created_at, updated_at)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                               $12, $13, $14, $15, $16, $17, $18, $19, $20)
-                       ON CONFLICT (event_id) DO UPDATE SET
+                               $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                       ON CONFLICT (organization_id, event_id) DO UPDATE SET
                            stage = EXCLUDED.stage,
                            reject_reason = EXCLUDED.reject_reason,
                            detail = EXCLUDED.detail,
@@ -242,6 +256,7 @@ impl CopyRepo {
                            position_id = COALESCE(EXCLUDED.position_id, copy_events.position_id),
                            updated_at = EXCLUDED.updated_at"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.event_id)
                 .bind(&rec.leader)
                 .bind(&rec.signature)
@@ -273,9 +288,12 @@ impl CopyRepo {
             .db
             .timed(
                 "copy_event_get",
-                sqlx::query("SELECT * FROM copy_events WHERE event_id = $1")
-                    .bind(event_id)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM copy_events WHERE organization_id = $1 AND event_id = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(event_id)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.as_ref().map(event_from_row))
@@ -294,8 +312,10 @@ impl CopyRepo {
                 "copy_events_since",
                 sqlx::query(
                     r#"SELECT * FROM copy_events
-                        WHERE observed_at >= $1 ORDER BY observed_at ASC LIMIT $2"#,
+                        WHERE organization_id = $1 AND observed_at >= $2
+                        ORDER BY observed_at ASC LIMIT $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(since)
                 .bind(limit.clamp(1, 10_000))
                 .fetch_all(self.db.pool()),
@@ -316,8 +336,10 @@ impl CopyRepo {
                 "copy_events_leader",
                 sqlx::query(
                     r#"SELECT * FROM copy_events
-                        WHERE leader = $1 ORDER BY observed_at DESC LIMIT $2"#,
+                        WHERE organization_id = $1 AND leader = $2
+                        ORDER BY observed_at DESC LIMIT $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(leader)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),
@@ -336,11 +358,12 @@ impl CopyRepo {
                 "copy_link_upsert",
                 sqlx::query(
                     r#"INSERT INTO copy_links
-                           (position_id, leader, mint, entry_event_id, entry_signature, intent_id,
-                            leader_token_amount, follower_qty, status, opened_at, closed_at,
-                            exit_event_id, last_reconciled_at, note, updated_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                       ON CONFLICT (position_id) DO UPDATE SET
+                           (organization_id, position_id, leader, mint, entry_event_id,
+                            entry_signature, intent_id, leader_token_amount, follower_qty,
+                            status, opened_at, closed_at, exit_event_id,
+                            last_reconciled_at, note, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                       ON CONFLICT (organization_id, position_id) DO UPDATE SET
                            intent_id = COALESCE(EXCLUDED.intent_id, copy_links.intent_id),
                            leader_token_amount = EXCLUDED.leader_token_amount,
                            follower_qty = EXCLUDED.follower_qty,
@@ -351,6 +374,7 @@ impl CopyRepo {
                            note = EXCLUDED.note,
                            updated_at = EXCLUDED.updated_at"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.position_id)
                 .bind(&rec.leader)
                 .bind(&rec.mint)
@@ -377,9 +401,12 @@ impl CopyRepo {
             .db
             .timed(
                 "copy_link_get",
-                sqlx::query("SELECT * FROM copy_links WHERE position_id = $1")
-                    .bind(position_id)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM copy_links WHERE organization_id = $1 AND position_id = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(position_id)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.as_ref().map(link_from_row))
@@ -392,8 +419,11 @@ impl CopyRepo {
             .timed(
                 "copy_links_open",
                 sqlx::query(
-                    "SELECT * FROM copy_links WHERE status = 'open' ORDER BY opened_at ASC LIMIT 5000",
+                    "SELECT * FROM copy_links \
+                     WHERE organization_id = $1 AND status = 'open' \
+                     ORDER BY opened_at ASC LIMIT 5000",
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;
@@ -414,10 +444,12 @@ impl CopyRepo {
                 "copy_link_close",
                 sqlx::query(
                     r#"UPDATE copy_links
-                          SET status = $2, exit_event_id = COALESCE($3, exit_event_id),
-                              note = COALESCE($4, note), closed_at = now(), updated_at = now()
-                        WHERE position_id = $1 AND status = 'open'"#,
+                          SET status = $3, exit_event_id = COALESCE($4, exit_event_id),
+                              note = COALESCE($5, note), closed_at = now(), updated_at = now()
+                        WHERE organization_id = $1 AND position_id = $2
+                          AND status = 'open'"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(position_id)
                 .bind(status)
                 .bind(exit_event_id)

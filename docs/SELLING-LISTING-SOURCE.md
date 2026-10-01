@@ -70,7 +70,9 @@ not hidden.
   limits; request-ID correlation; embedded dashboard.
 - Safety architecture: paper default, dual live gates, simulate mode
   (real tx build + RPC simulation, no broadcast), signer registry boundary,
-  strict config parsing, fail-startup for unimplemented custody backends.
+  strict config parsing, fail-startup for unimplemented signing providers,
+  real Vault-transit + AWS-KMS custody adapters (unit-tested, fail-closed,
+  not live-proven).
 
 ## Architecture facts
 
@@ -126,7 +128,9 @@ not hidden.
 - Secrets env-only; secret-scan release gate; redacted config endpoint;
   bounded metric labels; Telegram token redaction regression test.
 - Signer boundary: modules never hold keys; multi-signer completeness
-  enforced; unimplemented custody backends fail startup.
+  enforced; unimplemented signing providers fail startup; Vault-transit and
+  AWS-KMS custody adapters are real, unit-tested, fail-closed (not
+  live-proven — `docs/CUSTODY-STATUS-2026.md`).
 - Append-only hash-chained audit; app APIs cannot mutate audit rows.
 - Supply chain: two committed lockfiles; deny policy (14 permissive license
   allow-list, crates.io-only sources, no git deps); audit 0 findings at

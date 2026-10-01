@@ -80,6 +80,18 @@ pub struct ApiState {
     /// sessions, tenant API keys, plans, entitlements, usage, provisioning).
     /// Always present; it holds no trading truth.
     pub saas: Arc<crate::saas::SaasStore>,
+    /// PROMPT 3/10 — the tenant trading data plane (orders,
+    /// executions, positions, copy, polymarket, recovery, reporting),
+    /// built over the attached database. `None` when no database is
+    /// attached: every `/api/tenant/...` trading route then answers
+    /// 503 (`trading_data_plane_unavailable`).
+    pub trading: Option<Arc<crate::trading_data_plane::TenantTradingDataPlane>>,
+    /// §H — the live tenant module registry (§A): which bot runtimes
+    /// exist per (organization, module) and their lifecycle phase. The
+    /// customer bots surface reads THIS registry; an empty registry is
+    /// the honest "no bot runtimes registered in this deployment"
+    /// answer, never a synthesized list.
+    pub module_registry: Arc<crate::module_runtime::module_registry::TenantModuleRegistry>,
 }
 
 /// Build the full router.
@@ -125,6 +137,9 @@ pub fn router(state: ApiState) -> Router {
         // shares the rate limiter, the audit trail and the request-id
         // middleware with the existing API.
         .merge(crate::saas::routes())
+        // PROMPT 3/10 — the tenant trading data plane (503 when the
+        // database is not attached).
+        .merge(crate::trading_data_plane::routes())
         .route("/api/events", get(events_ws))
         // route_layer (not layer): runs after routing, so handlers see the
         // MatchedPath and the middleware can label metrics with the bounded
@@ -1585,6 +1600,10 @@ mod tests {
             health: Arc::new(HealthRegistry::new()),
             metrics_enabled,
             saas: crate::saas::SaasStore::shared(),
+            trading: None,
+            module_registry: Arc::new(
+                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
+            ),
         }
     }
 

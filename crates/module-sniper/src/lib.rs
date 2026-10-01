@@ -58,6 +58,9 @@ use bot_core::state::Shared;
 use solana_kit::execute::{ExecPolicy, Executor};
 use solana_kit::layout::LayoutStore;
 use solana_kit::rpc::Rpc;
+use solana_kit::tenant_broadcast_guard::TenantBroadcastGuard;
+use solana_kit::tenant_signing_context::TenantSigningContext;
+use solana_kit::tenant_transaction::TenantTransactionMeta;
 use solana_kit::tokens::Wallet;
 
 pub mod detect;
@@ -69,6 +72,9 @@ pub mod market;
 pub mod pipeline;
 pub mod replay;
 pub mod slippage;
+pub mod tenant_context;
+pub mod tenant_executor;
+pub mod tenant_state;
 
 pub use detect::LaunchDetector;
 pub use entry::EntryOutcome;
@@ -95,6 +101,17 @@ pub struct Sniper {
     /// server. When present, every money path claims its logical execution
     /// identity before broadcasting; `None` = single-instance/legacy.
     ownership: Option<Arc<bot_core::ownership::OwnershipRegistry>>,
+    /// Tenant execution context (PROMPT 4/10). When present, every
+    /// money-moving request is stamped with tenant metadata and the
+    /// executor carries the final tenant broadcast guard — an unscoped or
+    /// cross-tenant broadcast is refused fail-closed. `None` = the
+    /// deployment-global operator mode, byte-for-byte unchanged.
+    tenant: Option<TenantSigningContext>,
+    /// The guard attached to the internal executor. Kept alongside the
+    /// context so the exit sweeper's SEPARATE executor carries the SAME
+    /// fail-closed gate — exits move money too and must never run
+    /// unguarded in tenant mode.
+    tenant_guard: Option<Arc<TenantBroadcastGuard>>,
     /// Sweeper-local exit bookkeeping (mark failures, retry backoff).
     exits: exit::ExitTracker,
 }
@@ -142,6 +159,8 @@ impl Sniper {
             signers,
             intents: None,
             ownership: None,
+            tenant: None,
+            tenant_guard: None,
             exits: exit::ExitTracker::default(),
         })
     }
@@ -167,6 +186,76 @@ impl Sniper {
         self
     }
 
+    /// Bind this sniper to ONE tenant (PROMPT 4/10 §B).
+    ///
+    /// Attaches the final tenant broadcast guard to the internal executor
+    /// (wrong organization / runtime / generation / module / wallet is
+    /// refused before signing or broadcast) and remembers the tenant
+    /// signing context so every entry and exit request this sniper builds
+    /// carries its tenant metadata. The guard's funding wallet must be
+    /// this sniper's wallet — a mismatch fails at attach time.
+    ///
+    /// Without this call the sniper keeps its deployment-global operator
+    /// behaviour unchanged.
+    pub fn with_tenant_context(mut self, guard: Arc<TenantBroadcastGuard>) -> BotResult<Self> {
+        self.executor = self.executor.with_tenant_guard(Arc::clone(&guard))?;
+        self.tenant = Some(guard.context().clone());
+        self.tenant_guard = Some(guard);
+        Ok(self)
+    }
+
+    /// The bound tenant context, when this sniper is tenant-scoped.
+    pub fn tenant_context(&self) -> Option<&TenantSigningContext> {
+        self.tenant.as_ref()
+    }
+
+    /// Stamp tenant metadata onto an outgoing request. No-op in operator
+    /// mode; in tenant mode the request carries the tenant identity the
+    /// guard will verify immediately before signing/broadcast.
+    pub(crate) fn tenant_stamp(&self, req: solana_kit::tx::TxRequest) -> solana_kit::tx::TxRequest {
+        // An explicitly attached meta is NEVER overwritten: if a caller
+        // pinned (foreign) tenant metadata, the guard must judge it and
+        // deny — silently rewriting it to our own identity would mask
+        // exactly the cross-tenant mistake the guard exists to catch.
+        if req.tenant.is_some() {
+            return req;
+        }
+        match &self.tenant {
+            Some(ctx) => {
+                let meta = TenantTransactionMeta::from_context(
+                    ctx.execution_context(),
+                    &req.module,
+                    req.intent_id.as_deref(),
+                );
+                req.tenant(meta)
+            }
+            None => req,
+        }
+    }
+
+    /// Stamp tenant metadata onto a prebuilt (Jupiter-signed) transaction.
+    pub(crate) fn tenant_stamp_built(
+        &self,
+        built: solana_kit::tx::BuiltTx,
+    ) -> solana_kit::tx::BuiltTx {
+        // Same rule as `tenant_stamp`: explicit metadata is judged, never
+        // rewritten.
+        if built.tenant.is_some() {
+            return built;
+        }
+        match &self.tenant {
+            Some(ctx) => {
+                let meta = TenantTransactionMeta::from_context(
+                    ctx.execution_context(),
+                    &built.module,
+                    Some(built.intent_id.as_str()),
+                );
+                built.with_tenant(meta)
+            }
+            None => built,
+        }
+    }
+
     /// Fresh intent record for one money-moving broadcast.
     pub(crate) fn intent_rec(
         &self,
@@ -185,6 +274,18 @@ impl Sniper {
             signature: None,
             created_at: chrono::Utc::now(),
         }
+    }
+
+    /// Run an already-built request through this sniper's executor
+    /// (tenant-stamped first when a tenant context is bound). Used by the
+    /// tenant executor for scoped submissions and by tests that need to
+    /// exercise the guarded money path directly.
+    pub async fn execute_request(
+        &self,
+        req: solana_kit::tx::TxRequest,
+    ) -> BotResult<solana_kit::execute::ExecutionResult> {
+        let req = self.tenant_stamp(req);
+        self.executor.run(req).await
     }
 
     pub fn state(&self) -> &Shared {
@@ -240,6 +341,23 @@ impl Sniper {
             if let Some(reg) = &self.signers {
                 sweeper_executor = sweeper_executor.with_signer_registry(Arc::clone(reg));
             }
+            // PROMPT 4/10 §B: in tenant mode the sweeper's executor must
+            // carry the SAME final tenant broadcast guard as the entry
+            // executor — exits move money too. A guard that cannot attach
+            // is a fail-closed stop, never an unguarded sweeper.
+            if let Some(guard) = &self.tenant_guard {
+                match sweeper_executor.with_tenant_guard(Arc::clone(guard)) {
+                    Ok(executor_with_guard) => sweeper_executor = executor_with_guard,
+                    Err(e) => {
+                        error!(error = %e, "tenant guard could not attach to the exit sweeper; sniper stopping");
+                        self.state
+                            .record_error(BotModule::Sniper, &format!("sweeper tenant guard: {e}"))
+                            .await;
+                        self.state.set_running(BotModule::Sniper, false, true).await;
+                        return;
+                    }
+                }
+            }
             let mut this = Sniper {
                 state: self.state.clone(),
                 rpc: self.rpc.clone(),
@@ -250,6 +368,8 @@ impl Sniper {
                 signers: self.signers.clone(),
                 intents: self.intents.clone(),
                 ownership: self.ownership.clone(),
+                tenant: self.tenant.clone(),
+                tenant_guard: self.tenant_guard.clone(),
                 exits: exit::ExitTracker::default(),
             };
             tokio::spawn(async move { this.exit_sweeper().await })

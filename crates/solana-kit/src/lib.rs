@@ -37,6 +37,9 @@ pub mod pumpswap;
 pub mod raydium;
 pub mod rpc;
 pub mod signer;
+pub mod tenant_broadcast_guard;
+pub mod tenant_signing_context;
+pub mod tenant_transaction;
 pub mod tokens;
 pub mod tx;
 pub mod ws;
@@ -56,6 +59,9 @@ pub use signer::{
     COPY_TRADING_IDENTITY, PRIMARY_SIGNER_IDENTITY, SNIPER_IDENTITY, STAKING_ADMIN_IDENTITY,
     TREASURY_IDENTITY,
 };
+pub use tenant_broadcast_guard::{guard_for, TenantBroadcastDeny, TenantBroadcastGuard};
+pub use tenant_signing_context::{TenantSigningContext, TenantSigningDeny};
+pub use tenant_transaction::{TenantTransaction, TenantTransactionMeta};
 pub use tokens::Wallet;
-pub use tx::{TxBuilder, TxRequest};
+pub use tx::{BuiltTx, TxBuilder, TxRequest};
 pub use ws::{SolanaWs, WsMessage};

@@ -191,7 +191,15 @@ pub struct OrderParams<'a> {
     /// Address holding the funds (maker). Defaults to the signer when `None`.
     pub funder: Option<&'a str>,
     /// Order lifetime: `None`/0 for GTC, else a unix timestamp for GTD.
+    /// This is a **wire-body** field only — it is NOT part of the
+    /// EIP-712 signed struct (the V2 cutover removed it from the
+    /// signature); the bundle carries it so `POST /order` can send it.
     pub expiration_timestamp: u64,
+    /// Order creation time in **milliseconds** — the signed `timestamp`
+    /// field. The V2 cutover replaced the removed `nonce` with this
+    /// per-address uniqueness field, so every distinct signing uses a
+    /// distinct creation time and therefore a distinct order id.
+    pub created_at_ms: u64,
     /// Builder code (bytes32 hex) or `None` for zeros.
     pub builder_code: Option<&'a str>,
 }
@@ -207,6 +215,10 @@ pub struct SignedOrderBundle {
     pub verifying_contract: String,
     /// Whether this is a neg-risk market.
     pub neg_risk: bool,
+    /// GTD expiry in unix seconds, `"0"` for GTC. Sent in the
+    /// `POST /order` wire body (`order.expiration`) but never signed —
+    /// the V2 cutover removed `expiration` from the EIP-712 struct.
+    pub expiration: String,
 }
 
 impl SignedOrderBundle {
@@ -291,7 +303,11 @@ pub fn sign_order_bundle(key: &SigningKey, params: &OrderParams) -> PolyResult<S
         taker_amount: amounts.taker_amount.to_string(),
         side: amounts.side,
         signature_type: params.signature_type,
-        timestamp: params.expiration_timestamp.to_string(),
+        // The signed `timestamp` is the creation time in MILLISECONDS —
+        // the per-address uniqueness field that replaced the removed
+        // `nonce` (official V2 semantics; the GTD expiry is carried
+        // separately on the bundle and only in the wire body).
+        timestamp: params.created_at_ms.to_string(),
         metadata: String::new(),
         builder: params.builder_code.unwrap_or("").to_string(),
     };
@@ -323,6 +339,7 @@ pub fn sign_order_bundle(key: &SigningKey, params: &OrderParams) -> PolyResult<S
         signature,
         verifying_contract: verifying_contract.to_string(),
         neg_risk: params.neg_risk,
+        expiration: params.expiration_timestamp.to_string(),
     })
 }
 
@@ -1458,6 +1475,7 @@ mod tests {
             signature_type: 0,
             funder: None,
             expiration_timestamp: 0,
+            created_at_ms: 0,
             builder_code: None,
         };
         let bundle = sign_order_bundle(&key, &params).unwrap();
@@ -1489,6 +1507,7 @@ mod tests {
             signature_type: 0,
             funder: None,
             expiration_timestamp: expiration,
+            created_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
             builder_code: None,
         }
     }
@@ -1526,24 +1545,52 @@ mod tests {
     }
 
     #[test]
-    fn derived_order_id_is_deterministic_per_intent() {
-        // §G/§Q: re-signing the SAME intent (e.g. after an ambiguous HTTP
-        // timeout or a restart) must produce the SAME CLOB order id so the
-        // venue deduplicates instead of resting a second live order.
+    fn derived_order_id_is_deterministic_per_signed_struct() {
+        // §D-corrected semantics (official CLOB V2): the signed
+        // `timestamp` is the creation time in MILLISECONDS and is the
+        // per-address uniqueness field that replaced the removed
+        // `nonce`. Consequences, asserted below:
+        // * the SAME signed struct (one bundle, retried HTTP) always
+        //   derives the SAME order id — the venue deduplicates a
+        //   repost of the identical bytes;
+        // * a FRESH signing of the same intent at a later creation
+        //   time is a DIFFERENT order by design (that is what the
+        //   timestamp field is for);
+        // * different size, expiry window or signer are different
+        //   orders, as before.
         let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
         let a = sign_order_bundle(&key, &test_params(10.0, 0)).unwrap();
-        let b = sign_order_bundle(&key, &test_params(10.0, 0)).unwrap();
+        // The id derives purely from the signed struct — stable.
+        assert_eq!(a.derived_order_id().unwrap(), a.derived_order_id().unwrap());
+        // Same intent re-signed at the SAME creation time (the retry
+        // path: reuse the signed bundle) derives the same id.
+        let mut same_time = test_params(10.0, 0);
+        same_time.created_at_ms = a.order.timestamp.parse().unwrap();
+        let b = sign_order_bundle(&key, &same_time).unwrap();
         assert_eq!(a.derived_order_id().unwrap(), b.derived_order_id().unwrap());
-        // Different size → different intent → different id.
-        let c = sign_order_bundle(&key, &test_params(11.0, 0)).unwrap();
+        // A fresh creation time is a fresh order (uniqueness field).
+        let mut later = test_params(10.0, 0);
+        later.created_at_ms = a.order.timestamp.parse::<u64>().unwrap() + 1;
+        let c = sign_order_bundle(&key, &later).unwrap();
         assert_ne!(a.derived_order_id().unwrap(), c.derived_order_id().unwrap());
-        // GTD: a new expiration window is a new intent.
-        let d = sign_order_bundle(&key, &test_params(10.0, 1_900_000_000)).unwrap();
+        // Different size → different intent → different id.
+        let mut other_size = test_params(11.0, 0);
+        other_size.created_at_ms = a.order.timestamp.parse().unwrap();
+        let d = sign_order_bundle(&key, &other_size).unwrap();
         assert_ne!(a.derived_order_id().unwrap(), d.derived_order_id().unwrap());
+        // GTD: a new expiration window is a new intent (the expiry
+        // rides in the wire body and in the salt preimage).
+        let mut gtd = test_params(10.0, 1_900_000_000);
+        gtd.created_at_ms = a.order.timestamp.parse().unwrap();
+        let e = sign_order_bundle(&key, &gtd).unwrap();
+        assert_ne!(a.derived_order_id().unwrap(), e.derived_order_id().unwrap());
+        assert_eq!(e.expiration, "1900000000");
         // Another signer → different id (identity is part of the salt).
         let key2 = SigningKey::from_slice(&[9u8; 32]).unwrap();
-        let e = sign_order_bundle(&key2, &test_params(10.0, 0)).unwrap();
-        assert_ne!(a.derived_order_id().unwrap(), e.derived_order_id().unwrap());
+        let mut foreign = test_params(10.0, 0);
+        foreign.created_at_ms = a.order.timestamp.parse().unwrap();
+        let f = sign_order_bundle(&key2, &foreign).unwrap();
+        assert_ne!(a.derived_order_id().unwrap(), f.derived_order_id().unwrap());
         // Format: 0x + 64 hex chars (keccak256).
         let id = a.derived_order_id().unwrap();
         assert!(id.starts_with("0x") && id.len() == 66, "{id}");

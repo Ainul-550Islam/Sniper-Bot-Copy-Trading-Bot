@@ -431,6 +431,12 @@ pub struct Executor {
     /// Lifecycle ledger + duplicate guard. The process-wide ledger by
     /// default so every executor shares one guard.
     ledger: Arc<ExecutionLedger>,
+    /// Final tenant broadcast gate (PROMPT 4/10 file 27). `None` =
+    /// deployment-global executor with the pre-tenant behaviour,
+    /// byte-for-byte unchanged. `Some(..)` = every run/prebuilt request
+    /// must carry tenant metadata matching the bound context exactly or
+    /// the transaction is refused before signing (fail-closed).
+    tenant_guard: Option<Arc<crate::tenant_broadcast_guard::TenantBroadcastGuard>>,
 }
 
 impl Executor {
@@ -448,6 +454,7 @@ impl Executor {
             signers: None,
             fee_policy,
             ledger: execution::ledger(),
+            tenant_guard: None,
         }
     }
 
@@ -458,6 +465,40 @@ impl Executor {
     pub fn with_signer_registry(mut self, signers: Arc<crate::signer::SignerRegistry>) -> Self {
         self.signers = Some(signers);
         self
+    }
+
+    /// Attach the final tenant broadcast gate (PROMPT 4/10 file 27).
+    ///
+    /// From this moment the executor only signs/broadcasts transactions
+    /// whose [`crate::tx::TxRequest::tenant`] metadata matches the guard's
+    /// bound [`crate::tenant_signing_context::TenantSigningContext`]
+    /// (organization, runtime, fencing generation, module, wallet, live
+    /// signer binding). A deny is a policy veto that never leaves the
+    /// process — there is no fallback to unguarded execution.
+    ///
+    /// Fails at attach time when the guard's funding wallet is not THIS
+    /// executor's wallet (a mis-wired factory is a programming error that
+    /// must surface here, not at broadcast time).
+    pub fn with_tenant_guard(
+        mut self,
+        guard: Arc<crate::tenant_broadcast_guard::TenantBroadcastGuard>,
+    ) -> BotResult<Self> {
+        if guard.funding_wallet() != &self.wallet.pubkey {
+            return Err(BotError::invalid(format!(
+                "tenant guard wallet {} does not match the executor wallet {}",
+                guard.funding_wallet(),
+                self.wallet.pubkey
+            )));
+        }
+        self.tenant_guard = Some(guard);
+        Ok(self)
+    }
+
+    /// The attached tenant guard, when this executor is tenant-bound.
+    pub fn tenant_guard(
+        &self,
+    ) -> Option<&Arc<crate::tenant_broadcast_guard::TenantBroadcastGuard>> {
+        self.tenant_guard.as_ref()
     }
 
     /// Use a specific priority-fee policy (default: config defaults).
@@ -609,6 +650,21 @@ impl Executor {
     pub async fn run(&self, req: TxRequest) -> BotResult<ExecutionResult> {
         let started = Instant::now();
         let label = req.label.clone();
+
+        // ---- tenant broadcast gate (PROMPT 4/10 file 27) -------------------
+        // The FINAL tenant check, immediately before any signing/broadcast
+        // work: fail-closed, before the ledger records an attempt, so a
+        // refused tenant transaction leaves no lifecycle residue.
+        if let Some(guard) = &self.tenant_guard {
+            if let Err(deny) = guard.authorize(&req) {
+                guard.record_deny(&deny);
+                let mut r = guard.veto_result(&label, &deny);
+                r.total_ms = started.elapsed().as_millis() as u64;
+                meter_attempt(ExecStatus::Skipped);
+                return Ok(r);
+            }
+        }
+
         let intent = self.resolve_intent(&req).await;
 
         if req.priority_fee_micro_lamports < self.policy.min_priority_fee_micro_lamports {
@@ -1331,6 +1387,22 @@ impl Executor {
     pub async fn send_prebuilt(&self, built: &BuiltTx) -> BotResult<ExecutionResult> {
         let started = Instant::now();
         let signature = built.signature();
+
+        // ---- tenant broadcast gate (prebuilt path) ------------------------
+        // Same fail-closed rule as `run`: a tenant-guarded executor refuses
+        // a prebuilt transaction without matching tenant metadata before
+        // anything is submitted.
+        if let Some(guard) = &self.tenant_guard {
+            if let Err(deny) = guard.authorize_prebuilt(built) {
+                guard.record_deny(&deny);
+                let mut r = guard.veto_result(&built.label, &deny);
+                r.signature = signature.to_string();
+                r.total_ms = started.elapsed().as_millis() as u64;
+                meter_attempt(ExecStatus::Skipped);
+                return Ok(r);
+            }
+        }
+
         if self.is_paper() {
             let mut r = ExecutionResult::empty(&built.label, "", true);
             r.signature = signature.to_string();
@@ -1909,6 +1981,7 @@ mod tests {
             intent_id: String::new(),
             module: String::new(),
             symbol: String::new(),
+            tenant: None,
         };
         cache.insert("mint1", built.clone()).await;
         assert_eq!(cache.len().await, 1);
@@ -1937,6 +2010,7 @@ mod tests {
             intent_id: String::new(),
             module: String::new(),
             symbol: String::new(),
+            tenant: None,
         };
         cache.insert("k", built).await;
         assert!(cache.take("k").await.is_some());
@@ -1958,6 +2032,7 @@ mod tests {
             intent_id: String::new(),
             module: String::new(),
             symbol: String::new(),
+            tenant: None,
         };
         for i in 0..3 {
             cache.insert(format!("k{i}"), built.clone()).await;

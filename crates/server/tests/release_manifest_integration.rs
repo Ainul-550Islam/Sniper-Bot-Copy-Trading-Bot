@@ -1,4 +1,4 @@
-//! Release manifest integration placeholder (Batch 5).
+//! Release manifest integration tests (Batch 5; real assertions, not placeholders).
 //! Real logic in `crates/server/src/ops/release_manifest_verify.rs`.
 
 #[test]

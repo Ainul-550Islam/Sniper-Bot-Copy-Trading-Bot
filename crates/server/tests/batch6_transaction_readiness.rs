@@ -290,9 +290,15 @@ fn all_25_batch6_docs_exist() {
                 .unwrap_or(false)
         })
         .count();
+    // 2026-09-30: 101 -> 109 (PROMPT 5 §M evidence docs x7 +
+    // CURRENT-BUYER-STATE.md). 2026-10-01: 109 -> 122 (PROMPT 6 §K
+    // current-status family x9 + FORENSIC-SQL-RESEARCH +
+    // BUSINESS-MATRIX + BUYER-PACKAGE-CONTENTS + FINAL-16-SECTION-RESULT).
+    // Bumping this pin is the deliberate act of acknowledging the new
+    // document set.
     assert_eq!(
-        count, 101,
-        "docs/*.md should equal the current document count (101)"
+        count, 122,
+        "docs/*.md should equal the current document count (122)"
     );
 }
 

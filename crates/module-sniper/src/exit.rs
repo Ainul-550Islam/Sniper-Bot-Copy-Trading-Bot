@@ -874,6 +874,7 @@ impl Sniper {
         self.refresh_policy().await;
         // Write-ahead intent (§I crash point C) — exits move money too.
         let intent = self.intent_rec(&mint.to_string(), "sell", &sell_raw.to_string());
+        let req = self.tenant_stamp(req);
         bot_core::recovery::with_intent(
             self.intents.as_ref(),
             intent,
@@ -936,6 +937,7 @@ impl Sniper {
                 .with_intent_id(intent_id)
                 .attributed("sniper", mint.to_string());
                 let intent = self.intent_rec(&mint.to_string(), "sell", &sell_raw.to_string());
+                let built = self.tenant_stamp_built(built);
                 let result = bot_core::recovery::with_intent(
                     self.intents.as_ref(),
                     intent,

@@ -72,6 +72,15 @@ impl PolyBot {
             .with_auth(self.address.clone().unwrap_or_default(), ak))
     }
 
+    /// A fully-authenticated CLOB client for external callers of the
+    /// §D async pipeline (tenant executor backfill / reconciliation):
+    /// derives the API key when needed, then hands out the same
+    /// authenticated client the engine's own lifecycle calls use.
+    pub async fn authed_clob_client(&self) -> PolyResult<ClobClient> {
+        self.ensure_api_key().await?;
+        self.authed_client().await
+    }
+
     /// Spawn the heartbeat task (dead-man's switch).
     pub(crate) fn spawn_heartbeat(&self, interval_secs: u64) {
         let clob = self.clob.clone();

@@ -371,6 +371,7 @@ async fn post_order_sends_l2_headers_and_signed_bundle() {
         signature_type: 0,
         funder: None,
         expiration_timestamp: 0,
+        created_at_ms: 0,
         builder_code: None,
     };
     let bundle = build_signed_order(&key, &params).unwrap();
@@ -454,6 +455,7 @@ async fn authenticated_call_without_credentials_fails_locally() {
                     signature_type: 0,
                     funder: None,
                     expiration_timestamp: 0,
+                    created_at_ms: 0,
                     builder_code: None,
                 },
             )

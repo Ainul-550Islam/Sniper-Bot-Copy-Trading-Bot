@@ -55,10 +55,10 @@ if [ "$VER" != "$MAN_VER" ]; then echo "MISMATCH VERSION $VER vs manifest $MAN_V
 CARGO_VER="$(grep -E '^version =' "$ROOT/Cargo.toml" | head -n1 | sed 's/.*\"\(.*\)\"/\1/')"
 if [ "$VER" != "$CARGO_VER" ]; then echo "MISMATCH Cargo.toml $CARGO_VER vs VERSION $VER"; FAIL=1; else echo "Cargo.toml consistent"; fi
 
-# migration count consistency: check 0022 exists and manifest says 22
-if [ ! -f "$ROOT/crates/core/migrations/0022_checkout_url.sql" ]; then echo "MISSING migration 0022"; FAIL=1; else echo "OK migration 0022"; fi
+# migration count consistency: check 0024 exists and manifest says 24
+if [ ! -f "$ROOT/crates/core/migrations/0024_trading_tenant_backfill_constraints.sql" ]; then echo "MISSING migration 0024"; FAIL=1; else echo "OK migration 0024"; fi
 MAN_MIG="$(python3 -c "import json; d=json.load(open('$ROOT/release-manifest.json')); print(d.get('components',{}).get('database_migrations',{}).get('count',''))" 2>/dev/null || echo "")"
-if [ "$MAN_MIG" != "22" ]; then echo "WARN manifest migration count $MAN_MIG != 22"; fi
+if [ "$MAN_MIG" != "24" ]; then echo "WARN manifest migration count $MAN_MIG != 24"; fi
 
 # workspace members count 8
 MEMBERS="$(grep -c 'crates/' "$ROOT/Cargo.toml" | tr -d '[:space:]' || echo 0)"
@@ -157,6 +157,17 @@ import hashlib, sys
 from pathlib import Path
 root = Path(sys.argv[1]); src = root / "buyer-release" / "source"
 skip_dirs = {"buyer-release", "target", "node_modules", ".git", "__pycache__"}
+# Local toolchain state under .cargo/bin is never product (mirrors the
+# manifest walker's EXCLUDED_PREFIXES); .cargo config files like
+# audit.toml ARE product and stay mirrored.
+skip_prefixes = [(".cargo", "bin")]
+# Session artifacts excluded from the product by the manifest walker and
+# the rebuild mirror (one list, all three scripts — no drift).
+excluded_files = {
+    "PROMPT-4-PHASE0-MATRIX.md", "PROMPT-4-POLYMARKET-RESEARCH.md",
+    "PROMPT-4-PROGRESS.md", "PROMPT-4-RESULT.md", "PROMPT-5-SPEC.md",
+    "FILE-VERIFICATION-REPORT.md", "dump.rdb",
+}
 generated_dirs = {".next", ".turbo", ".vercel", "out", "dist", "build", "coverage", ".venv", ".cache"}
 relocated = {"licenses.csv", "licenses.json", "sbom.json", "sbom.cyclonedx.json"}
 report = []
@@ -166,7 +177,11 @@ for p in root.rglob("*"):
     rel = p.relative_to(root)
     if rel.parts[0] in skip_dirs or "node_modules" in rel.parts or "target" in rel.parts:
         continue
+    if len(rel.parts) > 1 and (rel.parts[0], rel.parts[1]) in skip_prefixes:
+        continue
     if any(part in generated_dirs for part in rel.parts):
+        continue
+    if rel.name in excluded_files:
         continue
     q = src / rel
     if q.exists():

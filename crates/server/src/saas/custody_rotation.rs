@@ -23,6 +23,10 @@ use crate::saas::middleware::{authorize_request, deny_response};
 
 #[derive(Debug, Deserialize)]
 pub struct RotationRequest {
+    /// The custody profile whose signers are being rotated. This names a
+    /// RESOURCE (ownership-checked below); it never selects the tenant —
+    /// the tenant comes from the authenticated context.
+    pub profile_id: String,
     pub old_signer_id: String,
     pub new_signer_id: String,
     pub provider_type: Option<String>,
@@ -45,15 +49,15 @@ pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/saas/custody/rotations", axum::routing::post(create))
         .route(
-            "/api/saas/custody/rotations/{id}",
+            "/api/saas/custody/rotations/:id",
             axum::routing::get(get_status),
         )
         .route(
-            "/api/saas/custody/rotations/{id}/activate",
+            "/api/saas/custody/rotations/:id/activate",
             axum::routing::post(activate),
         )
         .route(
-            "/api/saas/custody/rotations/{id}/revoke",
+            "/api/saas/custody/rotations/:id/revoke",
             axum::routing::post(revoke),
         )
 }
@@ -82,9 +86,40 @@ async fn create(
         Err(d) => return deny_response(&state, &d).await,
     };
     let org = ctx.organization.id;
-    let profile = state.saas.organization(org).await; // placeholder for profile resolution
-    let profile_id = CustodyProfileId::new(); // in prod, lookup profile; here synthetic but tenant-scoped
-    let _ = profile;
+    // P0 fix (PROMPT 5 §E): resolve the REAL custody profile from the
+    // profile store — tenant-scoped, fail-closed. No synthetic profile
+    // identity is ever invented here.
+    let profile_id = match CustodyProfileId::parse(&body.profile_id) {
+        Some(id) => id,
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid_profile_id"})),
+            )
+                .into_response()
+        }
+    };
+    let profile = match crate::saas::custody::find_profile(org, profile_id) {
+        Some(p) => p,
+        None => {
+            // Not found OR owned by another tenant: same answer, no oracle.
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({"error":"profile_not_found"})),
+            )
+                .into_response();
+        }
+    };
+    if profile.status != bot_core::custody::CustodyStatus::Active {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({
+                "error": "profile_not_active",
+                "status": profile.status.as_str(),
+            })),
+        )
+            .into_response();
+    }
     let old = match SignerId::parse(&body.old_signer_id) {
         Some(id) => id,
         None => {
@@ -111,6 +146,27 @@ async fn create(
             Json(json!({"error":"old_and_new_must_differ"})),
         )
             .into_response();
+    }
+    // Both signers must exist, belong to THIS tenant, and sit in the
+    // profile being rotated — a foreign or unbound signer id is refused.
+    for (label, id) in [("old", old), ("new", new)] {
+        match crate::saas::custody::find_signer(org, id) {
+            Some(signer) if signer.custody_profile_id == profile_id => {}
+            Some(_) => {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(json!({"error":"signer_not_in_profile","which":label})),
+                )
+                    .into_response()
+            }
+            None => {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({"error":"signer_not_found","which":label})),
+                )
+                    .into_response()
+            }
+        }
     }
     let provider = body
         .provider_type

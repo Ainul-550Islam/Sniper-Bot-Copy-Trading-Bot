@@ -1,4 +1,4 @@
-//! Buyer package integration placeholder (Batch 5).
+//! Buyer package integration tests (Batch 5; real assertions, not placeholders).
 
 #[test]
 fn buyer_package_verify_exists() {

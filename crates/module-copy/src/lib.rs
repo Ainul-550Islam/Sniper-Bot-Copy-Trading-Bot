@@ -48,13 +48,16 @@ pub mod policy;
 pub mod reconcile;
 pub mod recovery;
 pub mod sizing;
+pub mod tenant_context;
+pub mod tenant_executor;
+pub mod tenant_state;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use bot_core::config::Config;
 use bot_core::config::CopyWallet;
@@ -104,6 +107,14 @@ pub struct CopyBot {
     store: Arc<dyn CopyStore>,
     /// Monotonic delivery counter handed to events as `source_sequence`.
     sequence: u64,
+    /// Tenant execution context (PROMPT 4/10 §C). When present, every
+    /// money-moving request this bot builds carries tenant metadata and
+    /// the executor carries the final tenant broadcast guard. `None` =
+    /// the deployment-global operator mode, unchanged.
+    tenant: Option<solana_kit::tenant_signing_context::TenantSigningContext>,
+    /// The guard attached to the executor (kept so the exit path — which
+    /// receives the executor by reference — stamps the same identity).
+    tenant_guard: Option<Arc<solana_kit::tenant_broadcast_guard::TenantBroadcastGuard>>,
 }
 
 /// Fresh write-ahead intent record for one copy-trade broadcast (§I).
@@ -154,6 +165,8 @@ impl CopyBot {
             ordering: OrderingTracker::new(cfg.copy.strict_ordering),
             store: Arc::new(MemoryCopyStore::new()),
             sequence: 0,
+            tenant: None,
+            tenant_guard: None,
         }
     }
 
@@ -183,6 +196,71 @@ impl CopyBot {
     pub fn with_copy_store(mut self, store: Arc<dyn CopyStore>) -> Self {
         self.store = store;
         self
+    }
+
+    /// Bind this copy bot to ONE tenant (PROMPT 4/10 §C).
+    ///
+    /// Attaches the final tenant broadcast guard to the internal executor
+    /// and remembers the tenant signing context so every mirrored buy and
+    /// every exit carries tenant metadata. The guard's funding wallet
+    /// must be this bot's wallet. Without this call the bot keeps its
+    /// deployment-global operator behaviour unchanged.
+    pub fn with_tenant_context(
+        mut self,
+        guard: Arc<solana_kit::tenant_broadcast_guard::TenantBroadcastGuard>,
+    ) -> BotResult<Self> {
+        self.executor = self.executor.with_tenant_guard(Arc::clone(&guard))?;
+        self.tenant = Some(guard.context().clone());
+        self.tenant_guard = Some(guard);
+        Ok(self)
+    }
+
+    /// The bound tenant context, when tenant-scoped.
+    pub fn tenant_context(
+        &self,
+    ) -> Option<&solana_kit::tenant_signing_context::TenantSigningContext> {
+        self.tenant.as_ref()
+    }
+
+    /// Stamp tenant metadata onto an outgoing request (never overwrites
+    /// an explicitly attached meta — the guard judges mismatches, a
+    /// rewrite would mask them).
+    pub(crate) fn tenant_stamp(&self, req: solana_kit::tx::TxRequest) -> solana_kit::tx::TxRequest {
+        if req.tenant.is_some() {
+            return req;
+        }
+        match &self.tenant {
+            Some(ctx) => {
+                let meta = solana_kit::tenant_transaction::TenantTransactionMeta::from_context(
+                    ctx.execution_context(),
+                    &req.module,
+                    req.intent_id.as_deref(),
+                );
+                req.tenant(meta)
+            }
+            None => req,
+        }
+    }
+
+    /// Stamp tenant metadata onto a prebuilt (Jupiter-signed) transaction.
+    pub(crate) fn tenant_stamp_built(
+        &self,
+        built: solana_kit::tx::BuiltTx,
+    ) -> solana_kit::tx::BuiltTx {
+        if built.tenant.is_some() {
+            return built;
+        }
+        match &self.tenant {
+            Some(ctx) => {
+                let meta = solana_kit::tenant_transaction::TenantTransactionMeta::from_context(
+                    ctx.execution_context(),
+                    &built.module,
+                    Some(built.intent_id.as_str()),
+                );
+                built.with_tenant(meta)
+            }
+            None => built,
+        }
     }
 
     /// The leader registry (shared with the API / Telegram for read-only
@@ -558,6 +636,7 @@ impl CopyBot {
             &self.rpc,
             &self.wallet,
             &mut self.executor,
+            self.tenant.as_ref(),
             &self.layouts,
             &self.risk,
             &position,
@@ -641,7 +720,31 @@ impl CopyBot {
             self.ownership.clone(),
         )
         .await;
-        tokio::spawn(async move { sweeper.run().await });
+        // Tenant mode (PROMPT 4/10 §C): the sweeper builds its OWN
+        // executor, so the tenant broadcast guard must be attached here
+        // too — an unguarded sweeper would be a tenant-boundary hole.
+        // Fail closed: if the guard cannot be attached the run STOPS
+        // rather than continue with a deployment-global sweeper.
+        if let Some(guard) = &self.tenant_guard {
+            match sweeper.with_tenant_context(std::sync::Arc::clone(guard)) {
+                Ok(mut guarded) => {
+                    tokio::spawn(async move { guarded.run().await });
+                }
+                Err(e) => {
+                    error!(error = %e, "tenant exit sweeper guard attach failed");
+                    self.state
+                        .record_error(
+                            BotModule::Copy,
+                            &format!("tenant sweeper guard attach failed: {e}"),
+                        )
+                        .await;
+                    self.state.set_running(BotModule::Copy, false, false).await;
+                    return Err(e);
+                }
+            }
+        } else {
+            tokio::spawn(async move { sweeper.run().await });
+        }
 
         info!(wallets = cfg.copy.wallets.len(), "copy-trading bot running");
         let recon_secs = cfg.copy.reconcile_interval_secs.max(1);

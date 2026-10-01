@@ -162,9 +162,12 @@ async fn suspend(
     }
 
     if let Some(db) = &state.db {
-        let _ = sqlx::query("UPDATE organizations SET status='suspended', suspended_at=now(), suspend_reason=$2, updated_at=now() WHERE id=$1")
+        if let Err(error) = sqlx::query("UPDATE organizations SET status='suspended', suspended_at=now(), suspend_reason=$2, updated_at=now() WHERE id=$1")
             .bind(org_id.as_uuid()).bind(&org.suspend_reason)
-            .execute(db.pool()).await;
+            .execute(db.pool()).await
+        {
+            tracing::warn!("organizations suspend durable update failed (org {}): {}", org_id, error);
+        }
     }
 
     state
@@ -264,9 +267,12 @@ async fn resume(
     }
 
     if let Some(db) = &state.db {
-        let _ = sqlx::query("UPDATE organizations SET status='active', suspended_at=NULL, suspend_reason='', updated_at=now() WHERE id=$1")
+        if let Err(error) = sqlx::query("UPDATE organizations SET status='active', suspended_at=NULL, suspend_reason='', updated_at=now() WHERE id=$1")
             .bind(org_id.as_uuid())
-            .execute(db.pool()).await;
+            .execute(db.pool()).await
+        {
+            tracing::warn!("organizations resume durable update failed (org {}): {}", org_id, error);
+        }
     }
 
     state
@@ -377,9 +383,12 @@ async fn request_close(
     upsert_job(job.clone());
 
     if let Some(db) = &state.db {
-        let _ = sqlx::query("INSERT INTO tenant_lifecycle_jobs (id, organization_id, requested_action, phase, state, scheduled_at, started_at, retention_deadline, requested_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
+        if let Err(error) = sqlx::query("INSERT INTO tenant_lifecycle_jobs (id, organization_id, requested_action, phase, state, scheduled_at, started_at, retention_deadline, requested_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
             .bind(job.id).bind(org_id.as_uuid()).bind(&job.requested_action).bind(job.phase.as_str()).bind(job.state.as_str()).bind(job.scheduled_at).bind(job.started_at).bind(job.retention_deadline).bind(job.requested_by)
-            .execute(db.pool()).await;
+            .execute(db.pool()).await
+        {
+            tracing::warn!("tenant_lifecycle_jobs durable insert failed (job {}): {}", job.id, error);
+        }
     }
 
     // Invalidate credentials/sessions/custody bindings asynchronously — here we simulate by logging and marking.
@@ -394,11 +403,17 @@ async fn request_close(
     // Note: SaasStore in-memory sessions are not bulk-revoked here — DB path uses SQL below.
     if let Some(db) = &state.db {
         // Revoke sessions
-        let _ = sqlx::query("UPDATE saas_runtime_records SET record = jsonb_set(record, '{revoked_at}', to_jsonb(now()), true) WHERE kind='session' AND organization_id=$1")
-            .bind(org_id.as_uuid()).execute(db.pool()).await;
+        if let Err(error) = sqlx::query("UPDATE saas_runtime_records SET record = jsonb_set(record, '{revoked_at}', to_jsonb(now()), true) WHERE kind='session' AND organization_id=$1")
+            .bind(org_id.as_uuid()).execute(db.pool()).await
+        {
+            tracing::warn!("session revocation durable update failed (org {}): {}", org_id, error);
+        }
         // Revoke API keys
-        let _ = sqlx::query("UPDATE saas_runtime_records SET record = jsonb_set(record, '{revoked_at}', to_jsonb(now()), true) WHERE kind='api_key' AND organization_id=$1")
-            .bind(org_id.as_uuid()).execute(db.pool()).await;
+        if let Err(error) = sqlx::query("UPDATE saas_runtime_records SET record = jsonb_set(record, '{revoked_at}', to_jsonb(now()), true) WHERE kind='api_key' AND organization_id=$1")
+            .bind(org_id.as_uuid()).execute(db.pool()).await
+        {
+            tracing::warn!("api-key revocation durable update failed (org {}): {}", org_id, error);
+        }
     }
 
     (
@@ -534,14 +549,26 @@ async fn advance_job(
     upsert_job(job.clone());
 
     if let Some(db) = &state.db {
-        let _ = sqlx::query(
-            "UPDATE tenant_lifecycle_jobs SET phase=$2, state=$3, updated_at=now() WHERE id=$1",
+        // Defense-in-depth: the org check above (job.organization_id vs
+        // ctx.organization.id, platform scope exempt) is repeated in the
+        // durable WHERE clause so the write can never escape its tenant
+        // even if the in-process check were ever bypassed.
+        if let Err(error) = sqlx::query(
+            "UPDATE tenant_lifecycle_jobs SET phase=$2, state=$3, updated_at=now() WHERE id=$1 AND organization_id = $4",
         )
         .bind(job_id)
         .bind(job.phase.as_str())
         .bind(job.state.as_str())
+        .bind(job.organization_id.as_uuid())
         .execute(db.pool())
-        .await;
+        .await
+        {
+            tracing::warn!(
+                "tenant_lifecycle_jobs durable phase update failed (job {}): {}",
+                job_id,
+                error
+            );
+        }
     }
 
     state.audit.record("saas", "saas.lifecycle.phase.advanced", Some(&job_id.to_string()),

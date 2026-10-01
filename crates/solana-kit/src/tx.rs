@@ -65,6 +65,15 @@ pub struct TxRequest {
     pub module: String,
     /// Market / mint / pair for lifecycle records and dashboards.
     pub symbol: String,
+    /// Tenant identity for this transaction (PROMPT 4/10 file 28).
+    ///
+    /// `None` = deployment-global (operator) execution — the pre-tenant
+    /// behaviour, byte-for-byte unchanged. `Some(..)` = this transaction
+    /// belongs to a tenant, and a tenant-guarded executor will refuse to
+    /// sign or broadcast it unless the metadata matches its bound context
+    /// exactly. Deliberately NOT part of `intent_digest`: the digest pins
+    /// transaction content; tenant identity constrains who may submit.
+    pub tenant: Option<crate::tenant_transaction::TenantTransactionMeta>,
 }
 
 impl Default for TxRequest {
@@ -83,6 +92,7 @@ impl Default for TxRequest {
             intent_id: None,
             module: "solana".into(),
             symbol: String::new(),
+            tenant: None,
         }
     }
 }
@@ -141,6 +151,22 @@ impl TxRequest {
         self.module = module.into();
         self.symbol = symbol.into();
         self
+    }
+
+    /// Attach tenant identity to this request (PROMPT 4/10 file 28).
+    ///
+    /// The metadata is derived from an issued core execution context by
+    /// [`crate::tenant_transaction::TenantTransactionMeta::from_context`];
+    /// a tenant-guarded executor refuses any request whose metadata does
+    /// not match its bound context.
+    pub fn tenant(mut self, meta: crate::tenant_transaction::TenantTransactionMeta) -> Self {
+        self.tenant = Some(meta);
+        self
+    }
+
+    /// The attached tenant metadata, when present.
+    pub fn tenant_meta(&self) -> Option<&crate::tenant_transaction::TenantTransactionMeta> {
+        self.tenant.as_ref()
     }
 
     /// Deterministic digest of the request's LOGICAL content: instructions
@@ -394,6 +420,7 @@ impl<'a> TxBuilder<'a> {
             intent_id: req.intent_id.clone().unwrap_or_default(),
             module: req.module.clone(),
             symbol: req.symbol.clone(),
+            tenant: req.tenant.clone(),
         })
     }
 }
@@ -420,6 +447,10 @@ pub struct BuiltTx {
     /// Producing module / market for lifecycle records.
     pub module: String,
     pub symbol: String,
+    /// Tenant identity carried from the originating [`TxRequest`]
+    /// (`None` for deployment-global transactions and externally signed
+    /// wraps that never had one).
+    pub tenant: Option<crate::tenant_transaction::TenantTransactionMeta>,
 }
 
 impl BuiltTx {
@@ -468,6 +499,7 @@ impl BuiltTx {
             intent_id: String::new(),
             module: String::new(),
             symbol: String::new(),
+            tenant: None,
         })
     }
 
@@ -482,6 +514,15 @@ impl BuiltTx {
     pub fn attributed(mut self, module: impl Into<String>, symbol: impl Into<String>) -> Self {
         self.module = module.into();
         self.symbol = symbol.into();
+        self
+    }
+
+    /// Attach tenant identity to a prebuilt transaction (PROMPT 4/10
+    /// file 28). Externally signed transactions stay tenant-scoped too: a
+    /// tenant-guarded executor refuses a prebuilt without matching
+    /// metadata.
+    pub fn with_tenant(mut self, meta: crate::tenant_transaction::TenantTransactionMeta) -> Self {
+        self.tenant = Some(meta);
         self
     }
 

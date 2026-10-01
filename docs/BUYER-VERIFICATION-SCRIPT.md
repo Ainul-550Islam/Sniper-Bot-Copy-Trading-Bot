@@ -83,7 +83,7 @@ bash scripts/release-evidence.sh   # → release-evidence/summary.json (PASS/NOT
 LIVE_BILLING=1 STRIPE_API_KEY=sk_live_example_... STRIPE_WEBHOOK_SECRET=whsec_example_... \
   cargo test --test live_billing_contract -- --ignored --nocapture   # NOT_RUN without LIVE_BILLING=1; never PASS in hermetic
 
-# Vault/KMS/HSM live (GAP-002) — boundary verified, remote backend is NOT implemented in this build
+# Vault/KMS live (GAP-002) — REAL adapters implemented + unit-tested; live round-trip NOT_RUN here (HSM still unimplemented, fail-closed)
 LIVE_CUSTODY=1 VAULT_ADDR=https://vault.example.com VAULT_TOKEN=... \
   cargo test --test live_custody_contract -- --ignored --nocapture   # fail-closed: no local fallback; EXTERNAL_REQUIRED without creds
 

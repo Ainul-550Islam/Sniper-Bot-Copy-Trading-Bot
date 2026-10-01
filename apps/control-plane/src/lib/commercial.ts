@@ -70,11 +70,17 @@ export const commercial = {
   custodyHealth: () => request<CustodyHealth>("/api/saas/custody/health"),
   lifecycleStatus: (organizationId: string) =>
     request<LifecycleStatus>(`/api/saas/data-lifecycle/${encodeURIComponent(organizationId)}/status`),
-  // Rotation helpers
-  createRotation: (oldSignerId: string, newSignerId: string) =>
+  // Rotation helpers — the backend resolves the REAL custody profile from
+  // the authenticated organization and refuses synthetic rotations, so
+  // the caller must name the profile and both real signers.
+  createRotation: (profileId: string, oldSignerId: string, newSignerId: string) =>
     request<{ id: string }>(`/api/saas/custody/rotations`, {
       method: "POST",
-      body: { old_signer_id: oldSignerId, new_signer_id: newSignerId },
+      body: {
+        profile_id: profileId,
+        old_signer_id: oldSignerId,
+        new_signer_id: newSignerId,
+      },
     }),
 };
 

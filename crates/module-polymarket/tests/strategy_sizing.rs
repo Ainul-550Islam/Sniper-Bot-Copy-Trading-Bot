@@ -170,10 +170,24 @@ async fn gtd_expiry_and_order_type_reach_the_venue_as_configured() {
     let body = venue.last_body("POST", "/clob/order").unwrap();
     assert_eq!(body["orderType"], "GTD");
     assert_eq!(body["owner"], "mock-key");
+    // Corrected V2 semantics (§D): the signed `timestamp` is the
+    // creation time in MILLISECONDS (the uniqueness field that
+    // replaced the removed `nonce`); the GTD expiry travels in the
+    // UNSIGNED wire body `order.expiration`.
+    let posted_ts: u64 = body["order"]["timestamp"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .expect("timestamp is numeric");
+    assert!(
+        posted_ts >= (before as u64) * 1_000
+            && posted_ts <= ((before + 605) as u64) * 1_000 + 1_000,
+        "timestamp {posted_ts} is a creation-time millisecond value"
+    );
     assert_eq!(
-        body["order"]["timestamp"],
+        body["order"]["expiration"],
         sig.expiration.to_string(),
-        "GTD expiry travels in the V2 timestamp field"
+        "GTD expiry travels in the unsigned wire body"
     );
     assert_eq!(body["order"]["side"], "BUY");
     assert_eq!(body["order"]["tokenId"], YES);
@@ -202,7 +216,18 @@ async fn gtd_expiry_and_order_type_reach_the_venue_as_configured() {
     assert_eq!(out.stage, PolyStage::Filled, "{out:?}");
     let body = venue.last_body("POST", "/clob/order").unwrap();
     assert_eq!(body["orderType"], "FOK");
-    assert_eq!(body["order"]["timestamp"], "0");
+    // Creation-time milliseconds in the signed timestamp (§D); a
+    // non-GTD order carries expiration "0" in the wire body.
+    let fok_ts: u64 = body["order"]["timestamp"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .expect("numeric timestamp");
+    assert!(
+        fok_ts > 1_700_000_000_000,
+        "millisecond timestamp: {fok_ts}"
+    );
+    assert_eq!(body["order"]["expiration"], "0");
     let t = bot
         .tracked_orders()
         .await

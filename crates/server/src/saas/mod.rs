@@ -29,6 +29,7 @@ pub mod backup_status;
 pub mod billing;
 pub mod billing_reconciliation;
 pub mod billing_status;
+pub mod billing_view;
 pub mod billing_webhook;
 pub mod checkout;
 pub mod commercial_state;
@@ -174,21 +175,35 @@ pub async fn session_user(state: &ApiState, headers: &axum::http::HeaderMap) -> 
 /// deployment key maps to, on the Business plan so every module the
 /// operator already runs stays enabled. Idempotent: calling it twice
 /// returns the existing row.
+///
+/// The Business plan is ensured for a PRE-EXISTING organization too:
+/// migration 0024 backfills a legacy database by creating the deployment
+/// organization from SQL (same slug `deployment`, same name `Deployment`,
+/// active), and a deployment organization without a subscription would
+/// fail every plan-entitlement check once the runtime entitlement gates
+/// land. An operator's later plan change is never clobbered: the plan is
+/// only assigned when the organization has no subscription at all.
 pub async fn ensure_deployment_organization(store: &SaasStore) -> Option<Organization> {
-    if let Some(existing) = store.organization_by_slug(DEPLOYMENT_ORG_SLUG).await {
-        return Some(existing);
-    }
-    let now = Utc::now();
-    let org = Organization::new(
-        OrganizationId::new(),
-        DEPLOYMENT_ORG_SLUG,
-        "Deployment",
-        None,
-        now,
-    );
-    store.create_organization(&org).await.ok()?;
+    let org = if let Some(existing) = store.organization_by_slug(DEPLOYMENT_ORG_SLUG).await {
+        existing
+    } else {
+        let now = Utc::now();
+        let org = Organization::new(
+            OrganizationId::new(),
+            DEPLOYMENT_ORG_SLUG,
+            "Deployment",
+            None,
+            now,
+        );
+        store.create_organization(&org).await.ok()?;
+        org
+    };
     // Business tier: the deployment operator already had every module.
-    let _ = store.assign_plan(org.id, PlanCode::Business, now).await;
+    if store.subscription_of(org.id).await.is_none() {
+        let _ = store
+            .assign_plan(org.id, PlanCode::Business, Utc::now())
+            .await;
+    }
     Some(org)
 }
 

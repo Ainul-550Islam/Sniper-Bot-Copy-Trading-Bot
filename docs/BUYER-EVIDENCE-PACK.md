@@ -38,7 +38,7 @@ Evidence: `BUYER-TRUTH-REGISTER.md §1` (commands + outputs), `release-manifest.
 - **Rotation:** `rotation.rs` — `Pending → Active → Draining → Revoked` with `force` escape for emergency; non-force requires `Draining` before `Revoked`; rollback `Draining → Active`; audit emits.
 - **Server:** `saas/custody_rotation.rs` — tenant-scoped, `WalletManage` required, audit events for create/activate/revoke; `saas/custody_health.rs`, `custody.rs` — health never exposes private keys.
 - **SDK:** `custody.rs` — typed, safe.
-- **Note:** Only `Local` is reachable in tests; `Vault/KMS/HSM` stubs return `UnsupportedProvider`/`NotConfigured` and fail closed — **NOT EXECUTED** with real Vault/KMS (see §9).
+- **Note:** the Vault-transit and AWS-KMS adapters are REAL code with unit-tested wire protocols (sign/verify envelope, SigV4 vs the AWS-documented test vector, fail-closed paths); only `Local` completes a sign in this environment (no live backend) — **NOT EXECUTED** against real Vault/KMS (see §9). The domain-layer `Vault/Kms/Hsm` stubs in `crates/core/src/custody/provider.rs` remain as fail-closed refusals; HSM is unimplemented end-to-end.
 
 ### 2.3 Lifecycle — VERIFIED
 - **Deprovision:** `provisioning/deprovision.rs` — `Requested → TradingDisabled → CredentialsRevoked → SessionsInvalidated → CustodyRevoked → ResourcesCleaned → Retention → Completed` (idempotent, restart-safe).

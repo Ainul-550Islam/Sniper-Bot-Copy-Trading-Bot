@@ -76,6 +76,17 @@ mod reconcile;
 mod recovery;
 mod venue;
 
+// PROMPT 4/10 §D: Exchange V3 (position-backed orders), the async
+// commit pipeline, and the tenant execution boundary.
+pub mod async_commit;
+pub mod backfill;
+pub mod exchange_v3;
+pub mod position_orders;
+pub mod reconcile_async;
+pub mod tenant_context;
+pub mod tenant_executor;
+pub mod trade_resolution;
+
 pub use audit::AUDIT_ACTOR;
 pub use funding::CollateralSnapshot;
 pub use reconcile::{ReconFinding, ReconKind};
@@ -157,6 +168,11 @@ pub struct PolyBot {
     /// User-channel event queue (sender cloned into the feed task).
     user_tx: mpsc::Sender<UserEvent>,
     user_rx: Option<mpsc::Receiver<UserEvent>>,
+    /// Async-commit registry (§D): acceptances still owed settlement
+    /// facts (matched-without-hashes or `delayed`), awaiting backfill
+    /// / reconciliation. Shared so the tenant executor and the
+    /// reconciliation loop see the same pending set.
+    async_pending: Arc<backfill::AsyncPendingRegistry>,
 }
 
 impl PolyBot {
@@ -230,6 +246,7 @@ impl PolyBot {
             inflight: std::sync::Mutex::new(HashSet::new()),
             user_tx,
             user_rx: Some(user_rx),
+            async_pending: Arc::new(backfill::AsyncPendingRegistry::new()),
         })
     }
 
@@ -273,6 +290,40 @@ impl PolyBot {
     /// The order manager this bot records every order in.
     pub fn orders(&self) -> &Arc<OrderManager> {
         &self.orders
+    }
+
+    /// The engine's async pending registry (§D): acceptances still
+    /// owed settlement facts, awaiting backfill/reconciliation.
+    pub fn async_pending(&self) -> &Arc<backfill::AsyncPendingRegistry> {
+        &self.async_pending
+    }
+
+    /// The EOA address of the engine's signer — the PUBLIC identity
+    /// that signs orders (`None` when no signer is configured, i.e.
+    /// read-only/paper). Used by the tenant executor's wallet
+    /// binding: a live order's funds move from this address (or its
+    /// configured funder), so it must equal the tenant's bound venue
+    /// wallet.
+    pub fn signer_address(&self) -> Option<&str> {
+        self.address.as_deref()
+    }
+
+    /// The configured funder/maker override from the CURRENT config
+    /// snapshot (empty/absent ⇒ the signer itself is the maker).
+    pub async fn configured_funder(&self) -> Option<String> {
+        let cfg = self.state.config_snapshot().await;
+        cfg.polymarket
+            .funder_address
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// The durable journal store this engine writes venue snapshots
+    /// through (the operator engine's store; the tenant executor's
+    /// durable path is its sink — this accessor serves the async
+    /// reconciliation journal).
+    pub fn journal_store(&self) -> Arc<dyn store::PolyStore> {
+        Arc::clone(&self.store)
     }
 
     /// Snapshot of every tracked venue order.

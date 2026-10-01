@@ -676,6 +676,7 @@ impl PolyBot {
             signature_type: poly.signature_type,
             funder: poly.funder_address.as_deref(),
             expiration_timestamp: signal.expiration,
+            created_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
             builder_code: poly.builder_code.as_deref(),
         };
         let bundle = sign_order_bundle(key, &params)?;
@@ -726,6 +727,37 @@ impl PolyBot {
             }
         }
         let raw_status = resp.status.clone().unwrap_or_else(|| "live".into());
+        // Async commit pipeline (§D): classify the acceptance. When
+        // settlement facts are still owed — matched without hashes, or
+        // `delayed` (accepted, match deferred, zero amounts, no ids) —
+        // remember it in the async registry so backfill and
+        // reconciliation resolve it from the venue later. A delayed
+        // acceptance is NOT a fill and nothing is booked here.
+        let effective_order_id = resp
+            .order_id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| venue_order_id.to_string());
+        let mut acceptance = crate::async_commit::AsyncOrderAcceptance::from_response(&resp);
+        if acceptance.order_id.is_none() {
+            // Some venue answers omit the orderID on the async shapes;
+            // the derived struct hash IS the venue's order id (the
+            // same handle the LiveSubmit below carries).
+            acceptance.order_id = Some(effective_order_id.clone());
+        }
+        if acceptance.requires_backfill() {
+            if let Err(e) = self.async_pending.record(
+                &acceptance,
+                Utc::now(),
+                chrono::Duration::seconds(crate::tenant_executor::ASYNC_STALE_AFTER_SECS),
+            ) {
+                warn!(
+                    order = %effective_order_id,
+                    error = %e,
+                    "async acceptance could not be registered for backfill"
+                );
+            }
+        }
         Ok(LiveSubmit {
             venue_order_id: resp
                 .order_id

@@ -70,6 +70,10 @@ pub enum PostBehaviour {
     Reject { msg: String },
     /// HTTP 500 — transport-level ambiguity (SubmitUnknown).
     ServerError,
+    /// Answer arbitrary JSON verbatim — for the async-commit shapes
+    /// (matched-with-tradeIDs-without-hashes, `delayed`, …) the canned
+    /// variants do not model.
+    Raw(Value),
 }
 
 /// How `DELETE /order` answers.
@@ -92,6 +96,12 @@ pub struct VenueScript {
     pub cancel: Option<CancelBehaviour>,
     /// `GET /data/order?order_id=` answers (missing = 404).
     pub orders: HashMap<String, Value>,
+    /// Catch-all `GET /data/order` answer for ids NOT in `orders`
+    /// (used when a test cannot precompute the venue order id — with
+    /// the corrected V2 `timestamp` semantics every fresh signing is
+    /// a fresh order id, so scripts keyed by a precomputed hash no
+    /// longer match).
+    pub default_order: Option<Value>,
     /// `GET /data/orders` answer.
     pub open_orders: Vec<Value>,
     /// `GET /data/trades` answer.
@@ -138,6 +148,12 @@ impl MockVenue {
         s.allowance_raw = allowance_raw;
     }
     /// Script the venue's view of one order (`GET /data/order`).
+    /// Script a catch-all `GET /data/order` answer for unscripted ids
+    /// (`None` restores 404).
+    pub fn set_default_order(&self, v: Option<Value>) {
+        self.script.lock().unwrap().default_order = v;
+    }
+
     pub fn set_order(&self, id: &str, status: &str, size_matched: f64, original: f64) {
         let v = venue_order(id, status, size_matched, original);
         self.script
@@ -417,6 +433,7 @@ pub async fn mock_venue() -> MockVenue {
             PostBehaviour::ServerError => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "gateway exploded").into_response()
             }
+            PostBehaviour::Raw(v) => Json(v).into_response(),
         }
     }
 
@@ -476,8 +493,21 @@ pub async fn mock_venue() -> MockVenue {
             .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("order_id=")))
             .unwrap_or("")
             .to_ascii_lowercase();
-        let found = st.lock().unwrap().orders.get(&id).cloned();
-        match found {
+        let (found, default) = {
+            let st = st.lock().unwrap();
+            (st.orders.get(&id).cloned(), st.default_order.clone())
+        };
+        match found.or(default.map(|mut v| {
+            // Template the requested id into the catch-all so the
+            // client sees a well-formed order for THIS lookup.
+            if let Some(obj) = v.as_object_mut() {
+                // Only the struct's exact field name — adding the
+                // alias too would make the JSON carry a duplicate
+                // field, which serde rejects.
+                obj.insert("id".into(), Value::String(id.clone()));
+            }
+            v
+        })) {
             Some(v) => Json(v).into_response(),
             None => (StatusCode::NOT_FOUND, "not found").into_response(),
         }
@@ -714,6 +744,7 @@ pub fn sign_for(
         signature_type: poly.signature_type,
         funder: poly.funder_address.as_deref(),
         expiration_timestamp: signal.expiration,
+        created_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
         builder_code: poly.builder_code.as_deref(),
     };
     let bundle = sign_order_bundle(&test_key(), &params).expect("test signing");

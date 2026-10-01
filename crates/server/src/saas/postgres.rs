@@ -26,6 +26,7 @@ pub const SUBSCRIPTION: &str = "subscription";
 pub const ENTITLEMENT: &str = "entitlement";
 pub const USAGE: &str = "usage";
 pub const JOB: &str = "provisioning_job";
+pub const PAYMENT: &str = "payment_transaction";
 
 /// Shared PostgreSQL repository.
 pub struct PostgresSaasRepo {

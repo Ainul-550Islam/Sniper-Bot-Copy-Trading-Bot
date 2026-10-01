@@ -63,6 +63,7 @@ pub mod session;
 pub mod state;
 pub mod storage;
 pub mod tenant;
+pub mod trading_repository;
 
 pub use config::{AppConfig, Config};
 pub use error::{BotError, BotResult};

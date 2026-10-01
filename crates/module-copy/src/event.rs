@@ -1302,6 +1302,7 @@ impl CopyBot {
             &self.rpc,
             &self.wallet,
             &mut self.executor,
+            self.tenant.as_ref(),
             &self.layouts,
             &self.risk,
             &position,

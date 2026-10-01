@@ -51,7 +51,7 @@ export type Json = Record<string, unknown>;
 
 /** Options for {@link request}. */
 export interface RequestOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   /** Extra headers for one-off calls. */
   headers?: Record<string, string>;

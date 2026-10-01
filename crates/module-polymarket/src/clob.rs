@@ -181,6 +181,16 @@ pub struct PostOrderResponse {
     /// Filled making amount as a decimal string (raw 6-dec units).
     #[serde(default, alias = "makingAmount")]
     pub making_amount: Option<String>,
+    /// Trade ids for the fills this acceptance produced (async commit
+    /// pipeline: present when the order matched, EMPTY when the order
+    /// is `delayed`/`live`). Never fabricated — absent stays absent.
+    #[serde(default, alias = "tradeIDs", alias = "tradeIds")]
+    pub trade_ids: Option<Vec<String>>,
+    /// Settlement transaction hashes for those fills — async: may be
+    /// EMPTY on acceptance even for a matched order, and are resolved
+    /// later by polling (see `trade_resolution`).
+    #[serde(default, alias = "transactionsHashes", alias = "transactionsHashes")]
+    pub transactions_hashes: Option<Vec<String>>,
 }
 
 /// Provider-side view of one order (`GET /data/order`, `GET /data/orders`).
@@ -293,6 +303,17 @@ pub struct ClobTrade {
     /// Unix seconds string.
     #[serde(default)]
     pub match_time: String,
+    /// Settlement transaction hash (empty until the trade settles
+    /// on-chain; a `MATCHED` trade may not have one yet).
+    #[serde(default, alias = "transactionHash")]
+    pub transaction_hash: String,
+    /// Index of the bucket when one trade settles across multiple
+    /// transactions (0 when single).
+    #[serde(default)]
+    pub bucket_index: Option<i64>,
+    /// Timestamp of the venue's last status update for this trade.
+    #[serde(default, alias = "lastUpdate")]
+    pub last_update: String,
 }
 
 impl ClobTrade {
@@ -517,6 +538,7 @@ impl ClobClient {
             "side": if bundle.order.side == 0 { "BUY" } else { "SELL" },
             "signatureType": bundle.order.signature_type,
             "timestamp": bundle.order.timestamp,
+            "expiration": if bundle.expiration.is_empty() { "0".to_string() } else { bundle.expiration.clone() },
             "metadata": zero_if_empty(&bundle.order.metadata),
             "builder": zero_if_empty(&bundle.order.builder),
             "signature": bundle.signature,
@@ -525,6 +547,42 @@ impl ClobClient {
             "order": order_json,
             "owner": self.require_auth()?.key,
             "orderType": order_type,
+            "deferExec": false,
+        });
+        let v = self.l2_request("POST", "/order", Some(&body)).await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// `POST /order` with an explicit `deferExec` flag. `defer_exec =
+    /// true` asks the CLOB to defer the order's execution (the
+    /// acceptance then comes back without fills); the default
+    /// `post_order` sends `false`.
+    pub async fn post_order_with_defer(
+        &self,
+        bundle: &SignedOrderBundle,
+        order_type: &str,
+        defer_exec: bool,
+    ) -> PolyResult<PostOrderResponse> {
+        let order_json = serde_json::json!({
+            "salt": bundle.order.salt,
+            "maker": bundle.order.maker,
+            "signer": bundle.order.signer,
+            "tokenId": bundle.order.token_id,
+            "makerAmount": bundle.order.maker_amount,
+            "takerAmount": bundle.order.taker_amount,
+            "side": if bundle.order.side == 0 { "BUY" } else { "SELL" },
+            "signatureType": bundle.order.signature_type,
+            "timestamp": bundle.order.timestamp,
+            "expiration": if bundle.expiration.is_empty() { "0".to_string() } else { bundle.expiration.clone() },
+            "metadata": zero_if_empty(&bundle.order.metadata),
+            "builder": zero_if_empty(&bundle.order.builder),
+            "signature": bundle.signature,
+        });
+        let body = serde_json::json!({
+            "order": order_json,
+            "owner": self.require_auth()?.key,
+            "orderType": order_type,
+            "deferExec": defer_exec,
         });
         let v = self.l2_request("POST", "/order", Some(&body)).await?;
         Ok(serde_json::from_value(v)?)

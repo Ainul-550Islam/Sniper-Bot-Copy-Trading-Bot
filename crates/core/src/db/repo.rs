@@ -71,18 +71,23 @@ impl OrderRepo {
     /// `Ok(true)` = inserted, `Ok(false)` = duplicate key (caller should
     /// fetch + reuse the existing order).
     pub async fn insert_if_absent(&self, o: &Order) -> RepoResult<bool> {
+        // 0026: the idempotency arbiter is the tenant composite
+        // (organization_id, idempotency_key) — the legacy plane binds
+        // the deployment organization explicitly.
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
         let res = self
             .db
             .timed(
                 "order_insert",
                 sqlx::query(
                     r#"INSERT INTO orders
-                        (id, idempotency_key, module, side, symbol, venue, mode,
-                         status, qty, price, external_id, signature, error, meta,
-                         created_at, updated_at, submitted_at, finished_at)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-                       ON CONFLICT (idempotency_key) DO NOTHING"#,
+                        (organization_id, id, idempotency_key, module, side, symbol,
+                         venue, mode, status, qty, price, external_id, signature,
+                         error, meta, created_at, updated_at, submitted_at, finished_at)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+                       ON CONFLICT (organization_id, idempotency_key) DO NOTHING"#,
                 )
+                .bind(org)
                 .bind(&o.id)
                 .bind(&o.idempotency_key)
                 .bind(o.module.as_str())
@@ -109,15 +114,19 @@ impl OrderRepo {
 
     /// Full upsert used for mirror refresh + recovery writes.
     pub async fn upsert(&self, o: &Order) -> RepoResult<()> {
+        // `orders.id` stays the GLOBAL app-assigned primary key; the
+        // conflict leg is tenant-guarded so a cross-tenant id
+        // collision can never mutate another tenant's order.
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
         self.db
             .timed(
                 "order_upsert",
                 sqlx::query(
                     r#"INSERT INTO orders
-                        (id, idempotency_key, module, side, symbol, venue, mode,
-                         status, qty, price, external_id, signature, error, meta,
-                         created_at, updated_at, submitted_at, finished_at)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                        (organization_id, id, idempotency_key, module, side, symbol,
+                         venue, mode, status, qty, price, external_id, signature,
+                         error, meta, created_at, updated_at, submitted_at, finished_at)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
                        ON CONFLICT (id) DO UPDATE SET
                          status = EXCLUDED.status,
                          qty = EXCLUDED.qty,
@@ -128,8 +137,10 @@ impl OrderRepo {
                          meta = EXCLUDED.meta,
                          updated_at = EXCLUDED.updated_at,
                          submitted_at = COALESCE(EXCLUDED.submitted_at, orders.submitted_at),
-                         finished_at = EXCLUDED.finished_at"#,
+                         finished_at = EXCLUDED.finished_at
+                       WHERE orders.organization_id = $1"#,
                 )
+                .bind(org)
                 .bind(&o.id)
                 .bind(&o.idempotency_key)
                 .bind(o.module.as_str())
@@ -161,13 +172,15 @@ impl OrderRepo {
         from: OrderStatus,
         reason: Option<&str>,
     ) -> RepoResult<()> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
         let mut tx = self.db.pool().begin().await.map_err(TimedDbError::Error)?;
         sqlx::query(
-            r#"UPDATE orders SET status = $2, updated_at = $3,
-                     submitted_at = COALESCE(submitted_at, $4),
-                     finished_at = $5, error = COALESCE($6, error)
-               WHERE id = $1"#,
+            r#"UPDATE orders SET status = $3, updated_at = $4,
+                     submitted_at = COALESCE(submitted_at, $5),
+                     finished_at = $6, error = COALESCE($7, error)
+               WHERE organization_id = $1 AND id = $2"#,
         )
+        .bind(org)
         .bind(&o.id)
         .bind(o.status.as_str())
         .bind(o.updated_at)
@@ -182,9 +195,11 @@ impl OrderRepo {
         .await
         .map_err(TimedDbError::Error)?;
         sqlx::query(
-            r#"INSERT INTO order_status_history (order_id, from_status, to_status, reason)
-               VALUES ($1, $2, $3, $4)"#,
+            r#"INSERT INTO order_status_history
+                   (organization_id, order_id, from_status, to_status, reason)
+               VALUES ($1, $2, $3, $4, $5)"#,
         )
+        .bind(org)
         .bind(&o.id)
         .bind(from.as_str())
         .bind(o.status.as_str())
@@ -197,14 +212,16 @@ impl OrderRepo {
     }
 
     pub async fn update_external(&self, o: &Order) -> RepoResult<()> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
         self.db
             .timed(
                 "order_external",
                 sqlx::query(
-                    r#"UPDATE orders SET external_id = COALESCE($2, external_id),
-                              signature = COALESCE($3, signature), updated_at = $4
-                        WHERE id = $1"#,
+                    r#"UPDATE orders SET external_id = COALESCE($3, external_id),
+                              signature = COALESCE($4, signature), updated_at = $5
+                        WHERE organization_id = $1 AND id = $2"#,
                 )
+                .bind(org)
                 .bind(&o.id)
                 .bind(&o.external_id)
                 .bind(&o.signature)
@@ -220,7 +237,8 @@ impl OrderRepo {
             .db
             .timed(
                 "order_get",
-                sqlx::query("SELECT * FROM orders WHERE id = $1")
+                sqlx::query("SELECT * FROM orders WHERE organization_id = $1 AND id = $2")
+                    .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                     .bind(id)
                     .fetch_optional(self.db.pool()),
             )
@@ -233,9 +251,12 @@ impl OrderRepo {
             .db
             .timed(
                 "order_get_by_key",
-                sqlx::query("SELECT * FROM orders WHERE idempotency_key = $1")
-                    .bind(key)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM orders WHERE organization_id = $1 AND idempotency_key = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(key)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.as_ref().map(Self::map))
@@ -247,8 +268,10 @@ impl OrderRepo {
             .timed(
                 "order_get_by_sig",
                 sqlx::query(
-                    "SELECT * FROM orders WHERE signature = $1 ORDER BY created_at DESC LIMIT 1",
+                    "SELECT * FROM orders WHERE organization_id = $1 AND signature = $2 \
+                     ORDER BY created_at DESC LIMIT 1",
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(sig)
                 .fetch_optional(self.db.pool()),
             )
@@ -264,9 +287,12 @@ impl OrderRepo {
                 "orders_incomplete",
                 sqlx::query(
                     r#"SELECT * FROM orders
-                        WHERE status NOT IN ('filled','failed','cancelled','expired','reconciled')
+                        WHERE organization_id = $1
+                          AND status NOT IN
+                              ('filled','failed','cancelled','expired','reconciled')
                         ORDER BY created_at ASC LIMIT 5000"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;
@@ -278,9 +304,13 @@ impl OrderRepo {
             .db
             .timed(
                 "orders_recent",
-                sqlx::query("SELECT * FROM orders ORDER BY created_at DESC LIMIT $1")
-                    .bind(limit.clamp(1, 1000))
-                    .fetch_all(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM orders WHERE organization_id = $1 \
+                     ORDER BY created_at DESC LIMIT $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(limit.clamp(1, 1000))
+                .fetch_all(self.db.pool()),
             )
             .await?;
         Ok(rows.iter().map(Self::map).collect())
@@ -291,9 +321,11 @@ impl OrderRepo {
             .timed(
                 "execution_append",
                 sqlx::query(
-                    r#"INSERT INTO executions (order_id, ts, kind, endpoint, latency_ms, ok, detail)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7)"#,
+                    r#"INSERT INTO executions
+                           (organization_id, order_id, ts, kind, endpoint, latency_ms, ok, detail)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.order_id)
                 .bind(rec.ts)
                 .bind(&rec.kind)
@@ -369,19 +401,24 @@ impl PositionRepo {
 
     /// Upsert the full position row (open, closing or terminal).
     pub async fn upsert(&self, p: &Position) -> RepoResult<()> {
+        // `positions.id` stays the GLOBAL app-assigned primary key; the
+        // conflict leg is tenant-guarded (same shape as the tenant
+        // data plane's TenantPositionWrite::upsert).
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
         self.db
             .timed(
                 "position_upsert",
                 sqlx::query(
                     r#"INSERT INTO positions
-                        (id, source, venue, mode, status, symbol, symbol_display, quote_symbol,
-                         qty, avg_entry, cost_basis, realized_quote, last_mark,
-                         stop_loss, take_profit, trailing_stop, trailing_high_water,
-                         max_hold_secs, entry_signature, exit_signature, entry_latency_ms,
+                        (organization_id, id, source, venue, mode, status, symbol,
+                         symbol_display, quote_symbol, qty, avg_entry, cost_basis,
+                         realized_quote, last_mark, stop_loss, take_profit,
+                         trailing_stop, trailing_high_water, max_hold_secs,
+                         entry_signature, exit_signature, entry_latency_ms,
                          copied_wallet, market_id, outcome, reason_closed,
                          opened_at, updated_at, closed_at)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                               $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+                               $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
                        ON CONFLICT (id) DO UPDATE SET
                          status = EXCLUDED.status, qty = EXCLUDED.qty,
                          avg_entry = EXCLUDED.avg_entry, cost_basis = EXCLUDED.cost_basis,
@@ -394,8 +431,10 @@ impl PositionRepo {
                          exit_signature = COALESCE(EXCLUDED.exit_signature, positions.exit_signature),
                          reason_closed = EXCLUDED.reason_closed,
                          updated_at = EXCLUDED.updated_at,
-                         closed_at = COALESCE(EXCLUDED.closed_at, positions.closed_at)"#,
+                         closed_at = COALESCE(EXCLUDED.closed_at, positions.closed_at)
+                       WHERE positions.organization_id = $1"#,
                 )
+                .bind(org)
                 .bind(&p.id)
                 .bind(p.source.as_str())
                 .bind(p.venue.as_str())
@@ -437,9 +476,11 @@ impl PositionRepo {
             .timed(
                 "positions_open",
                 sqlx::query(
-                    r#"SELECT * FROM positions WHERE status IN ('open','closing')
+                    r#"SELECT * FROM positions
+                        WHERE organization_id = $1 AND status IN ('open','closing')
                         ORDER BY opened_at ASC LIMIT 5000"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;
@@ -451,7 +492,8 @@ impl PositionRepo {
             .db
             .timed(
                 "position_get",
-                sqlx::query("SELECT * FROM positions WHERE id = $1")
+                sqlx::query("SELECT * FROM positions WHERE organization_id = $1 AND id = $2")
+                    .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                     .bind(id)
                     .fetch_optional(self.db.pool()),
             )
@@ -464,9 +506,13 @@ impl PositionRepo {
             .db
             .timed(
                 "positions_recent",
-                sqlx::query("SELECT * FROM positions ORDER BY updated_at DESC LIMIT $1")
-                    .bind(limit.clamp(1, 1000))
-                    .fetch_all(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM positions WHERE organization_id = $1 \
+                     ORDER BY updated_at DESC LIMIT $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(limit.clamp(1, 1000))
+                .fetch_all(self.db.pool()),
             )
             .await?;
         Ok(rows.iter().map(Self::map).collect())
@@ -490,12 +536,13 @@ impl TradeRepo {
                 "trade_append",
                 sqlx::query(
                     r#"INSERT INTO trades
-                        (id, ts, source, venue, mode, side, symbol, symbol_display,
-                         amount_in, amount_out, quote_symbol, price, fee, slippage_bps,
-                         signature, position_id, note, latency_ms)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                        (organization_id, id, ts, source, venue, mode, side, symbol,
+                         symbol_display, amount_in, amount_out, quote_symbol, price,
+                         fee, slippage_bps, signature, position_id, note, latency_ms)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
                        ON CONFLICT (id) DO NOTHING"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&t.id)
                 .bind(t.ts)
                 .bind(t.source.as_str())
@@ -525,9 +572,12 @@ impl TradeRepo {
             .db
             .timed(
                 "trades_recent",
-                sqlx::query("SELECT * FROM trades ORDER BY ts DESC LIMIT $1")
-                    .bind(limit.clamp(1, 1000))
-                    .fetch_all(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM trades WHERE organization_id = $1 ORDER BY ts DESC LIMIT $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(limit.clamp(1, 1000))
+                .fetch_all(self.db.pool()),
             )
             .await?;
         Ok(rows.iter().map(Self::map).collect())
@@ -540,9 +590,13 @@ impl TradeRepo {
             .db
             .timed(
                 "trades_for_position",
-                sqlx::query("SELECT * FROM trades WHERE position_id = $1 ORDER BY ts ASC")
-                    .bind(position_id)
-                    .fetch_all(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM trades WHERE organization_id = $1 AND position_id = $2 \
+                     ORDER BY ts ASC",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(position_id)
+                .fetch_all(self.db.pool()),
             )
             .await?;
         Ok(rows.iter().map(Self::map).collect())
@@ -606,15 +660,19 @@ impl DedupRepo {
         } else {
             Some(Utc::now() + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::days(7)))
         };
+        // 0027: dedup identity is (organization_id, namespace, key) —
+        // the same namespace+key can be marked by another tenant
+        // independently; this tenant's mark is invisible to theirs.
         let res = self
             .db
             .timed(
                 "dedup_mark",
                 sqlx::query(
-                    r#"INSERT INTO dedup_keys (namespace, key, expires_at)
-                       VALUES ($1, $2, $3)
-                       ON CONFLICT (namespace, key) DO NOTHING"#,
+                    r#"INSERT INTO dedup_keys (organization_id, namespace, key, expires_at)
+                       VALUES ($1, $2, $3, $4)
+                       ON CONFLICT (organization_id, namespace, key) DO NOTHING"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(ns)
                 .bind(key)
                 .bind(expires)
@@ -630,10 +688,14 @@ impl DedupRepo {
         self.db
             .timed(
                 "dedup_forget",
-                sqlx::query("DELETE FROM dedup_keys WHERE namespace = $1 AND key = $2")
-                    .bind(ns)
-                    .bind(key)
-                    .execute(self.db.pool()),
+                sqlx::query(
+                    "DELETE FROM dedup_keys \
+                     WHERE organization_id = $1 AND namespace = $2 AND key = $3",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(ns)
+                .bind(key)
+                .execute(self.db.pool()),
             )
             .await?;
         Ok(())
@@ -644,10 +706,14 @@ impl DedupRepo {
             .db
             .timed(
                 "dedup_exists",
-                sqlx::query("SELECT 1 AS one FROM dedup_keys WHERE namespace = $1 AND key = $2")
-                    .bind(ns)
-                    .bind(key)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT 1 AS one FROM dedup_keys \
+                     WHERE organization_id = $1 AND namespace = $2 AND key = $3",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(ns)
+                .bind(key)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.is_some())
@@ -660,8 +726,11 @@ impl DedupRepo {
             .timed(
                 "dedup_cleanup",
                 sqlx::query(
-                    "DELETE FROM dedup_keys WHERE expires_at IS NOT NULL AND expires_at < now()",
+                    "DELETE FROM dedup_keys \
+                     WHERE organization_id = $1 \
+                       AND expires_at IS NOT NULL AND expires_at < now()",
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .execute(self.db.pool()),
             )
             .await?;
@@ -686,10 +755,11 @@ impl IdempotencyRepo {
             .timed(
                 "idem_consume",
                 sqlx::query(
-                    r#"INSERT INTO idempotency_keys (scope, key, consumed_at)
-                       VALUES ($1, $2, now())
-                       ON CONFLICT (scope, key) DO NOTHING"#,
+                    r#"INSERT INTO idempotency_keys (organization_id, scope, key, consumed_at)
+                       VALUES ($1, $2, $3, now())
+                       ON CONFLICT (organization_id, scope, key) DO NOTHING"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(scope)
                 .bind(key)
                 .execute(self.db.pool()),
@@ -708,8 +778,10 @@ impl IdempotencyRepo {
             .timed(
                 "idem_response",
                 sqlx::query(
-                    "UPDATE idempotency_keys SET response = $3 WHERE scope = $1 AND key = $2",
+                    "UPDATE idempotency_keys SET response = $4 \
+                     WHERE organization_id = $1 AND scope = $2 AND key = $3",
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(scope)
                 .bind(key)
                 .bind(resp)
@@ -725,9 +797,12 @@ impl IdempotencyRepo {
             .db
             .timed(
                 "idem_cleanup",
-                sqlx::query("DELETE FROM idempotency_keys WHERE created_at < $1")
-                    .bind(cutoff)
-                    .execute(self.db.pool()),
+                sqlx::query(
+                    "DELETE FROM idempotency_keys WHERE organization_id = $1 AND created_at < $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(cutoff)
+                .execute(self.db.pool()),
             )
             .await?;
         Ok(res.rows_affected())
@@ -760,9 +835,13 @@ impl TransactionRepo {
             .db
             .timed(
                 "tx_get_status",
-                sqlx::query_as("SELECT status FROM transactions WHERE signature = $1")
-                    .bind(signature)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query_as(
+                    "SELECT status FROM transactions \
+                     WHERE organization_id = $1 AND signature = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(signature)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.map(|r| r.0))
@@ -777,6 +856,11 @@ impl TransactionRepo {
         venue: Option<&str>,
         attempts: i32,
     ) -> RepoResult<bool> {
+        // The blockchain signature stays the GLOBAL primary key (one
+        // transaction on chain = one row, whoever submitted it); the
+        // row is ATTRIBUTED to the deployment organization so tenant
+        // accounting stays exact. Cross-replica `attempts` MAX + COALESCE
+        // semantics below are unchanged (0006).
         // Cross-replica truth for `attempts`: while the row is still
         // 'submitted', a re-recording replica MAXES the broadcast-attempt
         // count and fills in attribution it has but the row lacks (COALESCE
@@ -790,8 +874,9 @@ impl TransactionRepo {
                 "tx_submitted",
                 sqlx::query_as(
                     r#"INSERT INTO transactions
-                           (signature, chain, order_id, status, signer, venue, attempts)
-                       VALUES ($1, $2, $3, 'submitted', $4, $5, $6)
+                           (signature, organization_id, chain, order_id, status,
+                            signer, venue, attempts)
+                       VALUES ($1, $2, $3, $4, 'submitted', $5, $6, $7)
                        ON CONFLICT (signature) DO UPDATE
                            SET attempts = GREATEST(transactions.attempts, EXCLUDED.attempts),
                                order_id = COALESCE(transactions.order_id, EXCLUDED.order_id),
@@ -801,6 +886,7 @@ impl TransactionRepo {
                        RETURNING (xmax = 0)"#,
                 )
                 .bind(signature)
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(chain)
                 .bind(order_id)
                 .bind(signer)
@@ -819,9 +905,13 @@ impl TransactionRepo {
             .db
             .timed(
                 "tx_get_order_id",
-                sqlx::query_as("SELECT order_id FROM transactions WHERE signature = $1")
-                    .bind(signature)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query_as(
+                    "SELECT order_id FROM transactions \
+                     WHERE organization_id = $1 AND signature = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(signature)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.and_then(|r| r.0))
@@ -833,9 +923,13 @@ impl TransactionRepo {
             .db
             .timed(
                 "tx_get_attempts",
-                sqlx::query_as("SELECT attempts FROM transactions WHERE signature = $1")
-                    .bind(signature)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query_as(
+                    "SELECT attempts FROM transactions \
+                     WHERE organization_id = $1 AND signature = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(signature)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.map(|r| r.0))
@@ -853,12 +947,13 @@ impl TransactionRepo {
             .timed(
                 "tx_status",
                 sqlx::query(
-                    r#"UPDATE transactions SET status = $2, landed = $3,
-                              slot = COALESCE($4, slot), error = $5,
-                              confirmed_at = CASE WHEN $3 AND confirmed_at IS NULL
+                    r#"UPDATE transactions SET status = $3, landed = $4,
+                              slot = COALESCE($5, slot), error = $6,
+                              confirmed_at = CASE WHEN $4 AND confirmed_at IS NULL
                                                   THEN now() ELSE confirmed_at END
-                        WHERE signature = $1"#,
+                        WHERE organization_id = $1 AND signature = $2"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(signature)
                 .bind(status)
                 .bind(landed)
@@ -883,10 +978,12 @@ impl TransactionRepo {
                 "tx_unresolved",
                 sqlx::query(
                     r#"SELECT signature, order_id FROM transactions
-                        WHERE status IN ('submitted','confirmed')
-                          AND submitted_at < $1
-                        ORDER BY submitted_at ASC LIMIT $2"#,
+                        WHERE organization_id = $1
+                          AND status IN ('submitted','confirmed')
+                          AND submitted_at < $2
+                        ORDER BY submitted_at ASC LIMIT $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(cutoff)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),
@@ -943,10 +1040,11 @@ impl IntentRepo {
                 "intent_record",
                 sqlx::query(
                     r#"INSERT INTO execution_intents
-                           (intent_id, module, symbol, wallet, side, qty)
-                       VALUES ($1, $2, $3, $4, $5, $6)
-                       ON CONFLICT (intent_id) DO NOTHING"#,
+                           (organization_id, intent_id, module, symbol, wallet, side, qty)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)
+                       ON CONFLICT (organization_id, intent_id) DO NOTHING"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.intent_id)
                 .bind(&rec.module)
                 .bind(&rec.symbol)
@@ -967,9 +1065,11 @@ impl IntentRepo {
                 "intent_link",
                 sqlx::query(
                     r#"UPDATE execution_intents
-                          SET status = 'submitted', signature = $2, updated_at = now()
-                        WHERE intent_id = $1 AND status = 'pending'"#,
+                          SET status = 'submitted', signature = $3, updated_at = now()
+                        WHERE organization_id = $1 AND intent_id = $2
+                          AND status = 'pending'"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(intent_id)
                 .bind(signature)
                 .execute(self.db.pool()),
@@ -986,8 +1086,10 @@ impl IntentRepo {
                 sqlx::query(
                     r#"UPDATE execution_intents
                           SET status = 'abandoned', updated_at = now()
-                        WHERE intent_id = $1 AND status = 'pending'"#,
+                        WHERE organization_id = $1 AND intent_id = $2
+                          AND status = 'pending'"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(intent_id)
                 .execute(self.db.pool()),
             )
@@ -1000,9 +1102,13 @@ impl IntentRepo {
             .db
             .timed(
                 "intent_get",
-                sqlx::query("SELECT * FROM execution_intents WHERE intent_id = $1")
-                    .bind(intent_id)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM execution_intents \
+                     WHERE organization_id = $1 AND intent_id = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(intent_id)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.as_ref().map(Self::map))
@@ -1021,9 +1127,11 @@ impl IntentRepo {
                 "intent_orphans",
                 sqlx::query(
                     r#"SELECT * FROM execution_intents
-                        WHERE status = 'pending' AND created_at < $1
-                        ORDER BY created_at ASC LIMIT $2"#,
+                        WHERE organization_id = $1
+                          AND status = 'pending' AND created_at < $2
+                        ORDER BY created_at ASC LIMIT $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(cutoff)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),
@@ -1681,18 +1789,21 @@ impl ReconRepo {
     ) -> RepoResult<Vec<(String, String)>> {
         let sql = if active_only {
             r#"SELECT kind, subject FROM reconciliation_state
-                WHERE status IN ('pending', 'in_progress')
-                ORDER BY kind, subject LIMIT $1"#
+                WHERE organization_id = $1
+                  AND status IN ('pending', 'in_progress')
+                ORDER BY kind, subject LIMIT $2"#
         } else {
             r#"SELECT kind, subject FROM reconciliation_state
-                WHERE status <> 'resolved'
-                ORDER BY kind, subject LIMIT $1"#
+                WHERE organization_id = $1
+                  AND status <> 'resolved'
+                ORDER BY kind, subject LIMIT $2"#
         };
         let rows = self
             .db
             .timed(
                 "recon_unresolved_items",
                 sqlx::query(sql)
+                    .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                     .bind(limit.clamp(1, 5000))
                     .fetch_all(self.db.pool()),
             )
@@ -1712,19 +1823,23 @@ impl ReconRepo {
         let sql = if active_only {
             r#"SELECT kind, COUNT(*)::bigint
                  FROM reconciliation_state
-                WHERE status IN ('pending', 'in_progress')
+                WHERE organization_id = $1
+                  AND status IN ('pending', 'in_progress')
                 GROUP BY kind"#
         } else {
             r#"SELECT kind, COUNT(*)::bigint
                  FROM reconciliation_state
-                WHERE status <> 'resolved'
+                WHERE organization_id = $1
+                  AND status <> 'resolved'
                 GROUP BY kind"#
         };
         let rows: Vec<(String, i64)> = self
             .db
             .timed(
                 "recon_unresolved_counts",
-                sqlx::query_as(sql).fetch_all(self.db.pool()),
+                sqlx::query_as(sql)
+                    .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                    .fetch_all(self.db.pool()),
             )
             .await?;
         Ok(rows)
@@ -1743,8 +1858,10 @@ impl ReconRepo {
                     r#"UPDATE reconciliation_state
                           SET status = 'pending', attempts = 0, last_error = NULL,
                               next_attempt_at = now(), updated_at = now()
-                        WHERE kind = $1 AND subject = $2 AND status = 'resolved'"#,
+                        WHERE organization_id = $1 AND kind = $2 AND subject = $3
+                          AND status = 'resolved'"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(kind)
                 .bind(subject)
                 .execute(self.db.pool()),
@@ -1763,9 +1880,10 @@ impl ReconRepo {
                 "recon_is_active",
                 sqlx::query_as(
                     r#"SELECT 1::bigint FROM reconciliation_state
-                        WHERE kind = $1 AND subject = $2
+                        WHERE organization_id = $1 AND kind = $2 AND subject = $3
                           AND status IN ('pending', 'in_progress')"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(kind)
                 .bind(subject)
                 .fetch_optional(self.db.pool()),
@@ -1779,13 +1897,14 @@ impl ReconRepo {
             .timed(
                 "recon_enqueue",
                 sqlx::query(
-                    r#"INSERT INTO reconciliation_state (subject, kind)
-                       VALUES ($1, $2)
-                       ON CONFLICT (kind, subject) DO UPDATE SET
+                    r#"INSERT INTO reconciliation_state (organization_id, subject, kind)
+                       VALUES ($1, $2, $3)
+                       ON CONFLICT (organization_id, kind, subject) DO UPDATE SET
                          status = CASE WHEN reconciliation_state.status = 'resolved'
                                        THEN 'resolved' ELSE 'pending' END,
                          next_attempt_at = LEAST(reconciliation_state.next_attempt_at, now())"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(subject)
                 .bind(kind)
                 .execute(self.db.pool()),
@@ -1805,16 +1924,18 @@ impl ReconRepo {
                     r#"UPDATE reconciliation_state SET
                           status = 'in_progress', attempts = attempts + 1, updated_at = now(),
                           next_attempt_at = now() + interval '60 seconds'
-                       WHERE (kind, subject) IN (
-                           SELECT kind, subject FROM reconciliation_state
-                            WHERE status IN ('pending','in_progress')
+                       WHERE (organization_id, kind, subject) IN (
+                           SELECT organization_id, kind, subject FROM reconciliation_state
+                            WHERE organization_id = $1
+                              AND status IN ('pending','in_progress')
                               AND next_attempt_at <= now()
                               AND attempts < max_attempts
                             ORDER BY next_attempt_at ASC
-                            LIMIT $1
+                            LIMIT $2
                             FOR UPDATE SKIP LOCKED)
                        RETURNING kind, subject, attempts, max_attempts"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 200))
                 .fetch_all(self.db.pool()),
             )
@@ -1837,8 +1958,9 @@ impl ReconRepo {
                 sqlx::query(
                     r#"UPDATE reconciliation_state
                           SET status = 'resolved', last_error = NULL, updated_at = now()
-                        WHERE kind = $1 AND subject = $2"#,
+                        WHERE organization_id = $1 AND kind = $2 AND subject = $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(kind)
                 .bind(subject)
                 .execute(self.db.pool()),
@@ -1855,14 +1977,15 @@ impl ReconRepo {
                 "recon_fail",
                 sqlx::query(
                     r#"UPDATE reconciliation_state SET
-                          last_error = $3,
+                          last_error = $4,
                           status = CASE WHEN attempts >= max_attempts THEN 'failed'
                                         ELSE 'pending' END,
                           next_attempt_at = now() + make_interval(
                               secs => LEAST(30 * POWER(2, attempts), 3600)::bigint),
                           updated_at = now()
-                        WHERE kind = $1 AND subject = $2"#,
+                        WHERE organization_id = $1 AND kind = $2 AND subject = $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(kind)
                 .bind(subject)
                 .bind(err.chars().take(500).collect::<String>())
@@ -1880,10 +2003,11 @@ impl ReconRepo {
                 "recon_give_up",
                 sqlx::query(
                     r#"UPDATE reconciliation_state SET
-                          status = 'failed', last_error = $3,
+                          status = 'failed', last_error = $4,
                           attempts = max_attempts, updated_at = now()
-                        WHERE kind = $1 AND subject = $2"#,
+                        WHERE organization_id = $1 AND kind = $2 AND subject = $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(kind)
                 .bind(subject)
                 .bind(reason.chars().take(500).collect::<String>())
@@ -1904,8 +2028,10 @@ impl ReconRepo {
                           status = 'pending',
                           attempts = GREATEST(attempts - 1, 0),
                           next_attempt_at = now(), updated_at = now()
-                        WHERE kind = $1 AND subject = $2 AND status = 'in_progress'"#,
+                        WHERE organization_id = $1 AND kind = $2 AND subject = $3
+                          AND status = 'in_progress'"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(kind)
                 .bind(subject)
                 .execute(self.db.pool()),
@@ -1921,8 +2047,11 @@ impl ReconRepo {
             .timed(
                 "recon_failed",
                 sqlx::query(
-                    "SELECT * FROM reconciliation_state WHERE status = 'failed' ORDER BY updated_at DESC LIMIT $1",
+                    "SELECT * FROM reconciliation_state \
+                     WHERE organization_id = $1 AND status = 'failed' \
+                     ORDER BY updated_at DESC LIMIT $2",
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 500))
                 .fetch_all(self.db.pool()),
             )
@@ -2009,9 +2138,11 @@ impl BalanceRepo {
             .timed(
                 "balance_append",
                 sqlx::query(
-                    r#"INSERT INTO balance_snapshots (chain, address, asset, amount, usd_value, source)
-                       VALUES ($1,$2,$3,$4,$5,$6)"#,
+                    r#"INSERT INTO balance_snapshots
+                           (organization_id, chain, address, asset, amount, usd_value, source)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7)"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(chain)
                 .bind(address)
                 .bind(asset)
@@ -2033,8 +2164,10 @@ impl BalanceRepo {
                 sqlx::query(
                     r#"SELECT DISTINCT ON (address, asset) address, asset, amount
                          FROM balance_snapshots
+                        WHERE organization_id = $1
                         ORDER BY address, asset, ts DESC"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;

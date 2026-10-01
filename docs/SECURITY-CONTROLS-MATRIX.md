@@ -26,7 +26,8 @@
 | Backup/restore strict | `backup/{export,restore}_manifest.rs` DOCUMENTED→VERIFIED | 3+3 tests | `cargo test --test backup_restore_integration` | PASS |
 | SBOM / license | `sbom.json` + `licenses.json` generated, per-artifact sha | `sbom_report` 4, `license_report` 5 | `bash scripts/generate-sbom.sh && sha256sum sbom.json` | PASS |
 | Live Stripe/Paddle | `billing/provider_config.rs` refs only, no secrets | — | `LIVE_BILLING=1 STRIPE_API_KEY=... cargo test --test live_billing_contract -- --ignored` | EXTERNAL_REQUIRED (NOT_EXECUTED) |
-| Live Vault/KMS/HSM | `custody/provider_config.rs` refs only | — | `LIVE_CUSTODY=1 VAULT_ADDR=... cargo test --test live_custody_contract -- --ignored` | EXTERNAL_REQUIRED (boundary PASS; remote backend not implemented in this build) |
+| Live Vault/KMS | REAL adapters `crates/server/src/custody/{vault,kms}/` (transit REST wire; SigV4 vs AWS test vector) + `custody/provider_config.rs` refs | unit tests in `custody::vault` / `custody::kms` | `LIVE_CUSTODY=1 VAULT_ADDR=... cargo test --test live_custody_contract -- --ignored` | EXTERNAL_REQUIRED (boundary PASS; live round-trip NOT_EXECUTED) |
+| HSM custody | fail-closed refusal naming the PKCS#11 dependency | refusal tests in `custody` suites | — | NOT IMPLEMENTED (by design, fail-closed) |
 | Staking validator E2E | `programs/staking-suite/tests/validator_e2e.rs` | 3 tests gated | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` | EXTERNAL_REQUIRED (unit 71/71 PASS) |
 | Prod deployment | `Dockerfile`, `docker-compose.yml` | `docker build` smoke is LOCAL only | `DEPLOYMENT_BASE_URL=... cargo test --test deployment_smoke` (local `docker run` + `curl localhost` is never production verification) | EXTERNAL_REQUIRED |
 | Funded trading | `EXECUTION_MODE=dry_run` default | `funded_mode_guard` | `cargo test -p sniper-suite --lib funded_mode_guard` | EXTERNAL_REQUIRED (guard PASS; funded step operator-only) |

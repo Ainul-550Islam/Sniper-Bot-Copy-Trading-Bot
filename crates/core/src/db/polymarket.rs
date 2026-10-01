@@ -138,12 +138,13 @@ impl PolyRepo {
                 "poly_signal_record",
                 sqlx::query(
                     r#"INSERT INTO poly_signals
-                           (signal_id, condition_id, token_id, outcome, side, strategy,
-                            limit_price, size_tokens, stake_usd, mode, stage, reject_reason,
-                            detail, order_id, venue_order_id, position_id, created_at, updated_at)
+                           (organization_id, signal_id, condition_id, token_id, outcome,
+                            side, strategy, limit_price, size_tokens, stake_usd, mode,
+                            stage, reject_reason, detail, order_id, venue_order_id,
+                            position_id, created_at, updated_at)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                               $13, $14, $15, $16, $17, $18)
-                       ON CONFLICT (signal_id) DO UPDATE SET
+                               $13, $14, $15, $16, $17, $18, $19)
+                       ON CONFLICT (organization_id, signal_id) DO UPDATE SET
                            stage = EXCLUDED.stage,
                            reject_reason = EXCLUDED.reject_reason,
                            detail = EXCLUDED.detail,
@@ -152,6 +153,7 @@ impl PolyRepo {
                            position_id = COALESCE(EXCLUDED.position_id, poly_signals.position_id),
                            updated_at = EXCLUDED.updated_at"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.signal_id)
                 .bind(&rec.condition_id)
                 .bind(&rec.token_id)
@@ -181,9 +183,12 @@ impl PolyRepo {
             .db
             .timed(
                 "poly_signal_get",
-                sqlx::query("SELECT * FROM poly_signals WHERE signal_id = $1")
-                    .bind(signal_id)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM poly_signals WHERE organization_id = $1 AND signal_id = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(signal_id)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.as_ref().map(signal_from_row))
@@ -201,8 +206,10 @@ impl PolyRepo {
                 "poly_signals_since",
                 sqlx::query(
                     r#"SELECT * FROM poly_signals
-                        WHERE updated_at >= $1 ORDER BY updated_at ASC, signal_id ASC LIMIT $2"#,
+                        WHERE organization_id = $1 AND updated_at >= $2
+                        ORDER BY updated_at ASC, signal_id ASC LIMIT $3"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(since)
                 .bind(limit.clamp(1, 10_000))
                 .fetch_all(self.db.pool()),
@@ -222,13 +229,14 @@ impl PolyRepo {
                 "poly_order_upsert",
                 sqlx::query(
                     r#"INSERT INTO poly_orders
-                           (venue_order_id, order_id, signal_id, condition_id, token_id, outcome,
-                            side, order_type, limit_price, size_tokens, size_matched, mode, state,
-                            venue_status, expiration, position_id, replica_id, submitted_at,
-                            updated_at, closed_at)
+                           (organization_id, venue_order_id, order_id, signal_id,
+                            condition_id, token_id, outcome, side, order_type,
+                            limit_price, size_tokens, size_matched, mode, state,
+                            venue_status, expiration, position_id, replica_id,
+                            submitted_at, updated_at, closed_at)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                               $14, $15, $16, $17, $18, $19, $20)
-                       ON CONFLICT (venue_order_id) DO UPDATE SET
+                               $14, $15, $16, $17, $18, $19, $20, $21)
+                       ON CONFLICT (organization_id, venue_order_id) DO UPDATE SET
                            order_id = EXCLUDED.order_id,
                            size_matched = GREATEST(poly_orders.size_matched, EXCLUDED.size_matched),
                            state = EXCLUDED.state,
@@ -238,6 +246,7 @@ impl PolyRepo {
                            updated_at = EXCLUDED.updated_at,
                            closed_at = COALESCE(EXCLUDED.closed_at, poly_orders.closed_at)"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.venue_order_id)
                 .bind(&rec.order_id)
                 .bind(&rec.signal_id)
@@ -269,9 +278,13 @@ impl PolyRepo {
             .db
             .timed(
                 "poly_order_get",
-                sqlx::query("SELECT * FROM poly_orders WHERE venue_order_id = $1")
-                    .bind(venue_order_id)
-                    .fetch_optional(self.db.pool()),
+                sqlx::query(
+                    "SELECT * FROM poly_orders \
+                     WHERE organization_id = $1 AND venue_order_id = $2",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(venue_order_id)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
         Ok(row.as_ref().map(order_from_row))
@@ -286,8 +299,10 @@ impl PolyRepo {
                 "poly_orders_open",
                 sqlx::query(
                     r#"SELECT * FROM poly_orders
-                        WHERE closed_at IS NULL ORDER BY submitted_at ASC, venue_order_id ASC"#,
+                        WHERE organization_id = $1 AND closed_at IS NULL
+                        ORDER BY submitted_at ASC, venue_order_id ASC"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
             )
             .await?;
@@ -305,11 +320,12 @@ impl PolyRepo {
                 "poly_fill_record",
                 sqlx::query(
                     r#"INSERT INTO poly_fills
-                           (fill_id, venue_order_id, order_id, token_id, side, price,
-                            size_tokens, quote_usd, source, position_id, ts)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                       ON CONFLICT (fill_id) DO NOTHING"#,
+                           (organization_id, fill_id, venue_order_id, order_id, token_id,
+                            side, price, size_tokens, quote_usd, source, position_id, ts)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                       ON CONFLICT (organization_id, fill_id) DO NOTHING"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.fill_id)
                 .bind(&rec.venue_order_id)
                 .bind(&rec.order_id)
@@ -334,9 +350,11 @@ impl PolyRepo {
             .timed(
                 "poly_fills_for",
                 sqlx::query(
-                    r#"SELECT * FROM poly_fills WHERE venue_order_id = $1
+                    r#"SELECT * FROM poly_fills
+                        WHERE organization_id = $1 AND venue_order_id = $2
                         ORDER BY ts ASC, fill_id ASC"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(venue_order_id)
                 .fetch_all(self.db.pool()),
             )
@@ -352,9 +370,11 @@ impl PolyRepo {
                 "poly_recon_finding",
                 sqlx::query(
                     r#"INSERT INTO poly_recon_findings
-                           (kind, venue_order_id, order_id, token_id, detail, action, replica_id, ts)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+                           (organization_id, kind, venue_order_id, order_id, token_id,
+                            detail, action, replica_id, ts)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&rec.kind)
                 .bind(&rec.venue_order_id)
                 .bind(&rec.order_id)
@@ -376,8 +396,11 @@ impl PolyRepo {
             .timed(
                 "poly_recon_recent",
                 sqlx::query(
-                    r#"SELECT * FROM poly_recon_findings ORDER BY ts DESC, id DESC LIMIT $1"#,
+                    r#"SELECT * FROM poly_recon_findings
+                        WHERE organization_id = $1
+                        ORDER BY ts DESC, id DESC LIMIT $2"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 1000))
                 .fetch_all(self.db.pool()),
             )

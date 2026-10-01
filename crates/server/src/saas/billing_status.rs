@@ -1,42 +1,29 @@
-//! Customer-facing billing status application service (Batch 3).
+//! Customer-facing billing status application service (Batch 3, §G Batch 8).
 //!
-//! Returns current plan, pricing version, subscription state, payment/invoice state,
-//! entitlement state, usage summary, grace/dunning state. Tenant-scoped and permission-controlled.
-//! Never exposes provider secrets.
+//! Returns current plan, subscription state, payment/invoice state,
+//! entitlement state, usage summary, grace/dunning state. Tenant-scoped and
+//! permission-controlled. Never exposes provider secrets.
+//!
+//! §G: the response is assembled by [`crate::saas::billing_view::BillingView`]
+//! from the authoritative `SaasStore` — the plan, subscription status,
+//! entitlement flag and every usage number come from recorded state. There
+//! is no default plan code, no default `active` status, and no invented
+//! usage in this path.
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::Serialize;
 use serde_json::json;
 
 use bot_core::authorization::AccessRequest;
-use bot_core::billing::dunning::DunningState;
-use bot_core::billing::provider_config::BillingProviderKind;
 use bot_core::membership::Permission;
 use bot_core::tenant::OrganizationId;
 
 use crate::api::ApiState;
+use crate::saas::billing_view::BillingView;
 use crate::saas::middleware::{authorize_request, deny_response};
-
-#[derive(Debug, Serialize)]
-pub struct BillingStatusResponse {
-    pub organization_id: String,
-    pub plan_code: String,
-    pub plan_version: u32,
-    pub subscription_status: String,
-    pub billing_provider: String,
-    pub payment_state: Option<String>,
-    pub invoice_state: Option<String>,
-    pub entitlements_active: bool,
-    pub usage: serde_json::Value,
-    pub dunning_state: String,
-    pub grace_until: Option<String>,
-    pub suspension_reason: Option<String>,
-    pub as_of: String,
-}
 
 pub fn routes() -> Router<ApiState> {
     Router::new()
@@ -94,39 +81,34 @@ async fn by_id(
     render(org, &state).await.into_response()
 }
 
+/// The authoritative billing status: everything in the body is loaded from
+/// the store via [`BillingView`]; nothing is synthesized here.
 async fn render(organization_id: OrganizationId, state: &ApiState) -> Json<serde_json::Value> {
-    // Resolve subscription and plan via BillingStore; fallback to safe defaults when not found
-    let now = Utc::now();
-    // Use store that may be available via saas store -> billing store
-    // For now, synthesize from available saas store data (plan assignment)
-    // Keep tenant-scoped: never reveal other orgs
-    // This is safe to synthesize for hermetic tests; production will query BillingStore
-    let org_row = state.saas.organization(organization_id).await;
-    let plan_code = org_row
-        .as_ref()
-        .and(None::<String>) // placeholder, real would be plan lookup
-        .unwrap_or_else(|| "starter".to_string());
-    // Use dunning placeholder Current
-    Json(json!({
-        "organization_id": organization_id.to_string(),
-        "plan_code": plan_code,
-        "plan_version": 1,
-        "subscription_status": "active",
-        "billing_provider": BillingProviderKind::Manual.as_str(),
-        "payment_state": null,
-        "invoice_state": null,
-        "entitlements_active": true,
-        "usage": {"period": now.format("%Y-%m").to_string(), "total_requests": 0, "total_trades": 0},
-        "dunning_state": DunningState::Current.as_str(),
-        "grace_until": null,
-        "suspension_reason": null,
-        "as_of": now.to_rfc3339()
-    }))
+    let view = BillingView::load(&state.saas, organization_id, Utc::now()).await;
+    Json(view.to_status_json())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::saas::store::SaasStore;
+    use bot_core::billing::plan::PlanCode;
+    use bot_core::billing::usage::{UsageEvent, UsageMetric, UsageSource};
+    use bot_core::tenant::Organization;
+
+    async fn store_with_org() -> (SaasStore, OrganizationId) {
+        let store = SaasStore::new();
+        let org_id = OrganizationId::new();
+        let org = Organization::new(
+            org_id,
+            format!("test-{}", org_id.as_uuid()),
+            "Test Org",
+            None,
+            Utc::now(),
+        );
+        store.create_organization(&org).await.expect("org created");
+        (store, org_id)
+    }
 
     #[test]
     fn response_is_tenant_scoped() {
@@ -135,22 +117,59 @@ mod tests {
         assert_ne!(org1.to_string(), org2.to_string());
     }
 
+    #[tokio::test]
+    async fn no_subscription_renders_explicit_none() {
+        // The render path delegates to BillingView; verify through the
+        // view that a tenant with no subscription gets "none" — never a
+        // default tier.
+        let (store, org_id) = store_with_org().await;
+        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let body = view.to_status_json();
+        assert_eq!(body["plan_code"], "none");
+        assert_eq!(body["subscription_status"], "none");
+        assert_eq!(body["billing_provider"], "none");
+        assert_eq!(body["entitlements_active"], false);
+    }
+
+    #[tokio::test]
+    async fn assigned_plan_and_metered_usage_render_verbatim() {
+        let (store, org_id) = store_with_org().await;
+        store
+            .assign_plan(org_id, PlanCode::Pro, Utc::now())
+            .await
+            .expect("plan assigned");
+        store
+            .record_usage(&UsageEvent::new(
+                org_id,
+                UsageMetric::ApiRequests,
+                17.0,
+                UsageSource::Api,
+                "billing-status-1",
+                Utc::now(),
+            ))
+            .await
+            .expect("usage recorded");
+        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let body = view.to_status_json();
+        assert_eq!(body["plan_code"], "pro");
+        assert_eq!(body["subscription_status"], "active");
+        assert_eq!(body["billing_provider"], "manual");
+        assert_eq!(body["entitlements_active"], true);
+        assert_eq!(body["usage"]["api_requests"], 17.0);
+    }
+
     #[test]
     fn no_secrets_in_response() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            // We cannot fully instantiate ApiState without DB, but we can test serialization
-            let v = json!({
-                "organization_id": OrganizationId::new().to_string(),
-                "plan_code": "pro",
-                "billing_provider": "manual",
-                "payment_state": null
-            });
-            let s = v.to_string().to_ascii_lowercase();
-            for banned in ["secret", "private", "sk-", "token", "password"] {
-                assert!(!s.contains(banned));
-            }
+        let v = json!({
+            "organization_id": OrganizationId::new().to_string(),
+            "plan_code": "pro",
+            "billing_provider": "manual",
+            "payment_state": null
         });
+        let s = v.to_string().to_ascii_lowercase();
+        for banned in ["secret", "private", "sk-", "token", "password"] {
+            assert!(!s.contains(banned));
+        }
     }
 
     #[test]

@@ -464,6 +464,7 @@ impl Sniper {
                 // Write-ahead intent (§I crash point C): journaled BEFORE
                 // broadcast, linked to the signature (or abandoned) after.
                 let journal = self.intent_rec(&event.mint, "buy", &expected_out_raw.to_string());
+                let req = self.tenant_stamp(req);
                 let res = bot_core::recovery::with_intent(
                     self.intents.as_ref(),
                     journal,
@@ -513,6 +514,7 @@ impl Sniper {
                         Ok(()) => {
                             let journal =
                                 self.intent_rec(&event.mint, "buy", &spend_lamports.to_string());
+                            let built = self.tenant_stamp_built(built);
                             bot_core::recovery::with_intent(
                                 self.intents.as_ref(),
                                 journal,

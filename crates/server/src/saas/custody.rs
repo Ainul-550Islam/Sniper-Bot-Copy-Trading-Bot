@@ -18,8 +18,10 @@ use bot_core::custody::model::{
     CustodyProfile, CustodyProfileId, CustodyStatus, ProviderType, SignerId, SignerRecord,
 };
 use bot_core::custody::policy::{check as check_custody_policy, CustodyRequest};
+use bot_core::db::Database;
 use bot_core::membership::Permission;
-use bot_core::tenant::OrganizationId;
+use bot_core::tenant::{Organization, OrganizationId};
+use tracing::warn;
 
 use crate::api::ApiState;
 use crate::saas::middleware::{authorize_request, deny_response};
@@ -126,14 +128,40 @@ fn signers_store() -> &'static Mutex<HashMap<SignerId, SignerRecord>> {
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn find_profile(org: OrganizationId, id: CustodyProfileId) -> Option<CustodyProfile> {
+/// Tenant-scoped profile lookup, shared with the rotation API (§F/P0:
+/// rotation must resolve the REAL profile, never invent one).
+pub(crate) fn find_profile(org: OrganizationId, id: CustodyProfileId) -> Option<CustodyProfile> {
     let map = profiles_store().lock().expect("mutex").clone();
     map.get(&id).filter(|p| p.organization_id == org).cloned()
 }
 
-fn find_signer(org: OrganizationId, id: SignerId) -> Option<SignerRecord> {
+/// Tenant-scoped signer lookup, shared with the rotation API.
+pub(crate) fn find_signer(org: OrganizationId, id: SignerId) -> Option<SignerRecord> {
     let map = signers_store().lock().expect("mutex").clone();
     map.get(&id).filter(|s| s.organization_id == org).cloned()
+}
+
+/// The relational custody tables foreign-key onto `organizations(id)`,
+/// while the SaaS control plane persists organizations as generic
+/// runtime records. When a database is attached, the custody write path
+/// therefore first ensures the tenant's relational row exists —
+/// idempotently, from the AUTHENTICATED organization context (never
+/// from client input, never fabricated).
+async fn ensure_organization_row(db: &std::sync::Arc<Database>, org: &Organization) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO organizations (id, slug, name, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
+    )
+    .bind(org.id.as_uuid())
+    .bind(&org.slug)
+    .bind(&org.name)
+    .bind(org.status.as_str())
+    .bind(org.created_at)
+    .bind(org.updated_at)
+    .execute(db.pool())
+    .await
+    {
+        warn!(%error, organization = %org.id, "custody organization row ensure failed");
+    }
 }
 
 async fn create_profile(
@@ -182,15 +210,20 @@ async fn create_profile(
         profile.description = desc;
     }
 
-    // Persist to store + DB (durable)
+    // Persist to store + DB (durable; a failed durable write is logged,
+    // never silent — the in-process map stays the resolution source).
     {
         let mut map = profiles_store().lock().expect("mutex");
         map.insert(profile.id, profile.clone());
     }
     if let Some(db) = &state.db {
-        let _ = sqlx::query("INSERT INTO custody_profiles (id, organization_id, name, provider_type, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
+        ensure_organization_row(db, &ctx.organization).await;
+        if let Err(error) = sqlx::query("INSERT INTO custody_profiles (id, organization_id, name, provider_type, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
             .bind(profile.id.as_uuid()).bind(ctx.organization.id.as_uuid()).bind(&profile.name).bind(provider.as_str()).bind(profile.status.as_str()).bind(profile.created_at).bind(profile.updated_at)
-            .execute(db.pool()).await;
+            .execute(db.pool()).await
+        {
+            warn!(%error, profile = %profile.id, "custody profile durable insert failed");
+        }
     }
 
     state.audit.record("saas", "saas.custody.profile.created", Some(&profile.id.to_string()),
@@ -301,6 +334,22 @@ async fn activate_profile(
         let mut map = profiles_store().lock().expect("mutex");
         map.insert(pid, profile.clone());
     }
+    // Durable status write (logged on failure, never silent).
+    if let Some(db) = &state.db {
+        if let Err(error) = sqlx::query(
+            "UPDATE custody_profiles SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5",
+        )
+        .bind(profile.status.as_str())
+        .bind(profile.updated_at)
+        .bind(profile.activated_at)
+        .bind(pid.as_uuid())
+        .bind(ctx.organization.id.as_uuid())
+        .execute(db.pool())
+        .await
+        {
+            warn!(%error, profile = %pid, "custody profile durable activation write failed");
+        }
+    }
     state
         .audit
         .record(
@@ -362,6 +411,23 @@ async fn revoke_profile(
     {
         let mut map = profiles_store().lock().expect("mutex");
         map.insert(pid, profile.clone());
+    }
+    // Durable status write (logged on failure, never silent).
+    if let Some(db) = &state.db {
+        if let Err(error) = sqlx::query(
+            "UPDATE custody_profiles SET status = $1, updated_at = $2, revoked_at = $3, revoke_reason = $4 WHERE id = $5 AND organization_id = $6",
+        )
+        .bind(profile.status.as_str())
+        .bind(profile.updated_at)
+        .bind(profile.revoked_at)
+        .bind(&profile.revoke_reason)
+        .bind(pid.as_uuid())
+        .bind(ctx.organization.id.as_uuid())
+        .execute(db.pool())
+        .await
+        {
+            warn!(%error, profile = %pid, "custody profile durable revocation write failed");
+        }
     }
     state
         .audit
@@ -461,9 +527,13 @@ async fn create_signer(
         map.insert(signer.id, signer.clone());
     }
     if let Some(db) = &state.db {
-        let _ = sqlx::query("INSERT INTO custody_signers (id, organization_id, custody_profile_id, logical_identity, provider_type, public_address, capabilities, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING")
+        ensure_organization_row(db, &ctx.organization).await;
+        if let Err(error) = sqlx::query("INSERT INTO custody_signers (id, organization_id, custody_profile_id, logical_identity, provider_type, public_address, capabilities, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING")
             .bind(signer.id.as_uuid()).bind(ctx.organization.id.as_uuid()).bind(signer.custody_profile_id.as_uuid()).bind(&signer.logical_identity).bind(profile.provider_type.as_str()).bind(&signer.public_address).bind(serde_json::to_value(&signer.capabilities).unwrap()).bind(signer.status.as_str()).bind(signer.created_at).bind(signer.updated_at)
-            .execute(db.pool()).await;
+            .execute(db.pool()).await
+        {
+            warn!(%error, signer = %signer.id, "custody signer durable insert failed");
+        }
     }
 
     state.audit.record("saas", "saas.custody.signer.created", Some(&signer.id.to_string()),
@@ -532,6 +602,22 @@ async fn activate_signer(
         let mut map = signers_store().lock().expect("mutex");
         map.insert(sid, signer.clone());
     }
+    // Durable status write (logged on failure, never silent).
+    if let Some(db) = &state.db {
+        if let Err(error) = sqlx::query(
+            "UPDATE custody_signers SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5",
+        )
+        .bind(signer.status.as_str())
+        .bind(signer.updated_at)
+        .bind(signer.activated_at)
+        .bind(sid.as_uuid())
+        .bind(ctx.organization.id.as_uuid())
+        .execute(db.pool())
+        .await
+        {
+            warn!(%error, signer = %sid, "custody signer durable activation write failed");
+        }
+    }
     state.audit.record("saas", "saas.custody.signer.activated", Some(&sid.to_string()),
         bot_core::audit::AuditOutcome::Success,
         json!({"organization": ctx.organization.id.to_string(), "address": signer.public_address})).await;
@@ -586,6 +672,23 @@ async fn revoke_signer(
     {
         let mut map = signers_store().lock().expect("mutex");
         map.insert(sid, signer.clone());
+    }
+    // Durable status write (logged on failure, never silent).
+    if let Some(db) = &state.db {
+        if let Err(error) = sqlx::query(
+            "UPDATE custody_signers SET status = $1, updated_at = $2, revoked_at = $3, revoke_reason = $4 WHERE id = $5 AND organization_id = $6",
+        )
+        .bind(signer.status.as_str())
+        .bind(signer.updated_at)
+        .bind(signer.revoked_at)
+        .bind(&signer.revoke_reason)
+        .bind(sid.as_uuid())
+        .bind(ctx.organization.id.as_uuid())
+        .execute(db.pool())
+        .await
+        {
+            warn!(%error, signer = %sid, "custody signer durable revocation write failed");
+        }
     }
     state.audit.record("saas", "saas.custody.signer.revoked", Some(&sid.to_string()),
         bot_core::audit::AuditOutcome::Success,
@@ -776,12 +879,14 @@ async fn resolve_signer(
             .into_response();
     }
 
-    // Provider failure must fail closed — do not fall back to local
-    // We attempt to resolve via registry; if provider not configured, fail.
-    // In this build, only local provider is stubbed; vault/kms/hsm are unsupported.
+    // Provider failure must fail closed — do not fall back to local.
+    // This control-plane resolve endpoint does not itself perform remote
+    // resolution: HSM has no implementation (fail-closed refusal naming
+    // the PKCS#11 dependency), and Vault/KMS resolve + sign through the
+    // custody sign boundary (`crates/server/src/custody/sign_boundary.rs`),
+    // never through a local wallet fallback.
     if signer.provider_type != ProviderType::Local {
-        // Check if provider is configured — for now we have no remote backends, so fail closed
-        return (axum::http::StatusCode::NOT_IMPLEMENTED, Json(json!({"error":"unsupported_provider","reason": format!("provider {} is not configured; no local fallback", signer.provider_type.as_str())}))).into_response();
+        return (axum::http::StatusCode::NOT_IMPLEMENTED, Json(json!({"error":"unsupported_provider","reason": format!("provider {} is not resolvable on this control-plane endpoint; remote custody resolves through the sign boundary; no local fallback", signer.provider_type.as_str())}))).into_response();
     }
 
     // Return public address/status — never private key

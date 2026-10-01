@@ -310,7 +310,13 @@ impl BillingService {
             }
         }
 
-        // Persist would go to payment_transactions table (0019). For now audit trail covers it.
+        // §G: persist the transitioned transaction durably through the
+        // store (payment_transaction kind; table 0019 is the durable
+        // substrate behind the Postgres repo). No fake success: a store
+        // failure surfaces as an error after the audit row below records
+        // the outcome.
+        state.saas.update_payment(payment).await?;
+
         state
             .audit
             .record(
@@ -810,6 +816,10 @@ mod tests {
                     .await
                     .expect("saas store"),
             ),
+            module_registry: std::sync::Arc::new(
+                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
+            ),
+            trading: None,
         };
 
         // Register the organization through the store so the durable runtime
@@ -1002,6 +1012,10 @@ mod tests {
                     .await
                     .expect("restart saas store"),
             ),
+            module_registry: std::sync::Arc::new(
+                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
+            ),
+            trading: None,
         };
 
         // Duplicate lookup after restart must return the same durable identity
@@ -1246,6 +1260,10 @@ mod tests {
             health: std::sync::Arc::new(bot_core::obs::health::HealthRegistry::new()),
             metrics_enabled: false,
             saas: std::sync::Arc::new(crate::saas::SaasStore::new()),
+            module_registry: std::sync::Arc::new(
+                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
+            ),
+            trading: None,
         };
         // Seed an org in memory for no-db test
         let org_no_db = OrganizationId::new();
@@ -1334,6 +1352,10 @@ mod tests {
                     .await
                     .expect("saas"),
             ),
+            module_registry: std::sync::Arc::new(
+                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
+            ),
+            trading: None,
         };
 
         let now = Utc::now();
@@ -1550,6 +1572,10 @@ mod tests {
                     .await
                     .expect("saas"),
             ),
+            module_registry: std::sync::Arc::new(
+                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
+            ),
+            trading: None,
         };
         state.saas.create_organization(&org_rec).await.ok();
 
