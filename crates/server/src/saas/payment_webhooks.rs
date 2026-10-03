@@ -200,19 +200,48 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Deduplication check: persistent via provider_events table (0019) or fallback memory.
+///
+/// ATOMICITY: this is a CLAIM, not a read. The previous implementation did
+/// `SELECT` here and `INSERT … ON CONFLICT DO NOTHING` after processing,
+/// which leaves a window in which two concurrent deliveries of the same
+/// provider event both see "not seen" and both get applied to billing
+/// state. `INSERT … ON CONFLICT DO NOTHING RETURNING id` closes that window
+/// in the database: exactly one caller gets a row back and proceeds, every
+/// other caller gets `None` and is refused as a duplicate.
 async fn is_duplicate(state: &ApiState, event: &NormalizedEvent) -> bool {
-    // Try durable: if DB attached, query provider_events WHERE provider=$1 AND provider_event_id=$2
     if let Some(db) = &state.db {
         let pool = db.pool();
-        let res = sqlx::query(
-            "SELECT 1 FROM provider_events WHERE provider=$1 AND provider_event_id=$2 LIMIT 1",
+        let idempotency_key = format!("{}:{}", event.provider.as_str(), event.provider_event_id);
+        let payload_hash = hex::encode(md5::compute(event.payload.to_string()));
+        let claimed = sqlx::query(
+            "INSERT INTO provider_events
+                 (id, organization_id, provider, provider_event_id, event_type,
+                  idempotency_key, payload_hash, processed)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,false)
+             ON CONFLICT DO NOTHING
+             RETURNING id",
         )
+        .bind(uuid::Uuid::new_v4())
+        .bind(event.organization_id.map(|o| o.as_uuid()))
         .bind(event.provider.as_str())
         .bind(&event.provider_event_id)
+        .bind(&event.event_type)
+        .bind(&idempotency_key)
+        .bind(&payload_hash)
         .fetch_optional(pool)
         .await;
-        if let Ok(Some(_)) = res {
-            return true;
+        match claimed {
+            // A row came back: WE own this event. Not a duplicate.
+            Ok(Some(_)) => return false,
+            // No row: another delivery already claimed it. Duplicate.
+            Ok(None) => return true,
+            // The claim itself failed (DB down, schema drift). Do NOT
+            // silently fall through to the weaker checks — log and fall
+            // back, but never treat a failed claim as "fresh" without
+            // consulting the durable marker below.
+            Err(e) => {
+                tracing::warn!(error = %e, "provider_events claim failed; falling back");
+            }
         }
     }
     // Fallback to billing_webhook runtime record (existing TASK 7B durable marker)
@@ -231,20 +260,32 @@ async fn is_duplicate(state: &ApiState, event: &NormalizedEvent) -> bool {
 /// Record processed event for idempotency.
 async fn record_processed(state: &ApiState, event: &NormalizedEvent) -> Result<(), String> {
     if let Some(db) = &state.db {
-        let id = uuid::Uuid::new_v4();
-        let idempotency_key = format!("{}:{}", event.provider.as_str(), event.provider_event_id);
-        let payload_hash = hex::encode(md5::compute(event.payload.to_string()));
-        // Using sqlx directly; errors are not fatal for webhook ack but we log them.
-        let _ = sqlx::query("INSERT INTO provider_events (id, organization_id, provider, provider_event_id, event_type, idempotency_key, payload_hash, processed, processed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,true,now()) ON CONFLICT DO NOTHING")
-            .bind(id)
-            .bind(event.organization_id.map(|o| o.as_uuid()))
-            .bind(event.provider.as_str())
-            .bind(&event.provider_event_id)
-            .bind(&event.event_type)
-            .bind(&idempotency_key)
-            .bind(&payload_hash)
-            .execute(db.pool())
-            .await;
+        // The row was already INSERTed by the claim in `is_duplicate`;
+        // completing the work flips it to processed. The UPDATE's result
+        // is checked rather than discarded — a silently dropped write is
+        // exactly the class of bug migration 0035 had to repair.
+        let marked = sqlx::query(
+            "UPDATE provider_events
+                SET processed = true, processed_at = now()
+              WHERE provider = $1 AND provider_event_id = $2",
+        )
+        .bind(event.provider.as_str())
+        .bind(&event.provider_event_id)
+        .execute(db.pool())
+        .await;
+        match marked {
+            Ok(r) if r.rows_affected() == 0 => {
+                tracing::warn!(
+                    provider = event.provider.as_str(),
+                    event_id = %event.provider_event_id,
+                    "provider_events row missing when marking processed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to mark provider event processed");
+            }
+            _ => {}
+        }
     }
     // Also record in existing webhook durable store for backward compat
     let _ = state

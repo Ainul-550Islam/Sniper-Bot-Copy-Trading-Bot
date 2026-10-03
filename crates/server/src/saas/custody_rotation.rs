@@ -2,6 +2,15 @@
 //!
 //! Allows authorized rotation workflow, integrates custody policy/resolve/provider abstractions.
 //! Does not expose private keys, does not revoke existing signer before safe activation except emergency.
+//!
+//! §S-4 — rotation state is DURABLE. The authority is PostgreSQL
+//! (`custody_rotations`, migration 0036) behind
+//! [`crate::saas::custody_rotation_store::CustodyRotationStore`]. Before
+//! that migration this state lived in a process-global map, which meant a
+//! rotation created on one replica 404'd on every other one and a restart
+//! stranded the profile between signers with no record it had happened.
+//! Every write below FAILS CLOSED: if the durable write does not land,
+//! the caller is told the rotation did not advance.
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -62,12 +71,32 @@ pub fn routes() -> Router<ApiState> {
         )
 }
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use crate::saas::custody_rotation_store::RotationStoreError;
 
-fn store() -> &'static Mutex<HashMap<Uuid, RotationRecord>> {
-    static S: OnceLock<Mutex<HashMap<Uuid, RotationRecord>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
+/// Map a store failure onto an HTTP refusal. Never a 200: a rotation the
+/// store did not accept has not happened.
+fn rotation_store_refusal(stage: &'static str, error: &RotationStoreError) -> Response {
+    tracing::error!(stage, error = %error, "custody rotation refused: store failure");
+    match error {
+        RotationStoreError::ConflictInFlight => (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({
+                "error": "rotation_already_in_flight",
+                "detail": "this custody profile already has a rotation that has not reached a terminal state; complete or revoke it first",
+            })),
+        )
+            .into_response(),
+        RotationStoreError::Backend(_) | RotationStoreError::Corrupt(_) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "rotation_store_unavailable",
+                "stage": stage,
+                "applied": false,
+                "detail": "the rotation store could not be reached; NOTHING was changed. Retry.",
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn create(
@@ -176,7 +205,11 @@ async fn create(
     let now = Utc::now();
     let rec = RotationRecord::new(org, profile_id, old, new, provider, now);
     let id = rec.id;
-    store().lock().unwrap().insert(id, rec.clone());
+    // Durable first, respond second. A 201 here is a promise that the
+    // rotation exists for every replica, not just this one.
+    if let Err(e) = state.custody_rotations().insert(&rec).await {
+        return rotation_store_refusal("create", &e);
+    }
     state
         .audit
         .record(
@@ -228,9 +261,10 @@ async fn get_status(
                 .into_response()
         }
     };
-    let rec = match store().lock().unwrap().get(&uid).cloned() {
-        Some(r) => r,
-        None => {
+    let rec = match state.custody_rotations().get(uid).await {
+        Ok(Some(r)) => r,
+        Err(e) => return rotation_store_refusal("read", &e),
+        Ok(None) => {
             return (
                 axum::http::StatusCode::NOT_FOUND,
                 Json(json!({"error":"not_found"})),
@@ -291,30 +325,41 @@ async fn activate(
     let org = ctx.organization.id;
     let is_platform = ctx.authorization.is_platform_scope();
     let now = Utc::now();
-    let transition_result: Result<(String, OrganizationId), String> = {
-        let mut map = store().lock().unwrap();
-        let rec = match map.get_mut(&uid) {
-            Some(r) => r,
-            None => {
-                return (
-                    axum::http::StatusCode::NOT_FOUND,
-                    Json(json!({"error":"not_found"})),
-                )
-                    .into_response()
-            }
-        };
-        if rec.organization_id != org && !is_platform {
+    let rotations = state.custody_rotations();
+    let mut rec = match rotations.get(uid).await {
+        Ok(Some(r)) => r,
+        Err(e) => return rotation_store_refusal("read", &e),
+        Ok(None) => {
             return (
                 axum::http::StatusCode::NOT_FOUND,
                 Json(json!({"error":"not_found"})),
             )
-                .into_response();
+                .into_response()
         }
+    };
+    // Same answer for "absent" and "another tenant's": no oracle.
+    if rec.organization_id != org && !is_platform {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({"error":"not_found"})),
+        )
+            .into_response();
+    }
+    // The domain object owns the state machine; the store only persists
+    // what it accepted.
+    let transition_result: Result<(String, OrganizationId), String> =
         match rec.transition(RotationState::Active, now, false) {
             Ok(_) => Ok((rec.state.as_str().to_string(), rec.organization_id)),
             Err(e) => Err(e),
+        };
+    if transition_result.is_ok() {
+        if let Err(e) = rotations
+            .save_transition(&rec, &ctx.actor_label(), &ctx.correlation_label())
+            .await
+        {
+            return rotation_store_refusal("activate", &e);
         }
-    };
+    }
     match transition_result {
         Ok((state_str, org_id)) => {
             state
@@ -373,25 +418,27 @@ async fn revoke(
         Err(String, axum::http::StatusCode),
     }
 
-    let outcome: RevokeOutcome = {
-        let mut map = store().lock().unwrap();
-        let rec = match map.get_mut(&uid) {
-            Some(r) => r,
-            None => {
-                return (
-                    axum::http::StatusCode::NOT_FOUND,
-                    Json(json!({"error":"not_found"})),
-                )
-                    .into_response()
-            }
-        };
-        if rec.organization_id != org && !is_platform {
+    let rotations = state.custody_rotations();
+    let mut rec = match rotations.get(uid).await {
+        Ok(Some(r)) => r,
+        Err(e) => return rotation_store_refusal("read", &e),
+        Ok(None) => {
             return (
                 axum::http::StatusCode::NOT_FOUND,
                 Json(json!({"error":"not_found"})),
             )
-                .into_response();
+                .into_response()
         }
+    };
+    if rec.organization_id != org && !is_platform {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({"error":"not_found"})),
+        )
+            .into_response();
+    }
+    let outcome: RevokeOutcome = {
+        let rec = &mut rec;
         if rec.state == RotationState::Pending && !force {
             RevokeOutcome::Err(
                 "must activate replacement before revoke; use force for emergency".to_string(),
@@ -412,6 +459,14 @@ async fn revoke(
             }
         }
     };
+    if matches!(outcome, RevokeOutcome::Ok(..)) {
+        if let Err(e) = rotations
+            .save_transition(&rec, &ctx.actor_label(), &ctx.correlation_label())
+            .await
+        {
+            return rotation_store_refusal("revoke", &e);
+        }
+    }
     match outcome {
         RevokeOutcome::Ok(state_str, force_revoked, org_id) => {
             state

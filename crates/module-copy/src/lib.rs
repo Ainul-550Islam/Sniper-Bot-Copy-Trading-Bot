@@ -210,6 +210,10 @@ impl CopyBot {
         guard: Arc<solana_kit::tenant_broadcast_guard::TenantBroadcastGuard>,
     ) -> BotResult<Self> {
         self.executor = self.executor.with_tenant_guard(Arc::clone(&guard))?;
+        // Same tenant binding for the risk engine as for the broadcast
+        // guard: cluster-wide capacity / daily-loss reads stay inside this
+        // tenant (see `RiskEngine::with_tenant`).
+        self.risk = self.risk.clone().with_tenant(guard.organization_id());
         self.tenant = Some(guard.context().clone());
         self.tenant_guard = Some(guard);
         Ok(self)

@@ -30,10 +30,49 @@ use crate::state::Shared;
 ///   limit, never loosen it.
 #[async_trait]
 pub trait GlobalRiskOracle: Send + Sync {
-    /// Open positions across ALL replicas for `module`.
+    /// Open positions across ALL replicas for `module`, DEPLOYMENT-WIDE.
+    ///
+    /// Only correct as a tenant answer in single-operator mode. Multi-tenant
+    /// callers must use [`GlobalRiskOracle::count_open_for`].
     async fn count_open(&self, module: BotModule) -> Option<usize>;
-    /// Today's (UTC) realized PnL summed across ALL replicas.
+    /// Today's (UTC) realized PnL summed across ALL replicas,
+    /// DEPLOYMENT-WIDE. See [`GlobalRiskOracle::realized_today_for`].
     async fn realized_today(&self) -> Option<f64>;
+
+    /// Open positions across ALL replicas for `module`, restricted to ONE
+    /// tenant when `organization` is `Some`.
+    ///
+    /// Why this exists: the deployment-wide variants make every tenant's
+    /// capacity and daily-loss gate depend on every OTHER tenant's trading.
+    /// That is three bugs at once — a tenant can exhaust another tenant's
+    /// capacity (cross-tenant denial of service), one tenant's losses trip
+    /// everyone's daily-loss gate, and a tenant can infer the deployment's
+    /// aggregate book by probing where its own gate flips.
+    ///
+    /// The default implementation delegates to the deployment-wide method,
+    /// which preserves the exact behaviour of oracles that have no tenant
+    /// dimension (in-memory/test oracles). A store-backed oracle MUST
+    /// override it — see `bot_core::db::claims::PostgresRiskOracle`.
+    async fn count_open_for(
+        &self,
+        organization: Option<crate::tenant::OrganizationId>,
+        module: BotModule,
+    ) -> Option<usize> {
+        let _ = organization;
+        self.count_open(module).await
+    }
+
+    /// Today's (UTC) realized PnL across ALL replicas, restricted to ONE
+    /// tenant when `organization` is `Some`. See
+    /// [`GlobalRiskOracle::count_open_for`] for why this is not optional in
+    /// multi-tenant mode.
+    async fn realized_today_for(
+        &self,
+        organization: Option<crate::tenant::OrganizationId>,
+    ) -> Option<f64> {
+        let _ = organization;
+        self.realized_today().await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -397,11 +436,35 @@ pub struct TokenChecks {
 #[derive(Clone)]
 pub struct RiskEngine {
     state: Shared,
+    /// The tenant this engine evaluates for, when it was built by a tenant
+    /// runtime. `None` = the deployment-global operator mode, whose
+    /// behaviour is unchanged.
+    ///
+    /// The cluster-wide oracle is consulted THROUGH this scope, so one
+    /// tenant's open positions and realized PnL can never consume another
+    /// tenant's capacity or trip another tenant's daily-loss gate.
+    tenant: Option<crate::tenant::OrganizationId>,
 }
 
 impl RiskEngine {
     pub fn new(state: Shared) -> Self {
-        RiskEngine { state }
+        RiskEngine {
+            state,
+            tenant: None,
+        }
+    }
+
+    /// Bind this engine to ONE tenant. Every cluster-wide risk read it
+    /// performs from here on is restricted to `organization`.
+    #[must_use]
+    pub fn with_tenant(mut self, organization: crate::tenant::OrganizationId) -> Self {
+        self.tenant = Some(organization);
+        self
+    }
+
+    /// The tenant this engine is bound to, if any.
+    pub fn tenant(&self) -> Option<crate::tenant::OrganizationId> {
+        self.tenant
     }
 
     pub fn state(&self) -> &Arc<crate::state::AppState> {
@@ -551,7 +614,7 @@ impl RiskEngine {
     /// never depend on store availability).
     async fn effective_realized(&self, local: f64) -> f64 {
         if let Some(oracle) = self.state.risk_oracle() {
-            if let Some(global) = oracle.realized_today().await {
+            if let Some(global) = oracle.realized_today_for(self.tenant).await {
                 return local.min(global);
             }
         }
@@ -563,7 +626,7 @@ impl RiskEngine {
     /// replica counts against this replica's capacity immediately).
     async fn effective_open_count(&self, module: BotModule, local: usize) -> usize {
         if let Some(oracle) = self.state.risk_oracle() {
-            if let Some(global) = oracle.count_open(module).await {
+            if let Some(global) = oracle.count_open_for(self.tenant, module).await {
                 return local.max(global);
             }
         }
@@ -1344,6 +1407,76 @@ mod tests {
         async fn realized_today(&self) -> Option<f64> {
             self.pnl
         }
+    }
+
+    /// Records which tenant the engine asked the oracle about.
+    #[derive(Default)]
+    struct ScopeSpyOracle {
+        seen: std::sync::Mutex<Vec<Option<crate::tenant::OrganizationId>>>,
+    }
+
+    #[async_trait]
+    impl GlobalRiskOracle for ScopeSpyOracle {
+        async fn count_open(&self, _module: BotModule) -> Option<usize> {
+            None
+        }
+        async fn realized_today(&self) -> Option<f64> {
+            None
+        }
+        async fn count_open_for(
+            &self,
+            organization: Option<crate::tenant::OrganizationId>,
+            _module: BotModule,
+        ) -> Option<usize> {
+            self.seen.lock().expect("spy").push(organization);
+            None
+        }
+        async fn realized_today_for(
+            &self,
+            organization: Option<crate::tenant::OrganizationId>,
+        ) -> Option<f64> {
+            self.seen.lock().expect("spy").push(organization);
+            None
+        }
+    }
+
+    /// Cross-tenant isolation: a tenant-bound engine must ask the shared
+    /// cluster oracle ONLY about its own organization. An unscoped read
+    /// would let another tenant's open positions consume this tenant's
+    /// capacity and let another tenant's losses trip its daily-loss gate.
+    #[tokio::test]
+    async fn tenant_bound_engine_scopes_every_oracle_read() {
+        let org = crate::tenant::OrganizationId::new();
+        let spy = Arc::new(ScopeSpyOracle::default());
+        let e = engine().with_tenant(org);
+        e.state().attach_risk_oracle(spy.clone());
+
+        let _ = e.check_entry(&request(0.01, 10.0)).await;
+
+        let seen = spy.seen.lock().expect("spy").clone();
+        assert!(!seen.is_empty(), "the oracle was never consulted");
+        assert!(
+            seen.iter().all(|o| *o == Some(org)),
+            "tenant-bound engine leaked an unscoped oracle read: {seen:?}"
+        );
+    }
+
+    /// The deployment-global operator mode is unchanged: no tenant bound,
+    /// so the oracle is asked the deployment-wide question.
+    #[tokio::test]
+    async fn operator_mode_engine_stays_deployment_wide() {
+        let spy = Arc::new(ScopeSpyOracle::default());
+        let e = engine();
+        e.state().attach_risk_oracle(spy.clone());
+
+        let _ = e.check_entry(&request(0.01, 10.0)).await;
+
+        let seen = spy.seen.lock().expect("spy").clone();
+        assert!(!seen.is_empty(), "the oracle was never consulted");
+        assert!(
+            seen.iter().all(|o| o.is_none()),
+            "operator mode must stay deployment-wide: {seen:?}"
+        );
     }
 
     /// §Q gap closure: the cluster-wide oracle can only TIGHTEN limits —

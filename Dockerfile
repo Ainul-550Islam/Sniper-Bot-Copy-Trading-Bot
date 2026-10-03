@@ -18,7 +18,14 @@
 # Toolchain matches rust-toolchain.toml (1.98.1 — the version this codebase is
 # verified against; the file is copied below so rustup sees the same pin and
 # the image, CI and local builds cannot drift apart).
-FROM rust:1.98.1-bookworm AS builder
+# Pinned BY DIGEST, not by tag (P0 §7). `rust:1.98.1-bookworm` is a mutable
+# pointer — the same tag rebuilds with new base packages, so two builds of
+# the "same" Dockerfile are not the same image and a rollback does not
+# necessarily roll back. The digest IS the image.
+# Refresh with ./scripts/pin-base-image-digests.sh (keeps
+# deploy/release/base-images.lock.json authoritative).
+# rust:1.98.1-bookworm
+FROM rust@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 
 # Solana/reqwest builds want these native tools present.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -42,7 +49,8 @@ COPY crates ./crates
 RUN cargo build --release --bin sniper-suite
 
 # ---- runtime ----------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+# debian:bookworm-slim — digest-pinned, see the note on the builder stage.
+FROM debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \

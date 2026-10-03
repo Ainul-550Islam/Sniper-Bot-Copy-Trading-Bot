@@ -10,6 +10,51 @@ fails the release if they ever disagree.
 
 ## [Unreleased]
 
+### Backup, restore and durability (P1 batches 3–6, 2026-10-02)
+
+#### BREAKING — contract version 1.0.0 → 2.0.0
+- `GET /api/saas/backup/status` no longer returns `retention_configured`
+  or `protection`. Both were hard-coded literals: the endpoint reported
+  every tenant as protected while **nothing in this repository took a
+  backup**. They are removed rather than deprecated because a deployment
+  that is not backing anything up has no honest value to put in them.
+  Replacement fields: `state`, `protected`, `offsite`, `pitr`,
+  `rpo_estimate_seconds`, `rpo_basis`, `summary`.
+  `crates/saas-sdk` is updated in the same change; a 1.x client breaks on
+  this deliberately.
+
+#### Added
+- `scripts/backup-postgres.sh` — scheduled `pg_dump`, checksum, optional
+  `age` encryption (fail-closed), retention prune after success only, and
+  an append-only ledger record for **every** run including failures.
+- `scripts/verify-backup-restore.sh` — restore drill into a throwaway
+  database (checksum, `--exit-on-error`, migration high-water, required
+  tables), `--check` for overdue drills, `--from-offsite` to drill the
+  remote copy.
+- `scripts/backup-offsite-sync.sh` — S3/rclone copy with post-upload
+  verification; `BACKUP_OFFSITE_INCLUDE_PITR=true` also mirrors the base
+  backups and WAL archive.
+- Point-in-time recovery: `scripts/archive-wal.sh` (POSIX sh — it runs
+  inside `postgres:16-alpine`, which has no bash), `backup-basebackup.sh`,
+  `prune-wal-archive.sh`, `restore-pitr.sh` (`--verify`, `--check`), and
+  `deploy/compose/docker-compose.pitr.yml`. RPO moves from the dump
+  interval (up to 24h) to the WAL segment interval.
+- `crates/server/src/ops/backup_ledger.rs` — derives the posture from the
+  ledger on three independent axes (recoverable / off-site / PITR) with
+  22 unit tests.
+
+#### Changed
+- `GET /api/saas/security/summary`: `custody_mode` now comes from
+  `[signing].provider` and `audit_available` from whether the audit trail
+  is DB-chained. `mfa_status` reports `not_supported` instead of
+  `unknown` — there is no MFA implementation, and `unknown` implied there
+  might be.
+
+#### Removed
+- `ops/backup_verification.rs` and `ops/restore_verification.rs`: unused
+  in-memory models that persisted nothing. An unused "verification"
+  module reads as evidence that verification happens.
+
 ### PROMPT 2–5 arc — multi-tenant SaaS completion (consolidated 2026-09-30)
 
 #### PROMPT 5 — custody, billing, customer SaaS, buyer release (2026-09-30)

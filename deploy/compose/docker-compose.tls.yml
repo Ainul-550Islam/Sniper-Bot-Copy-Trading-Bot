@@ -1,0 +1,95 @@
+# ============================================================================
+# deploy/compose/docker-compose.tls.yml — TLS edge overlay (P0 §5).
+#
+# Adds an nginx terminator + certbot renewal in front of the `bot` service
+# from the root docker-compose.yml. The app itself is NOT re-exposed: the
+# overlay REMOVES its published port so the only way in is through TLS.
+#
+#   cd <repo root>
+#   export SNIPER_PUBLIC_HOST=app.example.com
+#   export SNIPER_ACME_EMAIL=ops@example.com
+#   docker compose -f docker-compose.yml -f deploy/compose/docker-compose.tls.yml up -d
+#
+# First run only — obtain the certificate before nginx can serve :443:
+#   ./scripts/obtain-certificate.sh
+#
+# Every image is pinned BY DIGEST (P0 §7). A tag is a mutable pointer; a
+# digest is the image. Refresh the pins with:
+#   ./scripts/pin-base-image-digests.sh
+# ============================================================================
+
+services:
+  # The app keeps listening on 8080 inside the compose network, but is no
+  # longer published to the host: nginx is the only ingress.
+  bot:
+    ports: !override []
+    environment:
+      # Behind a terminating proxy the app sees plain HTTP on an internal
+      # address. It must trust the X-Forwarded-Proto header for redirect
+      # and cookie-secure decisions, and bind on all interfaces INSIDE the
+      # container network (not loopback) so nginx can reach it.
+      API_BIND_HOST: 0.0.0.0
+      TRUST_PROXY_HEADERS: "true"
+
+  nginx:
+    # nginx:1.27-alpine
+    image: nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    restart: unless-stopped
+    depends_on:
+      bot:
+        condition: service_started
+    environment:
+      SNIPER_PUBLIC_HOST: ${SNIPER_PUBLIC_HOST:?set SNIPER_PUBLIC_HOST (the public FQDN)}
+      SNIPER_UPSTREAM: ${SNIPER_UPSTREAM:-bot:8080}
+      SNIPER_METRICS_ALLOW_CIDR: ${SNIPER_METRICS_ALLOW_CIDR:-10.0.0.0/8}
+      # Restrict envsubst to OUR variables. Without this filter the
+      # official entrypoint would also substitute nginx's own $host,
+      # $remote_addr, $connection_upgrade … and silently blank them.
+      NGINX_ENVSUBST_FILTER: "^SNIPER_"
+    volumes:
+      - ../nginx/sniper-suite.conf:/etc/nginx/templates/sniper-suite.conf.template:ro
+      - ../nginx/tls-params.conf:/etc/nginx/tls-params.conf:ro
+      - ../nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot-webroot:/var/www/certbot:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    # Certbot renews the certificate on a shared volume, but nginx only
+    # re-reads certificates on reload. Without this loop a renewal lands
+    # on disk and the edge keeps serving the OLD certificate until it
+    # expires — a silent outage ~60 days after deployment. Six hours is
+    # far inside the 30-day renewal margin.
+    command: >-
+      /bin/sh -c "while :; do sleep 21600; nginx -s reload 2>/dev/null || true; done &
+      exec nginx -g 'daemon off;'"
+    healthcheck:
+      # Checks the TLS listener end to end, including the certificate the
+      # edge is actually presenting.
+      test: ["CMD-SHELL", "wget -q --spider --no-check-certificate https://127.0.0.1/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  certbot:
+    # certbot/certbot:v3.1.0
+    image: certbot/certbot@sha256:fb978b4fef92dc5c85cc0b908836714c600e717b52a3f74c93276eb63a9d0af9
+    restart: unless-stopped
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    # Renew twice a day with jitter. Let's Encrypt certificates are valid
+    # for 90 days and renew at 30 days remaining, so a missed window has
+    # weeks of slack — but the renewal must not be a cron job on a host
+    # nobody watches.
+    entrypoint: >-
+      /bin/sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot --webroot-path=/var/www/certbot --quiet --deploy-hook 'touch /etc/letsencrypt/RENEWED';
+        sleep $$((43200 + RANDOM % 3600)) & wait $${!};
+      done"
+
+volumes:
+  letsencrypt:
+  certbot-webroot:

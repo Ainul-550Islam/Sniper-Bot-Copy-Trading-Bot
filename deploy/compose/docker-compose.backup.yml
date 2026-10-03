@@ -1,0 +1,106 @@
+# ============================================================================
+# deploy/compose/docker-compose.backup.yml — scheduled PostgreSQL backups
+# (P1, SLO D1/D2).
+#
+#   docker compose -f docker-compose.yml \
+#                  -f deploy/compose/docker-compose.backup.yml up -d
+#
+# Why a loop container and not host cron:
+#
+#   * it ships with the stack, so a deployment cannot be "installed" while
+#     silently having no backup schedule — which is exactly the state this
+#     repository was in while `/api/saas/backup/status` reported protection;
+#   * it runs on the compose network, so it reaches `postgres` by name
+#     without publishing the database to the host;
+#   * `restart: unless-stopped` means a crashed scheduler comes back,
+#     where a failed host cron job just stops producing backups quietly.
+#
+# Host cron remains perfectly valid and is documented in
+# docs/BACKUP-RESTORE.md for operators who already run one. Use ONE of
+# them: two schedulers against one database duplicate work (the script's
+# flock makes that safe, but the ledger then reads as a flapping schedule).
+#
+# The off-site sync runs right after each dump when BACKUP_OFFSITE_TARGET
+# is set. Credentials are taken from the environment by the aws/rclone
+# tools; this file never names a bucket, and neither does the ledger —
+# only the KIND of destination ("s3"/"rclone") is recorded, because the
+# ledger is what a tenant-facing endpoint reads.
+#
+# The restore DRILL is deliberately NOT on this timer. It creates and drops
+# a database, and it should be run by a human (or a quarterly pipeline job)
+# who will read the result:
+#   docker compose -f docker-compose.yml -f deploy/compose/docker-compose.backup.yml \
+#     run --rm backup /repo/scripts/verify-backup-restore.sh
+# ============================================================================
+
+services:
+  backup:
+    # postgres:16-alpine — the same digest as the database service, so the
+    # client tools match the server version exactly. A pg_dump older than
+    # the server refuses to run; pinning both to one digest removes that
+    # whole class of 3am surprise.
+    image: postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sniper}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
+      BACKUP_DIR: /backups
+      # The ledger lives on the SAME volume the app reads (`journaldata`
+      # → /app/data), which is how `/api/saas/backup/status` can report
+      # the truth. If you move the ledger, move both mounts together.
+      BACKUP_LEDGER_PATH: /app/data/backups/backups.jsonl
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      # Set to an age public key to encrypt dumps at rest. When set, the
+      # script FAILS CLOSED if `age` is unavailable rather than writing a
+      # plaintext dump of a trading database.
+      BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}
+      # Off-site copy. Empty = local only, and the status endpoint says so.
+      BACKUP_OFFSITE_TARGET: ${BACKUP_OFFSITE_TARGET:-}
+      BACKUP_OFFSITE_MAX_FILES: ${BACKUP_OFFSITE_MAX_FILES:-0}
+      # Passed through for the S3 path; unset in a local-only deployment.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}
+      AWS_SERVER_SIDE_ENCRYPTION: ${AWS_SERVER_SIDE_ENCRYPTION:-}
+    volumes:
+      - ./scripts:/repo/scripts:ro
+      - ./crates/core/migrations:/repo/crates/core/migrations:ro
+      - backups:/backups
+      - journaldata:/app/data
+    working_dir: /repo
+    # One backup per interval, starting immediately so a fresh deployment
+    # has a copy within seconds rather than at the next midnight.
+    #
+    # `|| true` on the script is deliberate: the script already records a
+    # FAILED run in the ledger (that is what surfaces as
+    # `state: failing`), and a non-zero exit must not kill the scheduler —
+    # a backup system that stops scheduling after one bad night is how
+    # weeks of missing backups happen.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        apk add --no-cache bash coreutils findutils age >/dev/null 2>&1 || true
+        if [ -n "$${BACKUP_OFFSITE_TARGET:-}" ]; then
+          case "$${BACKUP_OFFSITE_TARGET}" in
+            *://*) apk add --no-cache aws-cli >/dev/null 2>&1 || echo "WARNING: could not install aws-cli — off-site sync will fail and SAY so" ;;
+            *)     apk add --no-cache rclone  >/dev/null 2>&1 || echo "WARNING: could not install rclone — off-site sync will fail and SAY so" ;;
+          esac
+        fi
+        echo "backup scheduler: every ${BACKUP_INTERVAL_HOURS:-24}h, retention ${BACKUP_RETENTION_DAYS:-30}d"
+        while true; do
+          bash /repo/scripts/backup-postgres.sh || echo "backup run failed — recorded in the ledger"
+          # Runs even if the dump failed: the previous dumps may still
+          # need to reach the off-site target, and a skipped sync would
+          # leave the off-site axis silently unreported.
+          bash /repo/scripts/backup-offsite-sync.sh || echo "off-site sync failed — recorded in the ledger"
+          sleep "$$(( ${BACKUP_INTERVAL_HOURS:-24} * 3600 ))"
+        done
+
+volumes:
+  backups:

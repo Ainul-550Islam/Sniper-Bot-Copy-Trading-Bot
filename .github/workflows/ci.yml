@@ -66,9 +66,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rust-toolchain.toml pins the exact version + components; this action
-      # bootstraps rustup and warms the toolchain cache.
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml pins the exact version + components. The action
+      # is pinned to the SAME version explicitly: `@stable` would silently
+      # install a different toolchain than the one this repo is verified
+      # against, so CI and the pin could diverge without anyone noticing.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -100,13 +105,269 @@ jobs:
       - name: test
         run: cargo test --workspace -- --test-threads=1
 
-      - name: postgres migration gate — check migrations monotonic 0001-0022
-        run: ls crates/core/migrations/*.sql | sort | head -n 5 && ls crates/core/migrations/*.sql | wc -l | grep -q 22
+      # Named re-run of the multi-replica durability suite. `--workspace`
+      # above already executes it; this step exists so the gate is legible
+      # in the job list and a failure points at the thing that broke
+      # (tenant kill-switch, custody rotation and WS replay must be shared
+      # across replicas, not per-process). It is cached, so it costs seconds.
+      - name: durable shared state across replicas
+        run: cargo test -p sniper-suite --test multi_replica_durable_state -- --test-threads=1
+
+      # The committed API contract must equal what the code serves. A
+      # stale artifact is worse than none: it reads as authoritative while
+      # being wrong. Regenerate with ./scripts/export-openapi.sh.
+      - name: openapi artifact in sync with the code
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          ./scripts/export-openapi.sh --check
+
+      # Migration gate: contiguous, zero-padded, gap-free — derived from the
+      # tree, never a hard-coded count (the previous `grep -q 22` turned the
+      # whole job red the moment migration 0023 landed).
+      - name: postgres migration gate — migrations contiguous and gap-free
+        run: |
+          set -euo pipefail
+          n=$(ls crates/core/migrations/*.sql | wc -l)
+          echo "migrations found: $n"
+          for i in $(seq -f '%04g' 1 "$n"); do
+            ls crates/core/migrations/"${i}"_*.sql >/dev/null 2>&1 \
+              || { echo "::error::missing or non-contiguous migration $i"; exit 1; }
+          done
+          dupes=$(ls crates/core/migrations/*.sql | sed -E 's#.*/([0-9]{4})_.*#\1#' | sort | uniq -d)
+          if [ -n "$dupes" ]; then echo "::error::duplicate migration prefixes: $dupes"; exit 1; fi
 
       - name: docker compose config (syntax + interpolation gate)
         run: |
           cp .env.template .env
           POSTGRES_PASSWORD=ci-only docker compose config -q
+
+  # ------------------------------------------------------------- deploy -----
+  # P0 §5/§6/§7 — the deployment configuration is CODE and is gated like
+  # code. These checks are offline and take seconds; there is no reason
+  # for a TLS misconfiguration, a staging/production credential overlap,
+  # or a mutable image tag to reach a release branch.
+  deploy-config:
+    name: Deployment config (TLS / env separation / image digests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Asserts protocol floor, cipher posture, HSTS and the other
+      # security headers, the :80 -> :443 redirect, that /metrics is not
+      # public, and finally runs `nginx -t` on the RENDERED config inside
+      # the same digest-pinned nginx image the deployment uses.
+      - name: TLS edge configuration
+        run: ./scripts/verify-tls-config.sh
+
+      # Template mode: staging has every live gate off, production
+      # pre-enables none of them, the two name different resources, their
+      # variable sets reconcile, and no credential is committed. The
+      # --filled comparison of real values runs on the deploy host, never
+      # here: CI must not have both environments' secrets.
+      - name: Staging / production separation
+        run: ./scripts/verify-environment-separation.sh
+
+      # Every FROM and every compose `image:` must be repo@sha256:…, and
+      # must agree with deploy/release/base-images.lock.json.
+      - name: Image digest pinning
+        run: ./scripts/verify-image-digests.sh
+
+      # Does the lock still describe reality? An upstream rebuild of a
+      # base image is EXPECTED (security patches) — this step surfaces it
+      # as a reviewable change instead of letting the pin silently rot.
+      # continue-on-error: a moved upstream tag is news, not a broken PR.
+      - name: Base image digests current (advisory)
+        continue-on-error: true
+        run: ./scripts/pin-base-image-digests.sh --check
+
+      - name: Deploy and rollback scripts are valid shell
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          bash -n scripts/deploy-release.sh
+          bash -n scripts/rollback-release.sh
+          bash -n scripts/bootstrap-tls.sh
+          bash -n scripts/export-openapi.sh
+          bash -n scripts/backup-postgres.sh
+          bash -n scripts/verify-backup-restore.sh
+          bash -n scripts/backup-offsite-sync.sh
+          bash -n scripts/backup-basebackup.sh
+          bash -n scripts/restore-pitr.sh
+          bash -n scripts/prune-wal-archive.sh
+          # archive-wal.sh is POSIX sh ON PURPOSE: it runs inside the
+          # postgres:16-alpine container, which has no bash. Checking it
+          # with `sh -n` (dash on the runner) is the gate that keeps a
+          # bashism from being added by accident.
+          sh -n scripts/archive-wal.sh
+          # SC1090/SC1091: the env files are resolved at runtime on the
+          # deploy host and cannot be followed statically.
+          # SC2016: these scripts deliberately match LITERAL '$scheme',
+          # '${' and envsubst shell-format arguments — expansion there
+          # would break the check, which is the whole point of the quotes.
+          shellcheck -e SC1090,SC1091,SC2016 \
+            scripts/deploy-release.sh \
+            scripts/rollback-release.sh \
+            scripts/bootstrap-tls.sh \
+            scripts/verify-tls-config.sh \
+            scripts/verify-image-digests.sh \
+            scripts/verify-environment-separation.sh \
+            scripts/pin-base-image-digests.sh \
+            scripts/export-openapi.sh \
+            scripts/backup-postgres.sh \
+            scripts/verify-backup-restore.sh \
+            scripts/backup-offsite-sync.sh \
+            scripts/backup-basebackup.sh \
+            scripts/restore-pitr.sh \
+            scripts/prune-wal-archive.sh \
+            scripts/archive-wal.sh
+
+      # A backup script that only works when everything is fine is not a
+      # backup script. --dry-run exercises argument handling, config
+      # resolution and the retention arithmetic without a database, so a
+      # change that breaks the scheduler is caught here and not at 2am.
+      - name: Backup script dry-run (no database required)
+        run: |
+          BACKUP_DIR="$RUNNER_TEMP/backup-dryrun" \
+          BACKUP_LEDGER_PATH="$RUNNER_TEMP/backup-dryrun/backups.jsonl" \
+          DATABASE_URL="postgres://ci:ci@127.0.0.1:5432/ci" \
+            ./scripts/backup-postgres.sh --dry-run
+
+      # An unset off-site target is a valid, documented deployment shape
+      # and must exit 0 — otherwise every single-host install fails CI and
+      # the signal gets switched off. A SET target with no tooling must
+      # fail loudly instead.
+      - name: Off-site sync is honest about not being configured
+        run: |
+          ./scripts/backup-offsite-sync.sh
+          BACKUP_DIR="$RUNNER_TEMP/offsite" \
+          BACKUP_OFFSITE_TARGET="s3://ci-bucket/prefix" \
+            ./scripts/backup-offsite-sync.sh --dry-run
+
+      # The WAL archive command is the single most dangerous script in
+      # the repository: Postgres deletes the local segment as soon as it
+      # exits 0. These four properties are executed for real, with no
+      # database, because each one of them is silent data loss if it
+      # regresses.
+      - name: WAL archive command safety properties
+        run: |
+          set -e
+          A="$RUNNER_TEMP/wal-archive"; L="$RUNNER_TEMP/wal-ledger.jsonl"
+          S="$RUNNER_TEMP/wal-src"; mkdir -p "$S"
+          head -c 65536 /dev/urandom > "$S/000000010000000000000001"
+
+          # 1. archives a segment and records a heartbeat
+          BACKUP_WAL_ARCHIVE_DIR="$A" BACKUP_LEDGER_PATH="$L" BACKUP_WAL_HEARTBEAT_SECS=0 \
+            ./scripts/archive-wal.sh "$S/000000010000000000000001" 000000010000000000000001
+          test -f "$A/000000010000000000000001"
+
+          # 2. re-archiving identical content is success, not a duplicate
+          BACKUP_WAL_ARCHIVE_DIR="$A" BACKUP_LEDGER_PATH="$L" \
+            ./scripts/archive-wal.sh "$S/000000010000000000000001" 000000010000000000000001
+
+          # 3. the same name with DIFFERENT content must be refused and
+          #    must not modify what is already archived
+          before="$(sha256sum "$A/000000010000000000000001" | cut -d' ' -f1)"
+          head -c 100 /dev/urandom > "$S/other"
+          if BACKUP_WAL_ARCHIVE_DIR="$A" BACKUP_LEDGER_PATH="$L" \
+               ./scripts/archive-wal.sh "$S/other" 000000010000000000000001 2>/dev/null; then
+            echo "archive-wal.sh OVERWROTE an existing segment"; exit 1
+          fi
+          after="$(sha256sum "$A/000000010000000000000001" | cut -d' ' -f1)"
+          test "$before" = "$after"
+
+          # 4. a segment name that is not a plain file name is refused
+          if BACKUP_WAL_ARCHIVE_DIR="$A" BACKUP_LEDGER_PATH="$L" \
+               ./scripts/archive-wal.sh "$S/other" ../escape 2>/dev/null; then
+            echo "archive-wal.sh accepted a path-traversing segment name"; exit 1
+          fi
+
+          # no partial files may ever be left visible in the archive
+          test -z "$(find "$A" -name '*.partial.*' -print -quit)"
+          # failures are recorded, successes are throttled
+          grep -q '"ok":false' "$L"
+
+      # Pruning WAL is the one operation that can destroy recoverability
+      # while every job still reports success. With no base backup it
+      # must refuse outright.
+      - name: WAL pruning refuses to run without a base backup
+        run: |
+          set +e
+          BACKUP_DIR="$RUNNER_TEMP/pitr-empty" \
+          BACKUP_WAL_ARCHIVE_DIR="$RUNNER_TEMP/wal-archive" \
+          BACKUP_BASE_DIR="$RUNNER_TEMP/pitr-empty/base" \
+            ./scripts/prune-wal-archive.sh
+          rc=$?
+          set -e
+          test "$rc" -eq 1 || { echo "expected a refusal, got exit $rc"; exit 1; }
+
+      - name: PITR drill checker reports an overdue drill
+        run: |
+          set +e
+          BACKUP_LEDGER_PATH="$RUNNER_TEMP/absent-pitr/backups.jsonl" \
+            ./scripts/restore-pitr.sh --check
+          rc=$?
+          set -e
+          test "$rc" -eq 1 || { echo "unexpected exit $rc"; exit 1; }
+
+      - name: Base backup dry-run (no database required)
+        run: |
+          BACKUP_DIR="$RUNNER_TEMP/base-dryrun" \
+          BACKUP_LEDGER_PATH="$RUNNER_TEMP/base-dryrun/backups.jsonl" \
+          DATABASE_URL="postgres://ci:ci@127.0.0.1:5432/ci" \
+            ./scripts/backup-basebackup.sh --dry-run
+
+      # Shipping the dumps off-site while leaving the WAL archive behind
+      # is the quiet failure this flag exists to prevent, so the warning
+      # itself is a gate: if it ever stops being printed, a deployment
+      # can lose its fast recovery path without anybody being told.
+      - name: Off-site sync warns when PITR artefacts are left behind
+        run: |
+          set -e
+          D="$RUNNER_TEMP/offsite-pitr"
+          mkdir -p "$D/wal-archive" "$D/base/base-1"
+          head -c 2048 /dev/urandom > "$D/pg-20261002T010000Z.dump"
+          head -c 1024 /dev/urandom > "$D/wal-archive/000000010000000000000001"
+          head -c 512  /dev/urandom > "$D/base/base-1/base.tar.gz"
+
+          out="$(BACKUP_DIR="$D" BACKUP_OFFSITE_TARGET=s3://ci-bucket/prefix \
+                 ./scripts/backup-offsite-sync.sh --dry-run 2>&1)"
+          echo "$out" | grep -q "BACKUP_OFFSITE_INCLUDE_PITR is not set" \
+            || { echo "the local-only-PITR warning disappeared"; exit 1; }
+
+          out="$(BACKUP_DIR="$D" BACKUP_OFFSITE_INCLUDE_PITR=true \
+                 BACKUP_OFFSITE_TARGET=s3://ci-bucket/prefix \
+                 ./scripts/backup-offsite-sync.sh --dry-run 2>&1)"
+          echo "$out" | grep -q "scope: dumps+pitr" \
+            || { echo "the full-scope sync did not report dumps+pitr"; exit 1; }
+          echo "$out" | grep -q "mirror .* from wal-archive" \
+            || { echo "the WAL archive was not included"; exit 1; }
+
+      # The drill checker must REPORT, not crash, on a host that has never
+      # run a drill — that is the state every fresh checkout is in, and
+      # the exit code is what a quarterly reminder job keys on.
+      - name: Restore-drill checker runs without a ledger
+        run: |
+          set +e
+          BACKUP_LEDGER_PATH="$RUNNER_TEMP/absent/backups.jsonl" \
+            ./scripts/verify-backup-restore.sh --check
+          rc=$?
+          set -e
+          # 1 = "a drill is overdue" (correct here). Anything else is a bug
+          # in the checker itself.
+          test "$rc" -eq 1 || { echo "unexpected exit $rc"; exit 1; }
+
+      # The TLS overlay must compose cleanly on top of the base file.
+      - name: compose config (base + TLS + backup + PITR overlays)
+        run: |
+          cp .env.template .env
+          POSTGRES_PASSWORD=ci-only \
+          SNIPER_PUBLIC_HOST=ci.example.test \
+            docker compose -f docker-compose.yml -f deploy/compose/docker-compose.tls.yml config -q
+          POSTGRES_PASSWORD=ci-only \
+            docker compose -f docker-compose.yml -f deploy/compose/docker-compose.backup.yml config -q
+          POSTGRES_PASSWORD=ci-only \
+            docker compose -f docker-compose.yml \
+                           -f deploy/compose/docker-compose.backup.yml \
+                           -f deploy/compose/docker-compose.pitr.yml config -q
 
   # ------------------------------------------------------------ program ------
   program:

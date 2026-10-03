@@ -321,7 +321,13 @@ impl TenantPolyExecutor {
     pub async fn new(state: Shared, execution: TenantExecutionContext) -> PolyResult<Self> {
         let context = PolyTenantContext::adapt(execution)
             .map_err(|e: PolyContextError| crate::error::PolyError::invalid(e.to_string()))?;
-        let bot = PolyBot::new(state).await?;
+        // Bind the bot's risk engine to this tenant before it can evaluate
+        // anything: the cluster-wide oracle is shared across tenants, and
+        // an unscoped read would let another tenant's book consume this
+        // tenant's capacity / trip its daily-loss gate.
+        let bot = PolyBot::new(state)
+            .await?
+            .with_risk_tenant(context.organization_id());
         let tenant_state = TenantPolyState::new(
             context.organization_id().to_string(),
             context.runtime_id().to_string(),

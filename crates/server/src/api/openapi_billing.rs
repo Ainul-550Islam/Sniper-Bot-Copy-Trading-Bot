@@ -95,47 +95,20 @@ pub fn billing_schemas() -> Value {
                 "provider_event_kind": { "type": "string" }
             }
         },
-        "WebhookAck": {
-            "type": "object",
-            "required": ["status"],
-            "properties": {
-                "status": { "type": "string", "enum": ["applied","ignored","duplicate","rejected"] },
-                "detail": { "type": "string" },
-                "reason": { "type": "string" }
-            }
-        }
+        // NOTE: `WebhookAck` is declared identically in the base document
+        // and is kept there, so the two cannot drift apart.
     })
 }
 
 /// Paths contributed by billing.
 pub fn billing_paths() -> Value {
     json!({
-        "/api/saas/checkout": {
-            "post": {
-                "operationId": "saas.createCheckout",
-                "summary": "Create checkout (server-authoritative price, never client amount).",
-                "tags": ["checkout"],
-                "security": [{"bearerAuth": []}],
-                "requestBody": { "required": true, "content": { "application/json": { "schema": ok_ref("CheckoutRequest") } } },
-                "responses": {
-                    "201": { "description": "Checkout created", "content": { "application/json": { "schema": ok_ref("CheckoutResponse") } } },
-                    "400": { "$ref": "#/components/responses/BadRequest" },
-                    "401": { "$ref": "#/components/responses/Unauthorized" },
-                    "403": { "$ref": "#/components/responses/Forbidden" }
-                }
-            }
-        },
-        "/api/saas/invoices": {
-            "get": {
-                "operationId": "saas.listInvoices",
-                "tags": ["invoices"],
-                "security": [{"bearerAuth": []}],
-                "responses": {
-                    "200": { "description": "Invoice list (tenant-scoped)", "content": { "application/json": { "schema": { "type": "object", "properties": { "invoices": { "type": "array", "items": ok_ref("InvoiceView") } } } } } },
-                    "401": { "$ref": "#/components/responses/Unauthorized" }
-                }
-            }
-        },
+        // NOTE: `/api/saas/checkout` lives in the base document
+        // (`saas::openapi`), which declares the full request body and the
+        // 409/422 cases. One path, one source of truth.
+
+        // NOTE: `/api/saas/invoices` lives in the base document, which also
+        // declares 403/429. One path, one source of truth.
         "/api/saas/billing/reconcile": {
             "post": {
                 "operationId": "saas.reconcileBilling",
@@ -148,18 +121,12 @@ pub fn billing_paths() -> Value {
                 }
             }
         },
-        "/api/saas/billing/webhooks/{provider}": {
-            "post": {
-                "operationId": "saas.billingWebhook",
-                "tags": ["billing"],
-                "parameters": [{"name":"provider","in":"path","required":true,"schema":{"type":"string","enum":["stripe","paddle"]}}],
-                "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
-                "responses": {
-                    "200": { "description": "Webhook applied/duplicate", "content": { "application/json": { "schema": ok_ref("WebhookAck") } } },
-                    "401": { "description": "Signature verification failed" }
-                }
-            }
-        }
+        // NOTE: `/api/saas/billing/webhooks/{provider}` is deliberately NOT
+        // declared here. The base document in `saas::openapi` already
+        // declares it with a richer contract (422 and 501 responses, a
+        // typed request body). Declaring it in both places made the
+        // merge fail loudly rather than silently pick a winner; the base
+        // document is the single source of truth for this path.
     })
 }
 

@@ -31,6 +31,19 @@ test-validator-ledger*/
 # Docker / compose local overrides
 docker-compose.override.yml
 
+# Deployment environment files (P0 §6). The TEMPLATES are source; the
+# filled-in copies hold real credentials and must never be committed.
+# `.env.*` above does not match these (they are `staging.env`, not
+# `.env.staging`), so they need their own rule.
+deploy/environments/*.env
+!deploy/environments/*.env.template
+
+# Generated TLS material and the deployment ledger (P0 §5/§7). `*.pem`
+# and `*.jsonl` above already cover these; listed explicitly so the
+# intent survives a future edit of those broad rules.
+deploy/nginx/dhparam.pem
+deploy/release/deployments.jsonl
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db
@@ -48,3 +61,10 @@ node_modules/
 .next/
 *.tsbuildinfo
 /buyer-release/
+
+# Local/compose backup artifacts. Dumps are customer data and a ledger is
+# host state; neither belongs in version control, and a committed dump is
+# a database leak that survives every later permission fix.
+deploy/backups/
+*.dump
+*.dump.age

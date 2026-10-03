@@ -176,6 +176,18 @@ pub struct PolyBot {
 }
 
 impl PolyBot {
+    /// Bind this bot's risk engine to ONE tenant.
+    ///
+    /// Called by [`crate::tenant_executor::TenantPolyExecutor`] so the
+    /// cluster-wide capacity and daily-loss reads are restricted to the
+    /// acting tenant instead of the whole deployment. Operator mode never
+    /// calls this and is unchanged.
+    #[must_use]
+    pub fn with_risk_tenant(mut self, organization: bot_core::tenant::OrganizationId) -> Self {
+        self.risk = self.risk.clone().with_tenant(organization);
+        self
+    }
+
     /// Build the bot from shared state. Reads the optional private key from the
     /// environment; without it the bot runs read-only/paper.
     pub async fn new(state: Shared) -> PolyResult<Self> {

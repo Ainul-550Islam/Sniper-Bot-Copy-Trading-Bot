@@ -1,0 +1,129 @@
+# ============================================================================
+# deploy/compose/docker-compose.pitr.yml — point-in-time recovery
+# (P1 batch 5, SLO D1).
+#
+#   docker compose -f docker-compose.yml \
+#                  -f deploy/compose/docker-compose.backup.yml \
+#                  -f deploy/compose/docker-compose.pitr.yml up -d
+#
+# WHAT THIS CHANGES
+#
+# The dump schedule in docker-compose.backup.yml gives a recovery point
+# objective of one backup interval — up to 24 hours of trades on the
+# default settings. This overlay turns on write-ahead log archiving and
+# takes a periodic physical base backup, which together move the RPO to
+# minutes.
+#
+# IT REQUIRES THE BACKUP OVERLAY. The WAL archive without a base backup
+# restores nothing, and the base backups are produced by the sidecar
+# below using the same ledger the status endpoint reads.
+#
+# RESTART REQUIRED: `archive_mode` is not reloadable. Applying this
+# overlay restarts PostgreSQL. Do it in a maintenance window — the app
+# refuses to trade without its database, which is the correct behaviour
+# and not something to work around.
+#
+# DISK: the WAL archive grows until scripts/prune-wal-archive.sh removes
+# segments the oldest retained base backup no longer needs. Budget for
+# (WAL volume per day × days of base retention), and alert on the
+# archive volume. If the archive filesystem fills, archive_command fails,
+# Postgres keeps every segment in pg_wal, and the DATABASE eventually
+# stops. That is the safe direction — it is not a quiet one.
+# ============================================================================
+
+services:
+  postgres:
+    # The archive command runs INSIDE this container, as the postgres
+    # user, on every segment switch. It is POSIX sh precisely so that no
+    # package has to be added to the database image for it.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=/repo/scripts/archive-wal.sh %p %f
+      # Force a segment switch on a timer. Without this an idle database
+      # produces no WAL at all, and "the archive has been quiet for an
+      # hour" would be indistinguishable from "the archive is broken" —
+      # the status endpoint's staleness signal depends on this value.
+      - -c
+      - archive_timeout=300
+      # Needed by pg_basebackup for the physical copy.
+      - -c
+      - max_wal_senders=4
+      - -c
+      - wal_keep_size=256MB
+    environment:
+      BACKUP_WAL_ARCHIVE_DIR: /wal-archive
+      BACKUP_LEDGER_PATH: /app/data/backups/backups.jsonl
+      BACKUP_WAL_HEARTBEAT_SECS: ${BACKUP_WAL_HEARTBEAT_SECS:-300}
+    volumes:
+      - ./scripts:/repo/scripts:ro
+      - walarchive:/wal-archive
+      # The same ledger volume the app and the backup sidecar use: one
+      # file is what makes /api/saas/backup/status able to tell the
+      # truth about all three axes at once.
+      - journaldata:/app/data
+
+  # The dump sidecar from docker-compose.backup.yml gains access to the
+  # PITR artefacts. Without this, the off-site copy would carry the dumps
+  # and leave the WAL archive on the machine whose loss it exists for.
+  backup:
+    environment:
+      BACKUP_OFFSITE_INCLUDE_PITR: ${BACKUP_OFFSITE_INCLUDE_PITR:-true}
+      BACKUP_BASE_DIR: /backups/base
+      BACKUP_WAL_ARCHIVE_DIR: /wal-archive
+    volumes:
+      - walarchive:/wal-archive
+
+  # Physical base backups + WAL pruning. Separate from the dump sidecar
+  # because the two failures are different: a failed dump costs you a
+  # restore point, a failed base backup costs you the ability to replay
+  # the archive at all.
+  basebackup:
+    # Same digest as the database so pg_basebackup matches the server
+    # version exactly.
+    image: postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sniper}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?}
+      BACKUP_DIR: /backups
+      BACKUP_BASE_DIR: /backups/base
+      BACKUP_WAL_ARCHIVE_DIR: /wal-archive
+      BACKUP_LEDGER_PATH: /app/data/backups/backups.jsonl
+      BACKUP_BASE_RETAIN: ${BACKUP_BASE_RETAIN:-2}
+      BACKUP_BASE_INTERVAL_HOURS: ${BACKUP_BASE_INTERVAL_HOURS:-24}
+    volumes:
+      - ./scripts:/repo/scripts:ro
+      - backups:/backups
+      - walarchive:/wal-archive
+      - journaldata:/app/data
+    working_dir: /repo
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        apk add --no-cache bash coreutils findutils >/dev/null 2>&1 || true
+        echo "base backup scheduler: every ${BACKUP_BASE_INTERVAL_HOURS:-24}h, keeping ${BACKUP_BASE_RETAIN:-2}"
+        while true; do
+          # Order matters and is not negotiable: take the new base
+          # FIRST, prune WAL only afterwards. Pruning before a
+          # successful base can delete the segments the surviving base
+          # still needs — a backup that exists and restores to nothing.
+          if bash /repo/scripts/backup-basebackup.sh; then
+            bash /repo/scripts/prune-wal-archive.sh || echo "WAL prune failed — segments kept, which is the safe direction"
+          else
+            echo "base backup failed — recorded in the ledger; WAL will NOT be pruned"
+          fi
+          sleep "$$(( ${BACKUP_BASE_INTERVAL_HOURS:-24} * 3600 ))"
+        done
+
+volumes:
+  walarchive:

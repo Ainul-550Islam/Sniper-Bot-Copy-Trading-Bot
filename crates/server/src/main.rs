@@ -110,6 +110,17 @@ async fn main() -> anyhow::Result<()> {
     // values already present win over config, letting operators override.
     seed_secret_env(&cfg);
 
+    // ---- `--migrate-only`: apply the schema, then exit --------------------
+    // Production sets DATABASE_AUTO_MIGRATE=false so that five replicas
+    // rolling at once do not race each other through the migrator. The
+    // schema is instead advanced ONCE, by this mode, from the very image
+    // about to be deployed (scripts/deploy-release.sh step 3). Running the
+    // migration from the deployed build is the point: a schema advanced by
+    // some other binary is a schema nobody verified against this one.
+    if migrate_only_requested() {
+        return run_migrations_only(&cfg).await;
+    }
+
     // ---- lifecycle --------------------------------------------------------
     let shutdown = Shutdown::new();
     install_signal_handlers(shutdown.clone());
@@ -1454,4 +1465,51 @@ mod tests {
             assert!(!is_loopback(h), "{h:?} must NOT be treated as loopback");
         }
     }
+}
+
+/// Did the operator ask for a migrate-only run?
+///
+/// Accepts either the `--migrate-only` argument or `MIGRATE_ONLY=1`,
+/// because a container platform can set an environment variable far more
+/// easily than it can override an entrypoint's arguments.
+fn migrate_only_requested() -> bool {
+    if std::env::args().skip(1).any(|a| a == "--migrate-only") {
+        return true;
+    }
+    matches!(
+        std::env::var("MIGRATE_ONLY").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+    )
+}
+
+/// Apply every outstanding migration and exit.
+///
+/// FAILS LOUDLY in every ambiguous case. This runs in a deploy pipeline
+/// immediately before new replicas start, so "the database was not
+/// configured, so I did nothing, successfully" is the one outcome that
+/// must never be reported as success — the deploy would then roll a build
+/// that expects a schema which was never applied.
+async fn run_migrations_only(cfg: &Config) -> anyhow::Result<()> {
+    let mut db_cfg = cfg.database.clone();
+    if !db_cfg.enabled {
+        anyhow::bail!(
+            "--migrate-only requires the database to be enabled \
+             (set DATABASE_ENABLED=true and POSTGRES_URL)"
+        );
+    }
+    // Both forced: this mode exists to migrate, and a silent
+    // "continuing without the database" degrade would make the exit code
+    // a lie.
+    db_cfg.auto_migrate = true;
+    db_cfg.required = true;
+
+    let db = bot_core::db::open(&db_cfg)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("--migrate-only: the database could not be opened"))?;
+
+    let applied = db.migration_count().await?;
+    info!(applied, "migrations applied; exiting (--migrate-only)");
+    // stdout as well as the log: a deploy script reads this.
+    println!("migrations applied: {applied}");
+    Ok(())
 }

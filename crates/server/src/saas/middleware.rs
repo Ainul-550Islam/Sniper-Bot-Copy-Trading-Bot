@@ -82,6 +82,19 @@ impl SaasContext {
     pub fn organization_id(&self) -> OrganizationId {
         self.organization.id
     }
+
+    /// Correlation label stamped on durable records written for this
+    /// request (migration 0036's `correlation_id` columns).
+    ///
+    /// Stated honestly: the SaaS middleware does not yet plumb a
+    /// per-request id, so this is the stable `principal@tenant` pair. It
+    /// joins a durable row to the actor and the tenant that caused it; it
+    /// does NOT distinguish two requests by the same actor. Never a
+    /// secret — the principal identifier is a non-secret label and the
+    /// API-key branch uses the key SUMMARY, not the key.
+    pub fn correlation_label(&self) -> String {
+        format!("{}@{}", self.actor_label(), self.organization.id)
+    }
 }
 
 /// Extract the presented credential: `Authorization: Bearer …`, or the

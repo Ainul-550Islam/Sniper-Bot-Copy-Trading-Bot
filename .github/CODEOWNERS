@@ -1,0 +1,107 @@
+# ============================================================================
+# .github/CODEOWNERS — mandatory review for the code that moves money (P1).
+#
+# GitHub matches the LAST pattern that applies, so the ordering below is
+# deliberate: broad defaults first, then progressively narrower
+# high-blast-radius areas.
+#
+# ─────────────────────────── BEFORE THIS WORKS ──────────────────────────
+# Replace every @org/team placeholder with real teams or usernames, then
+# enable branch protection on `main`:
+#
+#   Settings → Branches → main →
+#     [x] Require a pull request before merging
+#     [x] Require review from Code Owners
+#     [x] Require status checks: "App workspace", "Security",
+#         "Deployment config", "Frontend"
+#     [x] Do not allow bypassing the above settings
+#
+# CODEOWNERS WITHOUT BRANCH PROTECTION IS A SUGGESTION, NOT A CONTROL.
+# An auditor will check the branch-protection setting, not this file.
+# ============================================================================
+
+# ---------------------------------------------------------------- default ---
+*                                       @org/engineering
+
+# --------------------------------------------------------- money movement ---
+# Anything that can size, sign, or broadcast a trade. A bug here costs
+# funds directly and silently.
+/crates/core/src/risk.rs                @org/trading-core @org/security
+/crates/core/src/global_risk/           @org/trading-core @org/security
+/crates/core/src/execution/             @org/trading-core @org/security
+/crates/core/src/oms/                   @org/trading-core
+/crates/module-sniper/                  @org/trading-core
+/crates/module-copy/                    @org/trading-core
+/crates/module-polymarket/              @org/trading-core
+/crates/solana-kit/                     @org/trading-core @org/security
+
+# ------------------------------------------------------- custody / keys -----
+# The key-custody boundary. Every file here can decide WHICH key signs.
+/crates/core/src/custody/               @org/security
+/crates/solana-kit/src/signer.rs        @org/security
+/crates/solana-kit/src/tenant_signing_context.rs  @org/security
+/crates/solana-kit/src/tenant_broadcast_guard.rs  @org/security
+/crates/server/src/saas/custody.rs      @org/security
+/crates/server/src/saas/custody_rotation.rs        @org/security
+/crates/server/src/saas/custody_rotation_store.rs  @org/security
+/crates/server/src/saas/wallet_access.rs           @org/security
+
+# ------------------------------------------------- tenant isolation / authz --
+# The multi-tenant boundary. A mistake here is a cross-tenant data leak.
+/crates/core/src/db/                    @org/security @org/platform
+/crates/core/src/tenant/                @org/security @org/platform
+/crates/core/src/authorization/         @org/security
+/crates/core/src/session/               @org/security
+/crates/core/src/trading_repository/    @org/platform @org/security
+/crates/server/src/saas/middleware.rs   @org/security
+/crates/server/src/saas/api_keys.rs     @org/security
+/crates/server/src/saas/websocket_auth.rs          @org/security
+/crates/server/src/saas/websocket_replay_store.rs  @org/security
+/crates/server/src/trading_data_plane/authorization_chain.rs @org/security
+
+# ---------------------------------------------------------- the schema ------
+# Migrations are forward-only and additive by policy. Every new file here
+# is permanent; review it like one.
+/crates/core/migrations/                @org/platform @org/security
+
+# ----------------------------------------------------------- the contract ---
+# The published API. A change here is a change to someone else's code.
+/openapi/                               @org/platform @org/api-owners
+/crates/server/src/saas/openapi.rs      @org/platform @org/api-owners
+/crates/server/src/api/openapi_*.rs     @org/platform @org/api-owners
+/crates/saas-sdk/                       @org/platform @org/api-owners
+/docs/API-VERSIONING.md                 @org/platform @org/api-owners
+
+# -------------------------------------------------- billing / commercial ----
+/crates/core/src/billing/               @org/platform @org/finance
+/crates/server/src/saas/billing*.rs     @org/platform @org/finance
+/crates/server/src/saas/payment_webhooks.rs  @org/platform @org/finance @org/security
+/crates/server/src/saas/invoices.rs     @org/platform @org/finance
+
+# ---------------------------------------------- deployment / supply chain ---
+# CI, the images, the TLS edge, the environment split. Owning the
+# pipeline means owning what ships.
+/.github/                               @org/platform @org/security
+/deploy/                                @org/platform @org/security
+/Dockerfile                             @org/platform @org/security
+/docker-compose.yml                     @org/platform
+/scripts/                               @org/platform
+/deny.toml                              @org/security
+/rust-toolchain.toml                    @org/platform
+/Cargo.lock                             @org/platform
+
+# ------------------------------------------------------------- frontend -----
+/apps/control-plane/                    @org/frontend
+/apps/control-plane/src/lib/auth.ts     @org/frontend @org/security
+
+# ------------------------------------------------------------- on-chain -----
+# Deployed bytecode. Immutable once on mainnet.
+/programs/staking-suite/                @org/trading-core @org/security
+
+# ----------------------------------------------------------------- docs -----
+/docs/                                  @org/engineering
+/docs/SECURITY-*.md                     @org/security
+/docs/INCIDENT-RESPONSE-RUNBOOK.md      @org/security @org/sre
+/docs/SLO-SLI.md                        @org/sre
+/docs/ONCALL.md                         @org/sre
+/SECURITY.md                            @org/security

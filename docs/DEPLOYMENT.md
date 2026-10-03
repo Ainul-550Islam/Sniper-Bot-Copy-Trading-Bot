@@ -1,5 +1,37 @@
 # Deployment guide
 
+> **Production deployments: read these first.** This guide covers the
+> single-host development/evaluation path. The hardened production path
+> is documented separately and is gated in CI (`deploy-config` job):
+>
+> | Topic | Document | Gate |
+> |---|---|---|
+> | TLS termination, reverse proxy, certificate renewal | [`TLS-REVERSE-PROXY.md`](TLS-REVERSE-PROXY.md) | `./scripts/verify-tls-config.sh` |
+> | Staging vs production isolation, gated migrations | [`ENVIRONMENT-SEPARATION.md`](ENVIRONMENT-SEPARATION.md) | `./scripts/verify-environment-separation.sh` |
+> | Digest-pinned deploy, rollback, deployment ledger | [`IMAGE-DIGEST-DEPLOY.md`](IMAGE-DIGEST-DEPLOY.md) | `./scripts/verify-image-digests.sh` |
+>
+> Configuration lives in [`deploy/`](../deploy/README.md).
+
+## Multi-replica
+
+Running more than one replica is safe **only** from migration
+`0036_durable_tenant_controls_and_rotations.sql` onward, with a
+0036-or-later application build. Before 0036 the tenant kill-switch,
+custody rotation state and the WebSocket replay set were process-local:
+a second replica ignored tenant pauses, returned 404 for rotations
+created elsewhere, and admitted replayed WebSocket tickets.
+
+Prove it on your own infrastructure before scaling out:
+
+```bash
+POSTGRES_URL=postgres://user:pass@host/db \
+  cargo test -p sniper-suite --test multi_replica_durable_state -- --nocapture
+```
+
+Production must also set `DATABASE_AUTO_MIGRATE=false` and let
+`scripts/deploy-release.sh` apply the schema once, before new replicas
+start — see `ENVIRONMENT-SEPARATION.md`.
+
 ## Prerequisites
 
 * Docker + docker compose (recommended), **or** Rust stable (pinned in

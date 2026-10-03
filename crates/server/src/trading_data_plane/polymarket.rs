@@ -214,12 +214,15 @@ pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Respon
     };
     (
         StatusCode::OK,
-        Json(status_payload(
-            &state,
-            &auth,
-            BotModule::Polymarket,
-            feature_key_for(BotModule::Polymarket),
-        )),
+        Json(
+            status_payload(
+                &state,
+                &auth,
+                BotModule::Polymarket,
+                feature_key_for(BotModule::Polymarket),
+            )
+            .await,
+        ),
     )
         .into_response()
 }
@@ -251,5 +254,5 @@ pub async fn controls(
         Ok(a) => a,
         Err(response) => return response,
     };
-    apply_control(&state, &auth, BotModule::Polymarket, action)
+    apply_control(&state, &auth, BotModule::Polymarket, action).await
 }

@@ -19,6 +19,7 @@ pub mod authorization_chain;
 pub mod bots;
 pub mod copy;
 pub mod executions;
+pub mod module_control_store;
 pub mod module_controls;
 pub mod orders;
 pub mod polymarket;

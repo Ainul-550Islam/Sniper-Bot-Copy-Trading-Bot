@@ -36,6 +36,7 @@ pub mod commercial_state;
 pub mod custody;
 pub mod custody_health;
 pub mod custody_rotation;
+pub mod custody_rotation_store;
 pub mod data_lifecycle;
 pub mod export;
 pub mod invoices;
@@ -53,6 +54,7 @@ pub mod usage_limits;
 pub mod users;
 pub mod wallet_access;
 pub mod websocket_auth;
+pub mod websocket_replay_store;
 
 #[allow(unused_imports)]
 pub use middleware::{authorize_request, deny_response, SaasContext, DEPLOYMENT_ORG_SLUG};

@@ -199,6 +199,11 @@ impl Sniper {
     /// behaviour unchanged.
     pub fn with_tenant_context(mut self, guard: Arc<TenantBroadcastGuard>) -> BotResult<Self> {
         self.executor = self.executor.with_tenant_guard(Arc::clone(&guard))?;
+        // Bind the risk engine to the same tenant, so the cluster-wide
+        // capacity and daily-loss reads are restricted to THIS tenant.
+        // Without this the shared oracle would let another tenant's open
+        // positions consume this tenant's capacity.
+        self.risk = self.risk.clone().with_tenant(guard.organization_id());
         self.tenant = Some(guard.context().clone());
         self.tenant_guard = Some(guard);
         Ok(self)

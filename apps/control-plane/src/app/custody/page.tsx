@@ -14,35 +14,61 @@ export default function CustodyPage() {
   const [rotation, setRotation] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [signerError, setSignerError] = useState<string | null>(null);
 
   useEffect(() => {
+    const abort = new AbortController();
     let cancelled = false;
     async function load() {
+      // A custody surface must never render "no profiles" when the truth is
+      // "we could not ask". The profiles call is therefore NOT swallowed:
+      // a 403 (entitlement revoked), a 500 or an expired session surfaces as
+      // an explicit error instead of an empty, reassuring list.
       try {
-        const [p, h] = await Promise.all([
-          request<{ profiles?: CustodyProfile[]; data?: CustodyProfile[] } | CustodyProfile[]>("/api/saas/custody/profiles").catch(() => []),
-          commercial.custodyHealth().catch(() => null),
-        ]);
-        const list = Array.isArray(p) ? p : (p as any)?.profiles ?? (p as any)?.data ?? [];
-        if (!cancelled) {
-          setProfiles(list);
-          setHealth(h);
-          // Try to load signers for first profile if any
-          if (list.length > 0) {
-            const first = list[0] as CustodyProfile;
-            try {
-              const s = await request<{ signers?: SignerView[] } | SignerView[]>(`/api/saas/custody/profiles/${first.id}/signers`).catch(() => null);
-              if (s && !cancelled) setSigners(Array.isArray(s) ? s : (s as any)?.signers ?? []);
-            } catch { /* ignore */ }
+        const p = await request<
+          { profiles?: CustodyProfile[]; data?: CustodyProfile[] } | CustodyProfile[]
+        >("/api/saas/custody/profiles", { signal: abort.signal });
+        if (cancelled) return;
+        const list: CustodyProfile[] = Array.isArray(p)
+          ? p
+          : p?.profiles ?? p?.data ?? [];
+        setProfiles(list);
+
+        // Health is advisory: its absence degrades the panel, it does not
+        // invalidate the page, so this one stays non-fatal (and says so).
+        const h = await commercial.custodyHealth().catch(() => null);
+        if (cancelled) return;
+        setHealth(h);
+
+        const first = list[0];
+        if (first) {
+          try {
+            const s = await request<{ signers?: SignerView[] } | SignerView[]>(
+              `/api/saas/custody/profiles/${first.id}/signers`,
+              { signal: abort.signal },
+            );
+            if (!cancelled) setSigners(Array.isArray(s) ? s : s?.signers ?? []);
+          } catch (e) {
+            // Signers failing is a real refusal too — report it rather than
+            // leaving the operator with a silent "No signers loaded."
+            if (!cancelled) setSignerError(toDisplayError(e));
           }
+        }
+        if (!cancelled) setLoading(false);
+      } catch (e) {
+        if (!cancelled) {
+          setError(toDisplayError(e));
           setLoading(false);
         }
-      } catch (e) {
-        if (!cancelled) { setError(toDisplayError(e)); setLoading(false); }
       }
     }
-    load();
-    return () => { cancelled = true; };
+    void load();
+    return () => {
+      cancelled = true;
+      // Abort in flight requests so a fast tenant switch cannot land the
+      // PREVIOUS tenant's custody data in this component's state.
+      abort.abort();
+    };
   }, []);
 
   async function handleRotation(profileId: string, oldId: string, newId: string) {
@@ -83,7 +109,10 @@ export default function CustodyPage() {
 
       <section className="card">
         <h2>Signers</h2>
-        {!signers || signers.length === 0 ? <p className="muted">No signers loaded.</p> : (
+        {signerError ? <p role="alert" className="error">{signerError}</p> : null}
+        {!signers || signers.length === 0 ? (
+          <p className="muted">{signerError ? "Signers could not be read." : "No signers loaded."}</p>
+        ) : (
           <table>
             <thead><tr><th>ID</th><th>Address</th><th>Provider</th><th>Status</th><th>Capabilities</th></tr></thead>
             <tbody>

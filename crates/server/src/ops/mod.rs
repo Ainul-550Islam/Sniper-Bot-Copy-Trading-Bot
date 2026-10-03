@@ -1,7 +1,7 @@
 //! Operator and buyer evidence operations (Batch 3+4, Batch 7 external contracts).
 
 pub mod audit_attestation;
-pub mod backup_verification;
+pub mod backup_ledger;
 pub mod buyer_package_verify;
 pub mod config_diff;
 pub mod container_metadata;
@@ -22,6 +22,7 @@ pub mod integration_services;
 pub mod license_report;
 pub mod live_gate;
 pub mod metrics_snapshot;
+pub mod migration_health;
 pub mod network_policy;
 pub mod observability_config;
 pub mod operator_actions;
@@ -34,7 +35,6 @@ pub mod release_lock;
 pub mod release_manifest_verify;
 pub mod release_readiness;
 pub mod reproducibility;
-pub mod restore_verification;
 pub mod runtime_config_report;
 pub mod sbom_report;
 pub mod security_evidence;

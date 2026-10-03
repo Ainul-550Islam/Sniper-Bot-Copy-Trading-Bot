@@ -1,0 +1,82 @@
+# ============================================================================
+# .github/workflows/codeql.yml — static security analysis (P1).
+#
+# WHAT THIS ADDS THAT ci.yml DOES NOT
+# -----------------------------------
+# `ci.yml` already runs clippy with `-D warnings`, cargo-audit and
+# cargo-deny. Those cover lint quality and KNOWN-VULNERABLE DEPENDENCIES.
+# They do not do interprocedural taint analysis of our own source.
+#
+# CodeQL does, for the TypeScript control plane: it traces untrusted
+# input through the app and flags injection, unsafe redirects, prototype
+# pollution and credential handling that a linter cannot see.
+#
+# RUST IS NOT ANALYSED HERE, AND THAT IS STATED RATHER THAN IMPLIED.
+# GitHub's CodeQL does not support Rust. Claiming "CodeQL coverage" for a
+# repository that is ~90% Rust would be a security claim the evidence
+# does not support. The Rust surface is covered by:
+#   * clippy -D warnings (workspace, all targets)   — ci.yml
+#   * cargo-audit (both lockfiles)                  — ci.yml
+#   * cargo-deny (licences, bans, advisories)       — ci.yml
+#   * the cross-tenant isolation test suites        — ci.yml
+# See docs/SECURITY-CONTROLS-MATRIX.md for the full mapping.
+# ============================================================================
+name: CodeQL
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly, so a newly published query finds old code without waiting
+    # for someone to touch the file.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write   # required to upload the SARIF results
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none          # Next.js: no compiled artifact needed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended adds lower-precision queries. For a control
+          # plane that fronts custody operations, a few more findings to
+          # triage is the right trade against a missed one.
+          queries: security-extended
+          config: |
+            paths:
+              - apps/control-plane/src
+            paths-ignore:
+              - apps/control-plane/.next
+              - apps/control-plane/node_modules
+              - "**/*.test.ts"
+              - "**/*.test.tsx"
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

@@ -11,10 +11,47 @@
 //! Internal-only endpoints (deployment key routes, `/api/kill`, journal,
 //! metrics, the legacy `/api/events` stream, the PostgreSQL probe) are
 //! deliberately absent: this document is the tenant-facing contract.
+//!
+//! # Fragments (P1 — API contract completeness)
+//!
+//! The billing, commercial, custody and ops surfaces describe themselves
+//! in `crate::api::openapi_{billing,commercial,custody,ops}`. Those four
+//! modules existed but **were never merged into this document** — they
+//! were compiled, never called, so roughly 760 lines of published
+//! contract were missing from `/api/saas/openapi.json` while the SDK and
+//! the docs implied they were there. [`merge_api_fragments`] now folds
+//! them in, and `openapi_artifact.rs` asserts the exported artifact stays
+//! in lockstep.
+//!
+//! # Versioning
+//!
+//! [`API_VERSION`] is the contract version and is NOT the crate version:
+//! a patch release of the binary must not look like an API change. The
+//! compatibility policy is in `docs/API-VERSIONING.md` and is enforced by
+//! the committed artifact diff — a breaking change cannot land unnoticed
+//! because the artifact changes with it.
 
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
+
+/// The version of the PUBLISHED CONTRACT.
+///
+/// Deliberately independent of `CARGO_PKG_VERSION`: the binary ships
+/// patches that change no route, and a consumer that pins the contract
+/// must not be told the API moved because a dependency was bumped. Bump
+/// this according to `docs/API-VERSIONING.md`:
+///   * PATCH — documentation/description only;
+///   * MINOR — new path, new optional field, new enum value (additive);
+///   * MAJOR — anything a conforming client could break on.
+///
+/// 2.0.0 — `BackupStatus` was rebuilt around the backup ledger. The
+/// fields `retention_configured` and `protection` are GONE, not
+/// deprecated: a deployment that is not backing anything up had no
+/// honest value to put in them. A conforming 1.x client breaks on this,
+/// which is exactly what a MAJOR bump is for. See
+/// `docs/API-VERSIONING.md` and the CHANGELOG entry for the migration.
+pub const API_VERSION: &str = "2.0.0";
 
 /// One reusable non-success response.
 fn error_ref() -> Value {
@@ -64,14 +101,26 @@ fn guarded_responses(ok: &str, schema: Value) -> Value {
 }
 
 /// The OpenAPI document for the SaaS control plane.
+///
+/// This is `base_document()` with the per-surface fragments merged in;
+/// the split exists so the base and the fragments can be inspected
+/// independently (e.g. to report every conflict at once instead of the
+/// first one).
 pub fn document() -> Value {
+    let mut doc = base_document();
+    merge_api_fragments(&mut doc);
+    doc
+}
+
+/// The hand-written core of the contract, before fragments are merged.
+pub fn base_document() -> Value {
     let tenant_path = |name: &str| json!([{ "name": name, "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }]);
 
-    json!({
+    let doc = json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Sniper Suite SaaS Control Plane",
-            "version": "0.1.0",
+            "version": API_VERSION,
             "description": "Multi-tenant SaaS contract over the TASK 7A control plane. \
                 Trading truth (orders, fills, positions, risk, ledger, HA) remains owned by \
                 the TASK 1–6 engines and is exposed read-only to tenants. Billing/usage \
@@ -90,6 +139,21 @@ pub fn document() -> Value {
             { "name": "contract" },
         ],
         "components": {
+            // Reusable responses. The surface fragments in `crate::api`
+            // reference these by name; before they existed those `$ref`s
+            // dangled, which every OpenAPI validator and SDK generator
+            // treats as a broken document.
+            "responses": {
+                "Unauthorized": {
+                    "description": "Missing, malformed or expired credential.",
+                    "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } },
+                },
+                "Forbidden": {
+                    "description": "Authenticated, but the credential may not act on this resource. \
+                        Note: cross-TENANT access returns 404, not 403, so the API is not an existence oracle.",
+                    "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } },
+                },
+            },
             "securitySchemes": {
                 "bearerAuth": {
                     "type": "http",
@@ -442,23 +506,11 @@ pub fn document() -> Value {
                     "saas.createCheckout",
                     "Create a provider-neutral checkout session for the caller's own tenant. Price authority is server-side plan definitions; client-supplied amounts are never trusted.",
                     &["checkout"], true,
-                    json!({ "type": "object", "required": ["plan_code", "idempotency_key"], "properties": {
-                        "plan_code": { "type": "string", "enum": ["starter", "pro", "business", "enterprise"] },
-                        "provider": { "type": "string", "enum": ["manual", "stripe", "paddle"] },
-                        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 128 },
-                        "success_url": { "type": "string", "format": "uri" },
-                        "cancel_url": { "type": "string", "format": "uri" },
-                    } }),
+                    // Typed by the billing fragment rather than copied inline:
+                    // an inline duplicate is a second definition that drifts.
+                    json!({ "$ref": "#/components/schemas/CheckoutRequest" }),
                     json!({
-                        "201": json_response("Checkout created.", json!({ "type": "object", "properties": {
-                            "id": { "type": "string", "format": "uuid" },
-                            "organization_id": { "type": "string", "format": "uuid" },
-                            "plan_code": { "type": "string" },
-                            "provider": { "type": "string" },
-                            "status": { "type": "string" },
-                            "checkout_url": { "type": ["string", "null"] },
-                            "expires_at": { "type": ["string", "null"], "format": "date-time" },
-                        } })),
+                        "201": json_response("Checkout created.", json!({ "$ref": "#/components/schemas/CheckoutResponse" })),
                         "400": error_ref(), "401": error_ref(), "403": error_ref(), "409": error_ref(),
                     }),
                 ),
@@ -470,7 +522,7 @@ pub fn document() -> Value {
                     &["invoices"], true, json!(null),
                     guarded_responses("Invoice list.", json!({ "type": "object", "properties": {
                         "organization_id": { "type": "string", "format": "uuid" },
-                        "invoices": { "type": "array", "items": { "type": "object" } },
+                        "invoices": { "type": "array", "items": { "$ref": "#/components/schemas/InvoiceView" } },
                         "count": { "type": "integer" },
                     } })),
                 ),
@@ -482,30 +534,16 @@ pub fn document() -> Value {
                     "Get one invoice. Uses organization_id predicate so cross-tenant access returns 404, not 403, to avoid existence oracle.",
                     &["invoices"], true, json!(null),
                     json!({
-                        "200": json_response("The invoice.", json!({ "type": "object" })),
+                        "200": json_response("The invoice.", json!({ "$ref": "#/components/schemas/InvoiceView" })),
                         "401": error_ref(), "403": error_ref(), "404": error_ref(),
                     }),
                 ),
             },
-            "/api/saas/custody/profiles": {
-                "post": operation(
-                    "saas.createCustodyProfile",
-                    "Create a custody profile for the caller's tenant. Stores only public metadata, never private keys.",
-                    &["custody"], true,
-                    json!({ "type": "object", "required": ["name", "provider_type"], "properties": {
-                        "name": { "type": "string" },
-                        "provider_type": { "type": "string", "enum": ["local", "vault", "kms", "hsm"] },
-                        "description": { "type": "string" },
-                    } }),
-                    json!({ "201": json_response("Profile created.", json!({ "type": "object" })), "400": error_ref(), "403": error_ref() }),
-                ),
-                "get": operation(
-                    "saas.listCustodyProfiles",
-                    "List custody profiles for the caller's tenant.",
-                    &["custody"], true, json!(null),
-                    guarded_responses("Profiles.", json!({ "type": "object" })),
-                ),
-            },
+            // NOTE: `/api/saas/custody/profiles` is declared in
+            // `crate::api::openapi_custody`, which types the responses
+            // (`CustodyProfile`) and documents 409/422. It is merged in by
+            // `merge_api_fragments`; declaring it here too would be two
+            // sources of truth for one path.
             "/api/saas/custody/profiles/{id}/activate": {
                 "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
                 "post": operation("saas.activateCustodyProfile", "Activate a custody profile (pending -> active). Closed tenants cannot activate.", &["custody"], true, json!(null), guarded_responses("Activated.", json!({ "type": "object" }))),
@@ -532,10 +570,11 @@ pub fn document() -> Value {
                 "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
                 "get": operation("saas.getSigner", "Get signer public view (address/status/capabilities, never private key).", &["custody"], true, json!(null), guarded_responses("Signer view.", json!({ "type": "object" }))),
             },
-            "/api/saas/custody/signers/{id}/resolve": {
-                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-                "get": operation("saas.resolveSigner", "Resolve active signer for trading. Enforces tenant ownership, active status, capabilities, provider match.", &["custody"], true, json!(null), json!({ "200": json_response("Resolved signer.", json!({ "type": "object" })), "403": error_ref(), "404": error_ref(), "501": error_ref() })),
-            },
+
+            // NOTE: `/api/saas/custody/signers/{id}/resolve` is declared in
+            // `crate::api::openapi_custody` (typed `SignerView`, plus the
+            // 409 "not active" and 422 "provider unavailable, fail closed"
+            // cases). Merged in, not duplicated here.
             "/api/saas/organizations/{id}/lifecycle": {
                 "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
                 "get": operation("saas.getLifecycleStatus", "Inspect tenant lifecycle status (suspend/close/retention).", &["lifecycle"], true, json!(null), guarded_responses("Lifecycle status.", json!({ "type": "object" }))),
@@ -549,7 +588,79 @@ pub fn document() -> Value {
                 "post": operation("saas.advanceLifecycleJob", "Advance deprovisioning job phase. Restart-safe and idempotent.", &["lifecycle"], true, json!(null), guarded_responses("Advanced.", json!({ "type": "object" }))),
             },
         },
-    })
+    });
+
+    doc
+}
+
+/// Fold the per-surface contract fragments into the document.
+///
+/// These four modules are the authoritative description of the billing,
+/// commercial, custody and ops surfaces. Before this merge they were
+/// dead code: declared in `crate::api`, compiled, and never called, so
+/// the served contract silently omitted every path they describe.
+///
+/// Conflict policy is FAIL LOUD, not last-writer-wins. Two fragments
+/// claiming the same path or the same schema name means two sources of
+/// truth for one endpoint; silently keeping one of them is how a
+/// published contract starts lying. The panic fires in
+/// `document()`, which every request to `/api/saas/openapi.json` and the
+/// artifact test both call, so a conflict cannot reach a release.
+fn merge_api_fragments(doc: &mut Value) {
+    use crate::api::{openapi_billing, openapi_commercial, openapi_custody, openapi_ops};
+
+    let fragments: [(&str, Value, Value); 4] = [
+        (
+            "billing",
+            openapi_billing::billing_paths(),
+            openapi_billing::billing_schemas(),
+        ),
+        (
+            "commercial",
+            openapi_commercial::commercial_paths(),
+            openapi_commercial::commercial_schemas(),
+        ),
+        (
+            "custody",
+            openapi_custody::custody_paths(),
+            openapi_custody::custody_schemas(),
+        ),
+        ("ops", openapi_ops::paths(), openapi_ops::schemas()),
+    ];
+
+    for (name, paths, schemas) in fragments {
+        merge_object(doc, &["paths"], paths, name, "path");
+        merge_object(doc, &["components", "schemas"], schemas, name, "schema");
+    }
+}
+
+/// Merge `incoming` into the object at `pointer`, refusing to overwrite.
+fn merge_object(doc: &mut Value, pointer: &[&str], incoming: Value, origin: &str, what: &str) {
+    let Some(incoming) = incoming.as_object().cloned() else {
+        // A fragment that is not an object is a programming error in the
+        // fragment, not a condition to paper over.
+        panic!("openapi fragment '{origin}' did not return a JSON object of {what}s");
+    };
+
+    let mut target = doc;
+    for key in pointer {
+        target = target
+            .get_mut(*key)
+            .unwrap_or_else(|| panic!("openapi document has no '{key}' object to merge into"));
+    }
+    let target = target
+        .as_object_mut()
+        .unwrap_or_else(|| panic!("openapi document '{}' is not an object", pointer.join("/")));
+
+    for (key, value) in incoming {
+        if target.contains_key(&key) {
+            panic!(
+                "openapi fragment '{origin}' redefines {what} '{key}', which the base \
+                 document already declares — two sources of truth for one endpoint"
+            );
+        }
+        target.insert(key, value);
+    }
 }
 
 /// `GET /api/saas/openapi.json` — the public contract.

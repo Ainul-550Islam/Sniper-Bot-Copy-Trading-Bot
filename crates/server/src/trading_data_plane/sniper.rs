@@ -34,12 +34,15 @@ pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Respon
     };
     (
         StatusCode::OK,
-        Json(status_payload(
-            &state,
-            &auth,
-            BotModule::Sniper,
-            feature_key_for(BotModule::Sniper),
-        )),
+        Json(
+            status_payload(
+                &state,
+                &auth,
+                BotModule::Sniper,
+                feature_key_for(BotModule::Sniper),
+            )
+            .await,
+        ),
     )
         .into_response()
 }
@@ -66,7 +69,7 @@ pub async fn controls(
         Ok(a) => a,
         Err(response) => return response,
     };
-    apply_control(&state, &auth, BotModule::Sniper, action)
+    apply_control(&state, &auth, BotModule::Sniper, action).await
 }
 
 #[cfg(test)]

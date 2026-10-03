@@ -1,0 +1,3664 @@
+{
+  "components": {
+    "responses": {
+      "Forbidden": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Authenticated, but the credential may not act on this resource. Note: cross-TENANT access returns 404, not 403, so the API is not an existence oracle."
+      },
+      "Unauthorized": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Missing, malformed or expired credential."
+      }
+    },
+    "schemas": {
+      "ApiKeyMetadata": {
+        "description": "Metadata view. The secret material exists only in the create response, once.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "key_prefix": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "usable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "key_prefix",
+          "label",
+          "role",
+          "created_at",
+          "usable"
+        ],
+        "type": "object"
+      },
+      "BackupStatus": {
+        "description": "Reports ONLY what the append-only backup ledger proves. A deployment with no ledger answers state=not_configured; this endpoint never asserts protection it cannot evidence.",
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "backup_count": {
+            "type": "integer"
+          },
+          "encrypted": {
+            "description": "Whether every recorded backup was encrypted at rest. null = nothing recorded.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "last_backup_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_verified_restore": {
+            "description": "null = no restore has ever been verified.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "offsite": {
+            "description": "Geographic redundancy, a SEPARATE axis from `protected`. `protected` answers \"can this be restored, proven by drill\"; this answers \"would a copy survive losing this host\".",
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "includes_pitr": {
+                "description": "Whether the last successful sync also carried the base backups and WAL archive. False with PITR configured means point-in-time recovery does not survive losing this host.",
+                "type": "boolean"
+              },
+              "last_sync_at": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "not_configured",
+                  "current",
+                  "stale",
+                  "failing"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "configured",
+              "includes_pitr"
+            ],
+            "type": "object"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "pitr": {
+            "description": "Point-in-time recovery — the axis that decides how MUCH data a disaster costs, as opposed to whether anything can be recovered at all.",
+            "properties": {
+              "last_base_backup_at": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_verified_pitr": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_wal_archive_at": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "description": "not_configured = no WAL archiving, so the recovery point is the dump interval. unverified = archiving runs but no point-in-time recovery has ever been proven.",
+                "enum": [
+                  "not_configured",
+                  "failing",
+                  "stale",
+                  "unverified",
+                  "current"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          "protected": {
+            "description": "True only for state=verified.",
+            "type": "boolean"
+          },
+          "retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rpo_basis": {
+            "description": "Which record the estimate came from. A failing or stale WAL archive is never used as the basis.",
+            "enum": [
+              "wal_archive",
+              "last_backup",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "rpo_estimate_seconds": {
+            "description": "Worst-case data loss in seconds as evidenced by the ledger. null when nothing is recorded — an unknown RPO is reported as unknown, never as zero.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "verified = a current backup AND a restore drill inside the quarterly window. unverified = backups run but no restore has ever been proven — an untested backup is an assumption, so this is NOT protected.",
+            "enum": [
+              "verified",
+              "unverified",
+              "stale",
+              "failing",
+              "not_configured"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "description": "One actionable sentence. Never contains a path, bucket, host or backup id.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_id",
+          "state",
+          "protected",
+          "offsite",
+          "pitr",
+          "rpo_basis",
+          "summary",
+          "as_of"
+        ],
+        "type": "object"
+      },
+      "BillingState": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "entitlement_active": {
+            "type": "boolean"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscription_status": {
+            "enum": [
+              "active",
+              "trialing",
+              "past_due",
+              "canceled",
+              "suspended",
+              "expired",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "organization_id",
+          "subscription_status",
+          "entitlement_active"
+        ],
+        "type": "object"
+      },
+      "BillingStatus": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "billing_provider": {
+            "enum": [
+              "manual",
+              "stripe",
+              "paddle",
+              "test"
+            ],
+            "type": "string"
+          },
+          "dunning_state": {
+            "enum": [
+              "current",
+              "payment_failed",
+              "retry_pending",
+              "grace_period",
+              "billing_suspended",
+              "recovered",
+              "manually_resolved"
+            ],
+            "type": "string"
+          },
+          "entitlements_active": {
+            "type": "boolean"
+          },
+          "grace_until": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invoice_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "payment_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan_code": {
+            "enum": [
+              "starter",
+              "pro",
+              "business",
+              "enterprise"
+            ],
+            "type": "string"
+          },
+          "plan_version": {
+            "type": "integer"
+          },
+          "subscription_status": {
+            "enum": [
+              "trialing",
+              "active",
+              "past_due",
+              "paused",
+              "canceled",
+              "expired"
+            ],
+            "type": "string"
+          },
+          "suspension_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usage": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "organization_id",
+          "plan_code",
+          "subscription_status",
+          "billing_provider",
+          "entitlements_active",
+          "dunning_state",
+          "as_of"
+        ],
+        "type": "object"
+      },
+      "CheckoutRequest": {
+        "additionalProperties": false,
+        "description": "Client supplies only plan_code + idempotency, never amount/currency.",
+        "properties": {
+          "cancel_url": {
+            "format": "uri",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "plan_code": {
+            "enum": [
+              "starter",
+              "pro",
+              "business",
+              "enterprise"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "default": "manual",
+            "enum": [
+              "manual",
+              "stripe",
+              "paddle"
+            ],
+            "type": "string"
+          },
+          "success_url": {
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_code",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "CheckoutResponse": {
+        "properties": {
+          "checkout_url": {
+            "format": "uri",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "plan_code": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "open",
+              "completed",
+              "expired",
+              "canceled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "plan_code",
+          "provider",
+          "status"
+        ],
+        "type": "object"
+      },
+      "CommercialState": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "billing_provider": {
+            "type": "string"
+          },
+          "commercial_consistent": {
+            "type": "boolean"
+          },
+          "dunning_state": {
+            "type": "string"
+          },
+          "entitlements_active": {
+            "type": "boolean"
+          },
+          "lifecycle_status": {
+            "enum": [
+              "active",
+              "suspended",
+              "closed",
+              "pending"
+            ],
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "plan_code": {
+            "type": "string"
+          },
+          "subscription_status": {
+            "type": "string"
+          },
+          "suspension_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usage": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "organization_id",
+          "plan_code",
+          "subscription_status",
+          "billing_provider",
+          "entitlements_active",
+          "dunning_state",
+          "lifecycle_status",
+          "commercial_consistent",
+          "as_of"
+        ],
+        "type": "object"
+      },
+      "CredentialRefView": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "env_var",
+              "aws_kms_key_id",
+              "gcp_kms_resource",
+              "azure_key_vault",
+              "vault_transit",
+              "hsm_slot",
+              "file_path",
+              "handle"
+            ],
+            "type": "string"
+          },
+          "metadata_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "provider_type": {
+            "enum": [
+              "vault",
+              "kms",
+              "hsm",
+              "local"
+            ],
+            "type": "string"
+          },
+          "reference": {
+            "description": "Env var name or resource ARN — never secret value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_type",
+          "kind",
+          "reference"
+        ],
+        "type": "object"
+      },
+      "CustodyHealth": {
+        "properties": {
+          "checked_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Secret-free detail",
+            "type": "string"
+          },
+          "provider_type": {
+            "enum": [
+              "local",
+              "vault",
+              "kms",
+              "hsm"
+            ],
+            "type": "string"
+          },
+          "signing_allowed": {
+            "description": "False when degraded/unavailable/revoked",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "configured",
+              "reachable",
+              "unavailable",
+              "degraded",
+              "revoked"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_type",
+          "state",
+          "detail",
+          "signing_allowed"
+        ],
+        "type": "object"
+      },
+      "CustodyHealthReport": {
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/CustodyHealth"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "organization_id",
+          "providers"
+        ],
+        "type": "object"
+      },
+      "CustodyProfile": {
+        "description": "Public custody metadata only — no private keys or credential values.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "provider_type": {
+            "enum": [
+              "local",
+              "vault",
+              "kms",
+              "hsm"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "active",
+              "revoked",
+              "suspended"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "name",
+          "provider_type",
+          "status"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "error": {
+            "description": "Stable refusal kind (deny_* / invalid_credentials / …).",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Single-line, secret-free human explanation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ExportEnvelope": {
+        "properties": {
+          "data": {
+            "additionalProperties": true,
+            "description": "Deterministic, sorted section payload.",
+            "type": "object"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "profile",
+              "members",
+              "api_keys",
+              "usage",
+              "subscription",
+              "wallets",
+              "audit"
+            ],
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_id",
+          "kind",
+          "generated_at",
+          "data"
+        ],
+        "type": "object"
+      },
+      "InvoiceView": {
+        "properties": {
+          "amount_cents": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "amount_due_cents": {
+            "type": "integer"
+          },
+          "amount_paid_cents": {
+            "type": "integer"
+          },
+          "currency": {
+            "pattern": "^[a-z]{3}$",
+            "type": "string"
+          },
+          "hosted_url": {
+            "format": "uri",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "period_end": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "period_start": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "enum": [
+              "manual",
+              "stripe",
+              "paddle"
+            ],
+            "type": "string"
+          },
+          "provider_invoice_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "open",
+              "paid",
+              "void",
+              "uncollectible",
+              "refunded"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "provider",
+          "status",
+          "amount_cents",
+          "currency"
+        ],
+        "type": "object"
+      },
+      "Membership": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "platform_admin",
+              "org_owner",
+              "org_admin",
+              "trader",
+              "security_admin",
+              "billing_admin",
+              "auditor",
+              "viewer"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "suspended",
+              "removed"
+            ],
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_id",
+          "user_id",
+          "role",
+          "status"
+        ],
+        "type": "object"
+      },
+      "MigrationHealth": {
+        "properties": {
+          "applied_count": {
+            "type": "integer"
+          },
+          "binary_high_water": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "checksum_mismatches": {
+            "description": "Same version, different content. Never automatic to resolve.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "database_high_water": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "embedded_count": {
+            "type": "integer"
+          },
+          "failed_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "healthy": {
+            "type": "boolean"
+          },
+          "pending_versions": {
+            "description": "Required by this build, not applied. Queries using them fail at request time.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "state": {
+            "description": "`ahead` (database newer than the binary) is HEALTHY — that is the normal state during a rollback.",
+            "enum": [
+              "in_sync",
+              "ahead",
+              "pending",
+              "dirty",
+              "checksum_mismatch"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "description": "One actionable sentence. Never contains a connection string or checksum bytes.",
+            "type": "string"
+          },
+          "unknown_versions": {
+            "description": "Applied but unknown to this build.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "versions": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "state",
+          "healthy",
+          "embedded_count",
+          "applied_count",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "Organization": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "trialing",
+              "past_due",
+              "suspended",
+              "closed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "status",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "ReadinessOperator": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "diagnostics": {
+            "description": "redacted — no secrets",
+            "type": "object"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "services": {
+            "type": "object"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "version",
+          "as_of",
+          "services",
+          "diagnostics"
+        ],
+        "type": "object"
+      },
+      "ReadinessPublic": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "services": {
+            "type": "object"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "version",
+          "as_of",
+          "services"
+        ],
+        "type": "object"
+      },
+      "ReconcileRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "type": "boolean"
+          },
+          "event_kind": {
+            "enum": [
+              "payment_succeeded",
+              "payment_failed",
+              "subscription_created",
+              "subscription_updated",
+              "subscription_canceled",
+              "invoice_created",
+              "invoice_paid",
+              "invoice_failed",
+              "refund_created",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "stripe",
+              "paddle",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "provider_event_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ReconcileResponse": {
+        "properties": {
+          "action": {
+            "enum": [
+              "no_op",
+              "update",
+              "suspend",
+              "restore",
+              "investigate"
+            ],
+            "type": "string"
+          },
+          "decided_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "idempotent": {
+            "type": "boolean"
+          },
+          "internal_subscription_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "provider_event_kind": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_id",
+          "action",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "SecuritySummary": {
+        "description": "Every field is derived from this deployment's configuration or from the credential that made the request. None of them is a constant.",
+        "properties": {
+          "api_key_status": {
+            "enum": [
+              "in_use",
+              "not_used_for_this_request"
+            ],
+            "type": "string"
+          },
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "audit_available": {
+            "description": "True only when the audit trail is DB-chained and therefore verifiable after a restart.",
+            "type": "boolean"
+          },
+          "custody_mode": {
+            "description": "Read from [signing].provider. Only `local` is implemented; the others fail startup rather than falling back.",
+            "enum": [
+              "local",
+              "vault",
+              "kms",
+              "hsm"
+            ],
+            "type": "string"
+          },
+          "lifecycle_state": {
+            "type": "string"
+          },
+          "mfa_status": {
+            "description": "`not_supported` in every build that has no MFA implementation — stated plainly rather than as `unknown`, which would imply the capability might exist.",
+            "enum": [
+              "not_supported"
+            ],
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "session_status": {
+            "description": "How THIS request authenticated.",
+            "enum": [
+              "session",
+              "api_key"
+            ],
+            "type": "string"
+          },
+          "websocket_auth": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_id",
+          "mfa_status",
+          "session_status",
+          "api_key_status",
+          "websocket_auth",
+          "custody_mode",
+          "audit_available",
+          "lifecycle_state",
+          "as_of"
+        ],
+        "type": "object"
+      },
+      "SignerView": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "custody_profile_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "logical_identity": {
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "provider_type": {
+            "enum": [
+              "local",
+              "vault",
+              "kms",
+              "hsm"
+            ],
+            "type": "string"
+          },
+          "public_address": {
+            "description": "On-chain address, never private key",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "active",
+              "revoked"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "custody_profile_id",
+          "logical_identity",
+          "public_address",
+          "provider_type",
+          "status"
+        ],
+        "type": "object"
+      },
+      "UsageLimits": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "limits": {
+            "items": {
+              "properties": {
+                "allows": {
+                  "type": "boolean"
+                },
+                "current": {
+                  "type": "number"
+                },
+                "feature": {
+                  "type": "string"
+                },
+                "limit": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "remaining": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "state": {
+                  "enum": [
+                    "within_allowance",
+                    "soft_limit_exceeded",
+                    "hard_limit_exceeded",
+                    "suspended"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "feature",
+                "state",
+                "allows"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "period": {
+            "pattern": "^[0-9]{4}-[0-9]{2}$",
+            "type": "string"
+          },
+          "plan_code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_id",
+          "period",
+          "plan_code",
+          "limits",
+          "as_of"
+        ],
+        "type": "object"
+      },
+      "UserProfile": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "format": "email",
+            "type": "string"
+          },
+          "email_verified": {
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "last_login_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "platform_admin": {
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "suspended",
+              "deactivated"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "email_verified",
+          "display_name",
+          "status",
+          "platform_admin",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "WalletBinding": {
+        "description": "A tenant's authorized wallet binding. Public address only — no signing material exists in the SaaS layer.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "modules": {
+            "items": {
+              "enum": [
+                "module.sniper",
+                "module.copy",
+                "module.polymarket"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "public_address": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "label",
+          "public_address",
+          "modules",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "WebhookAck": {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "applied",
+              "ignored",
+              "duplicate",
+              "rejected"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "A SaaS session token (login) or a tenant API key. The tenant context is the credential's own organization unless the caller is a platform administrator.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Multi-tenant SaaS contract over the TASK 7A control plane. Trading truth (orders, fills, positions, risk, ledger, HA) remains owned by the TASK 1–6 engines and is exposed read-only to tenants. Billing/usage reads are served through the deterministic exports (`/api/saas/exports?kind=subscription|usage|...`); there are no separate plan-catalogue or usage endpoints.",
+    "title": "Sniper Suite SaaS Control Plane",
+    "version": "2.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/ops/migration-health": {
+      "get": {
+        "description": "Platform administrators only: the answer describes the deployment, not a tenant, and it exposes the shape of the schema. Production runs with DATABASE_AUTO_MIGRATE=false, so a binary can start, pass /health and /ready, and still be missing the columns its queries use — this endpoint is the only external way to see that. A database AHEAD of the binary is reported as healthy because that is the expected state during a rollback.",
+        "operationId": "ops.migrationHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigrationHealth"
+                }
+              }
+            },
+            "description": "Schema agrees with this build (in_sync), or the database is ahead of it."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigrationHealth"
+                }
+              }
+            },
+            "description": "Migrations are pending, a migration did not complete, a checksum disagrees, no database is attached, or the migration table could not be read. The body carries `state` and `summary`."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Does the database schema match this build? 200 for in_sync or ahead, 503 for pending, dirty or checksum_mismatch.",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/saas/api-keys": {
+      "get": {
+        "operationId": "saas.listApiKeys",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApiKeyMetadata"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Key metadata list."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The tenant's API keys (metadata only — never secrets).",
+        "tags": [
+          "api-keys"
+        ]
+      },
+      "post": {
+        "operationId": "saas.createApiKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "expires_in_days": {
+                    "maximum": 3650,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "label": {
+                    "maxLength": 120,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "role": {
+                    "enum": [
+                      "org_admin",
+                      "trader",
+                      "security_admin",
+                      "billing_admin",
+                      "auditor",
+                      "viewer"
+                    ],
+                    "type": "string"
+                  },
+                  "scopes": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "label"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "key": {
+                      "$ref": "#/components/schemas/ApiKeyMetadata"
+                    },
+                    "secret": {
+                      "type": "string",
+                      "writeOnly": true
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "secret"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The key metadata plus the one-time `secret`."
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a tenant API key. The response carries the plaintext secret EXACTLY ONCE; only its hash is stored.",
+        "tags": [
+          "api-keys"
+        ]
+      }
+    },
+    "/api/saas/api-keys/{prefix}": {
+      "delete": {
+        "operationId": "saas.revokeApiKey",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Revocation acknowledged."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Revoke a tenant API key (api_key.revoke).",
+        "tags": [
+          "api-keys"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "prefix",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/saas/backup/status": {
+      "get": {
+        "operationId": "saas.backupStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupStatus"
+                }
+              }
+            },
+            "description": "Backup status."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Backup/retention posture for the caller's own tenant. `last_verified_restore: null` means no restore has ever been verified.",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/saas/billing/payment-webhooks/{provider}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "provider",
+          "required": true,
+          "schema": {
+            "enum": [
+              "stripe",
+              "paddle"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "saas.billingPaymentWebhook",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "data": {
+                    "type": "object"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "type"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookAck"
+                }
+              }
+            },
+            "description": "applied | ignored | duplicate"
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookAck"
+                }
+              }
+            },
+            "description": "rejected"
+          },
+          "501": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "summary": "Provider-neutral payment/invoice event entry. Signature-verified and idempotent; not user-authenticated.",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/saas/billing/reconcile": {
+      "post": {
+        "operationId": "saas.reconcileBilling",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReconcileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileResponse"
+                }
+              }
+            },
+            "description": "Reconciliation decision (idempotent)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/saas/billing/status": {
+      "get": {
+        "operationId": "saas.billingStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingStatus"
+                }
+              }
+            },
+            "description": "Billing status"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Organization not found"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/saas/billing/webhooks/{provider}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "provider",
+          "required": true,
+          "schema": {
+            "enum": [
+              "stripe",
+              "paddle"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "saas.billingWebhook",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "data": {
+                    "type": "object"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "type"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookAck"
+                }
+              }
+            },
+            "description": "applied | ignored | duplicate"
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookAck"
+                }
+              }
+            },
+            "description": "rejected"
+          },
+          "501": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "summary": "Provider webhook entry. Signature-verified and idempotent by provider event id; not user-authenticated.",
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/saas/checkout": {
+      "post": {
+        "operationId": "saas.createCheckout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckoutResponse"
+                }
+              }
+            },
+            "description": "Checkout created."
+          },
+          "400": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "409": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a provider-neutral checkout session for the caller's own tenant. Price authority is server-side plan definitions; client-supplied amounts are never trusted.",
+        "tags": [
+          "checkout"
+        ]
+      }
+    },
+    "/api/saas/commercial/state": {
+      "get": {
+        "operationId": "saas.commercialState",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommercialState"
+                }
+              }
+            },
+            "description": "Aggregated commercial state"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/saas/custody/health": {
+      "get": {
+        "operationId": "saas.custodyHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustodyHealthReport"
+                }
+              }
+            },
+            "description": "Provider health (secret-free)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/profiles": {
+      "get": {
+        "operationId": "saas.listCustodyProfiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CustodyProfile"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Tenant's custody profiles (scoped)"
+          },
+          "404": {
+            "description": "Organization not found (also for cross-tenant)"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "custody"
+        ]
+      },
+      "post": {
+        "operationId": "saas.createCustodyProfile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "provider_type": {
+                    "enum": [
+                      "local",
+                      "vault",
+                      "kms",
+                      "hsm"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "provider_type"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustodyProfile"
+                }
+              }
+            },
+            "description": "Profile created"
+          },
+          "400": {
+            "description": "Bad request — invalid provider or name"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "Profile already exists"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/profiles/{id}/activate": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "saas.activateCustodyProfile",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Activated."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Activate a custody profile (pending -> active). Closed tenants cannot activate.",
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/signers": {
+      "post": {
+        "operationId": "saas.createSigner",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "capabilities": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "custody_profile_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "logical_identity": {
+                    "type": "string"
+                  },
+                  "public_address": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "custody_profile_id",
+                  "logical_identity",
+                  "public_address"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Signer created."
+          },
+          "400": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "404": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a logical signer under a custody profile. Public address only — never private key material.",
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/signers/{id}": {
+      "get": {
+        "operationId": "saas.getSigner",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Signer view."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get signer public view (address/status/capabilities, never private key).",
+        "tags": [
+          "custody"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/saas/custody/signers/{id}/activate": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "saas.activateSigner",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Activated."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Activate a signer. Fails closed if provider not configured; no local fallback when remote configured.",
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/signers/{id}/resolve": {
+      "get": {
+        "operationId": "saas.resolveSigner",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignerView"
+                }
+              }
+            },
+            "description": "Resolved signer handle (public address only)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Tenant mismatch or capability missing"
+          },
+          "404": {
+            "description": "Signer/profile not found or revoked"
+          },
+          "409": {
+            "description": "Signer not active"
+          },
+          "422": {
+            "description": "Provider unavailable — fail closed"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/data-lifecycle/{id}/status": {
+      "get": {
+        "operationId": "saas.lifecycleStatus",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lifecycle status"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/events": {
+      "get": {
+        "operationId": "saas.streamEvents",
+        "responses": {
+          "101": {
+            "description": "Upgraded; the first frame must authenticate."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Authenticated tenant-scoped WebSocket stream. No credential may travel in the URL: authenticate with the `Authorization: Bearer` header, or send {\"type\":\"auth\",\"token\":…} as the first frame after connecting.",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/saas/exports": {
+      "get": {
+        "operationId": "saas.exportData",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportEnvelope"
+                }
+              }
+            },
+            "description": "The export envelope."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Export one deterministic, tenant-scoped section (export.create; audit section additionally needs audit.read).",
+        "tags": [
+          "exports"
+        ]
+      }
+    },
+    "/api/saas/invoices": {
+      "get": {
+        "operationId": "saas.listInvoices",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "invoices": {
+                      "items": {
+                        "$ref": "#/components/schemas/InvoiceView"
+                      },
+                      "type": "array"
+                    },
+                    "organization_id": {
+                      "format": "uuid",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Invoice list."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List invoices for the caller's own tenant (tenant-scoped query).",
+        "tags": [
+          "invoices"
+        ]
+      }
+    },
+    "/api/saas/invoices/{id}": {
+      "get": {
+        "operationId": "saas.getInvoice",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvoiceView"
+                }
+              }
+            },
+            "description": "The invoice."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "404": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get one invoice. Uses organization_id predicate so cross-tenant access returns 404, not 403, to avoid existence oracle.",
+        "tags": [
+          "invoices"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/saas/lifecycle/jobs/{id}/advance": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "saas.advanceLifecycleJob",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Advanced."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Advance deprovisioning job phase. Restart-safe and idempotent.",
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/organizations": {
+      "post": {
+        "operationId": "saas.createOrganization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "maxLength": 120,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "slug": {
+                    "pattern": "^[a-z0-9][a-z0-9-]{1,62}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "slug",
+                  "name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            },
+            "description": "The organization."
+          },
+          "409": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create an organization through the provisioning state machine; the creator becomes its owner.",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/saas/organizations/{id}": {
+      "get": {
+        "operationId": "saas.getOrganization",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            },
+            "description": "The organization."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "One organization the caller may see.",
+        "tags": [
+          "organizations"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "operationId": "saas.updateOrganization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            },
+            "description": "The updated organization."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update the organization record (tenant.update).",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/saas/organizations/{id}/close": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "saas.requestClose",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Close accepted."
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "409": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Request tenant close. Trading disabled, credentials revoked, custody revoked, retention scheduled. Restorable only via retention policy, not via race.",
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/organizations/{id}/lifecycle": {
+      "get": {
+        "operationId": "saas.getLifecycleStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Lifecycle status."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Inspect tenant lifecycle status (suspend/close/retention).",
+        "tags": [
+          "lifecycle"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/saas/organizations/{id}/members": {
+      "get": {
+        "operationId": "saas.listMembers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Membership"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Member list."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The organization's members (users.read).",
+        "tags": [
+          "organizations"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/saas/organizations/{id}/suspension": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "saas.suspendOrganization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  },
+                  "suspended": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "suspended"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            },
+            "description": "The organization after the change."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Suspend or restore the organization (platform staff).",
+        "tags": [
+          "organizations"
+        ]
+      }
+    },
+    "/api/saas/readiness": {
+      "get": {
+        "operationId": "saas.readinessPublic",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessPublic"
+                }
+              }
+            },
+            "description": "Public readiness (safe)"
+          }
+        },
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/saas/readiness/operator": {
+      "get": {
+        "operationId": "saas.readinessOperator",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessOperator"
+                }
+              }
+            },
+            "description": "Operator readiness (redacted)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Operator only"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/saas/security/summary": {
+      "get": {
+        "operationId": "saas.securitySummary",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecuritySummary"
+                }
+              }
+            },
+            "description": "Security summary."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "No such tenant, or not visible to this credential (404 rather than 403 to avoid an existence oracle)."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Security posture for the caller's own tenant.",
+        "tags": [
+          "security"
+        ]
+      }
+    },
+    "/api/saas/sessions": {
+      "post": {
+        "operationId": "saas.login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "email": {
+                    "format": "email",
+                    "type": "string"
+                  },
+                  "password": {
+                    "type": "string",
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "email",
+                  "password"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "session": {
+                      "properties": {
+                        "expires_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "id": {
+                          "format": "uuid",
+                          "type": "string"
+                        },
+                        "prefix": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "token": {
+                      "type": "string",
+                      "writeOnly": true
+                    },
+                    "user": {
+                      "$ref": "#/components/schemas/UserProfile"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Session created; `token` is the one-time secret."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "summary": "Create a session. The token is returned exactly once and never stored server-side in plaintext.",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/saas/usage/limits": {
+      "get": {
+        "operationId": "saas.usageLimits",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageLimits"
+                }
+              }
+            },
+            "description": "Usage vs limits"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/saas/users": {
+      "post": {
+        "operationId": "saas.registerUser",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "display_name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "format": "email",
+                    "type": "string"
+                  },
+                  "password": {
+                    "minLength": 12,
+                    "type": "string",
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "email",
+                  "password"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            },
+            "description": "The created user profile."
+          },
+          "409": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "summary": "Register a user (email + PBKDF2-hashed password).",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/saas/users/me": {
+      "get": {
+        "operationId": "saas.currentUser",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "organizations": {
+                      "items": {
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "organization_id": {
+                            "format": "uuid",
+                            "type": "string"
+                          },
+                          "role": {
+                            "type": "string"
+                          },
+                          "slug": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "user": {
+                      "$ref": "#/components/schemas/UserProfile"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The user profile and tenant memberships."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The authenticated user plus the organizations they belong to.",
+        "tags": [
+          "users"
+        ]
+      },
+      "patch": {
+        "operationId": "saas.updateProfile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "display_name": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            },
+            "description": "The updated profile."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update safe profile fields of the current user.",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/saas/users/me/logout": {
+      "post": {
+        "operationId": "saas.logout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Session revoked."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Revoke the presented session.",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/saas/wallet-access": {
+      "get": {
+        "operationId": "saas.listWallets",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WalletBinding"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Bindings for the caller's own tenant only."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "The tenant's wallet bindings (wallet.read).",
+        "tags": [
+          "wallet-access"
+        ]
+      },
+      "post": {
+        "operationId": "saas.bindWallet",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "label": {
+                    "maxLength": 120,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "modules": {
+                    "items": {
+                      "enum": [
+                        "module.sniper",
+                        "module.copy",
+                        "module.polymarket"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "public_address": {
+                    "maxLength": 100,
+                    "minLength": 8,
+                    "pattern": "^[A-Za-z0-9:_-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "label",
+                  "public_address"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletBinding"
+                }
+              }
+            },
+            "description": "The binding."
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Register a tenant wallet binding (wallet.manage). Public address only — the SaaS layer never receives signing material.",
+        "tags": [
+          "wallet-access"
+        ]
+      }
+    },
+    "/api/saas/wallet-access/{id}": {
+      "delete": {
+        "operationId": "saas.revokeWallet",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Revocation acknowledged."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Revoke a wallet binding of the caller's own tenant (wallet.manage).",
+        "tags": [
+          "wallet-access"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/saas/wallet-access/{id}/authorize": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "saas.authorizeWalletModule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "module": {
+                    "enum": [
+                      "module.sniper",
+                      "module.copy",
+                      "module.polymarket"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "module"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "allowed": {
+                      "type": "boolean"
+                    },
+                    "binding": {
+                      "$ref": "#/components/schemas/WalletBinding"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "allowed"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The boundary decision."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Ask the boundary whether this tenant may run `module` against this wallet now (ownership ∧ binding ∧ entitlement).",
+        "tags": [
+          "wallet-access"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "the control-plane deployment itself",
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "auth"
+    },
+    {
+      "name": "users"
+    },
+    {
+      "name": "organizations"
+    },
+    {
+      "name": "api-keys"
+    },
+    {
+      "name": "billing"
+    },
+    {
+      "name": "checkout"
+    },
+    {
+      "name": "invoices"
+    },
+    {
+      "name": "custody"
+    },
+    {
+      "name": "lifecycle"
+    },
+    {
+      "name": "wallet-access"
+    },
+    {
+      "name": "exports"
+    },
+    {
+      "name": "events"
+    },
+    {
+      "name": "contract"
+    }
+  ]
+}

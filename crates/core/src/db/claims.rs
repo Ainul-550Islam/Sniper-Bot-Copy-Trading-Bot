@@ -32,6 +32,7 @@ use crate::ownership::{
     RuntimeFlagsReader, RuntimeFlagsWriter, StoreContext,
 };
 use crate::risk::GlobalRiskOracle;
+use crate::tenant::OrganizationId;
 
 fn ms(d: std::time::Duration) -> i64 {
     d.as_millis().max(1) as i64
@@ -575,42 +576,77 @@ impl PostgresRiskOracle {
 #[async_trait]
 impl GlobalRiskOracle for PostgresRiskOracle {
     async fn count_open(&self, module: BotModule) -> Option<usize> {
+        self.count_open_for(None, module).await
+    }
+
+    async fn realized_today(&self) -> Option<f64> {
+        self.realized_today_for(None).await
+    }
+
+    /// Tenant-scoped capacity read. With `organization = Some(org)` the
+    /// query carries `AND organization_id = $2`, so another tenant's open
+    /// positions can never consume this tenant's capacity. `None` keeps the
+    /// deployment-wide read for single-operator mode.
+    async fn count_open_for(
+        &self,
+        organization: Option<OrganizationId>,
+        module: BotModule,
+    ) -> Option<usize> {
         let source = match module {
             BotModule::Sniper => "sniper",
             BotModule::Copy => "copy",
             BotModule::Polymarket => "polymarket",
             BotModule::Contract | BotModule::Telegram => return None,
         };
+        let mut q = sqlx::query(match organization {
+            Some(_) => {
+                "SELECT count(*)::bigint AS n FROM positions
+                 WHERE status IN ('open','closing') AND source = $1
+                   AND organization_id = $2"
+            }
+            None => {
+                "SELECT count(*)::bigint AS n FROM positions
+                 WHERE status IN ('open','closing') AND source = $1"
+            }
+        })
+        .bind(source);
+        if let Some(org) = organization {
+            q = q.bind(org.0);
+        }
         let row = self
             .db
-            .timed(
-                "risk_count_open",
-                sqlx::query(
-                    "SELECT count(*)::bigint AS n FROM positions
-                     WHERE status IN ('open','closing') AND source = $1",
-                )
-                .bind(source)
-                .fetch_one(self.db.pool()),
-            )
+            .timed("risk_count_open", q.fetch_one(self.db.pool()))
             .await
             .ok()?;
         let n: i64 = row.try_get("n").ok()?;
         Some(n.max(0) as usize)
     }
 
-    async fn realized_today(&self) -> Option<f64> {
+    /// Tenant-scoped daily-loss read. With `organization = Some(org)` one
+    /// tenant's losses can no longer trip another tenant's daily-loss gate
+    /// (nor be inferred from it).
+    async fn realized_today_for(&self, organization: Option<OrganizationId>) -> Option<f64> {
+        let mut q = sqlx::query(match organization {
+            Some(_) => {
+                "SELECT COALESCE(SUM(realized_quote - cost_basis), 0)::double precision AS pnl
+                 FROM positions
+                 WHERE closed_at IS NOT NULL
+                   AND closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                   AND organization_id = $1"
+            }
+            None => {
+                "SELECT COALESCE(SUM(realized_quote - cost_basis), 0)::double precision AS pnl
+                 FROM positions
+                 WHERE closed_at IS NOT NULL
+                   AND closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
+            }
+        });
+        if let Some(org) = organization {
+            q = q.bind(org.0);
+        }
         let row = self
             .db
-            .timed(
-                "risk_realized_today",
-                sqlx::query(
-                    "SELECT COALESCE(SUM(realized_quote - cost_basis), 0)::double precision AS pnl
-                     FROM positions
-                     WHERE closed_at IS NOT NULL
-                       AND closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'",
-                )
-                .fetch_one(self.db.pool()),
-            )
+            .timed("risk_realized_today", q.fetch_one(self.db.pool()))
             .await
             .ok()?;
         row.try_get("pnl").ok()

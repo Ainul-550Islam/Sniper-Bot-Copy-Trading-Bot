@@ -22,6 +22,8 @@ pub mod openapi_billing;
 pub mod openapi_commercial;
 pub mod openapi_custody;
 pub mod openapi_ops;
+/// The `/api/ops/**` operator surface (platform-admin only).
+pub mod ops_routes;
 
 use axum::{
     extract::{
@@ -94,6 +96,36 @@ pub struct ApiState {
     pub module_registry: Arc<crate::module_runtime::module_registry::TenantModuleRegistry>,
 }
 
+impl ApiState {
+    /// The authoritative tenant module-control store (§S-2, migration
+    /// 0036's `tenant_module_controls`).
+    ///
+    /// Built on demand rather than held as a field: the store owns no
+    /// connection of its own (it is an `Option<Arc<Database>>` plus a
+    /// process-wide read-through cache), so construction is free and
+    /// every call site is guaranteed to see the state's CURRENT database
+    /// attachment rather than one captured at startup.
+    pub fn module_controls(
+        &self,
+    ) -> crate::trading_data_plane::module_control_store::ModuleControlStore {
+        crate::trading_data_plane::module_control_store::ModuleControlStore::new(self.db.clone())
+    }
+
+    /// The authoritative custody rotation store (§S-4, migration 0036's
+    /// `custody_rotations`). Same construction rationale as
+    /// [`ApiState::module_controls`].
+    pub fn custody_rotations(&self) -> crate::saas::custody_rotation_store::CustodyRotationStore {
+        crate::saas::custody_rotation_store::CustodyRotationStore::new(self.db.clone())
+    }
+
+    /// The shared WebSocket replay-protection store (migration 0036's
+    /// `ws_replay_tokens`). Same construction rationale as
+    /// [`ApiState::module_controls`].
+    pub fn websocket_replay(&self) -> crate::saas::websocket_replay_store::WebsocketReplayStore {
+        crate::saas::websocket_replay_store::WebsocketReplayStore::new(self.db.clone())
+    }
+}
+
 /// Build the full router.
 pub fn router(state: ApiState) -> Router {
     Router::new()
@@ -140,6 +172,9 @@ pub fn router(state: ApiState) -> Router {
         // PROMPT 3/10 — the tenant trading data plane (503 when the
         // database is not attached).
         .merge(crate::trading_data_plane::routes())
+        // P1 — the operator surface (`/api/ops/**`). Platform-admin
+        // only; it describes the deployment, not a tenant.
+        .merge(crate::api::ops_routes::routes())
         .route("/api/events", get(events_ws))
         // route_layer (not layer): runs after routing, so handlers see the
         // MatchedPath and the middleware can label metrics with the bounded
