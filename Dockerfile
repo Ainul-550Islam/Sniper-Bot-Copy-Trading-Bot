@@ -50,7 +50,7 @@ RUN cargo build --release --bin sniper-suite
 
 # ---- runtime ----------------------------------------------------------------
 # debian:bookworm-slim — digest-pinned, see the note on the builder stage.
-FROM debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+FROM debian@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
