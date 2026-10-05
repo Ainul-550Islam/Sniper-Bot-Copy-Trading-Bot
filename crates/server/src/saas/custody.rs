@@ -6,12 +6,13 @@
 //! Never exposes private key material. Fail closed on provider failure.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::Row;
 
 use bot_core::authorization::AccessRequest;
 use bot_core::custody::model::{
@@ -119,7 +120,7 @@ pub fn routes() -> Router<ApiState> {
         )
 }
 
-/// In-memory durable store for custody (process-local fallback; DB path uses custody_* tables after 0020).
+/// Compatibility cache for custody domain records. PostgreSQL is authoritative whenever attached; this cache is used only for the no-database test/development mode and is refreshed before database-backed reads or mutations.
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -168,6 +169,206 @@ async fn ensure_organization_row(db: &std::sync::Arc<Database>, org: &Organizati
     }
 }
 
+fn custody_storage_error(detail: &'static str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "custody_storage_error",
+            "reason": detail,
+        })),
+    )
+        .into_response()
+}
+
+/// Persist the custody lifecycle event in the dedicated compliance table.
+/// The general application audit stream remains useful for operational
+/// observability, but `custody_audit` is the tenant-scoped report source for
+/// custody actions. In no-database test/development mode the existing
+/// process-local application audit remains the only available sink.
+pub(crate) async fn record_durable_custody_audit(
+    state: &ApiState,
+    ctx: &crate::saas::middleware::SaasContext,
+    profile_id: Option<CustodyProfileId>,
+    signer_id: Option<SignerId>,
+    action: &'static str,
+    from_status: Option<&str>,
+    to_status: Option<&str>,
+    from_provider: Option<&str>,
+    to_provider: Option<&str>,
+    reason: &str,
+) -> Result<(), String> {
+    let Some(db) = state.db.as_deref() else {
+        return Ok(());
+    };
+    let actor = ctx.actor_label();
+    let result = sqlx::query(
+        "INSERT INTO custody_audit
+             (id, organization_id, custody_profile_id, signer_id, action,
+              from_status, to_status, from_provider, to_provider, reason,
+              actor_user_id, actor, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(ctx.organization.id.as_uuid())
+    .bind(profile_id.map(|value| value.as_uuid()))
+    .bind(signer_id.map(|value| value.as_uuid()))
+    .bind(action)
+    .bind(from_status)
+    .bind(to_status)
+    .bind(from_provider)
+    .bind(to_provider)
+    .bind(reason)
+    .bind(ctx.authorization.user_id.map(|value| value.as_uuid()))
+    .bind(actor)
+    .execute(db.pool())
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, action, organization = %ctx.organization.id, "durable custody audit write failed");
+        "custody action was applied but its durable audit record could not be written".to_string()
+    })?;
+    if result.rows_affected() != 1 {
+        return Err(
+            "custody action was applied but its durable audit record was not inserted".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Refresh the process cache from the durable custody tables before any
+/// handler relies on the legacy domain-model lookup helpers. The cache is
+/// retained for the no-database test/development mode, but an attached
+/// PostgreSQL database is authoritative across restarts and replicas.
+pub(crate) async fn hydrate_from_database(
+    state: &ApiState,
+    organization_id: OrganizationId,
+) -> Result<(), Response> {
+    let Some(db) = state.db.as_deref() else {
+        return Ok(());
+    };
+
+    macro_rules! required_column {
+        ($row:expr, $column:literal) => {{
+            $row.try_get($column).map_err(|error| {
+                tracing::error!(error = %error, column = $column, "custody row column could not be decoded");
+                custody_storage_error("stored custody data is invalid")
+            })?
+        }};
+    }
+
+    let profile_rows = sqlx::query(
+        "SELECT id, organization_id, name, description, provider_type, status,
+                created_by, created_at, updated_at, activated_at, revoked_at, revoke_reason
+           FROM custody_profiles
+          WHERE organization_id = $1",
+    )
+    .bind(organization_id.as_uuid())
+    .fetch_all(db.pool())
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, organization_id = %organization_id, "failed to hydrate custody profiles");
+        custody_storage_error("custody profiles could not be loaded")
+    })?;
+
+    let signer_rows = sqlx::query(
+        "SELECT id, organization_id, custody_profile_id, logical_identity,
+                provider_type, public_address, provider_ref, capabilities, status,
+                created_by, created_at, updated_at, activated_at, revoked_at,
+                revoke_reason, last_used_at
+           FROM custody_signers
+          WHERE organization_id = $1",
+    )
+    .bind(organization_id.as_uuid())
+    .fetch_all(db.pool())
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, organization_id = %organization_id, "failed to hydrate custody signers");
+        custody_storage_error("custody signers could not be loaded")
+    })?;
+
+    let mut profiles = Vec::with_capacity(profile_rows.len());
+    for row in profile_rows {
+        let provider_raw: String = required_column!(row, "provider_type");
+        let status_raw: String = required_column!(row, "status");
+        let Some(provider_type) = ProviderType::parse(&provider_raw) else {
+            return Err(custody_storage_error(
+                "stored custody provider type is invalid",
+            ));
+        };
+        let Some(status) = CustodyStatus::parse(&status_raw) else {
+            return Err(custody_storage_error(
+                "stored custody profile status is invalid",
+            ));
+        };
+        let organization_uuid: uuid::Uuid = required_column!(row, "organization_id");
+        profiles.push(CustodyProfile {
+            id: CustodyProfileId(required_column!(row, "id")),
+            organization_id: OrganizationId::from(organization_uuid),
+            name: required_column!(row, "name"),
+            description: required_column!(row, "description"),
+            provider_type,
+            status,
+            created_by: required_column!(row, "created_by"),
+            created_at: required_column!(row, "created_at"),
+            updated_at: required_column!(row, "updated_at"),
+            activated_at: required_column!(row, "activated_at"),
+            revoked_at: required_column!(row, "revoked_at"),
+            revoke_reason: required_column!(row, "revoke_reason"),
+        });
+    }
+
+    let mut signers = Vec::with_capacity(signer_rows.len());
+    for row in signer_rows {
+        let provider_raw: String = required_column!(row, "provider_type");
+        let status_raw: String = required_column!(row, "status");
+        let Some(provider_type) = ProviderType::parse(&provider_raw) else {
+            return Err(custody_storage_error(
+                "stored signer provider type is invalid",
+            ));
+        };
+        let Some(status) = CustodyStatus::parse(&status_raw) else {
+            return Err(custody_storage_error("stored signer status is invalid"));
+        };
+        let capabilities_value: serde_json::Value = required_column!(row, "capabilities");
+        let capabilities = serde_json::from_value::<Vec<String>>(capabilities_value)
+            .map_err(|_| custody_storage_error("stored signer capabilities are invalid"))?;
+        let organization_uuid: uuid::Uuid = required_column!(row, "organization_id");
+        signers.push(SignerRecord {
+            id: SignerId(required_column!(row, "id")),
+            organization_id: OrganizationId::from(organization_uuid),
+            custody_profile_id: CustodyProfileId(required_column!(row, "custody_profile_id")),
+            logical_identity: required_column!(row, "logical_identity"),
+            provider_type,
+            public_address: required_column!(row, "public_address"),
+            provider_ref: required_column!(row, "provider_ref"),
+            capabilities,
+            status,
+            created_by: required_column!(row, "created_by"),
+            created_at: required_column!(row, "created_at"),
+            updated_at: required_column!(row, "updated_at"),
+            activated_at: required_column!(row, "activated_at"),
+            revoked_at: required_column!(row, "revoked_at"),
+            revoke_reason: required_column!(row, "revoke_reason"),
+            last_used_at: required_column!(row, "last_used_at"),
+        });
+    }
+
+    {
+        let mut map = profiles_store().lock().expect("mutex");
+        map.retain(|_, profile| profile.organization_id != organization_id);
+        for profile in profiles {
+            map.insert(profile.id, profile);
+        }
+    }
+    {
+        let mut map = signers_store().lock().expect("mutex");
+        map.retain(|_, signer| signer.organization_id != organization_id);
+        for signer in signers {
+            map.insert(signer.id, signer);
+        }
+    }
+    Ok(())
+}
+
 async fn create_profile(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -210,27 +411,57 @@ async fn create_profile(
 
     let now = Utc::now();
     let mut profile = CustodyProfile::new(ctx.organization.id, body.name.trim(), provider, now);
+    profile.created_by = ctx.authorization.user_id.map(|user_id| user_id.as_uuid());
     if let Some(desc) = body.description {
-        profile.description = desc;
+        profile.description = desc.trim().to_string();
     }
 
     // Persist to DB first when configured (durable & fail-closed).
     if let Some(db) = &state.db {
         ensure_organization_row(db, &ctx.organization).await;
-        if let Err(error) = sqlx::query("INSERT INTO custody_profiles (id, organization_id, name, provider_type, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-            .bind(profile.id.as_uuid()).bind(ctx.organization.id.as_uuid()).bind(&profile.name).bind(provider.as_str()).bind(profile.status.as_str()).bind(profile.created_at).bind(profile.updated_at)
-            .execute(db.pool()).await
-        {
-            warn!(%error, profile = %profile.id, "custody profile durable insert failed");
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile"})),
-            ).into_response();
+        let insert = sqlx::query("INSERT INTO custody_profiles (id, organization_id, name, description, provider_type, status, created_by, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
+            .bind(profile.id.as_uuid()).bind(ctx.organization.id.as_uuid()).bind(&profile.name).bind(&profile.description).bind(provider.as_str()).bind(profile.status.as_str()).bind(profile.created_by).bind(profile.created_at).bind(profile.updated_at)
+            .execute(db.pool()).await;
+        match insert {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(json!({"error":"already_exists","reason":"a custody profile with this name already exists"})),
+                ).into_response();
+            }
+            Err(error) => {
+                warn!(%error, profile = %profile.id, "custody profile durable insert failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile"})),
+                ).into_response();
+            }
         }
     }
     {
         let mut map = profiles_store().lock().expect("mutex");
         map.insert(profile.id, profile.clone());
+    }
+    if let Err(reason) = record_durable_custody_audit(
+        &state,
+        &ctx,
+        Some(profile.id),
+        None,
+        "profile_created",
+        None,
+        Some(profile.status.as_str()),
+        None,
+        Some(profile.provider_type.as_str()),
+        "",
+    )
+    .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"custody_audit_unavailable","reason": reason})),
+        )
+            .into_response();
     }
 
     state.audit.record("saas", "saas.custody.profile.created", Some(&profile.id.to_string()),
@@ -260,6 +491,9 @@ async fn list_profiles(State(state): State<ApiState>, headers: HeaderMap) -> Res
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let map = profiles_store().lock().expect("mutex");
     let profiles: Vec<CustodyProfileView> = map
         .values()
@@ -307,6 +541,9 @@ async fn activate_profile(
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let pid = match CustodyProfileId::parse(&id) {
         Some(v) => v,
         None => {
@@ -334,13 +571,14 @@ async fn activate_profile(
     if !profile.status.can_transition_to(CustodyStatus::Active) {
         return (axum::http::StatusCode::CONFLICT, Json(json!({"error":"invalid_transition","reason": format!("cannot activate from {}", profile.status.as_str())}))).into_response();
     }
+    let from_status = profile.status.as_str().to_string();
     profile.status = CustodyStatus::Active;
     profile.activated_at = Some(Utc::now());
     profile.updated_at = Utc::now();
 
     // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
-        if let Err(error) = sqlx::query(
+        let update = sqlx::query(
             "UPDATE custody_profiles SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5",
         )
         .bind(profile.status.as_str())
@@ -349,18 +587,47 @@ async fn activate_profile(
         .bind(pid.as_uuid())
         .bind(ctx.organization.id.as_uuid())
         .execute(db.pool())
-        .await
-        {
-            warn!(%error, profile = %pid, "custody profile durable activation write failed");
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile activation"})),
-            ).into_response();
+        .await;
+        match update {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({"error":"not_found","reason":"custody profile disappeared before activation"})),
+                ).into_response();
+            }
+            Err(error) => {
+                warn!(%error, profile = %pid, "custody profile durable activation write failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile activation"})),
+                ).into_response();
+            }
         }
     }
     {
         let mut map = profiles_store().lock().expect("mutex");
         map.insert(pid, profile.clone());
+    }
+    if let Err(reason) = record_durable_custody_audit(
+        &state,
+        &ctx,
+        Some(pid),
+        None,
+        "profile_activated",
+        Some(&from_status),
+        Some(profile.status.as_str()),
+        Some(profile.provider_type.as_str()),
+        Some(profile.provider_type.as_str()),
+        "",
+    )
+    .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"custody_audit_unavailable","reason": reason})),
+        )
+            .into_response();
     }
     state
         .audit
@@ -394,6 +661,9 @@ async fn revoke_profile(
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let pid = match CustodyProfileId::parse(&id) {
         Some(v) => v,
         None => {
@@ -417,13 +687,14 @@ async fn revoke_profile(
     if !profile.status.can_transition_to(CustodyStatus::Revoked) {
         return (axum::http::StatusCode::CONFLICT, Json(json!({"error":"invalid_transition","reason": format!("cannot revoke from {}", profile.status.as_str())}))).into_response();
     }
+    let from_status = profile.status.as_str().to_string();
     profile.status = CustodyStatus::Revoked;
     profile.revoked_at = Some(Utc::now());
     profile.updated_at = Utc::now();
 
     // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
-        if let Err(error) = sqlx::query(
+        let update = sqlx::query(
             "UPDATE custody_profiles SET status = $1, updated_at = $2, revoked_at = $3, revoke_reason = $4 WHERE id = $5 AND organization_id = $6",
         )
         .bind(profile.status.as_str())
@@ -433,18 +704,47 @@ async fn revoke_profile(
         .bind(pid.as_uuid())
         .bind(ctx.organization.id.as_uuid())
         .execute(db.pool())
-        .await
-        {
-            warn!(%error, profile = %pid, "custody profile durable revocation write failed");
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile revocation"})),
-            ).into_response();
+        .await;
+        match update {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({"error":"not_found","reason":"custody profile disappeared before revocation"})),
+                ).into_response();
+            }
+            Err(error) => {
+                warn!(%error, profile = %pid, "custody profile durable revocation write failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile revocation"})),
+                ).into_response();
+            }
         }
     }
     {
         let mut map = profiles_store().lock().expect("mutex");
         map.insert(pid, profile.clone());
+    }
+    if let Err(reason) = record_durable_custody_audit(
+        &state,
+        &ctx,
+        Some(pid),
+        None,
+        "profile_revoked",
+        Some(&from_status),
+        Some(profile.status.as_str()),
+        Some(profile.provider_type.as_str()),
+        Some(profile.provider_type.as_str()),
+        &profile.revoke_reason,
+    )
+    .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"custody_audit_unavailable","reason": reason})),
+        )
+            .into_response();
     }
     state
         .audit
@@ -491,6 +791,9 @@ async fn create_signer(
     if ctx.organization.status == bot_core::tenant::OrganizationStatus::Closed {
         return (axum::http::StatusCode::FORBIDDEN, Json(json!({"error":"tenant_closed","reason":"closed organization cannot create signers"}))).into_response();
     }
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let pid = match CustodyProfileId::parse(&body.custody_profile_id) {
         Some(v) => v,
         None => {
@@ -511,7 +814,20 @@ async fn create_signer(
                 .into_response()
         }
     };
-    // Validate provider match: signer must use same provider as profile (or be explicitly mismatch -> will be denied at resolve)
+    if !matches!(
+        profile.status,
+        CustodyStatus::Pending | CustodyStatus::Active
+    ) {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({
+                "error": "profile_unavailable",
+                "reason": format!("cannot create a signer for a {} profile", profile.status.as_str()),
+            })),
+        )
+            .into_response();
+    }
+    // Validate provider match: signer uses the profile's provider type.
     if body.logical_identity.trim().is_empty() || body.public_address.trim().is_empty() {
         return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_request","reason":"logical_identity and public_address required"}))).into_response();
     }
@@ -531,6 +847,7 @@ async fn create_signer(
         body.public_address.trim(),
         now,
     );
+    signer.created_by = ctx.authorization.user_id.map(|user_id| user_id.as_uuid());
     signer.capabilities = body
         .capabilities
         .into_iter()
@@ -542,20 +859,49 @@ async fn create_signer(
     // Durable insert (fail-closed: DB first).
     if let Some(db) = &state.db {
         ensure_organization_row(db, &ctx.organization).await;
-        if let Err(error) = sqlx::query("INSERT INTO custody_signers (id, organization_id, custody_profile_id, logical_identity, provider_type, public_address, capabilities, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING")
-            .bind(signer.id.as_uuid()).bind(ctx.organization.id.as_uuid()).bind(signer.custody_profile_id.as_uuid()).bind(&signer.logical_identity).bind(profile.provider_type.as_str()).bind(&signer.public_address).bind(serde_json::to_value(&signer.capabilities).unwrap()).bind(signer.status.as_str()).bind(signer.created_at).bind(signer.updated_at)
-            .execute(db.pool()).await
-        {
-            warn!(%error, signer = %signer.id, "custody signer durable insert failed");
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer"})),
-            ).into_response();
+        let insert = sqlx::query("INSERT INTO custody_signers (id, organization_id, custody_profile_id, logical_identity, provider_type, public_address, provider_ref, capabilities, status, created_by, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING")
+            .bind(signer.id.as_uuid()).bind(ctx.organization.id.as_uuid()).bind(signer.custody_profile_id.as_uuid()).bind(&signer.logical_identity).bind(profile.provider_type.as_str()).bind(&signer.public_address).bind(&signer.provider_ref).bind(serde_json::to_value(&signer.capabilities).unwrap_or_else(|_| serde_json::json!([]))).bind(signer.status.as_str()).bind(signer.created_by).bind(signer.created_at).bind(signer.updated_at)
+            .execute(db.pool()).await;
+        match insert {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(json!({"error":"already_exists","reason":"a signer with this identity or public address already exists"})),
+                ).into_response();
+            }
+            Err(error) => {
+                warn!(%error, signer = %signer.id, "custody signer durable insert failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer"})),
+                ).into_response();
+            }
         }
     }
     {
         let mut map = signers_store().lock().expect("mutex");
         map.insert(signer.id, signer.clone());
+    }
+    if let Err(reason) = record_durable_custody_audit(
+        &state,
+        &ctx,
+        Some(signer.custody_profile_id),
+        Some(signer.id),
+        "signer_created",
+        None,
+        Some(signer.status.as_str()),
+        Some(signer.provider_type.as_str()),
+        Some(signer.provider_type.as_str()),
+        "",
+    )
+    .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"custody_audit_unavailable","reason": reason})),
+        )
+            .into_response();
     }
 
     state.audit.record("saas", "saas.custody.signer.created", Some(&signer.id.to_string()),
@@ -581,6 +927,9 @@ async fn list_signers(State(state): State<ApiState>, headers: HeaderMap) -> Resp
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let map = signers_store().lock().expect("mutex");
     let signers: Vec<SignerView> = map
         .values()
@@ -610,6 +959,9 @@ async fn list_profile_signers(
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let pid = match CustodyProfileId::parse(&id) {
         Some(v) => v,
         None => {
@@ -656,6 +1008,9 @@ async fn activate_signer(
         )
             .into_response();
     }
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let sid = match SignerId::parse(&id) {
         Some(v) => v,
         None => {
@@ -676,9 +1031,27 @@ async fn activate_signer(
                 .into_response()
         }
     };
+    let profile = match find_profile(ctx.organization.id, signer.custody_profile_id) {
+        Some(p) => p,
+        None => {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                Json(json!({"error":"profile_not_found","reason":"signer profile is no longer available"})),
+            )
+                .into_response();
+        }
+    };
+    if profile.status != CustodyStatus::Active {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({"error":"profile_not_active","reason":"signer activation requires an active custody profile"})),
+        )
+            .into_response();
+    }
     if !signer.status.can_transition_to(CustodyStatus::Active) {
         return (axum::http::StatusCode::CONFLICT, Json(json!({"error":"invalid_transition","reason": format!("cannot activate from {}", signer.status.as_str())}))).into_response();
     }
+    let from_status = signer.status.as_str().to_string();
     // Provider failure must fail closed: check registry
     // For now we allow activation; resolve will fail if provider not configured.
     signer.status = CustodyStatus::Active;
@@ -687,7 +1060,7 @@ async fn activate_signer(
 
     // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
-        if let Err(error) = sqlx::query(
+        let update = sqlx::query(
             "UPDATE custody_signers SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5",
         )
         .bind(signer.status.as_str())
@@ -696,18 +1069,47 @@ async fn activate_signer(
         .bind(sid.as_uuid())
         .bind(ctx.organization.id.as_uuid())
         .execute(db.pool())
-        .await
-        {
-            warn!(%error, signer = %sid, "custody signer durable activation write failed");
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer activation"})),
-            ).into_response();
+        .await;
+        match update {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({"error":"not_found","reason":"custody signer disappeared before activation"})),
+                ).into_response();
+            }
+            Err(error) => {
+                warn!(%error, signer = %sid, "custody signer durable activation write failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer activation"})),
+                ).into_response();
+            }
         }
     }
     {
         let mut map = signers_store().lock().expect("mutex");
         map.insert(sid, signer.clone());
+    }
+    if let Err(reason) = record_durable_custody_audit(
+        &state,
+        &ctx,
+        Some(signer.custody_profile_id),
+        Some(sid),
+        "signer_activated",
+        Some(&from_status),
+        Some(signer.status.as_str()),
+        Some(signer.provider_type.as_str()),
+        Some(signer.provider_type.as_str()),
+        "",
+    )
+    .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"custody_audit_unavailable","reason": reason})),
+        )
+            .into_response();
     }
     state.audit.record("saas", "saas.custody.signer.activated", Some(&sid.to_string()),
         bot_core::audit::AuditOutcome::Success,
@@ -734,6 +1136,9 @@ async fn revoke_signer(
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let sid = match SignerId::parse(&id) {
         Some(v) => v,
         None => {
@@ -757,13 +1162,14 @@ async fn revoke_signer(
     if !signer.status.can_transition_to(CustodyStatus::Revoked) {
         return (axum::http::StatusCode::CONFLICT, Json(json!({"error":"invalid_transition","reason": format!("cannot revoke from {}", signer.status.as_str())}))).into_response();
     }
+    let from_status = signer.status.as_str().to_string();
     signer.status = CustodyStatus::Revoked;
     signer.revoked_at = Some(Utc::now());
     signer.updated_at = Utc::now();
 
     // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
-        if let Err(error) = sqlx::query(
+        let update = sqlx::query(
             "UPDATE custody_signers SET status = $1, updated_at = $2, revoked_at = $3, revoke_reason = $4 WHERE id = $5 AND organization_id = $6",
         )
         .bind(signer.status.as_str())
@@ -773,18 +1179,47 @@ async fn revoke_signer(
         .bind(sid.as_uuid())
         .bind(ctx.organization.id.as_uuid())
         .execute(db.pool())
-        .await
-        {
-            warn!(%error, signer = %sid, "custody signer durable revocation write failed");
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer revocation"})),
-            ).into_response();
+        .await;
+        match update {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({"error":"not_found","reason":"custody signer disappeared before revocation"})),
+                ).into_response();
+            }
+            Err(error) => {
+                warn!(%error, signer = %sid, "custody signer durable revocation write failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer revocation"})),
+                ).into_response();
+            }
         }
     }
     {
         let mut map = signers_store().lock().expect("mutex");
         map.insert(sid, signer.clone());
+    }
+    if let Err(reason) = record_durable_custody_audit(
+        &state,
+        &ctx,
+        Some(signer.custody_profile_id),
+        Some(sid),
+        "signer_revoked",
+        Some(&from_status),
+        Some(signer.status.as_str()),
+        Some(signer.provider_type.as_str()),
+        Some(signer.provider_type.as_str()),
+        &signer.revoke_reason,
+    )
+    .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"custody_audit_unavailable","reason": reason})),
+        )
+            .into_response();
     }
     state.audit.record("saas", "saas.custody.signer.revoked", Some(&sid.to_string()),
         bot_core::audit::AuditOutcome::Success,
@@ -812,6 +1247,9 @@ async fn attach_capability(
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let sid = match SignerId::parse(&id) {
         Some(v) => v,
         None => {
@@ -847,26 +1285,55 @@ async fn attach_capability(
         signer.capabilities.push(cap.clone());
         signer.updated_at = Utc::now();
         if let Some(db) = &state.db {
-            if let Err(error) = sqlx::query(
+            let update = sqlx::query(
                 "UPDATE custody_signers SET capabilities = $1, updated_at = $2 WHERE id = $3 AND organization_id = $4",
             )
-            .bind(serde_json::to_value(&signer.capabilities).unwrap_or_default())
+            .bind(serde_json::to_value(&signer.capabilities).unwrap_or_else(|_| serde_json::json!([])))
             .bind(signer.updated_at)
             .bind(sid.as_uuid())
             .bind(ctx.organization.id.as_uuid())
             .execute(db.pool())
-            .await
-            {
-                warn!(%error, signer = %sid, "custody signer durable capability update failed");
-                return (
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"error":"persistence_failed","reason":"database write failed for signer capabilities"})),
-                ).into_response();
+            .await;
+            match update {
+                Ok(result) if result.rows_affected() == 1 => {}
+                Ok(_) => {
+                    return (
+                        axum::http::StatusCode::NOT_FOUND,
+                        Json(json!({"error":"not_found","reason":"custody signer disappeared before capability update"})),
+                    ).into_response();
+                }
+                Err(error) => {
+                    warn!(%error, signer = %sid, "custody signer durable capability update failed");
+                    return (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error":"persistence_failed","reason":"database write failed for signer capabilities"})),
+                    ).into_response();
+                }
             }
         }
         {
             let mut map = signers_store().lock().expect("mutex");
             map.insert(sid, signer.clone());
+        }
+        if let Err(reason) = record_durable_custody_audit(
+            &state,
+            &ctx,
+            Some(signer.custody_profile_id),
+            Some(sid),
+            "capability_attached",
+            None,
+            Some(signer.status.as_str()),
+            Some(signer.provider_type.as_str()),
+            Some(signer.provider_type.as_str()),
+            &cap,
+        )
+        .await
+        {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"custody_audit_unavailable","reason": reason})),
+            )
+                .into_response();
         }
         state
             .audit
@@ -901,6 +1368,9 @@ async fn get_signer(
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let sid = match SignerId::parse(&id) {
         Some(v) => v,
         None => {
@@ -944,6 +1414,9 @@ async fn resolve_signer(
         Ok(ctx) => ctx,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
+        return response;
+    }
     let sid = match SignerId::parse(&id) {
         Some(v) => v,
         None => {
@@ -995,7 +1468,7 @@ async fn resolve_signer(
 
     // Provider failure must fail closed — do not fall back to local.
     // This control-plane resolve endpoint does not itself perform remote
-    // resolution: HSM has no implementation (fail-closed refusal naming
+    // resolution: the configured remote custody provider has no implementation (fail-closed refusal naming
     // the PKCS#11 dependency), and Vault/KMS resolve + sign through the
     // custody sign boundary (`crates/server/src/custody/sign_boundary.rs`),
     // never through a local wallet fallback.

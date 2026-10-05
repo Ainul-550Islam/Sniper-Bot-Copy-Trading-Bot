@@ -1,12 +1,12 @@
 /**
- * Typed Support Tickets & Enterprise SLA Client (THIRD.md §129).
+ * Typed Support Ticket Client (THIRD.md §129).
  *
  * Interfaces with `/api/saas/support/tickets`.
  */
 
 import { request } from "../api";
 
-export type TicketPriority = "low" | "medium" | "high" | "urgent";
+export type TicketPriority = "low" | "normal" | "high" | "urgent";
 export type TicketStatus = "open" | "in_progress" | "resolved" | "closed";
 
 export interface SupportTicket {
@@ -16,7 +16,6 @@ export interface SupportTicket {
   priority: TicketPriority;
   status: TicketStatus;
   description: string;
-  sla_target_response_hours: number;
   created_at: string;
   updated_at: string;
 }

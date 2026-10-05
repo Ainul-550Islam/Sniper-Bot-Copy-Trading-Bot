@@ -96,13 +96,26 @@ async fn by_id(
         )
             .into_response();
     }
-    render(org, &state).await.into_response()
+    render(org, &state).await
 }
 
 /// The authoritative commercial state: billing facts via [`BillingView`],
 /// lifecycle facts via the organization row, consistency COMPUTED.
-async fn render(org: OrganizationId, state: &ApiState) -> Json<serde_json::Value> {
-    let view = BillingView::load(&state.saas, org, Utc::now()).await;
+async fn render(org: OrganizationId, state: &ApiState) -> Response {
+    let view = match BillingView::load(&state.saas, org, Utc::now()).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org, "commercial state could not be loaded");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "billing_storage_unavailable",
+                    "reason": "authoritative commercial records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
     let lifecycle_status = view
         .organization
         .as_ref()
@@ -124,7 +137,7 @@ async fn render(org: OrganizationId, state: &ApiState) -> Json<serde_json::Value
         commercial_consistent: consistency.consistent,
         as_of: view.as_of.to_rfc3339(),
     };
-    Json(json!(response))
+    Json(json!(response)).into_response()
 }
 
 #[cfg(test)]
@@ -168,7 +181,9 @@ mod tests {
             ))
             .await
             .expect("usage recorded");
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         let consistency = view.consistency();
         assert!(consistency.consistent);
         assert!(consistency.entitlements_match_lifecycle);
@@ -180,7 +195,9 @@ mod tests {
     #[tokio::test]
     async fn tenant_without_subscription_has_no_plan_and_still_consistent() {
         let (store, org_id) = store_with_org(OrganizationStatus::Active).await;
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(view.plan_code(), "none");
         assert!(view.consistency().consistent);
     }
@@ -188,7 +205,9 @@ mod tests {
     #[tokio::test]
     async fn suspended_tenant_reflects_lifecycle_not_invented_past_due() {
         let (store, org_id) = store_with_org(OrganizationStatus::Suspended).await;
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         // Dunning is DERIVED from the lifecycle row, never defaulted.
         assert_eq!(
             view.dunning,

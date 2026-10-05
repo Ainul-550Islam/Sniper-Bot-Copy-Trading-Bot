@@ -6,6 +6,11 @@
 
 use std::fmt;
 
+/// Compatibility result aliases used by the first generated SDK modules.
+pub type Result<T> = std::result::Result<T, SdkError>;
+pub type BotResult<T> = std::result::Result<T, SdkError>;
+pub type BotError = SdkError;
+
 /// Error kind — machine-readable, secret-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SdkErrorKind {
@@ -127,6 +132,11 @@ pub struct SdkError {
 }
 
 impl SdkError {
+    /// Compatibility constructor for validation failures in older SDK modules.
+    pub fn invalid_input(message: impl Into<String>) -> Self {
+        Self::new(SdkErrorKind::InvalidRequest, message)
+    }
+
     pub fn new(kind: SdkErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,

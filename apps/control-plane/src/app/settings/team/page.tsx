@@ -22,26 +22,24 @@ export default function TeamSettingsPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await request<{ items: TeamMember[] }>("/api/saas/organizations/current/members");
-      setMembers(res.items || []);
-    } catch {
-      // Fallback sample members for demo / local development
-      setMembers([
-        {
-          id: "mem-01",
-          user_id: "usr-01",
-          email: "lead.trader@acme-quant.com",
-          role: "owner",
-          created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
-        },
-        {
-          id: "mem-02",
-          user_id: "usr-02",
-          email: "risk.officer@acme-quant.com",
-          role: "admin",
-          created_at: new Date(Date.now() - 15 * 86400000).toISOString(),
-        },
-      ]);
+      const res = await request<{
+        items: Array<{
+          membership_id: string;
+          user: { id: string; email: string; created_at: string } | null;
+          role: TeamMember["role"];
+          created_at: string;
+        }>;
+      }>("/api/saas/organizations/current/members");
+      setMembers((res.items || []).flatMap((member) => member.user ? [{
+        id: member.membership_id,
+        user_id: member.user.id,
+        email: member.user.email,
+        role: member.role,
+        created_at: member.created_at,
+      }] : []));
+    } catch (err: unknown) {
+      setMembers([]);
+      setError(err instanceof Error ? err.message : "Failed to load organization members");
     } finally {
       setLoading(false);
     }

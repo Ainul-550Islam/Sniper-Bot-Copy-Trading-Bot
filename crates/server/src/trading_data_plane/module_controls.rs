@@ -47,7 +47,10 @@ pub async fn override_for(
     state: &ApiState,
     org: OrganizationId,
     module: BotModule,
-) -> Option<ModuleControlOverride> {
+) -> Result<
+    Option<ModuleControlOverride>,
+    crate::trading_data_plane::module_control_store::ControlStoreError,
+> {
     state.module_controls().override_for(org, module).await
 }
 
@@ -58,7 +61,10 @@ pub async fn effective_state(
     state: &ApiState,
     org: OrganizationId,
     module: BotModule,
-) -> (&'static str, Option<ModuleControlOverride>) {
+) -> Result<
+    (&'static str, Option<ModuleControlOverride>),
+    crate::trading_data_plane::module_control_store::ControlStoreError,
+> {
     state.module_controls().effective_state(org, module).await
 }
 
@@ -73,7 +79,19 @@ pub async fn status_payload(
 ) -> serde_json::Value {
     let org = auth.organization_id();
     let controls = state.module_controls();
-    let (effective, override_entry) = controls.effective_state(org, module).await;
+    let (effective, override_entry, control_state_error) =
+        match controls.effective_state(org, module).await {
+            Ok((effective, override_entry)) => (effective, override_entry, None),
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    organization = %org,
+                    module = module.as_str(),
+                    "module control state is unavailable"
+                );
+                ("unknown", None, Some(error.to_string()))
+            }
+        };
     let runtime = state.module_registry.get(org, module).map(|h| {
         json!({
             "runtime_id": h.runtime_id().to_string(),
@@ -98,6 +116,7 @@ pub async fn status_payload(
             "version": o.version,
         })).unwrap_or(serde_json::Value::Null),
         "effective_state": effective,
+        "control_state_error": control_state_error,
         "runtime": runtime.unwrap_or(serde_json::Value::Null),
         "runtime_detail": if state.module_registry.get(org, module).is_some() {
             serde_json::Value::Null
@@ -299,23 +318,45 @@ mod tests {
             .expect("memory write");
 
         // Org B sees no override and an enabled default.
-        assert!(store.override_for(b, BotModule::Sniper).await.is_none());
+        assert!(store
+            .override_for(b, BotModule::Sniper)
+            .await
+            .expect("read")
+            .is_none());
         assert_eq!(
-            store.effective_state(b, BotModule::Sniper).await.0,
+            store
+                .effective_state(b, BotModule::Sniper)
+                .await
+                .expect("read")
+                .0,
             "enabled"
         );
         // Org A sees its own, and only on the module it paused.
-        let (state, entry) = store.effective_state(a, BotModule::Sniper).await;
+        let (state, entry) = store
+            .effective_state(a, BotModule::Sniper)
+            .await
+            .expect("read");
         assert_eq!(state, "disabled");
         assert_eq!(entry.expect("entry").reason, "paused");
-        assert_eq!(store.effective_state(a, BotModule::Copy).await.0, "enabled");
+        assert_eq!(
+            store
+                .effective_state(a, BotModule::Copy)
+                .await
+                .expect("read")
+                .0,
+            "enabled"
+        );
 
         assert!(store
             .clear_override(a, BotModule::Sniper)
             .await
             .expect("clear"));
         assert_eq!(
-            store.effective_state(a, BotModule::Sniper).await.0,
+            store
+                .effective_state(a, BotModule::Sniper)
+                .await
+                .expect("read")
+                .0,
             "enabled"
         );
     }

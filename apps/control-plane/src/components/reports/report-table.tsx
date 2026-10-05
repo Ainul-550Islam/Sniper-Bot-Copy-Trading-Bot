@@ -74,7 +74,7 @@ export default function ReportTable({ reports, onRefresh }: ReportTableProps) {
               style={{ width: "100%" }}
             >
               <option value="accounting_ledger">Capital Gains &amp; Execution Ledger</option>
-              <option value="security_audit">SOC2 Audit &amp; Member Access Trail</option>
+              <option value="security_audit">Security Audit and Member Access Trail</option>
               <option value="risk_events">Risk Limit Breaches &amp; Circuit Breakers</option>
               <option value="custody_rotation">Custody Key Lifecycle &amp; Signer Log</option>
             </select>
@@ -92,7 +92,6 @@ export default function ReportTable({ reports, onRefresh }: ReportTableProps) {
             >
               <option value="csv">CSV Spreadsheet</option>
               <option value="json">JSON Ledger</option>
-              <option value="pdf">PDF Statement</option>
             </select>
           </div>
 

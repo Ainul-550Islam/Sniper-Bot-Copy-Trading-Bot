@@ -15,8 +15,8 @@ export function KillSwitchPanel({ killSwitchActive, onRefresh }: KillSwitchPanel
   const handleToggle = async () => {
     const nextState = !killSwitchActive;
     const promptMsg = nextState
-      ? "EMERGENCY: This will immediately freeze all tenant trading bot execution, cancel open orders, and block new quotes. Confirm activation?"
-      : "Resume normal trading execution for this organization?";
+      ? "EMERGENCY: This will disable every trading module for this organization and block new entries. Confirm activation?"
+      : "Resume trading modules for this organization?";
 
     if (!confirm(promptMsg)) return;
 
@@ -48,14 +48,14 @@ export function KillSwitchPanel({ killSwitchActive, onRefresh }: KillSwitchPanel
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <h3 style={{ margin: 0, color: killSwitchActive ? "var(--bad)" : "var(--text)" }}>
-              Emergency Tenant Kill-Switch
+              Tenant Trading Kill-Switch
             </h3>
             <span className={`badge ${killSwitchActive ? "badge-bad" : "badge-ok"}`}>
               {killSwitchActive ? "ACTIVE — TRADING BLOCKED" : "STANDBY — NORMAL"}
             </span>
           </div>
           <p style={{ margin: "0.25rem 0 0", fontSize: "0.85rem", color: "var(--muted)" }}>
-            Instant multi-venue execution circuit-breaker with lease-fence invalidation and atomic order cancellation.
+            Server-confirmed organization-scoped stop state. It disables all tenant trading modules through the authoritative module-control store.
           </p>
         </div>
 

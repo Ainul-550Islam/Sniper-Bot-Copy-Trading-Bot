@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde_json::json;
+use sqlx::Row;
 
 // invoice types used via handler payloads
 // payment types
@@ -72,16 +73,33 @@ async fn handle_webhook(
         }
     };
 
-    // Deduplication: has this provider_event_id already been processed?
-    if is_duplicate(&state, &normalized).await {
-        return (StatusCode::OK, Json(json!({"status":"duplicate"}))).into_response();
+    // Deduplication: has this provider_event_id already been claimed?
+    match is_duplicate(&state, &normalized).await {
+        Ok(true) => return (StatusCode::OK, Json(json!({"status":"duplicate"}))).into_response(),
+        Ok(false) => {}
+        Err(reason) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"webhook_deduplication_unavailable","reason": reason})),
+            )
+                .into_response();
+        }
     }
 
     // Apply event to domain (idempotent, organization-scoped, verified only)
     match apply_normalized(&state, &normalized).await {
         Ok(detail) => {
-            // Persist dedup marker (provider, provider_event_id) — unique constraint prevents replay
-            let _ = record_processed(&state, &normalized).await;
+            // Mark the durable claim only after domain application. A
+            // failed completion is surfaced instead of reporting a fully
+            // committed webhook to the provider.
+            if let Err(reason) = record_processed(&state, &normalized).await {
+                tracing::error!(event_id = %normalized.provider_event_id, %reason, "provider webhook applied but durable completion failed");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"webhook_completion_unavailable","reason": reason})),
+                )
+                    .into_response();
+            }
             state.audit.record("saas", "saas.billing.webhook.applied", Some(&normalized.provider_event_id),
                 bot_core::audit::AuditOutcome::Success,
                 json!({"provider": provider_kind.as_str(), "type": normalized.event_type, "detail": detail})).await;
@@ -92,8 +110,21 @@ async fn handle_webhook(
                 .into_response()
         }
         Err(reason) => {
-            // Invalid event shape → 400, but still record if needed to avoid replay loops?
-            // For safety, we do NOT record invalid events as processed; provider will retry if important.
+            // The database row was a claim, not a completed marker. Release
+            // it before returning a validation/domain error so a corrected
+            // provider retry is not permanently classified as a duplicate.
+            if let Err(release_reason) = release_claim(&state, &normalized).await {
+                tracing::error!(
+                    event_id = %normalized.provider_event_id,
+                    %release_reason,
+                    "webhook rejected but durable claim release failed"
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"webhook_claim_cleanup_unavailable","reason": release_reason})),
+                )
+                    .into_response();
+            }
             tracing::warn!(
                 provider = provider_kind.as_str(),
                 event_type = normalized.event_type,
@@ -208,7 +239,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// state. `INSERT … ON CONFLICT DO NOTHING RETURNING id` closes that window
 /// in the database: exactly one caller gets a row back and proceeds, every
 /// other caller gets `None` and is refused as a duplicate.
-async fn is_duplicate(state: &ApiState, event: &NormalizedEvent) -> bool {
+async fn is_duplicate(state: &ApiState, event: &NormalizedEvent) -> Result<bool, String> {
     if let Some(db) = &state.db {
         let pool = db.pool();
         let idempotency_key = format!("{}:{}", event.provider.as_str(), event.provider_event_id);
@@ -232,29 +263,75 @@ async fn is_duplicate(state: &ApiState, event: &NormalizedEvent) -> bool {
         .await;
         match claimed {
             // A row came back: WE own this event. Not a duplicate.
-            Ok(Some(_)) => return false,
-            // No row: another delivery already claimed it. Duplicate.
-            Ok(None) => return true,
-            // The claim itself failed (DB down, schema drift). Do NOT
-            // silently fall through to the weaker checks — log and fall
-            // back, but never treat a failed claim as "fresh" without
-            // consulting the durable marker below.
+            Ok(Some(_)) => return Ok(false),
+            // A conflicting row may still be in flight. Only a completed
+            // row is a duplicate; an unfinished claim must make the provider
+            // retry rather than acknowledging work that may still fail.
+            Ok(None) => {
+                let existing = sqlx::query(
+                    "SELECT processed FROM provider_events
+                      WHERE provider = $1 AND provider_event_id = $2",
+                )
+                .bind(event.provider.as_str())
+                .bind(&event.provider_event_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|error| {
+                    tracing::error!(error = %error, "provider event claim state could not be read");
+                    "durable webhook claim state could not be read".to_string()
+                })?;
+                let Some(row) = existing else {
+                    return Err(
+                        "durable webhook claim disappeared during deduplication".to_string()
+                    );
+                };
+                let processed: bool = row.try_get("processed").map_err(|error| {
+                    tracing::error!(error = %error, "provider event processed flag could not be decoded");
+                    "durable webhook claim state was invalid".to_string()
+                })?;
+                if processed {
+                    return Ok(true);
+                }
+                return Err("webhook event is already being processed; retry later".to_string());
+            }
+            // A configured database is authoritative. Never weaken replay
+            // protection to a process-local marker after a durable claim
+            // fails because of an outage or schema problem.
             Err(e) => {
-                tracing::warn!(error = %e, "provider_events claim failed; falling back");
+                tracing::error!(error = %e, "provider_events claim failed; refusing webhook processing");
+                return Err("durable webhook deduplication could not be completed".to_string());
             }
         }
     }
-    // Fallback to billing_webhook runtime record (existing TASK 7B durable marker)
-    if state
-        .saas
-        .runtime_event_exists(&event.provider_event_id)
+    // Memory fallback. The check and claim occur under one lock so the
+    // no-database development path does not reintroduce a concurrent replay
+    // window.
+    memory_claim(&event.provider, &event.provider_event_id)
+}
+
+/// Release a claim when domain validation/application rejects the event.
+/// Completed events are never released.
+async fn release_claim(state: &ApiState, event: &NormalizedEvent) -> Result<(), String> {
+    if let Some(db) = &state.db {
+        let result = sqlx::query(
+            "DELETE FROM provider_events
+              WHERE provider = $1 AND provider_event_id = $2 AND processed = false",
+        )
+        .bind(event.provider.as_str())
+        .bind(&event.provider_event_id)
+        .execute(db.pool())
         .await
-        .is_some()
-    {
-        return true;
+        .map_err(|error| {
+            tracing::error!(error = %error, "failed to release rejected provider event claim");
+            "durable webhook claim could not be released".to_string()
+        })?;
+        if result.rows_affected() != 1 {
+            return Err("durable webhook claim was already completed or missing".to_string());
+        }
+        return Ok(());
     }
-    // Memory fallback
-    memory_seen(&event.provider, &event.provider_event_id)
+    memory_release(&event.provider, &event.provider_event_id);
+    Ok(())
 }
 
 /// Record processed event for idempotency.
@@ -274,24 +351,23 @@ async fn record_processed(state: &ApiState, event: &NormalizedEvent) -> Result<(
         .execute(db.pool())
         .await;
         match marked {
-            Ok(r) if r.rows_affected() == 0 => {
-                tracing::warn!(
-                    provider = event.provider.as_str(),
-                    event_id = %event.provider_event_id,
-                    "provider_events row missing when marking processed"
+            Ok(r) if r.rows_affected() == 1 => return Ok(()),
+            Ok(_) => {
+                return Err(
+                    "durable provider event claim was missing during completion".to_string()
                 );
             }
             Err(e) => {
-                tracing::warn!(error = %e, "failed to mark provider event processed");
+                tracing::error!(error = %e, "failed to mark provider event processed");
+                return Err("durable webhook completion could not be persisted".to_string());
             }
-            _ => {}
         }
     }
-    // Also record in existing webhook durable store for backward compat
-    let _ = state
-        .saas
-        .record_runtime_event(&event.provider_event_id, &event.payload)
-        .await;
+    // No-database mode is explicitly non-durable and is retained only for
+    // hermetic tests/development. Production callers must take the database
+    // branch above. The claim was inserted into the process-local set by
+    // `is_duplicate`; keeping it marked makes successful delivery a no-op on
+    // replay within this process.
     memory_mark(&event.provider, &event.provider_event_id);
     Ok(())
 }
@@ -325,6 +401,7 @@ async fn apply_normalized(state: &ApiState, event: &NormalizedEvent) -> Result<S
         .saas
         .organization(org)
         .await
+        .map_err(|error| format!("organization lookup failed: {error}"))?
         .ok_or_else(|| "organization does not exist".to_string())?;
     if org_rec.status == bot_core::tenant::OrganizationStatus::Closed {
         return Err("organization is closed".to_string());
@@ -359,6 +436,7 @@ async fn apply_normalized(state: &ApiState, event: &NormalizedEvent) -> Result<S
                 .saas
                 .subscription_of(org)
                 .await
+                .map_err(|error| format!("subscription lookup failed: {error}"))?
                 .ok_or_else(|| "organization has no subscription".to_string())?;
             match event.event_type.as_str() {
                 "subscription.payment_failed" => sub.status = SubscriptionStatus::PastDue,
@@ -411,9 +489,21 @@ fn memory_seen_set() -> &'static Mutex<HashSet<String>> {
     static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
 }
-fn memory_seen(provider: &BillingProviderKind, id: &str) -> bool {
+fn memory_claim(provider: &BillingProviderKind, id: &str) -> Result<bool, String> {
     let key = format!("{}:{}", provider.as_str(), id);
-    memory_seen_set().lock().expect("mutex").contains(&key)
+    let mut seen = memory_seen_set().lock().expect("mutex");
+    if seen.contains(&key) {
+        return Ok(true);
+    }
+    if seen.len() >= 10_000 {
+        return Err("process-local webhook replay cache is full; configure PostgreSQL".to_string());
+    }
+    seen.insert(key);
+    Ok(false)
+}
+fn memory_release(provider: &BillingProviderKind, id: &str) {
+    let key = format!("{}:{}", provider.as_str(), id);
+    memory_seen_set().lock().expect("mutex").remove(&key);
 }
 fn memory_mark(provider: &BillingProviderKind, id: &str) {
     let key = format!("{}:{}", provider.as_str(), id);
@@ -450,31 +540,6 @@ mod md5 {
         fn from(v: [u8; 16]) -> Self {
             HexWrap(v)
         }
-    }
-}
-
-// Helper trait for SaasStore runtime event existence (reuse existing TASK 7B mechanism)
-trait SaasRuntimeExt {
-    async fn runtime_event_exists(&self, event_id: &str) -> Option<()>;
-    async fn record_runtime_event(
-        &self,
-        event_id: &str,
-        payload: &serde_json::Value,
-    ) -> Result<(), String>;
-}
-impl SaasRuntimeExt for crate::saas::SaasStore {
-    async fn runtime_event_exists(&self, _event_id: &str) -> Option<()> {
-        // Check via PostgresSaasRepo if present, else via memory markers in billing_webhook
-        // We reuse the same kind as billing_webhook.rs: WEBHOOK_EVENT_KIND
-        // SaasStore doesn't expose this directly, so we do a best-effort check via durables.
-        None // durable check done earlier via provider_events; this is fallback
-    }
-    async fn record_runtime_event(
-        &self,
-        _event_id: &str,
-        _payload: &serde_json::Value,
-    ) -> Result<(), String> {
-        Ok(())
     }
 }
 

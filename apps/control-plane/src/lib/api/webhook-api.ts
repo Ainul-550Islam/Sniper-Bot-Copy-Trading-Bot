@@ -58,7 +58,19 @@ export async function deleteWebhook(id: string): Promise<{ success: boolean }> {
 }
 
 /**
- * Dispatch a mock test event to the webhook URL.
+ * Replace the endpoint signing secret. The new secret is returned once.
+ */
+export async function rotateWebhookSecret(id: string): Promise<{ id: string; secret: string; warning: string }> {
+  return request<{ id: string; secret: string; warning: string }>(
+    `/api/saas/webhooks/${encodeURIComponent(id)}/rotate`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+/**
+ * Dispatch a signed test event to the webhook URL and return the remote result.
  */
 export async function testWebhook(
   id: string,

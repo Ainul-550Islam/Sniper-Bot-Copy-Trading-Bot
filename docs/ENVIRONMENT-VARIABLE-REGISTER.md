@@ -6,6 +6,8 @@
 |---|---|---|---|---|---|---|
 | `DATABASE_URL` | Optional (if `database.required=false`) / Required (if `true`) | `DATABASE_URL` | Yes (password) | `[database]` `url` or env `DATABASE_URL` | No DB → memory store, warn, single replica | `GET /ready` not ready if required, `db_integration` NOT_RUN |
 | `REDIS_URL` | Optional | `REDIS_URL` | Yes | `[redis]` `url` | No Redis → dedup L1 only | `redis_integration` NOT_RUN |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | Required for webhook create/delivery | `WEBHOOK_SECRET_ENCRYPTION_KEY` | Yes | SaaS webhook AES-256-GCM envelope | No key → webhook creation and delivery refuse; legacy plaintext rows must be rotated | `webhook_secret_storage_unavailable` / `webhook_secret_unavailable` |
+| `MFA_ENCRYPTION_KEY` | Required when MFA is enabled | `MFA_ENCRYPTION_KEY` | Yes | SaaS TOTP AES-256-GCM envelope | No key → TOTP enrollment, verification, and MFA-protected authentication refuse; use a stable base64-encoded 32-byte key | `mfa_encryption_key_missing` / `mfa_secret_unavailable` |
 | `RUST_LOG` | No | `RUST_LOG` | No | `[observability]` `log_level` (overridden by RUST_LOG) | `info` via `EnvFilter` | Falls back to `info` if invalid |
 | `SOLANA_KEYPAIR` | No (paper) | `SOLANA_KEYPAIR` | Yes (private key JSON) | `secrets.solana_keypair` → env `SOLANA_KEYPAIR` | Ephemeral `Wallet::generate()` (paper only, warn) | `load_wallet` fails if malformed |
 | `TELEGRAM_BOT_TOKEN` | No | `TELEGRAM_BOT_TOKEN` (or `telegram.bot_token_env`) | Yes | `secrets.telegram_bot_token` → env | `module-telegram` disabled, log | — |

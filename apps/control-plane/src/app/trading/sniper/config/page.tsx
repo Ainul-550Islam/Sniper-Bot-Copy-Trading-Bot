@@ -12,13 +12,13 @@ import AppShell from "@/components/AppShell";
 import { createStrategy } from "@/lib/api/strategy-api";
 
 export default function SniperConfigPage() {
-  const [name, setName] = useState("Raydium Launch Sniper v1");
-  const [maxBuySol, setMaxBuySol] = useState(1.5);
-  const [slippageBps, setSlippageBps] = useState(150);
-  const [minLiquidityUsd, setMinLiquidityUsd] = useState(10000);
-  const [takeProfitPct, setTakeProfitPct] = useState(100);
-  const [stopLossPct, setStopLossPct] = useState(20);
-  const [tipLamports, setTipLamports] = useState(500000);
+  const [name, setName] = useState("");
+  const [maxBuySol, setMaxBuySol] = useState<number | "">("");
+  const [slippageBps, setSlippageBps] = useState<number | "">("");
+  const [minLiquidityUsd, setMinLiquidityUsd] = useState<number | "">("");
+  const [takeProfitPct, setTakeProfitPct] = useState<number | "">("");
+  const [stopLossPct, setStopLossPct] = useState<number | "">("");
+  const [tipLamports, setTipLamports] = useState<number | "">("");
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<{ message: string; ok: boolean } | null>(null);
 
@@ -42,7 +42,7 @@ export default function SniperConfigPage() {
           mev_protection_tip_lamports: tipLamports,
         },
       });
-      setStatus({ message: "Sniper configuration deployed successfully to active tenant plane!", ok: true });
+      setStatus({ message: "Sniper strategy saved to the authenticated tenant.", ok: true });
     } catch (err: unknown) {
       setStatus({ message: err instanceof Error ? err.message : "Failed to save sniper configuration", ok: false });
     } finally {

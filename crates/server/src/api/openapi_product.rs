@@ -123,6 +123,38 @@ pub fn product_paths() -> Value {
                     "200": { "description": "Activity timeline returned" }
                 }
             }
+        },
+        "/api/saas/support/tickets": {
+            "get": {
+                "summary": "List tenant support tickets",
+                "tags": ["Support"],
+                "responses": {
+                    "200": { "description": "Support tickets returned" }
+                }
+            },
+            "post": {
+                "summary": "Create a tenant support ticket",
+                "tags": ["Support"],
+                "responses": {
+                    "201": { "description": "Support ticket created" }
+                }
+            }
+        },
+        "/api/saas/notifications/preferences": {
+            "get": {
+                "summary": "Read tenant notification preferences",
+                "tags": ["Notifications"],
+                "responses": {
+                    "200": { "description": "Notification preferences returned" }
+                }
+            },
+            "put": {
+                "summary": "Update tenant notification preferences",
+                "tags": ["Notifications"],
+                "responses": {
+                    "200": { "description": "Notification preferences updated" }
+                }
+            }
         }
     })
 }

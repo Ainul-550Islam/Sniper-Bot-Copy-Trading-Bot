@@ -44,9 +44,9 @@ export default function PolymarketPage() {
       const [st, cfg, ord, fl, rc] = await Promise.all([
         customerTrading.polymarketStatus(),
         customerTrading.polymarketConfig(),
-        customerTrading.polymarketOrders().catch(() => ({ organization_id: "", items: [], next_cursor: null })),
-        customerTrading.polymarketFills().catch(() => ({ items: [] })),
-        customerTrading.polymarketReconciliation().catch(() => ({ organization_id: "", drift: [] })),
+        customerTrading.polymarketOrders(),
+        customerTrading.polymarketFills(),
+        customerTrading.polymarketReconciliation(),
       ]);
       setStatus(st);
       setConfig(cfg);
@@ -113,19 +113,19 @@ export default function PolymarketPage() {
           <div className="stat-card">
             <span className="stat-card__title">Execution Mode</span>
             <span className="stat-card__value">
-              {config?.dry_run ? "PAPER SIMULATION" : "LIVE CLOB"}
+              {config ? (config.dry_run ? "PAPER MODE" : "LIVE MODE CONFIGURED") : "UNCONFIGURED"}
             </span>
             <span className={`tag ${config?.dry_run ? "tag--paper" : "tag--active"}`} style={{ width: "fit-content", marginTop: "0.3rem" }}>
-              {config?.dry_run ? "Simulation Mode" : "EIP-712 Live Signed"}
+              {config ? (config.dry_run ? "Paper mode configured" : "Live mode configured") : "No configuration recorded"}
             </span>
           </div>
 
           <div className="stat-card">
             <span className="stat-card__title">Position Cap (USDC)</span>
             <span className="stat-card__value">
-              ${config?.max_position_size_usdc ?? 500}
+              {config ? `$${config.max_position_size_usdc}` : "—"}
             </span>
-            <span className="muted small">Max Market Exposure: ${config?.max_market_exposure_usdc ?? 2500}</span>
+            <span className="muted small">Max Market Exposure: {config ? `$${config.max_market_exposure_usdc}` : "—"}</span>
           </div>
 
           <div className="stat-card">
@@ -150,7 +150,7 @@ export default function PolymarketPage() {
                     <strong>Entitlement:</strong> <code>{status.entitlement.feature ?? "module.polymarket"}</code> ({status.entitlement.granted ? "Granted" : "Denied"})
                   </p>
                   <p>
-                    <strong>Runtime Phase:</strong> <span className={`tag tag--${status.runtime?.phase}`}>{status.runtime?.phase ?? "idle"}</span>
+                    <strong>Runtime Phase:</strong> <span className={`tag tag--${status.runtime?.phase}`}>{status.runtime?.phase ?? "—"}</span>
                   </p>
                   <p>
                     <strong>Runtime ID:</strong> <code>{status.runtime?.runtime_id ?? "not scheduled"}</code>

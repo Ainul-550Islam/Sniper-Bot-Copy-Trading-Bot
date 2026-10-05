@@ -79,7 +79,9 @@ async fn memory_store_with_org(status: OrganizationStatus) -> (SaasStore, Organi
 #[tokio::test]
 async fn no_subscription_is_explicit_none_never_a_default_tier() {
     let (store, org_id) = memory_store_with_org(OrganizationStatus::Active).await;
-    let view = BillingView::load(&store, org_id, Utc::now()).await;
+    let view = BillingView::load(&store, org_id, Utc::now())
+        .await
+        .expect("billing view");
     let body = view.to_status_json();
     assert_eq!(body["plan_code"], "none", "no invented starter/pro");
     assert_eq!(body["subscription_status"], "none", "no invented active");
@@ -115,7 +117,9 @@ async fn assigned_plan_renders_verbatim_with_real_usage() {
             .await
             .expect("usage recorded");
     }
-    let view = BillingView::load(&store, org_id, Utc::now()).await;
+    let view = BillingView::load(&store, org_id, Utc::now())
+        .await
+        .expect("billing view");
     let body = view.to_status_json();
     assert_eq!(body["plan_code"], "pro");
     assert_eq!(body["plan_name"], "Pro");
@@ -145,7 +149,9 @@ async fn idempotent_usage_redelivery_does_not_double_count() {
     assert!(store.record_usage(&event).await.expect("first"));
     // Same (tenant, key) identity again: refused, not re-counted.
     assert!(!store.record_usage(&event).await.expect("duplicate"));
-    let view = BillingView::load(&store, org_id, Utc::now()).await;
+    let view = BillingView::load(&store, org_id, Utc::now())
+        .await
+        .expect("billing view");
     assert_eq!(view.usage.api_requests, 5.0);
 }
 
@@ -167,8 +173,12 @@ async fn tenant_usage_isolation() {
         ))
         .await
         .expect("b usage");
-    let view_a = BillingView::load(&store, org_a.id, Utc::now()).await;
-    let view_b = BillingView::load(&store, org_b.id, Utc::now()).await;
+    let view_a = BillingView::load(&store, org_a.id, Utc::now())
+        .await
+        .expect("billing view");
+    let view_b = BillingView::load(&store, org_b.id, Utc::now())
+        .await
+        .expect("billing view");
     assert_eq!(
         view_a.usage.api_requests, 0.0,
         "org A must not see org B usage"
@@ -183,13 +193,19 @@ async fn past_due_derives_grace_then_failure() {
         .assign_plan(org_id, PlanCode::Pro, Utc::now())
         .await
         .expect("plan");
-    let mut sub = store.subscription_of(org_id).await.expect("sub");
+    let mut sub = store
+        .subscription_of(org_id)
+        .await
+        .expect("subscription lookup")
+        .expect("sub");
     sub.status = SubscriptionStatus::PastDue;
 
     // Inside the period: grace.
     sub.current_period_end = Some(Utc::now() + Duration::days(2));
     store.update_subscription(&sub).await.expect("updated");
-    let view = BillingView::load(&store, org_id, Utc::now()).await;
+    let view = BillingView::load(&store, org_id, Utc::now())
+        .await
+        .expect("billing view");
     assert_eq!(view.dunning, DunningState::GracePeriod);
     assert!(view.grace_until().is_some());
     assert_eq!(view.to_status_json()["payment_state"], "failed");
@@ -197,7 +213,9 @@ async fn past_due_derives_grace_then_failure() {
     // Past the period: payment failed, no grace.
     sub.current_period_end = Some(Utc::now() - Duration::hours(1));
     store.update_subscription(&sub).await.expect("updated");
-    let view = BillingView::load(&store, org_id, Utc::now()).await;
+    let view = BillingView::load(&store, org_id, Utc::now())
+        .await
+        .expect("billing view");
     assert_eq!(view.dunning, DunningState::PaymentFailed);
     assert!(view.grace_until().is_none());
 }
@@ -224,7 +242,11 @@ async fn payments_persist_idempotently_and_read_tenant_scoped() {
         .create_organization(&org_other)
         .await
         .expect("other org");
-    assert!(store2.payment_of(org_id, payment.id).await.is_none());
+    assert!(store2
+        .payment_of(org_id, payment.id)
+        .await
+        .expect("payment lookup")
+        .is_none());
 
     // Status transition persists through update_payment.
     payment
@@ -235,12 +257,16 @@ async fn payments_persist_idempotently_and_read_tenant_scoped() {
         )
         .expect("transition");
     store.update_payment(&payment).await.expect("updated");
-    let loaded = store.payment_of(org_id, payment.id).await.expect("loaded");
+    let loaded = store
+        .payment_of(org_id, payment.id)
+        .await
+        .expect("payment lookup")
+        .expect("loaded");
     assert_eq!(
         loaded.status,
         bot_core::billing::payment::TransactionStatus::Succeeded
     );
-    let listed = store.payments_of(org_id).await;
+    let listed = store.payments_of(org_id).await.expect("payments");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, payment.id);
 }
@@ -255,7 +281,9 @@ async fn pg_durable_store_agrees_with_memory_invariants() {
     store.create_organization(&org).await.expect("org created");
 
     // No subscription: explicit none.
-    let view = BillingView::load(&store, org.id, Utc::now()).await;
+    let view = BillingView::load(&store, org.id, Utc::now())
+        .await
+        .expect("billing view");
     assert_eq!(view.plan_code(), "none");
     assert_eq!(view.subscription_status(), "none");
 
@@ -275,7 +303,9 @@ async fn pg_durable_store_agrees_with_memory_invariants() {
         ))
         .await
         .expect("usage");
-    let view = BillingView::load(&store, org.id, Utc::now()).await;
+    let view = BillingView::load(&store, org.id, Utc::now())
+        .await
+        .expect("billing view");
     assert_eq!(view.plan_code(), "starter");
     assert_eq!(view.subscription_status(), "active");
     assert!(view.entitlements_active());
@@ -293,6 +323,10 @@ async fn pg_durable_store_agrees_with_memory_invariants() {
     );
     assert!(store.record_payment(&payment).await.expect("recorded"));
     assert!(!store.record_payment(&payment).await.expect("dup refused"));
-    let loaded = store.payment_of(org.id, payment.id).await.expect("loaded");
+    let loaded = store
+        .payment_of(org.id, payment.id)
+        .await
+        .expect("payment lookup")
+        .expect("loaded");
     assert_eq!(loaded.amount_cents, 1_234);
 }

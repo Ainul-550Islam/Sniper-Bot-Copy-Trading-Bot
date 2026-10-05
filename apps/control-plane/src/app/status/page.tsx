@@ -65,10 +65,14 @@ export default function StatusPage() {
           >
             <div>
               <h3 style={{ margin: 0, color: report.overall_status === "operational" ? "var(--ok)" : "var(--warn)" }}>
-                All Systems Operational
+                {report.overall_status === "operational" ? "All registered components operational" : `Health registry: ${report.overall_status}`}
               </h3>
               <p style={{ margin: "0.25rem 0 0", fontSize: "0.85rem" }}>
-                Zero active degraded incidents across global relayer clusters.
+                {report.components.length === 0
+                  ? "No health components are registered in this deployment."
+                  : report.active_incidents_count === null
+                    ? "Incident count unavailable."
+                    : `${report.active_incidents_count} registered component incident${report.active_incidents_count === 1 ? "" : "s"}.`}
               </p>
             </div>
             <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>

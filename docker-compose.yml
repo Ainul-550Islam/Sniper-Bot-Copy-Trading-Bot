@@ -69,6 +69,8 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       POSTGRES_URL: postgres://${POSTGRES_USER:-sniper}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-sniper}
       REDIS_URL: redis://redis:6379
+      WEBHOOK_SECRET_ENCRYPTION_KEY: ${WEBHOOK_SECRET_ENCRYPTION_KEY:-}
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
       # Wallet keypair is mounted read-only from the host, never baked in:
       SOLANA_KEYPAIR: /run/secrets/solana_keypair.json
     volumes:

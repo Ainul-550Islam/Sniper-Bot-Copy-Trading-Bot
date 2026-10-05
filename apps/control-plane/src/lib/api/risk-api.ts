@@ -1,7 +1,8 @@
 /**
- * Typed Risk Limits & Kill-Switch Client (THIRD.md §127).
+ * Typed tenant risk limits and organization-scoped kill-switch client.
  *
- * Interfaces with `/api/saas/risk-dashboard` and emergency kill-switches.
+ * Values come from the tenant configuration document. The client does not
+ * convert non-USD values into fabricated dollar amounts.
  */
 
 import { request } from "../api";
@@ -9,22 +10,23 @@ import { request } from "../api";
 export interface RiskLimitRule {
   id: string;
   name: string;
-  scope: "tenant" | "strategy" | "wallet" | "global";
-  limit_usd_cents: number;
-  current_utilization_cents: number;
-  utilization_pct: number;
+  scope: string;
+  limit_ref: number | null;
+  current_utilization_ref: number | null;
+  utilization_pct: number | null;
   status: "normal" | "warning" | "breached";
 }
 
 export interface RiskDashboardState {
   organization_id: string;
   kill_switch_active: boolean;
-  kill_switch_activated_at?: string;
-  kill_switch_actor?: string;
-  max_drawdown_limit_bps: number;
-  current_drawdown_bps: number;
-  daily_loss_limit_usd_cents: number;
-  current_daily_loss_cents: number;
+  reference_asset: string;
+  max_drawdown_limit_ref: number | null;
+  current_drawdown_ref: number | null;
+  daily_loss_limit_ref: number | null;
+  current_daily_loss_ref: number | null;
+  durable: boolean;
+  modules: Array<{ module: string; effective_state: "enabled" | "disabled" | "unknown"; override: unknown }>;
   rules: RiskLimitRule[];
   as_of: string;
 }
@@ -34,12 +36,10 @@ export interface ToggleKillSwitchInput {
   reason: string;
 }
 
-/** Fetches overall risk posture and effective limits. */
 export async function getRiskDashboard(): Promise<RiskDashboardState> {
   return request<RiskDashboardState>("/api/saas/risk-dashboard");
 }
 
-/** Activates or deactivates the tenant-level emergency kill-switch. */
 export async function toggleKillSwitch(
   input: ToggleKillSwitchInput,
 ): Promise<{ success: boolean; kill_switch_active: boolean; updated_at: string }> {

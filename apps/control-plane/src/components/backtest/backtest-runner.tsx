@@ -56,7 +56,7 @@ export default function BacktestRunner({ strategies, onComplete, onCancel }: Bac
 
   return (
     <div className="card" style={{ marginBottom: "1.5rem" }}>
-      <h3 style={{ marginTop: 0 }}>Configure Backtest Simulation</h3>
+          <h3 style={{ marginTop: 0 }}>Queue Backtest Simulation</h3>
       {error && (
         <div style={{ color: "var(--bad)", background: "var(--bad-glow)", padding: "0.5rem", borderRadius: "4px", marginBottom: "1rem" }}>
           {error}
@@ -172,7 +172,7 @@ export default function BacktestRunner({ strategies, onComplete, onCancel }: Bac
             Cancel
           </button>
           <button type="submit" disabled={loading || strategies.length === 0} className="btn btn-primary">
-            {loading ? "Running Simulation..." : "Execute Simulation"}
+            {loading ? "Queueing..." : "Queue Simulation"}
           </button>
         </div>
       </form>

@@ -1,42 +1,23 @@
 //! Tenant polymarket handlers (PROMPT 3/10 #65).
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 use bot_core::membership::Permission;
 use bot_core::models::BotModule;
-use bot_core::tenant::OrganizationId;
+
+use super::config_store::{read_module, write_module};
 
 use super::authorization_chain::{guard, guard_manage, TradingModuleFamily};
 use super::executions::window;
 use super::module_controls::{apply_control, feature_key_for, status_payload, ControlAction};
 use super::orders::{page_request, plane_error};
 use crate::api::ApiState;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PolymarketConfigPayload {
-    pub organization_id: String,
-    pub active_condition_ids: Vec<String>,
-    pub max_position_size_usdc: f64,
-    pub max_market_exposure_usdc: f64,
-    pub spread_threshold_bps: u32,
-    pub reprice_interval_seconds: u32,
-    pub cancel_stale_orders: bool,
-    pub dry_run: bool,
-    pub order_type: String,
-    pub updated_at: String,
-}
-
-static POLYMARKET_CONFIG_STORE: LazyLock<Arc<Mutex<HashMap<OrganizationId, PolymarketConfigPayload>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 /// `GET /api/tenant/polymarket/orders?limit=&cursor=`
 pub async fn orders(
@@ -261,6 +242,69 @@ pub async fn controls(
     apply_control(&state, &auth, BotModule::Polymarket, action).await
 }
 
+fn validate_config(body: Value) -> Result<Map<String, Value>, Response> {
+    let Some(object) = body.as_object() else {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config", "detail": "configuration body must be a JSON object" }))).into_response());
+    };
+    const ALLOWED: &[&str] = &[
+        "active_condition_ids",
+        "max_position_size_usdc",
+        "max_market_exposure_usdc",
+        "spread_threshold_bps",
+        "reprice_interval_seconds",
+        "cancel_stale_orders",
+        "dry_run",
+        "order_type",
+    ];
+    if let Some(unknown) = object.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "unknown_config_field", "detail": format!("unsupported Polymarket configuration field: {unknown}") }))).into_response());
+    }
+    for key in ["max_position_size_usdc", "max_market_exposure_usdc"] {
+        if let Some(value) = object.get(key) {
+            let Some(number) = value.as_f64() else {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} must be a number") }))).into_response());
+            };
+            if !number.is_finite() || number < 0.0 || number > 1_000_000_000.0 {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} is outside its allowed range") }))).into_response());
+            }
+        }
+    }
+    for (key, maximum) in [
+        ("spread_threshold_bps", 10_000),
+        ("reprice_interval_seconds", 31_536_000),
+    ] {
+        if let Some(value) = object.get(key) {
+            if value.as_u64().is_none_or(|number| number > maximum) {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} is outside its allowed range") }))).into_response());
+            }
+        }
+    }
+    for key in ["cancel_stale_orders", "dry_run"] {
+        if object.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} must be boolean") }))).into_response());
+        }
+    }
+    if let Some(value) = object.get("active_condition_ids") {
+        let Some(items) = value.as_array() else {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": "active_condition_ids must be an array of strings" }))).into_response());
+        };
+        if items.len() > 10_000
+            || items.iter().any(|item| {
+                item.as_str()
+                    .is_none_or(|text| text.is_empty() || text.len() > 256)
+            })
+        {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": "active_condition_ids contains an invalid item" }))).into_response());
+        }
+    }
+    if let Some(value) = object.get("order_type") {
+        if !matches!(value.as_str(), Some("limit" | "fok" | "gtc")) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": "order_type must be limit, fok, or gtc" }))).into_response());
+        }
+    }
+    Ok(object.clone())
+}
+
 /// `GET /api/tenant/polymarket/config`
 pub async fn get_config(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     let auth = match guard(
@@ -271,33 +315,26 @@ pub async fn get_config(State(state): State<ApiState>, headers: HeaderMap) -> Re
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-
-    let org = auth.organization_id();
-    let mut lock = POLYMARKET_CONFIG_STORE.lock().unwrap();
-    let cfg = lock.entry(org).or_insert_with(|| PolymarketConfigPayload {
-        organization_id: org.to_string(),
-        active_condition_ids: vec![],
-        max_position_size_usdc: 500.0,
-        max_market_exposure_usdc: 2500.0,
-        spread_threshold_bps: 50,
-        reprice_interval_seconds: 5,
-        cancel_stale_orders: true,
-        dry_run: true,
-        order_type: "limit".into(),
-        updated_at: Utc::now().to_rfc3339(),
-    });
-
-    (StatusCode::OK, Json(cfg.clone())).into_response()
+    let Some(db) = state.db.as_deref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "trading_data_plane_unavailable", "detail": "Polymarket configuration requires PostgreSQL" }))).into_response();
+    };
+    match read_module(db, auth.organization_id(), "polymarket").await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to read tenant Polymarket configuration");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "config_storage_error", "detail": "Polymarket configuration could not be loaded" }))).into_response()
+        }
+    }
 }
 
 /// `PUT /api/tenant/polymarket/config`
 pub async fn update_config(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<Value>,
 ) -> Response {
     let auth = match guard_manage(
         &state,
@@ -307,53 +344,29 @@ pub async fn update_config(
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-
-    let org = auth.organization_id();
-    let mut lock = POLYMARKET_CONFIG_STORE.lock().unwrap();
-    let current = lock.entry(org).or_insert_with(|| PolymarketConfigPayload {
-        organization_id: org.to_string(),
-        active_condition_ids: vec![],
-        max_position_size_usdc: 500.0,
-        max_market_exposure_usdc: 2500.0,
-        spread_threshold_bps: 50,
-        reprice_interval_seconds: 5,
-        cancel_stale_orders: true,
-        dry_run: true,
-        order_type: "limit".into(),
-        updated_at: Utc::now().to_rfc3339(),
-    });
-
-    if let Some(v) = body.get("max_position_size_usdc").and_then(|x| x.as_f64()) {
-        current.max_position_size_usdc = v;
+    let patch = match validate_config(body) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Some(db) = state.db.as_deref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "trading_data_plane_unavailable", "detail": "Polymarket configuration requires PostgreSQL" }))).into_response();
+    };
+    match write_module(
+        db,
+        auth.organization_id(),
+        "polymarket",
+        &patch,
+        &auth.ctx.actor_label(),
+    )
+    .await
+    {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to write tenant Polymarket configuration");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "config_storage_error", "detail": "Polymarket configuration could not be saved" }))).into_response()
+        }
     }
-    if let Some(v) = body.get("max_market_exposure_usdc").and_then(|x| x.as_f64()) {
-        current.max_market_exposure_usdc = v;
-    }
-    if let Some(v) = body.get("spread_threshold_bps").and_then(|x| x.as_u64()) {
-        current.spread_threshold_bps = v as u32;
-    }
-    if let Some(v) = body.get("reprice_interval_seconds").and_then(|x| x.as_u64()) {
-        current.reprice_interval_seconds = v as u32;
-    }
-    if let Some(v) = body.get("cancel_stale_orders").and_then(|x| x.as_bool()) {
-        current.cancel_stale_orders = v;
-    }
-    if let Some(v) = body.get("dry_run").and_then(|x| x.as_bool()) {
-        current.dry_run = v;
-    }
-    if let Some(v) = body.get("order_type").and_then(|x| x.as_str()) {
-        current.order_type = v.to_string();
-    }
-    if let Some(v) = body.get("active_condition_ids").and_then(|x| x.as_array()) {
-        current.active_condition_ids = v
-            .iter()
-            .filter_map(|s| s.as_str().map(|str_val| str_val.to_string()))
-            .collect();
-    }
-    current.updated_at = Utc::now().to_rfc3339();
-
-    (StatusCode::OK, Json(current.clone())).into_response()
 }

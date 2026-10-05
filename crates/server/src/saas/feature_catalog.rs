@@ -1,4 +1,7 @@
-//! Product feature entitlements catalog and quota definitions (THIRD.md §140).
+//! Shared feature vocabulary exposed by the control plane.
+//!
+//! This catalogue describes capability keys only. Whether a tenant may use a
+//! capability is determined by its durable plan and entitlement rows.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,40 +16,40 @@ pub struct FeatureEntitlement {
 pub fn all_features() -> Vec<FeatureEntitlement> {
     vec![
         FeatureEntitlement {
-            key: "bot.sniper".into(),
-            name: "Solana DEX Sniper".into(),
-            description: "Block-0 token launch sniper with Jito bundle relay".into(),
+            key: "module.sniper".into(),
+            name: "Sniper module".into(),
+            description: "Tenant entitlement key for the sniper module.".into(),
             category: "Trading".into(),
         },
         FeatureEntitlement {
-            key: "bot.copy".into(),
-            name: "Copy Trading Engine".into(),
-            description: "Autonomous high-winrate wallet mirroring".into(),
+            key: "module.copy".into(),
+            name: "Copy module".into(),
+            description: "Tenant entitlement key for the copy module.".into(),
             category: "Trading".into(),
         },
         FeatureEntitlement {
-            key: "bot.polymarket".into(),
-            name: "Polymarket CLOB".into(),
-            description: "Binary event outcome trading and spread capture".into(),
+            key: "module.polymarket".into(),
+            name: "Polymarket module".into(),
+            description: "Tenant entitlement key for the Polymarket module.".into(),
             category: "Trading".into(),
         },
         FeatureEntitlement {
-            key: "custody.kms".into(),
-            name: "FIPS 140-3 AWS KMS Custody".into(),
-            description: "Hardware signer profile and key envelope encryption".into(),
-            category: "Security".into(),
+            key: "feature.live_trading".into(),
+            name: "Live trading".into(),
+            description: "Tenant entitlement key for live trading activity.".into(),
+            category: "Trading".into(),
         },
         FeatureEntitlement {
-            key: "backtest.engine".into(),
-            name: "Deterministic Backtester".into(),
-            description: "Historical simulation with exact fee & slippage modeling".into(),
-            category: "Analytics".into(),
+            key: "feature.api_keys".into(),
+            name: "API keys".into(),
+            description: "Tenant entitlement key for API-key access.".into(),
+            category: "Access".into(),
         },
         FeatureEntitlement {
-            key: "reports.audit".into(),
-            name: "Compliance Audit Exporter".into(),
-            description: "SOC2 and Capital Gains ledger exports in CSV/JSON/PDF".into(),
-            category: "Compliance".into(),
+            key: "feature.exports".into(),
+            name: "Data exports".into(),
+            description: "Tenant entitlement key for data exports.".into(),
+            category: "Reporting".into(),
         },
     ]
 }

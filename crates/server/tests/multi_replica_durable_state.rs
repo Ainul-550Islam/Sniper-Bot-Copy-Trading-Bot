@@ -136,7 +136,11 @@ async fn kill_switch_set_on_one_replica_is_honoured_by_the_other() {
     assert!(store_a.is_durable() && store_b.is_durable());
 
     assert_eq!(
-        store_b.effective_state(org, BotModule::Sniper).await.0,
+        store_b
+            .effective_state(org, BotModule::Sniper)
+            .await
+            .expect("read")
+            .0,
         "enabled",
         "no override yet"
     );
@@ -154,7 +158,10 @@ async fn kill_switch_set_on_one_replica_is_honoured_by_the_other() {
         .await
         .expect("replica A writes the pause");
 
-    let (state, entry) = store_b.effective_state(org, BotModule::Sniper).await;
+    let (state, entry) = store_b
+        .effective_state(org, BotModule::Sniper)
+        .await
+        .expect("read");
     assert_eq!(state, "disabled", "replica B MUST see the pause");
     let entry = entry.expect("replica B must see the override record");
     assert_eq!(entry.reason, "risk review");
@@ -166,7 +173,11 @@ async fn kill_switch_set_on_one_replica_is_honoured_by_the_other() {
         .await
         .expect("replica B clears"));
     assert_eq!(
-        store_a.effective_state(org, BotModule::Sniper).await.0,
+        store_a
+            .effective_state(org, BotModule::Sniper)
+            .await
+            .expect("read")
+            .0,
         "enabled",
         "replica A MUST see the clear"
     );
@@ -199,7 +210,10 @@ async fn kill_switch_survives_a_cold_restart() {
     let fresh = replica().await.expect("reconnect");
     let after = ModuleControlStore::new(Some(fresh));
 
-    let (state, entry) = after.effective_state(org, BotModule::Copy).await;
+    let (state, entry) = after
+        .effective_state(org, BotModule::Copy)
+        .await
+        .expect("read");
     assert_eq!(state, "disabled", "the pause MUST survive the restart");
     assert_eq!(entry.expect("entry").reason, "paused before restart");
 }
@@ -234,6 +248,7 @@ async fn kill_switch_stays_tenant_scoped_across_replicas() {
         store_b
             .override_for(tenant_b, BotModule::Polymarket)
             .await
+            .expect("read")
             .is_none(),
         "tenant B must not inherit tenant A's pause"
     );
@@ -241,6 +256,7 @@ async fn kill_switch_stays_tenant_scoped_across_replicas() {
         store_b
             .effective_state(tenant_b, BotModule::Polymarket)
             .await
+            .expect("read")
             .0,
         "enabled"
     );
@@ -248,6 +264,7 @@ async fn kill_switch_stays_tenant_scoped_across_replicas() {
         store_b
             .effective_state(tenant_a, BotModule::Polymarket)
             .await
+            .expect("read")
             .0,
         "disabled"
     );

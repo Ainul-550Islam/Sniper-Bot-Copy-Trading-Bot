@@ -54,6 +54,9 @@ jobs:
         run: npm run typecheck
         # Fails on type errors — hard gate
 
+      - name: Frontend contract and truthfulness gate
+        run: ../../scripts/check-frontend-contract.sh
+
       - name: Production build
         run: npm run build
         env:

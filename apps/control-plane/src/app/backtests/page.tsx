@@ -45,7 +45,7 @@ export default function BacktestsPage() {
         <div>
           <h1 style={{ margin: 0 }}>Strategy Backtesting &amp; Simulation</h1>
           <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-            Replay execution algorithms over historical order books and liquidity pools with exact fee accounting.
+            Queue tenant-owned backtest jobs for worker execution over an available authoritative historical dataset.
           </p>
         </div>
         <button onClick={() => setShowRunner(!showRunner)} className="btn btn-primary">

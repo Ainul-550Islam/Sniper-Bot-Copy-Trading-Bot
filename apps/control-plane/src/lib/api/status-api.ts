@@ -12,8 +12,8 @@ export interface StatusComponent {
   name: string;
   category: string;
   status: ComponentHealth;
-  latency_ms?: number;
-  last_checked: string;
+  latency_ms: number | null;
+  last_checked: string | null;
   details: string;
 }
 
@@ -21,7 +21,7 @@ export interface ServiceStatusReport {
   overall_status: ComponentHealth;
   as_of: string;
   components: StatusComponent[];
-  active_incidents_count: number;
+  active_incidents_count: number | null;
 }
 
 /** Fetches real-time status of trading infrastructure and external feeds. */

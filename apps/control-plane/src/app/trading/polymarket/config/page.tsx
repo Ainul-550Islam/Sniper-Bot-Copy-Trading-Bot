@@ -16,7 +16,7 @@ export default function PolymarketConfigPage() {
   const [marketSlugs, setMarketSlugs] = useState("presidential-election-winner-2024");
   const [maxPositionUsd, setMaxPositionUsd] = useState(5000);
   const [spreadThresholdBps, setSpreadThresholdBps] = useState(30);
-  const [clobOrderType, setClobOrderType] = useState("GTC");
+  const [clobOrderType, setClobOrderType] = useState("");
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<{ message: string; ok: boolean } | null>(null);
 
@@ -42,7 +42,7 @@ export default function PolymarketConfigPage() {
           clob_order_type: clobOrderType,
         },
       });
-      setStatus({ message: "Polymarket strategy configuration active!", ok: true });
+      setStatus({ message: "Polymarket strategy saved to the authenticated tenant.", ok: true });
     } catch (err: unknown) {
       setStatus({ message: err instanceof Error ? err.message : "Failed to save configuration", ok: false });
     } finally {

@@ -1,116 +1,99 @@
-//! Tenant Telegram binding/status API (§J, spec file 77).
+//! Tenant Telegram binding and status API.
 //!
-//! Telegram is the CONTROL PLANE: an authenticated tenant always has it
-//! and it never trades by itself (`bot_core::tenant::feature_key` maps
-//! it to no plan feature). This surface gives the tenant:
-//!
-//! * `GET /api/tenant/telegram/status` — module status (control plane)
-//!   plus the organization's notification binding;
-//! * `PUT /api/tenant/telegram/binding` — bind/replace the
-//!   organization's notification chat (a chat id, never a secret);
-//! * `DELETE /api/tenant/telegram/binding` — clear the binding.
-//!
-//! HONESTY NOTE (stated in the status payload too): the deployment-level
-//! alert forwarder (`module-telegram`) currently routes alerts to the
-//! deployment's configured alert chat; per-tenant routing that consumes
-//! this binding is a deployment-side integration step. The binding API
-//! records the tenant's declared notification target — it does not
-//! claim per-tenant delivery is already active.
-//!
-//! The binding store follows the established tenant-scoped store pattern
-//! (`saas/custody.rs`): keyed by organization, process-local, with every
-//! access resolved from the authenticated context — a tenant can only
-//! ever read or write THEIR OWN binding.
-
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+//! The binding is durable tenant configuration. It records only a public chat
+//! identifier and an audit actor; bot tokens and delivery credentials remain in
+//! deployment secret storage and are never accepted by this API.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 
 use bot_core::membership::Permission;
 use bot_core::models::BotModule;
-use bot_core::tenant::OrganizationId;
 
 use super::authorization_chain::{guard, guard_manage, TradingModuleFamily};
+use super::config_store::{clear_module, read_module, write_module};
 use crate::api::ApiState;
 
-/// A tenant's Telegram notification binding. The chat id is a public
-/// Telegram identifier, not a secret; the bot token (the actual secret)
-/// stays in the operator environment and NEVER appears here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelegramBinding {
     pub chat_id: i64,
     pub bound_at: DateTime<Utc>,
-    /// Non-secret actor label from the authenticated context.
     pub bound_by: String,
 }
 
-fn bindings_store() -> &'static Mutex<HashMap<OrganizationId, TelegramBinding>> {
-    static S: OnceLock<Mutex<HashMap<OrganizationId, TelegramBinding>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
+fn error_response(status: StatusCode, error: &'static str, detail: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({ "error": error, "detail": detail.into() })),
+    )
+        .into_response()
 }
 
-/// Read THIS organization's binding (tenant-scoped).
-pub fn binding_for(org: OrganizationId) -> Option<TelegramBinding> {
-    bindings_store()
-        .lock()
-        .expect("bindings mutex")
-        .get(&org)
-        .cloned()
-}
-
-/// Set THIS organization's binding (upsert).
-pub fn set_binding(
-    org: OrganizationId,
-    chat_id: i64,
-    bound_by: &str,
-    now: DateTime<Utc>,
-) -> TelegramBinding {
-    let binding = TelegramBinding {
-        chat_id,
-        bound_at: now,
-        bound_by: bound_by.to_string(),
+async fn binding_for(
+    state: &ApiState,
+    organization_id: bot_core::tenant::OrganizationId,
+) -> Result<Option<TelegramBinding>, Response> {
+    let Some(db) = state.db.as_deref() else {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trading_data_plane_unavailable",
+            "Telegram binding requires PostgreSQL",
+        ));
     };
-    bindings_store()
-        .lock()
-        .expect("bindings mutex")
-        .insert(org, binding.clone());
-    binding
-}
-
-/// Clear THIS organization's binding. Returns true when one existed.
-pub fn clear_binding(org: OrganizationId) -> bool {
-    bindings_store()
-        .lock()
-        .expect("bindings mutex")
-        .remove(&org)
-        .is_some()
-}
-
-/// Validate a Telegram chat id (Telegram chat ids are i64; positive for
-/// users/groups, negative for supergroups/channel style ids — both are
-/// legitimate, so the only invalid value is a non-number).
-#[allow(clippy::result_large_err)]
-fn parse_chat_id(body: &serde_json::Value) -> Result<i64, Response> {
-    let raw = match body.get("chat_id").and_then(|v| v.as_i64()) {
-        Some(v) => v,
-        None => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "invalid_chat_id",
-                    "detail": "chat_id must be an integer Telegram chat id",
-                })),
+    let value = read_module(db, organization_id, "telegram")
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "failed to read tenant Telegram binding");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config_storage_error",
+                "Telegram binding could not be loaded",
             )
-                .into_response())
-        }
+        })?;
+    value
+        .map(|item| {
+            serde_json::from_value(item).map_err(|error| {
+                tracing::error!(error = %error, "tenant Telegram binding has invalid durable data");
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "config_storage_error",
+                    "Telegram binding data is invalid",
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Validate a Telegram chat id. Telegram user/group/channel identifiers are
+/// signed 64-bit integers, so negative values are valid.
+fn parse_chat_id(body: &Value) -> Result<i64, Response> {
+    let Some(object) = body.as_object() else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_chat_id",
+            "request body must be a JSON object",
+        ));
     };
-    Ok(raw)
+    let Some(value) = object.get("chat_id") else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_chat_id",
+            "chat_id is required",
+        ));
+    };
+    let Some(chat_id) = value.as_i64() else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_chat_id",
+            "chat_id must be an integer Telegram chat id",
+        ));
+    };
+    Ok(chat_id)
 }
 
 /// `GET /api/tenant/telegram/status`
@@ -123,48 +106,47 @@ pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Respon
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-    let org = auth.organization_id();
+    let organization_id = auth.organization_id();
+    let binding = match binding_for(&state, organization_id).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let runtime = state
         .module_registry
-        .get(org, BotModule::Telegram)
-        .map(|h| {
+        .get(organization_id, BotModule::Telegram)
+        .map(|handle| {
             json!({
-                "runtime_id": h.runtime_id().to_string(),
-                "generation": h.generation().to_string(),
-                "phase": h.phase().as_str(),
-                "since": h.since().to_rfc3339(),
+                "runtime_id": handle.runtime_id().to_string(),
+                "generation": handle.generation().to_string(),
+                "phase": handle.phase().as_str(),
+                "since": handle.since().to_rfc3339(),
             })
         });
-    let binding = binding_for(org);
     (
         StatusCode::OK,
         Json(json!({
-            "organization_id": org.to_string(),
+            "organization_id": organization_id.to_string(),
             "module": "telegram",
             "entitlement": {
-                "feature": serde_json::Value::Null,
+                "feature": Value::Null,
                 "granted": true,
-                "note": "telegram is the control plane — every authenticated tenant has it; it never trades",
+                "note": "telegram is the control plane; it never trades",
             },
             "effective_state": "enabled",
-            "runtime": runtime.unwrap_or(serde_json::Value::Null),
-            "runtime_detail": if state.module_registry.get(org, BotModule::Telegram).is_some() {
-                serde_json::Value::Null
+            "runtime": runtime.unwrap_or(Value::Null),
+            "runtime_detail": if state.module_registry.get(organization_id, BotModule::Telegram).is_some() {
+                Value::Null
             } else {
-                json!("no runtime registered for this module and organization (absence is not an error)")
+                json!("no runtime registered for this module and organization")
             },
-            "binding": binding.map(|b| json!({
-                "chat_id": b.chat_id,
-                "bound_at": b.bound_at.to_rfc3339(),
-                "bound_by": b.bound_by,
-            })).unwrap_or(serde_json::Value::Null),
-            "binding_detail": json!({
+            "binding": binding,
+            "binding_detail": {
                 "purpose": "records this organization's declared Telegram notification chat",
-                "delivery": "the deployment-level alert forwarder currently routes to the deployment alert chat; per-tenant routing is a deployment-side integration step",
-            }),
+                "delivery": "delivery health is not claimed by this binding endpoint",
+            },
             "controls": {
                 "available": true,
                 "actions": ["bind", "unbind"],
@@ -178,10 +160,10 @@ pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Respon
 pub async fn bind(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<Value>,
 ) -> Response {
     let chat_id = match parse_chat_id(&body) {
-        Ok(v) => v,
+        Ok(value) => value,
         Err(response) => return response,
     };
     let auth = match guard_manage(
@@ -192,25 +174,27 @@ pub async fn bind(
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-    let org = auth.organization_id();
-    let actor = auth.ctx.actor_label();
-    let binding = set_binding(org, chat_id, &actor, Utc::now());
-    (
-        StatusCode::OK,
-        Json(json!({
-            "organization_id": org.to_string(),
-            "binding": {
-                "chat_id": binding.chat_id,
-                "bound_at": binding.bound_at.to_rfc3339(),
-                "bound_by": binding.bound_by,
-            },
-            "detail": "binding recorded for your organization; the chat id is a public Telegram identifier and no token material is stored",
-        })),
-    )
-        .into_response()
+    let Some(db) = state.db.as_deref() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trading_data_plane_unavailable",
+            "Telegram binding requires PostgreSQL",
+        );
+    };
+    let mut patch = Map::new();
+    patch.insert("chat_id".to_string(), json!(chat_id));
+    patch.insert("bound_at".to_string(), json!(Utc::now().to_rfc3339()));
+    patch.insert("bound_by".to_string(), json!(auth.ctx.actor_label()));
+    match write_module(db, auth.organization_id(), "telegram", &patch, &auth.ctx.actor_label()).await {
+        Ok(binding) => (StatusCode::OK, Json(json!({ "organization_id": auth.organization_id().to_string(), "binding": binding }))).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to persist tenant Telegram binding");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "config_storage_error", "Telegram binding could not be saved")
+        }
+    }
 }
 
 /// `DELETE /api/tenant/telegram/binding`
@@ -223,30 +207,26 @@ pub async fn unbind(State(state): State<ApiState>, headers: HeaderMap) -> Respon
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-    let org = auth.organization_id();
-    if clear_binding(org) {
-        (
+    let Some(db) = state.db.as_deref() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trading_data_plane_unavailable",
+            "Telegram binding requires PostgreSQL",
+        );
+    };
+    match clear_module(db, auth.organization_id(), "telegram", &auth.ctx.actor_label()).await {
+        Ok(_) => (
             StatusCode::OK,
-            Json(json!({
-                "organization_id": org.to_string(),
-                "binding": serde_json::Value::Null,
-                "detail": "binding cleared",
-            })),
+            Json(json!({ "organization_id": auth.organization_id().to_string(), "binding": Value::Null })),
         )
-            .into_response()
-    } else {
-        (
-            StatusCode::OK,
-            Json(json!({
-                "organization_id": org.to_string(),
-                "binding": serde_json::Value::Null,
-                "detail": "no binding was present",
-            })),
-        )
-            .into_response()
+            .into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to clear tenant Telegram binding");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "config_storage_error", "Telegram binding could not be cleared")
+        }
     }
 }
 
@@ -255,46 +235,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bindings_are_tenant_scoped() {
-        let a = OrganizationId::new();
-        let b = OrganizationId::new();
-        set_binding(a, 123456, "user:a", Utc::now());
-        assert!(binding_for(b).is_none());
-        assert_eq!(binding_for(a).unwrap().chat_id, 123456);
-        // Upsert replaces.
-        set_binding(a, 987654, "user:a2", Utc::now());
-        assert_eq!(binding_for(a).unwrap().chat_id, 987654);
-        assert_eq!(binding_for(a).unwrap().bound_by, "user:a2");
-        // Clear is scoped and idempotent.
-        assert!(clear_binding(a));
-        assert!(!clear_binding(a));
-        assert!(binding_for(a).is_none());
-        assert!(binding_for(b).is_none());
-    }
-
-    #[test]
     fn chat_ids_parse_strictly() {
         assert_eq!(
-            parse_chat_id(&serde_json::json!({"chat_id": -1002003004005i64})).ok(),
-            Some(-1002003004005i64)
+            parse_chat_id(&json!({ "chat_id": -1002003004005_i64 })).unwrap(),
+            -1002003004005_i64
         );
         assert_eq!(
-            parse_chat_id(&serde_json::json!({"chat_id": 42i64})).ok(),
-            Some(42)
+            parse_chat_id(&json!({ "chat_id": 42_i64 })).unwrap(),
+            42_i64
         );
-        assert!(parse_chat_id(&serde_json::json!({"chat_id": "123"})).is_err());
-        assert!(parse_chat_id(&serde_json::json!({"chat_id": 12.5})).is_err());
-        assert!(parse_chat_id(&serde_json::json!({})).is_err());
-    }
-
-    #[test]
-    fn telegram_family_is_the_control_plane() {
-        // No plan feature gates telegram — it is satisfied by
-        // authentication itself (the chain's control-plane carve-out).
-        assert_eq!(
-            TradingModuleFamily::Telegram.satisfying_features(),
-            &[] as &[&str]
-        );
-        assert_eq!(bot_core::tenant::feature_key(BotModule::Telegram), None);
+        assert!(parse_chat_id(&json!({ "chat_id": "123" })).is_err());
+        assert!(parse_chat_id(&json!({ "chat_id": 12.5 })).is_err());
+        assert!(parse_chat_id(&json!({})).is_err());
     }
 }

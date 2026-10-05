@@ -31,7 +31,7 @@ export default function CustodyPage() {
           : p?.profiles ?? p?.data ?? [];
         setProfiles(list);
 
-        const h = await commercial.custodyHealth().catch(() => null);
+        const h = await commercial.custodyHealth();
         if (cancelled) return;
         setHealth(h);
 
@@ -106,7 +106,7 @@ export default function CustodyPage() {
                 <p className="muted" style={{ marginTop: "0.5rem" }}>No health data.</p>
               )}
               <p className="muted small" style={{ marginTop: "0.5rem" }}>
-                No private keys or provider credentials are ever displayed. Hardware signers fail closed if unreachable.
+                No private keys or provider credentials are ever displayed. Signing remains blocked until an independent provider reachability probe supplies live evidence.
               </p>
             </section>
 
@@ -150,8 +150,8 @@ export default function CustodyPage() {
                           <td className="muted"><code>{s.id.slice(0, 8)}…</code></td>
                           <td><code>{s.public_address}</code></td>
                           <td>{s.provider_type}</td>
-                          <td><span className="tag tag--healthy">{s.status}</span></td>
-                          <td>{s.capabilities?.join(", ") || "Ed25519"}</td>
+                          <td><span className={`tag tag--${s.status === "active" ? "healthy" : "warning"}`}>{s.status}</span></td>
+                          <td>{s.capabilities?.join(", ") || "—"}</td>
                         </tr>
                       ))}
                     </tbody>

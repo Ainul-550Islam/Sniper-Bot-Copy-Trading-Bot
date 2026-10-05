@@ -15,8 +15,22 @@ interface AuditEvent {
   id: string;
   actor: string;
   action: string;
-  target?: string;
+  target?: string | null;
   created_at: string;
+}
+
+interface AuditExportRecord {
+  id: string;
+  actor: string;
+  action: string;
+  target?: string | null;
+  at: string;
+}
+
+interface AuditExportResponse {
+  data: {
+    records: AuditExportRecord[];
+  };
 }
 
 export default function AuditLogPage() {
@@ -28,40 +42,19 @@ export default function AuditLogPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await request<{ items: AuditEvent[] }>("/api/saas/exports?kind=audit");
-      setEvents(res.items || []);
-    } catch {
-      // Deterministic sample entries for audit view
-      setEvents([
-        {
-          id: "aud-01",
-          actor: "usr_operator_01",
-          action: "saas.strategy.parameter_updated",
-          target: "strat-sniper-raydium-v1",
-          created_at: new Date(Date.now() - 10 * 60000).toISOString(),
-        },
-        {
-          id: "aud-02",
-          actor: "usr_admin_01",
-          action: "saas.security.ip_allowlist_updated",
-          target: "cidr_count=2",
-          created_at: new Date(Date.now() - 45 * 60000).toISOString(),
-        },
-        {
-          id: "aud-03",
-          actor: "usr_admin_01",
-          action: "saas.team.member_invited",
-          target: "risk.officer@acme-quant.com",
-          created_at: new Date(Date.now() - 180 * 60000).toISOString(),
-        },
-        {
-          id: "aud-04",
-          actor: "usr_operator_01",
-          action: "trading.bot.resumed",
-          target: "module_family=sniper",
-          created_at: new Date(Date.now() - 360 * 60000).toISOString(),
-        },
-      ]);
+      const res = await request<AuditExportResponse>("/api/saas/exports?kind=audit");
+      setEvents(
+        res.data.records.map((record) => ({
+          id: record.id,
+          actor: record.actor,
+          action: record.action,
+          target: record.target,
+          created_at: record.at,
+        })),
+      );
+    } catch (err: unknown) {
+      setEvents([]);
+      setError(err instanceof Error ? err.message : "Failed to load audit ledger");
     } finally {
       setLoading(false);
     }
@@ -105,7 +98,13 @@ export default function AuditLogPage() {
               </tr>
             </thead>
             <tbody>
-              {events.map((e) => (
+              {events.length === 0 ? (
+                <tr>
+                  <td colSpan={4} style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>
+                    No audit events were returned for this tenant.
+                  </td>
+                </tr>
+              ) : events.map((e) => (
                 <tr key={e.id} style={{ borderTop: "1px solid var(--line)" }}>
                   <td style={{ padding: "0.75rem 1rem", fontSize: "0.8rem", color: "var(--muted)" }}>
                     {new Date(e.created_at).toLocaleString()}

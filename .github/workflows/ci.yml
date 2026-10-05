@@ -136,6 +136,12 @@ jobs:
           dupes=$(ls crates/core/migrations/*.sql | sed -E 's#.*/([0-9]{4})_.*#\1#' | sort | uniq -d)
           if [ -n "$dupes" ]; then echo "::error::duplicate migration prefixes: $dupes"; exit 1; fi
 
+      - name: production source truthfulness gate
+        run: ./scripts/forbid-fake-data.sh
+
+      - name: server and frontend route contract gate
+        run: ./scripts/check-routes-vs-ui.sh
+
       - name: docker compose config (syntax + interpolation gate)
         run: |
           cp .env.template .env

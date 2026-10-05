@@ -112,6 +112,9 @@ impl Default for SaasClientBuilder {
     }
 }
 
+/// Backward-compatible name used by the earlier SDK modules.
+pub type Client = SaasClient;
+
 /// Typed SaaS client.
 #[derive(Clone)]
 pub struct SaasClient {
@@ -162,6 +165,19 @@ impl SaasClient {
         body: &B,
     ) -> Result<T, SdkError> {
         self.request(reqwest::Method::POST, path, Some(body)).await
+    }
+
+    pub(crate) async fn put<T: DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, SdkError> {
+        self.request(reqwest::Method::PUT, path, Some(body)).await
+    }
+
+    pub(crate) async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, SdkError> {
+        self.request(reqwest::Method::DELETE, path, Option::<&()>::None)
+            .await
     }
 
     async fn request<T: DeserializeOwned, B: Serialize>(

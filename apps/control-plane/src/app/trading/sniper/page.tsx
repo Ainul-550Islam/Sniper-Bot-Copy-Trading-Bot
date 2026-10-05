@@ -94,27 +94,25 @@ export default function SniperPage() {
           <div className="stat-card">
             <span className="stat-card__title">Execution Mode</span>
             <span className="stat-card__value">
-              {config?.dry_run ? "PAPER / DRY-RUN" : "LIVE MAINNET"}
+              {config ? (config.dry_run ? "PAPER / DRY-RUN" : "LIVE MODE CONFIGURED") : "UNCONFIGURED"}
             </span>
             <span className={`tag ${config?.dry_run ? "tag--paper" : "tag--active"}`} style={{ width: "fit-content", marginTop: "0.3rem" }}>
-              {config?.dry_run ? "Simulation (Zero Risk)" : "Funded Execution"}
+              {config ? (config.dry_run ? "Paper mode configured" : "Live mode configured") : "No configuration recorded"}
             </span>
           </div>
 
           <div className="stat-card">
             <span className="stat-card__title">DEX Routing &amp; Engine</span>
             <span className="stat-card__value">
-              {config?.dex_routing.toUpperCase() ?? "RAYDIUM + PUMP"}
+              {config ? config.dex_routing.toUpperCase() : "—"}
             </span>
             <span className="muted small">Priority: {config ? `${(config.priority_fee_lamports / 1e9).toFixed(4)} SOL` : "—"}</span>
           </div>
 
           <div className="stat-card">
             <span className="stat-card__title">Feed Latency (Geyser)</span>
-            <span className="stat-card__value">&lt; 45ms</span>
-            <span className="stat-card__trend up">
-              <span>●</span> Direct validator Yellowstone feed
-            </span>
+            <span className="stat-card__value">Unavailable</span>
+            <span className="muted small">No health-registry latency sample is exposed by this deployment</span>
           </div>
         </div>
 

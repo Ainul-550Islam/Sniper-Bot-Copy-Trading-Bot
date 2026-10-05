@@ -32,12 +32,16 @@ pub enum Permission {
     UsersInvite,
     /// Remove a member.
     UsersRemove,
+    /// Manage tenant users as a single administrative operation.
+    UsersManage,
     /// Read wallet metadata and balances.
     WalletRead,
     /// Add / rotate / remove wallets.
     WalletManage,
     /// Read bot/module status.
     BotRead,
+    /// Configure a module without starting it.
+    BotConfigure,
     /// Start a module.
     BotStart,
     /// Stop a module.
@@ -58,8 +62,12 @@ pub enum Permission {
     BillingRead,
     /// Change plan / payment method / cancel.
     BillingManage,
+    /// Read tenant API-key metadata and related integration records.
+    ApiKeyRead,
     /// Create a tenant API key.
     ApiKeyCreate,
+    /// Change tenant API-key or integration state.
+    ApiKeyWrite,
     /// Revoke a tenant API key.
     ApiKeyRevoke,
     /// Read the audit trail.
@@ -70,15 +78,17 @@ pub enum Permission {
 
 impl Permission {
     /// Every permission, stable order (docs, matrices, tests).
-    pub const ALL: [Permission; 22] = [
+    pub const ALL: [Permission; 26] = [
         Permission::TenantRead,
         Permission::TenantUpdate,
         Permission::UsersRead,
         Permission::UsersInvite,
         Permission::UsersRemove,
+        Permission::UsersManage,
         Permission::WalletRead,
         Permission::WalletManage,
         Permission::BotRead,
+        Permission::BotConfigure,
         Permission::BotStart,
         Permission::BotStop,
         Permission::OrderRead,
@@ -89,7 +99,9 @@ impl Permission {
         Permission::ReconciliationRead,
         Permission::BillingRead,
         Permission::BillingManage,
+        Permission::ApiKeyRead,
         Permission::ApiKeyCreate,
+        Permission::ApiKeyWrite,
         Permission::ApiKeyRevoke,
         Permission::AuditRead,
         Permission::ExportCreate,
@@ -103,9 +115,11 @@ impl Permission {
             Permission::UsersRead => "users.read",
             Permission::UsersInvite => "users.invite",
             Permission::UsersRemove => "users.remove",
+            Permission::UsersManage => "users.manage",
             Permission::WalletRead => "wallet.read",
             Permission::WalletManage => "wallet.manage",
             Permission::BotRead => "bot.read",
+            Permission::BotConfigure => "bot.configure",
             Permission::BotStart => "bot.start",
             Permission::BotStop => "bot.stop",
             Permission::OrderRead => "order.read",
@@ -116,7 +130,9 @@ impl Permission {
             Permission::ReconciliationRead => "reconciliation.read",
             Permission::BillingRead => "billing.read",
             Permission::BillingManage => "billing.manage",
+            Permission::ApiKeyRead => "api_key.read",
             Permission::ApiKeyCreate => "api_key.create",
+            Permission::ApiKeyWrite => "api_key.write",
             Permission::ApiKeyRevoke => "api_key.revoke",
             Permission::AuditRead => "audit.read",
             Permission::ExportCreate => "export.create",
@@ -150,6 +166,7 @@ impl Permission {
                 | Permission::LedgerRead
                 | Permission::ReconciliationRead
                 | Permission::BillingRead
+                | Permission::ApiKeyRead
                 | Permission::AuditRead
         )
     }
@@ -266,7 +283,7 @@ mod tests {
             assert!(seen.insert(p.as_str()), "duplicate string for {p}");
             assert!(p.as_str().contains('.'), "{p} must be resource.verb");
         }
-        assert_eq!(Permission::ALL.len(), 22);
+        assert_eq!(Permission::ALL.len(), 26);
         assert_eq!(Permission::parse("bot.launch_rockets"), None);
         assert_eq!(Permission::parse(""), None);
         assert_eq!(Permission::parse("  bot.read  "), Some(Permission::BotRead));

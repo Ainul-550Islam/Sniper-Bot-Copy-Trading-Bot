@@ -50,7 +50,8 @@ impl<'a> BacktestClient<'a> {
             .get("items")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([]));
-        serde_json::from_value(items).map_err(|e| crate::error::BotError::invalid_input(e.to_string()))
+        serde_json::from_value(items)
+            .map_err(|e| crate::error::BotError::invalid_input(e.to_string()))
     }
 
     /// Get backtest detail.

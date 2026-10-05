@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use bot_core::authorization::AccessRequest;
 use bot_core::billing::features;
+use bot_core::error::BotResult;
 use bot_core::membership::Permission;
 use bot_core::tenant::OrganizationId;
 
@@ -195,31 +196,30 @@ impl WalletRegistry {
     }
 
     /// One binding by id (any tenant — callers must scope before use).
-    async fn get(&self, id: Uuid) -> Option<WalletBinding> {
+    async fn get(&self, id: Uuid) -> BotResult<Option<WalletBinding>> {
         match self {
-            WalletRegistry::Memory(map) => map.lock().expect("wallet map").get(&id).cloned(),
-            WalletRegistry::Durable(repo) => repo
-                .by_id::<WalletBinding>(WALLET_KIND, &id.to_string())
-                .await
-                .ok()
-                .flatten(),
+            WalletRegistry::Memory(map) => Ok(map.lock().expect("wallet map").get(&id).cloned()),
+            WalletRegistry::Durable(repo) => {
+                repo.by_id::<WalletBinding>(WALLET_KIND, &id.to_string())
+                    .await
+            }
         }
     }
 
     /// Every binding of ONE tenant.
-    pub async fn list_for(&self, organization_id: OrganizationId) -> Vec<WalletBinding> {
+    pub async fn list_for(&self, organization_id: OrganizationId) -> BotResult<Vec<WalletBinding>> {
         match self {
-            WalletRegistry::Memory(map) => map
+            WalletRegistry::Memory(map) => Ok(map
                 .lock()
                 .expect("wallet map")
                 .values()
                 .filter(|b| b.organization_id == organization_id)
                 .cloned()
-                .collect(),
-            WalletRegistry::Durable(repo) => repo
-                .by_organization::<WalletBinding>(WALLET_KIND, organization_id)
-                .await
-                .unwrap_or_default(),
+                .collect()),
+            WalletRegistry::Durable(repo) => {
+                repo.by_organization::<WalletBinding>(WALLET_KIND, organization_id)
+                    .await
+            }
         }
     }
 }
@@ -361,9 +361,23 @@ pub async fn list_bindings(State(state): State<ApiState>, headers: HeaderMap) ->
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
     };
-    let mut bindings = WalletRegistry::for_state(&state)
+    let mut bindings = match WalletRegistry::for_state(&state)
         .list_for(ctx.organization_id())
-        .await;
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %ctx.organization_id(), "wallet bindings could not be loaded");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "wallet_storage_unavailable",
+                    "reason": "authoritative wallet bindings could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
     bindings.sort_by_key(|b| (b.created_at, b.id));
     Json(json!({
         "organization_id": ctx.organization_id(),
@@ -378,7 +392,22 @@ async fn own_binding(
     ctx: &SaasContext,
     id: Uuid,
 ) -> Result<WalletBinding, Box<Response>> {
-    let binding = WalletRegistry::for_state(state).get(id).await;
+    let binding = match WalletRegistry::for_state(state).get(id).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, wallet = %id, "wallet binding could not be loaded");
+            return Err(Box::new(
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "wallet_storage_unavailable",
+                        "reason": "authoritative wallet binding could not be loaded",
+                    })),
+                )
+                    .into_response(),
+            ));
+        }
+    };
     let Some(binding) = binding else {
         // Same shape as a cross-tenant refusal: existence is not disclosed.
         let d = bot_core::authorization::Decision::resource("no such wallet in this organization");
@@ -466,11 +495,25 @@ pub async fn authorize_module(
         Ok(b) => b,
         Err(resp) => return *resp,
     };
-    let entitled = state
+    let entitlements = match state
         .saas
         .entitlements_of(ctx.organization_id(), Utc::now())
         .await
-        .allows(&body.module);
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %ctx.organization_id(), "wallet authorization entitlements could not be loaded");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "billing_storage_unavailable",
+                    "reason": "authoritative entitlements could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
+    let entitled = entitlements.allows(&body.module);
     match decide(&binding, &ctx, &body.module, entitled) {
         Ok(()) => Json(json!({
             "allowed": true,

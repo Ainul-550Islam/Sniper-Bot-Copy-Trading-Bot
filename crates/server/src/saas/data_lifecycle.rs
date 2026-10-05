@@ -149,11 +149,21 @@ async fn status(
         )
             .into_response();
     }
-    let org_row = state.saas.organization(org).await;
+    let org_row = match state.saas.organization(org).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org, "data lifecycle organization could not be loaded");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"lifecycle_storage_unavailable","reason":"authoritative organization data could not be loaded"})),
+            )
+                .into_response();
+        }
+    };
     let org_status = org_row
         .as_ref()
-        .map(|o| o.status.as_str().into())
-        .unwrap_or("unknown".to_string());
+        .map(|o| o.status.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     let s = get_state(org);
     let view = DataLifecycleStatus {
         organization_id: org.to_string(),

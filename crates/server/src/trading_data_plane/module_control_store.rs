@@ -23,17 +23,15 @@
 //! active so a status surface can tell the truth instead of implying
 //! durability it does not have.
 //!
-//! When a database IS attached but a read fails, the cache answer is used
-//! and the failure is logged. That is deliberate: refusing to answer would
-//! turn a transient database blip into "the kill-switch state is unknown",
-//! and the safe reading of an unknown kill-switch is not obvious. The
-//! cache is only ever populated from a successful durable read or from
-//! this replica's own successful durable write, so the fallback answer is
-//! the last value this replica *knows* was true, never a guess.
+//! When a database IS attached but a read fails, the store returns an
+//! explicit error and the status surface reports `effective_state: unknown`.
+//! A stale replica cache must never be presented as the current kill-switch
+//! state, because an unavailable authoritative read cannot prove that a
+//! module is enabled or paused.
 //!
-//! A WRITE, by contrast, fails CLOSED: if the durable write does not
-//! land, the caller is told it did not land. A tenant must never be shown
-//! "module paused" when the pause exists only in one replica's RAM.
+//! A WRITE also fails CLOSED: if the durable write does not land, the caller
+//! is told it did not land. A tenant must never be shown a successful control
+//! action when it exists only in one replica's RAM.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -148,16 +146,18 @@ impl ModuleControlStore {
 
     /// Read THIS organization's override for a module.
     ///
-    /// `None` is the honest "no tenant override": the effective state is
-    /// then the entitlement-governed default.
+    /// `Ok(None)` is the honest "no tenant override": the effective state
+    /// is then the entitlement-governed default. `Err` means the
+    /// authoritative state could not be read and must not be replaced by a
+    /// cached guess.
     pub async fn override_for(
         &self,
         org: OrganizationId,
         module: BotModule,
-    ) -> Option<ModuleControlOverride> {
+    ) -> Result<Option<ModuleControlOverride>, ControlStoreError> {
         let key = (org, module);
         let Some(db) = &self.db else {
-            return cache_get(&key);
+            return Ok(cache_get(&key));
         };
 
         let row = sqlx::query(
@@ -168,37 +168,43 @@ impl ModuleControlStore {
         .bind(org.0)
         .bind(module.as_str())
         .fetch_optional(db.pool())
-        .await;
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                error = %error,
+                organization = %org,
+                module = module.as_str(),
+                "module control read failed; refusing to report a stale cached state"
+            );
+            ControlStoreError::Backend(error.to_string())
+        })?;
 
-        match row {
-            Ok(Some(r)) => {
-                let entry = ModuleControlOverride {
-                    enabled: r.try_get("enabled").unwrap_or(true),
-                    reason: r.try_get::<String, _>("reason").unwrap_or_default(),
-                    updated_at: r.try_get("updated_at").unwrap_or_else(|_| Utc::now()),
-                    updated_by: r.try_get::<String, _>("updated_by").unwrap_or_default(),
-                    version: r.try_get("version").unwrap_or(1),
-                };
-                cache_put(key, entry.clone());
-                Some(entry)
-            }
-            Ok(None) => {
-                // Authoritative absence — drop any stale cached entry so
-                // a cleared override cannot be resurrected by a later
-                // degraded read.
-                cache_remove(&key);
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    organization = %org,
-                    module = module.as_str(),
-                    "module control read failed; serving last known value from cache"
-                );
-                cache_get(&key)
-            }
-        }
+        let Some(row) = row else {
+            // Authoritative absence — drop any stale cached entry so a
+            // cleared override cannot be resurrected by a later read.
+            cache_remove(&key);
+            return Ok(None);
+        };
+
+        let entry = ModuleControlOverride {
+            enabled: row.try_get("enabled").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control enabled value: {error}"))
+            })?,
+            reason: row.try_get("reason").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control reason value: {error}"))
+            })?,
+            updated_at: row.try_get("updated_at").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control timestamp: {error}"))
+            })?,
+            updated_by: row.try_get("updated_by").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control actor value: {error}"))
+            })?,
+            version: row.try_get("version").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control version: {error}"))
+            })?,
+        };
+        cache_put(key, entry.clone());
+        Ok(Some(entry))
     }
 
     /// Record an override for THIS organization's module.
@@ -267,11 +273,21 @@ impl ModuleControlStore {
         })?;
 
         let entry = ModuleControlOverride {
-            enabled: row.try_get("enabled").unwrap_or(enabled),
-            reason: row.try_get::<String, _>("reason").unwrap_or_default(),
-            updated_at: row.try_get("updated_at").unwrap_or(now),
-            updated_by: row.try_get::<String, _>("updated_by").unwrap_or_default(),
-            version: row.try_get("version").unwrap_or(1),
+            enabled: row.try_get("enabled").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control enabled value: {error}"))
+            })?,
+            reason: row.try_get("reason").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control reason value: {error}"))
+            })?,
+            updated_at: row.try_get("updated_at").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control timestamp: {error}"))
+            })?,
+            updated_by: row.try_get("updated_by").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control actor value: {error}"))
+            })?,
+            version: row.try_get("version").map_err(|error| {
+                ControlStoreError::Backend(format!("invalid module control version: {error}"))
+            })?,
         };
         cache_put(key, entry.clone());
         Ok(entry)
@@ -311,6 +327,106 @@ impl ModuleControlStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Atomically set or clear the tenant emergency stop across every
+    /// trading module. A kill switch is a tenant control, not a process-wide
+    /// flag: the database transaction makes all module overrides visible
+    /// together on every replica.
+    pub async fn set_trading_kill_switch(
+        &self,
+        org: OrganizationId,
+        active: bool,
+        reason: &str,
+        updated_by: &str,
+        correlation_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), ControlStoreError> {
+        let Some(db) = &self.db else {
+            for module in BotModule::TRADING {
+                let key = (org, module);
+                if active {
+                    cache_put(
+                        key,
+                        ModuleControlOverride {
+                            enabled: false,
+                            reason: reason.to_string(),
+                            updated_at: now,
+                            updated_by: updated_by.to_string(),
+                            version: 0,
+                        },
+                    );
+                } else {
+                    cache_remove(&key);
+                }
+            }
+            return Ok(());
+        };
+
+        let mut transaction = db.pool().begin().await.map_err(|error| {
+            ControlStoreError::Backend(format!("kill switch transaction could not start: {error}"))
+        })?;
+        if active {
+            for module in BotModule::TRADING {
+                sqlx::query(
+                    "INSERT INTO tenant_module_controls
+                         (organization_id, module, enabled, reason, version,
+                          updated_by, correlation_id, created_at, updated_at)
+                     VALUES ($1, $2, false, $3, 1, $4, $5, $6, $6)
+                     ON CONFLICT (organization_id, module) DO UPDATE
+                        SET enabled = false,
+                            reason = EXCLUDED.reason,
+                            updated_by = EXCLUDED.updated_by,
+                            correlation_id = EXCLUDED.correlation_id,
+                            updated_at = EXCLUDED.updated_at,
+                            version = tenant_module_controls.version + 1",
+                )
+                .bind(org.0)
+                .bind(module.as_str())
+                .bind(reason)
+                .bind(updated_by)
+                .bind(correlation_id)
+                .bind(now)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    ControlStoreError::Backend(format!(
+                        "kill switch disable could not be persisted: {error}"
+                    ))
+                })?;
+            }
+        } else {
+            sqlx::query(
+                "DELETE FROM tenant_module_controls WHERE organization_id = $1 AND module = ANY($2)",
+            )
+            .bind(org.0)
+            .bind(BotModule::TRADING.iter().map(|module| module.as_str().to_string()).collect::<Vec<_>>())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                ControlStoreError::Backend(format!("kill switch resume could not be persisted: {error}"))
+            })?;
+        }
+        transaction.commit().await.map_err(|error| {
+            ControlStoreError::Backend(format!("kill switch transaction could not commit: {error}"))
+        })?;
+        for module in BotModule::TRADING {
+            if active {
+                cache_put(
+                    (org, module),
+                    ModuleControlOverride {
+                        enabled: false,
+                        reason: reason.to_string(),
+                        updated_at: now,
+                        updated_by: updated_by.to_string(),
+                        version: 0,
+                    },
+                );
+            } else {
+                cache_remove(&(org, module));
+            }
+        }
+        Ok(())
+    }
+
     /// The effective module state from the tenant's perspective: a
     /// disable override wins; everything else is the entitlement default
     /// (which the authorization chain has already granted).
@@ -318,11 +434,11 @@ impl ModuleControlStore {
         &self,
         org: OrganizationId,
         module: BotModule,
-    ) -> (&'static str, Option<ModuleControlOverride>) {
-        match self.override_for(org, module).await {
-            Some(o) if !o.enabled => ("disabled", Some(o)),
-            Some(o) => ("enabled", Some(o)),
-            None => ("enabled", None),
+    ) -> Result<(&'static str, Option<ModuleControlOverride>), ControlStoreError> {
+        match self.override_for(org, module).await? {
+            Some(o) if !o.enabled => Ok(("disabled", Some(o))),
+            Some(o) => Ok(("enabled", Some(o))),
+            None => Ok(("enabled", None)),
         }
     }
 }
@@ -344,7 +460,13 @@ mod tests {
         let org = OrganizationId::new();
         assert!(!s.is_durable());
 
-        assert_eq!(s.effective_state(org, BotModule::Sniper).await.0, "enabled");
+        assert_eq!(
+            s.effective_state(org, BotModule::Sniper)
+                .await
+                .expect("read")
+                .0,
+            "enabled"
+        );
         s.apply_override(
             org,
             BotModule::Sniper,
@@ -356,7 +478,10 @@ mod tests {
         )
         .await
         .expect("memory write");
-        let (state, entry) = s.effective_state(org, BotModule::Sniper).await;
+        let (state, entry) = s
+            .effective_state(org, BotModule::Sniper)
+            .await
+            .expect("read");
         assert_eq!(state, "disabled");
         assert_eq!(entry.expect("entry").reason, "paused");
 
@@ -364,7 +489,13 @@ mod tests {
             .clear_override(org, BotModule::Sniper)
             .await
             .expect("clear"));
-        assert_eq!(s.effective_state(org, BotModule::Sniper).await.0, "enabled");
+        assert_eq!(
+            s.effective_state(org, BotModule::Sniper)
+                .await
+                .expect("read")
+                .0,
+            "enabled"
+        );
     }
 
     /// One tenant's pause must never be visible to another tenant, and
@@ -387,9 +518,28 @@ mod tests {
         .await
         .expect("write");
 
-        assert!(s.override_for(b, BotModule::Sniper).await.is_none());
-        assert_eq!(s.effective_state(b, BotModule::Sniper).await.0, "enabled");
-        assert_eq!(s.effective_state(a, BotModule::Copy).await.0, "enabled");
-        assert_eq!(s.effective_state(a, BotModule::Sniper).await.0, "disabled");
+        assert!(s
+            .override_for(b, BotModule::Sniper)
+            .await
+            .expect("read")
+            .is_none());
+        assert_eq!(
+            s.effective_state(b, BotModule::Sniper)
+                .await
+                .expect("read")
+                .0,
+            "enabled"
+        );
+        assert_eq!(
+            s.effective_state(a, BotModule::Copy).await.expect("read").0,
+            "enabled"
+        );
+        assert_eq!(
+            s.effective_state(a, BotModule::Sniper)
+                .await
+                .expect("read")
+                .0,
+            "disabled"
+        );
     }
 }

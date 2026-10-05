@@ -145,7 +145,7 @@ impl Default for SniperStrategyParams {
             max_slippage_bps: 150,                 // 1.5%
             anti_mev_protection: true,
             priority_fee_lamports: 500_000,
-            entry_amount_lamports: 500_000_000,    // 0.5 SOL
+            entry_amount_lamports: 500_000_000, // 0.5 SOL
             take_profit_pct: 100,
             stop_loss_pct: 20,
             trailing_stop_pct: 10,
@@ -171,8 +171,8 @@ pub struct CopyStrategyParams {
 impl Default for CopyStrategyParams {
     fn default() -> Self {
         Self {
-            max_exposure_usd_cents: 100_000,              // $1,000.00
-            allocation_per_trade_lamports: 250_000_000,  // 0.25 SOL
+            max_exposure_usd_cents: 100_000,            // $1,000.00
+            allocation_per_trade_lamports: 250_000_000, // 0.25 SOL
             max_slippage_bps: 100,
             mirror_buys: true,
             mirror_sells: true,
@@ -200,7 +200,7 @@ impl Default for PolymarketStrategyParams {
     fn default() -> Self {
         Self {
             active_condition_ids: Vec::new(),
-            max_position_size_usdc_units: 500_000_000,     // 500 USDC (6 decimals)
+            max_position_size_usdc_units: 500_000_000, // 500 USDC (6 decimals)
             max_market_exposure_usdc_units: 2_500_000_000, // 2500 USDC
             spread_threshold_bps: 50,
             reprice_interval_seconds: 5,

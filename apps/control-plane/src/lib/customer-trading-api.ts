@@ -223,13 +223,13 @@ export interface BacktestRecord {
   period_end: string;
   venue: string;
   initial_balance_usd: number;
-  final_balance_usd: number;
-  net_pnl_usd: number;
-  net_roi_pct: number;
-  max_drawdown_pct: number;
-  total_trades: number;
-  win_rate_pct: number;
-  sharpe_ratio: number;
+  final_balance_usd: number | null;
+  net_pnl_usd: number | null;
+  net_roi_pct: number | null;
+  max_drawdown_pct: number | null;
+  total_trades: number | null;
+  win_rate_pct: number | null;
+  sharpe_ratio: number | null;
   fee_rate_bps: number;
   slippage_bps: number;
   created_at: string;
@@ -314,11 +314,11 @@ export interface IntegrationItem {
   id: string;
   organization_id: string;
   provider_name: string;
-  category: "solana_rpc" | "geyser_feed" | "custody_signer" | "billing" | "alerts";
+  category: "solana_rpc" | "geyser_feed" | "custody_signer" | "billing" | "alerts" | "other";
   status: "connected" | "degraded" | "not_configured" | "error";
   endpoint_url_masked: string;
   evidence_level: "live_verified" | "simulated" | "not_run";
-  last_health_check_at: string;
+  last_health_check_at: string | null;
   latency_ms: number | null;
 }
 
@@ -332,25 +332,26 @@ export interface AnalyticsSummary {
   organization_id: string;
   timeframe: string;
   total_trades: number;
-  win_rate_pct: number;
+  win_rate_pct: number | null;
   realized_pnl_usd: number;
   unrealized_pnl_usd: number;
   total_volume_usd: number;
   total_fees_usd: number;
-  sharpe_ratio: number;
-  max_drawdown_pct: number;
+  sharpe_ratio: number | null;
+  max_drawdown_pct: number | null;
   pnl_series: Array<{ date: string; pnl_usd: number; cumulative_usd: number }>;
   module_breakdown: Array<{
     module: string;
     trades_count: number;
     volume_usd: number;
-    pnl_usd: number;
-    win_rate_pct: number;
+    pnl_usd: number | null;
+    win_rate_pct: number | null;
+    fees_usd?: number;
   }>;
   execution_quality: {
-    avg_fill_time_ms: number;
-    avg_slippage_bps: number;
-    failed_attempts_pct: number;
+    avg_fill_time_ms: number | null;
+    avg_slippage_bps: number | null;
+    failed_attempts_pct: number | null;
     reverted_txs: number;
   };
 }
@@ -455,12 +456,7 @@ export const customerTrading = {
   polymarketReconciliation: () => tenantRequest<{ organization_id: string; drift: unknown[] }>("/api/tenant/polymarket/reconciliation"),
 
   // --- strategies ----------------------------------------------------------
-  strategies: () =>
-    tenantRequest<StrategiesResponse>("/api/tenant/strategies").catch(() => ({
-      organization_id: "",
-      items: [],
-      count: 0,
-    })),
+  strategies: () => tenantRequest<StrategiesResponse>("/api/tenant/strategies"),
   strategyDetail: (id: string) =>
     tenantRequest<StrategyRecord>(`/api/tenant/strategies/${encodeURIComponent(id)}`),
   createStrategy: (strategy: Partial<StrategyRecord>) =>
@@ -479,12 +475,7 @@ export const customerTrading = {
     }),
 
   // --- backtests -----------------------------------------------------------
-  backtests: () =>
-    tenantRequest<BacktestsResponse>("/api/tenant/backtests").catch(() => ({
-      organization_id: "",
-      items: [],
-      count: 0,
-    })),
+  backtests: () => tenantRequest<BacktestsResponse>("/api/tenant/backtests"),
   backtestDetail: (id: string) =>
     tenantRequest<BacktestRecord>(`/api/tenant/backtests/${encodeURIComponent(id)}`),
   createBacktest: (params: {
@@ -502,71 +493,24 @@ export const customerTrading = {
     }),
 
   // --- markets -------------------------------------------------------------
-  markets: () =>
-    tenantRequest<MarketsResponse>("/api/tenant/markets").catch(() => ({
-      organization_id: "",
-      items: [],
-      count: 0,
-    })),
+  markets: () => tenantRequest<MarketsResponse>("/api/tenant/markets"),
 
   // --- module configurations -----------------------------------------------
-  sniperConfig: () =>
-    tenantRequest<SniperConfig>("/api/tenant/sniper/config").catch(() => ({
-      organization_id: "",
-      min_liquidity_sol: 5.0,
-      max_slippage_bps: 150,
-      anti_mev_protection: true,
-      priority_fee_lamports: 500000,
-      entry_amount_sol: 0.5,
-      take_profit_pct: 100,
-      stop_loss_pct: 20,
-      trailing_stop_pct: 10,
-      auto_sell_timeout_seconds: 300,
-      dry_run: true,
-      blacklisted_tokens: [],
-      dex_routing: "auto" as const,
-      updated_at: new Date().toISOString(),
-    })),
+  sniperConfig: () => tenantRequest<SniperConfig | null>("/api/tenant/sniper/config"),
   updateSniperConfig: (config: Partial<SniperConfig>) =>
     tenantRequest<SniperConfig>("/api/tenant/sniper/config", {
       method: "PUT",
       body: config,
     }),
 
-  copyConfig: () =>
-    tenantRequest<CopyConfig>("/api/tenant/copy/config").catch(() => ({
-      organization_id: "",
-      max_exposure_usd: 1000,
-      allocation_per_trade_sol: 0.25,
-      max_slippage_bps: 100,
-      mirror_buys: true,
-      mirror_sells: true,
-      stale_event_timeout_seconds: 15,
-      allowed_tokens: [],
-      blocked_tokens: [],
-      dry_run: true,
-      copy_ratio_pct: 100,
-      updated_at: new Date().toISOString(),
-    })),
+  copyConfig: () => tenantRequest<CopyConfig | null>("/api/tenant/copy/config"),
   updateCopyConfig: (config: Partial<CopyConfig>) =>
     tenantRequest<CopyConfig>("/api/tenant/copy/config", {
       method: "PUT",
       body: config,
     }),
 
-  polymarketConfig: () =>
-    tenantRequest<PolymarketConfig>("/api/tenant/polymarket/config").catch(() => ({
-      organization_id: "",
-      active_condition_ids: [],
-      max_position_size_usdc: 500,
-      max_market_exposure_usdc: 2500,
-      spread_threshold_bps: 50,
-      reprice_interval_seconds: 5,
-      cancel_stale_orders: true,
-      dry_run: true,
-      order_type: "limit" as const,
-      updated_at: new Date().toISOString(),
-    })),
+  polymarketConfig: () => tenantRequest<PolymarketConfig | null>("/api/tenant/polymarket/config"),
   updatePolymarketConfig: (config: Partial<PolymarketConfig>) =>
     tenantRequest<PolymarketConfig>("/api/tenant/polymarket/config", {
       method: "PUT",
@@ -574,58 +518,14 @@ export const customerTrading = {
     }),
 
   // --- integrations catalog ------------------------------------------------
-  integrations: () =>
-    tenantRequest<IntegrationsResponse>("/api/tenant/integrations").catch(() => ({
-      organization_id: "",
-      items: [],
-      count: 0,
-    })),
+  integrations: () => tenantRequest<IntegrationsResponse>("/api/tenant/integrations"),
 
   // --- analytics -----------------------------------------------------------
   analytics: (timeframe: "24h" | "7d" | "30d" | "all" = "7d") =>
-    tenantRequest<AnalyticsSummary>(`/api/tenant/analytics?timeframe=${timeframe}`).catch(() => ({
-      organization_id: "",
-      timeframe,
-      total_trades: 0,
-      win_rate_pct: 0,
-      realized_pnl_usd: 0,
-      unrealized_pnl_usd: 0,
-      total_volume_usd: 0,
-      total_fees_usd: 0,
-      sharpe_ratio: 0,
-      max_drawdown_pct: 0,
-      pnl_series: [],
-      module_breakdown: [],
-      execution_quality: {
-        avg_fill_time_ms: 0,
-        avg_slippage_bps: 0,
-        failed_attempts_pct: 0,
-        reverted_txs: 0,
-      },
-    })),
+    tenantRequest<AnalyticsSummary>(`/api/tenant/analytics?timeframe=${encodeURIComponent(timeframe)}`),
 
   // --- onboarding ----------------------------------------------------------
-  onboardingState: () =>
-    tenantRequest<OnboardingState>("/api/tenant/onboarding").catch(() => ({
-      organization_id: "",
-      current_step: 1,
-      steps_total: 6,
-      completed: false,
-      steps: {
-        org_created: true,
-        custody_configured: false,
-        module_enabled: false,
-        strategy_configured: false,
-        paper_trade_executed: false,
-        live_prerequisites_met: false,
-      },
-      details: {
-        has_active_signer: false,
-        has_funded_wallet: false,
-        has_enabled_module: false,
-        has_saved_strategy: false,
-      },
-    })),
+  onboardingState: () => tenantRequest<OnboardingState>("/api/tenant/onboarding"),
   completeOnboardingStep: (step: number) =>
     tenantRequest<OnboardingState>("/api/tenant/onboarding/complete", {
       method: "POST",
@@ -683,7 +583,7 @@ export function tradingStateMessage(state: TradingSurfaceState): string {
     case "suspended_tenant":
       return `Your organization's trading access is currently suspended (${state.reason}). Contact support or review your billing status to reactivate.`;
     case "entitlement_denied":
-      return `This module is not included in your current subscription tier (${state.reason}). Upgrade to unlock institutional features.`;
+      return `This module is not included in your current subscription tier (${state.reason}). Upgrade to request access to additional entitled features.`;
     case "module_disabled":
       return `This trading module is currently paused${state.reason ? `: ${state.reason}` : ""}. You can re-enable it from the module controls.`;
     case "stale_runtime":

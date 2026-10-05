@@ -264,10 +264,24 @@ async fn guard_with(
         return Err(denial.into_response());
     }
     // Steps 5–6: module family entitlement.
-    let entitlements = state
+    let entitlements = match state
         .saas
         .entitlements_of(ctx.organization_id(), chrono::Utc::now())
-        .await;
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %ctx.organization_id(), "trading authorization entitlements could not be loaded");
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "authorization_evidence_unavailable",
+                    "detail": "tenant entitlements could not be loaded",
+                })),
+            )
+                .into_response());
+        }
+    };
     if let Err(denial) = check_module_entitlement(&entitlements, family) {
         return Err(denial.into_response());
     }

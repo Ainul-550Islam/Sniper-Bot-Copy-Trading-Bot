@@ -12,12 +12,12 @@ export function ApiExplorer() {
       description: "Fetches authoritative multi-venue portfolio equity and exposures.",
       responseExample: JSON.stringify(
         {
-          organization_id: "018f-a94b-72b1-9128f1a",
-          total_equity_usd_cents: 4850000,
-          available_cash_usd_cents: 1820000,
-          allocated_margin_usd_cents: 3030000,
-          unrealized_pnl_usd_cents: 245000,
-          as_of: "2026-10-03T12:00:00Z",
+          organization_id: "",
+          total_equity_usd_cents: 0,
+          available_cash_usd_cents: 0,
+          allocated_margin_usd_cents: 0,
+          unrealized_pnl_usd_cents: 0,
+          as_of: "",
         },
         null,
         2,
@@ -29,14 +29,7 @@ export function ApiExplorer() {
       description: "Lists all trading strategies configured for the tenant.",
       responseExample: JSON.stringify(
         {
-          items: [
-            {
-              id: "strat-sniper-raydium-v1",
-              name: "Raydium Launch Sniper",
-              status: "active",
-              module_family: "sniper",
-            },
-          ],
+          items: [],
         },
         null,
         2,
@@ -45,7 +38,7 @@ export function ApiExplorer() {
     {
       method: "POST",
       path: "/api/saas/risk-dashboard/kill-switch",
-      description: "Activates or deactivates emergency tenant execution circuit-breaker.",
+      description: "Activates or deactivates the deployment risk-engine kill switch when the authenticated organization owns that engine.",
       responseExample: JSON.stringify(
         {
           success: true,

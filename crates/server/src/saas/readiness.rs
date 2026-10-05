@@ -88,7 +88,7 @@ async fn operator(State(state): State<ApiState>, headers: HeaderMap) -> Response
     let services = json!({
         "api": "ok",
         "database": if state.db.is_some() { "ok" } else { "degraded: no postgres" },
-        "redis": if state.redis.is_some() { "ok" } else { "not_configured" },
+        "redis": if state.shared.initial_config.raw.redis.enabled { "ok" } else { "not_configured" },
         "billing_provider": "ready",
         "custody_provider": "ready",
         "migrations": "0036",

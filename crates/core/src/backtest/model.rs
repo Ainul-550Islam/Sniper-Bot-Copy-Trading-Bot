@@ -152,9 +152,6 @@ mod tests {
     #[test]
     fn backtest_id_parsing() {
         let id = BacktestRunId::new();
-        assert_eq!(
-            BacktestRunId::parse(&id.to_string()),
-            Some(id)
-        );
+        assert_eq!(BacktestRunId::parse(&id.to_string()), Some(id));
     }
 }

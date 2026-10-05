@@ -26,6 +26,7 @@ use bot_core::tenant::{
 
 use crate::runtime_registry::{FenceToken, RuntimeRegistryService, TenantRuntimeRecord};
 use crate::tenant_config::{ConfigCache, GlobalSafetyBounds, RuntimeOverrides};
+use crate::trading_data_plane::module_control_store::ModuleControlStore;
 
 use super::binding_guard;
 use super::context::TenantContext;
@@ -88,6 +89,9 @@ pub struct ExecutionInputs {
     /// Runtime-level overrides for resolution (degradations). The
     /// supervisor updates these; the default is "no degradation".
     pub overrides: RuntimeOverrides,
+    /// Durable tenant module controls. Every execution admission checks this
+    /// authority after tenant configuration and before wallet/signing guards.
+    pub module_controls: Arc<ModuleControlStore>,
 }
 
 impl ExecutionInputs {
@@ -106,7 +110,17 @@ impl ExecutionInputs {
             entitlements,
             bounds,
             overrides: RuntimeOverrides::default(),
+            module_controls: Arc::new(ModuleControlStore::new(None)),
         }
+    }
+
+    /// Attach the authoritative module-control store used by the running
+    /// deployment. PostgreSQL-backed stores are read on every admission, so
+    /// a pause written by another replica is observed without relying on a
+    /// process-local cache.
+    pub fn with_module_controls(mut self, module_controls: Arc<ModuleControlStore>) -> Self {
+        self.module_controls = module_controls;
+        self
     }
 }
 
@@ -290,6 +304,30 @@ impl TenantExecutionGateway {
         match module_guard::check(&effective, request.module) {
             GuardOutcome::Allow(note) => notes.push(note),
             GuardOutcome::Deny(reason) => return self.deny(reason),
+        }
+        match self
+            .inputs
+            .module_controls
+            .effective_state(request.organization_id, request.module)
+            .await
+        {
+            Ok(("disabled", _)) => {
+                return self.deny(DenyReason::ModuleDisabled {
+                    module: request.module.as_str(),
+                    reason: "tenant_control",
+                });
+            }
+            Ok(("enabled", _)) => notes.push("tenant_module_control_enabled"),
+            Err(_) => {
+                return self.deny(DenyReason::DependencyError {
+                    source: "module_control_store",
+                });
+            }
+            Ok((_, _)) => {
+                return self.deny(DenyReason::DependencyError {
+                    source: "module_control_store",
+                });
+            }
         }
         match mode_guard::check(&effective, request.mode) {
             GuardOutcome::Allow(note) => {

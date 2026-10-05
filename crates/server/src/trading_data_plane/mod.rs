@@ -13,13 +13,12 @@
 
 pub mod analytics;
 pub mod authorization_chain;
-pub mod backtest_service;
 pub mod backtests;
 pub mod bots;
+pub mod config_store;
 pub mod copy;
 pub mod executions;
 pub mod integrations;
-pub mod market_service;
 pub mod markets;
 pub mod module_control_store;
 pub mod module_controls;
@@ -31,7 +30,6 @@ pub mod recovery;
 pub mod service;
 pub mod sniper;
 pub mod strategies;
-pub mod strategy_runtime;
 pub mod telegram;
 
 use axum::routing::{get, post, put};

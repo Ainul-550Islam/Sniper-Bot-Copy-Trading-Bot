@@ -38,7 +38,7 @@ export default function CopyPage() {
       const [st, cfg, ldr] = await Promise.all([
         customerTrading.copyStatus(),
         customerTrading.copyConfig(),
-        customerTrading.copyLeaders().catch(() => ({ organization_id: "", items: [] })),
+        customerTrading.copyLeaders(),
       ]);
       setStatus(st);
       setConfig(cfg);
@@ -110,16 +110,16 @@ export default function CopyPage() {
             <span className="stat-card__value">
               {config ? `${config.allocation_per_trade_sol} SOL` : "—"}
             </span>
-            <span className="muted small">Max Portfolio Exposure: ${config?.max_exposure_usd ?? 0}</span>
+            <span className="muted small">Max Portfolio Exposure: {config ? `$${config.max_exposure_usd}` : "—"}</span>
           </div>
 
           <div className="stat-card">
             <span className="stat-card__title">Execution Mode</span>
             <span className="stat-card__value">
-              {config?.dry_run ? "PAPER / DRY-RUN" : "LIVE MAINNET"}
+              {config ? (config.dry_run ? "PAPER / DRY-RUN" : "LIVE MODE CONFIGURED") : "UNCONFIGURED"}
             </span>
             <span className={`tag ${config?.dry_run ? "tag--paper" : "tag--active"}`} style={{ width: "fit-content", marginTop: "0.3rem" }}>
-              {config?.dry_run ? "Simulation" : "Live Mirroring"}
+              {config ? (config.dry_run ? "Paper mode configured" : "Live mode configured") : "No configuration recorded"}
             </span>
           </div>
         </div>
@@ -132,7 +132,7 @@ export default function CopyPage() {
               <div className="grid-2">
                 <div>
                   <p>
-                    <strong>Entitlement:</strong> <code>{status.entitlement.feature ?? "module.copy"}</code> ({status.entitlement.granted ? "Granted" : "Denied"})
+                    <strong>Entitlement:</strong> <code>{status.entitlement.feature ?? "—"}</code> ({status.entitlement.granted ? "Granted" : "Denied"})
                   </p>
                   <p>
                     <strong>Runtime Phase:</strong> <span className={`tag tag--${status.runtime?.phase}`}>{status.runtime?.phase ?? "idle"}</span>
@@ -206,8 +206,8 @@ export default function CopyPage() {
                     <td>
                       <code>{l.address}</code>
                     </td>
-                    <td>{l.note || "Primary Target"}</td>
-                    <td>{l.followed_since ? new Date(l.followed_since).toLocaleDateString() : "Active"}</td>
+                    <td>{l.note || "—"}</td>
+                    <td>{l.followed_since ? new Date(l.followed_since).toLocaleDateString() : "—"}</td>
                     <td>
                       <Link href={`https://solscan.io/account/${l.address}`} target="_blank" rel="noreferrer">
                         <button className="link">Solscan ↗</button>

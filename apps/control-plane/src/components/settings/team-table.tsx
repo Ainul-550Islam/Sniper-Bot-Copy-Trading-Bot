@@ -10,7 +10,7 @@ interface TeamTableProps {
 
 export default function TeamTable({ members, onRefresh }: TeamTableProps) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<TeamRole>("operator");
+  const [role, setRole] = useState<TeamRole>("trader");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -71,7 +71,7 @@ export default function TeamTable({ members, onRefresh }: TeamTableProps) {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="operator@acme-quant.com"
+              placeholder="operator@your-domain.example"
               className="input"
               style={{ width: "100%" }}
             />
@@ -87,9 +87,9 @@ export default function TeamTable({ members, onRefresh }: TeamTableProps) {
               className="select"
               style={{ width: "100%" }}
             >
-              <option value="admin">Admin (Full Management)</option>
-              <option value="operator">Operator (Trading & Bots)</option>
-              <option value="analyst">Analyst (Read & Reports)</option>
+              <option value="org_admin">Organization Admin</option>
+              <option value="trader">Trader (Trading & Bots)</option>
+              <option value="auditor">Auditor (Read & Audit)</option>
               <option value="viewer">Viewer (Read Only)</option>
             </select>
           </div>
@@ -115,7 +115,13 @@ export default function TeamTable({ members, onRefresh }: TeamTableProps) {
             </tr>
           </thead>
           <tbody>
-            {members.map((m) => (
+            {members.length === 0 ? (
+              <tr>
+                <td colSpan={4} style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>
+                  No organization members were returned.
+                </td>
+              </tr>
+            ) : members.map((m) => (
               <tr key={m.id} style={{ borderTop: "1px solid var(--line)" }}>
                 <td style={{ padding: "0.75rem 1rem" }}>
                   <strong>{m.email}</strong>
@@ -129,7 +135,7 @@ export default function TeamTable({ members, onRefresh }: TeamTableProps) {
                   {new Date(m.created_at).toLocaleDateString()}
                 </td>
                 <td style={{ padding: "0.75rem 1rem" }}>
-                  {m.role !== "owner" && (
+                  {m.role !== "org_owner" && (
                     <button
                       onClick={() => handleRemove(m)}
                       className="btn btn-secondary"

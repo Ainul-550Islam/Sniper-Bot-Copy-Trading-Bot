@@ -102,16 +102,12 @@ export interface InvoicesResponse {
 export interface PlanTier {
   code: string;
   name: string;
-  price_monthly_usd: number;
+  price_monthly_usd_cents: number | null;
+  price_yearly_usd_cents: number | null;
+  prices_available: boolean;
+  status: string;
   description: string;
   features: string[];
-  limits: {
-    max_bots: number;
-    max_orders_per_minute: number;
-    supported_modules: string[];
-    priority_support: boolean;
-    dedicated_rpc: boolean;
-  };
 }
 
 export interface CheckoutSessionCreated {
@@ -170,73 +166,8 @@ export interface SecuritySummary {
   }>;
 }
 
-export const AVAILABLE_PLANS: PlanTier[] = [
-  {
-    code: "starter",
-    name: "Starter Trader",
-    price_monthly_usd: 99,
-    description: "Core Solana AMM launch monitoring and manual sniping automation.",
-    features: [
-      "Solana AMM Raydium / Pump.fun launch detection",
-      "Standard sub-second routing",
-      "Telegram notification alerts",
-      "Paper trading simulation",
-      "Standard custody support",
-    ],
-    limits: {
-      max_bots: 2,
-      max_orders_per_minute: 30,
-      supported_modules: ["sniper", "telegram"],
-      priority_support: false,
-      dedicated_rpc: false,
-    },
-  },
-  {
-    code: "pro",
-    name: "Professional Alpha",
-    price_monthly_usd: 299,
-    description: "High-frequency copy trading and automated execution with multi-wallet support.",
-    features: [
-      "Everything in Starter",
-      "Real-time Copy Trading with wallet mirroring",
-      "Polymarket V3 prediction market execution",
-      "Advanced risk limits and stop-loss trailing",
-      "Full backtesting suite with historical logs",
-      "Multi-user team access (up to 5 seats)",
-    ],
-    limits: {
-      max_bots: 10,
-      max_orders_per_minute: 120,
-      supported_modules: ["sniper", "copy", "polymarket", "telegram"],
-      priority_support: true,
-      dedicated_rpc: false,
-    },
-  },
-  {
-    code: "business",
-    name: "Enterprise Business",
-    price_monthly_usd: 799,
-    description: "Institutional infrastructure with dedicated Geyser feeds and KMS custody.",
-    features: [
-      "Everything in Pro",
-      "Dedicated Jito / Yellowstone Geyser RPC feeds",
-      "AWS KMS & HashiCorp Vault hardware signing",
-      "Zero-latency multi-region HA execution clusters",
-      "Custom strategy builder with automated backtesting",
-      "Audit trail export & SOC2-ready compliance reporting",
-      "Unlimited team seats & dedicated account manager",
-    ],
-    limits: {
-      max_bots: 50,
-      max_orders_per_minute: 600,
-      supported_modules: ["sniper", "copy", "polymarket", "telegram"],
-      priority_support: true,
-      dedicated_rpc: true,
-    },
-  },
-];
-
 export const commercial = {
+  pricing: () => request<{ plans: PlanTier[]; pricing_status?: string }>("/api/saas/pricing"),
   // Billing status & commercial state
   billingStatus: () => request<BillingStatus>("/api/saas/billing/status"),
   usageLimits: () => request<UsageLimits>("/api/saas/usage/limits"),
@@ -292,13 +223,7 @@ export const commercial = {
     ),
 
   // Security & Sessions
-  securitySummary: () => request<SecuritySummary>("/api/saas/security/summary").catch(() => ({
-    mfa_enforced: false,
-    active_sessions_count: 1,
-    api_keys_count: 0,
-    last_password_change_at: null,
-    recent_security_events: [],
-  })),
+  securitySummary: () => request<SecuritySummary>("/api/saas/security/summary"),
 
   // Custody Rotation
   createRotation: (profileId: string, oldSignerId: string, newSignerId: string) =>

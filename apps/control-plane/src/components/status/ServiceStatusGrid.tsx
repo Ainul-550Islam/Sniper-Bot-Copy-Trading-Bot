@@ -38,8 +38,8 @@ export function ServiceStatusGrid({ components }: ServiceStatusGridProps) {
               paddingTop: "0.5rem",
             }}
           >
-            <span>Latency: {c.latency_ms ? `${c.latency_ms}ms` : "—"}</span>
-            <span>Checked: {new Date(c.last_checked).toLocaleTimeString()}</span>
+            <span>Latency: {c.latency_ms === null ? "Unavailable" : `${c.latency_ms}ms`}</span>
+            <span>Checked: {c.last_checked ? new Date(c.last_checked).toLocaleTimeString() : "No sample timestamp"}</span>
           </div>
         </div>
       ))}

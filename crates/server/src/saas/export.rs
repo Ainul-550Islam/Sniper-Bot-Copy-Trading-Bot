@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 
 use bot_core::authorization::AccessRequest;
 use bot_core::billing::UsageMetric;
+use bot_core::error::BotResult;
 use bot_core::membership::Permission;
 
 use crate::api::ApiState;
@@ -64,22 +65,22 @@ async fn section(
     kind: &str,
     ctx_org: bot_core::tenant::OrganizationId,
     ctx_user: Option<bot_core::tenant::UserId>,
-) -> Value {
+) -> BotResult<Value> {
     let now = Utc::now();
     match kind {
         "profile" => {
-            let user = match ctx_user.map(|id| state.saas.user(id)) {
-                Some(fut) => fut.await,
+            let user = match ctx_user {
+                Some(id) => state.saas.user(id).await?,
                 None => None,
             };
             let mut memberships = match ctx_user.map(|id| state.saas.memberships_of_user(id)) {
-                Some(fut) => fut.await,
+                Some(fut) => fut.await?,
                 None => Vec::new(),
             };
             // An org-scoped export carries only THIS tenant's membership row.
             memberships.retain(|m| m.organization_id == ctx_org);
             memberships.sort_by_key(|m| m.created_at);
-            json!({
+            Ok(json!({
                 "user": user.as_ref().map(|u| json!({
                     "id": u.id,
                     "email": u.email,
@@ -96,12 +97,12 @@ async fn section(
                         "created_at": m.created_at,
                     }))
                     .collect::<Vec<_>>(),
-            })
+            }))
         }
         "members" => {
-            let mut members = state.saas.members(ctx_org).await;
+            let mut members = state.saas.members(ctx_org).await?;
             members.sort_by_key(|m| (m.created_at, m.user_id));
-            json!({ "members": members
+            Ok(json!({ "members": members
                 .iter()
                 .map(|m| json!({
                     "user_id": m.user_id,
@@ -109,12 +110,12 @@ async fn section(
                     "status": m.status,
                     "created_at": m.created_at,
                 }))
-                .collect::<Vec<_>>() })
+                .collect::<Vec<_>>() }))
         }
         "api_keys" => {
-            let mut keys = state.saas.api_keys_of(ctx_org).await;
+            let mut keys = state.saas.api_keys_of(ctx_org).await?;
             keys.sort_by_key(|k| (k.created_at, k.id));
-            json!({ "api_keys": keys
+            Ok(json!({ "api_keys": keys
                 .iter()
                 .map(|k| json!({
                     "key_prefix": k.key_prefix,
@@ -124,24 +125,24 @@ async fn section(
                     "expires_at": k.expires_at,
                     "revoked_at": k.revoked_at,
                 }))
-                .collect::<Vec<_>>() })
+                .collect::<Vec<_>>() }))
         }
         "usage" => {
             let period = now.format("%Y-%m").to_string();
             let mut totals = BTreeMap::new();
             for metric in UsageMetric::ALL {
-                let total = state.saas.usage_total(ctx_org, metric, &period).await;
+                let total = state.saas.usage_total(ctx_org, metric, &period).await?;
                 totals.insert(metric.as_str().to_string(), total);
             }
-            json!({ "period": period, "totals": totals })
+            Ok(json!({ "period": period, "totals": totals }))
         }
         "subscription" => {
-            let subscription = state.saas.subscription_of(ctx_org).await;
+            let subscription = state.saas.subscription_of(ctx_org).await?;
             let plan = match &subscription {
-                Some(s) => state.saas.plan(s.plan_id).await.map(|p| p.code),
+                Some(s) => state.saas.plan(s.plan_id).await?.map(|p| p.code),
                 None => None,
             };
-            json!({
+            Ok(json!({
                 "subscription": subscription.map(|s| json!({
                     "id": s.id,
                     "plan_id": s.plan_id,
@@ -152,12 +153,12 @@ async fn section(
                     "current_period_end": s.current_period_end,
                     "cancel_at_period_end": s.cancel_at_period_end,
                 })),
-            })
+            }))
         }
         "wallets" => {
-            let mut bindings = WalletRegistry::for_state(state).list_for(ctx_org).await;
+            let mut bindings = WalletRegistry::for_state(state).list_for(ctx_org).await?;
             bindings.sort_by_key(|b| (b.created_at, b.id));
-            json!({ "wallets": bindings.iter().map(|b| b.public_view()).collect::<Vec<_>>() })
+            Ok(json!({ "wallets": bindings.iter().map(|b| b.public_view()).collect::<Vec<_>>() }))
         }
         "audit" => {
             // The audit trail is a global log; an export carries only the
@@ -180,7 +181,7 @@ async fn section(
                     })
                 })
                 .collect();
-            json!({ "records": rows, "limit": AUDIT_EXPORT_LIMIT })
+            Ok(json!({ "records": rows, "limit": AUDIT_EXPORT_LIMIT }))
         }
         _ => unreachable!("kind is validated against SECTIONS first"),
     }
@@ -217,7 +218,20 @@ pub async fn export(
         }
     }
     let org = ctx.organization_id();
-    let payload = section(&state, kind, org, ctx.authorization.user_id).await;
+    let payload = match section(&state, kind, org, ctx.authorization.user_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org, kind, "tenant export could not be assembled");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "export_storage_unavailable",
+                    "reason": "authoritative export records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
     state
         .audit
         .success(&ctx.actor_label(), "saas.export", Some(kind))

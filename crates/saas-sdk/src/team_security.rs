@@ -50,7 +50,8 @@ impl<'a> TeamSecurityClient<'a> {
             .get("members")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([]));
-        serde_json::from_value(members).map_err(|e| crate::error::BotError::invalid_input(e.to_string()))
+        serde_json::from_value(members)
+            .map_err(|e| crate::error::BotError::invalid_input(e.to_string()))
     }
 
     /// List webhook endpoints.
@@ -60,11 +61,15 @@ impl<'a> TeamSecurityClient<'a> {
             .get("items")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([]));
-        serde_json::from_value(items).map_err(|e| crate::error::BotError::invalid_input(e.to_string()))
+        serde_json::from_value(items)
+            .map_err(|e| crate::error::BotError::invalid_input(e.to_string()))
     }
 
     /// Create webhook endpoint.
-    pub async fn create_webhook(&self, req: &CreateWebhookRequest) -> BotResult<WebhookEndpointDto> {
+    pub async fn create_webhook(
+        &self,
+        req: &CreateWebhookRequest,
+    ) -> BotResult<WebhookEndpointDto> {
         self.client.post("/api/saas/webhooks", req).await
     }
 }

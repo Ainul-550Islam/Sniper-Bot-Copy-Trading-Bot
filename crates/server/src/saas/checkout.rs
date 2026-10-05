@@ -97,13 +97,27 @@ pub async fn create_checkout(
 
     let now = Utc::now();
     // Idempotency: check if already exists for this org+key (durable when DB attached)
-    if let Some(existing) = crate::saas::billing::BillingService::find_checkout(
+    let existing = match crate::saas::billing::BillingService::find_checkout(
         &state,
         ctx.organization.id,
         &body.idempotency_key,
     )
     .await
     {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %ctx.organization.id, "checkout idempotency lookup failed");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "billing_storage_unavailable",
+                    "reason": "checkout idempotency records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
+    if let Some(existing) = existing {
         let resp = CheckoutResponse {
             id: existing.id.to_string(),
             organization_id: existing.organization_id.to_string(),
@@ -166,6 +180,8 @@ pub async fn create_checkout(
                 || msg.contains("LIVE_BILLING")
                 || msg.contains("reconciliation required")
                 || msg.contains("database unavailable")
+                || msg.contains("checkout lookup failed")
+                || msg.contains("checkout record decode failed")
                 || msg.contains("durable update failed")
             {
                 // Live opt-in missing, external provider required, or the durable write

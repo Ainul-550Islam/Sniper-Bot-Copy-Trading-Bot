@@ -23,6 +23,7 @@ use axum::Json;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::Row;
 
 use bot_core::authorization::AccessRequest;
 use bot_core::membership::Permission;
@@ -121,6 +122,9 @@ pub struct LoginBody {
     /// Optional organization slug to scope the session to immediately.
     #[serde(default)]
     pub organization: Option<String>,
+    /// TOTP code when the selected organization requires MFA.
+    #[serde(default)]
+    pub mfa_code: Option<String>,
 }
 
 /// `POST /api/saas/sessions` — log in and receive a session token ONCE.
@@ -132,11 +136,25 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
         )
             .into_response()
     };
-    let Some(mut user) = state.saas.user_by_email(&body.email).await else {
-        // Hash anyway so a missing account and a wrong password take a
-        // similar amount of work.
-        let _ = verify_password(&body.password, "pbkdf2-sha256$600000$c2FsdA$aGFzaA");
-        return unauthorized();
+    let mut user = match state.saas.user_by_email(&body.email).await {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            // Hash anyway so a missing account and a wrong password take a
+            // similar amount of work.
+            let _ = verify_password(&body.password, "pbkdf2-sha256$600000$c2FsdA$aGFzaA");
+            return unauthorized();
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "login user lookup failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "identity_storage_unavailable",
+                    "reason": "account records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
     };
     if !verify_password(&body.password, &user.password_hash) {
         return unauthorized();
@@ -149,21 +167,113 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
             .into_response();
     }
 
+    // An MFA-protected organization must be selected at login so the code
+    // can be verified before a session token is issued. An unscoped session
+    // must never become a bypass around an organization policy.
+    if body.organization.is_none() {
+        if let Some(db) = state.db.as_deref() {
+            let protected = sqlx::query(
+                "SELECT EXISTS (SELECT 1 FROM organization_members om JOIN tenant_security_policies tsp ON tsp.organization_id = om.organization_id WHERE om.user_id = $1 AND om.status = 'active' AND tsp.mfa_enforced = true) AS protected",
+            )
+            .bind(user.id.as_uuid())
+            .fetch_one(db.pool())
+            .await;
+            match protected {
+                Ok(row) if row.try_get::<bool, _>("protected").unwrap_or(false) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "error": "organization_required_for_mfa",
+                            "mfa_required": true,
+                            "reason": "select the MFA-protected organization and provide mfa_code"
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, user = %user.id, "MFA policy lookup during login failed");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "identity_storage_unavailable",
+                            "reason": "MFA policy records could not be loaded"
+                        })),
+                    )
+                        .into_response();
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Optional immediate tenant scoping — only into an organization the
     // user is actually a member of.
     let mut organization_id = None;
     if let Some(slug) = body.organization.as_deref() {
-        let Some(org) = state.saas.organization_by_slug(slug).await else {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "no_membership" })),
-            )
-                .into_response();
+        let org = match state.saas.organization_by_slug(slug).await {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "no_membership" })),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "login organization lookup failed");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "identity_storage_unavailable",
+                        "reason": "organization records could not be loaded",
+                    })),
+                )
+                    .into_response();
+            }
         };
-        if state.saas.membership(org.id, user.id).await.is_none() {
+        match state.saas.membership(org.id, user.id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "no_membership" })),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                tracing::error!(error = %error, organization = %org.id, user = %user.id, "login membership lookup failed");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "identity_storage_unavailable",
+                        "reason": "membership records could not be loaded",
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        if let Err(reason) = crate::saas::security::verify_login_mfa(
+            &state,
+            user.id,
+            org.id,
+            body.mfa_code.as_deref(),
+        )
+        .await
+        {
+            let status = if reason == "mfa_challenge_required" {
+                StatusCode::UNAUTHORIZED
+            } else if reason == "invalid_totp_code" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
             return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "no_membership" })),
+                status,
+                Json(json!({
+                    "error": reason,
+                    "mfa_required": matches!(reason.as_str(), "mfa_challenge_required" | "invalid_totp_code"),
+                    "organization_id": org.id,
+                })),
             )
                 .into_response();
         }
@@ -218,22 +328,48 @@ pub async fn current_user(State(state): State<ApiState>, headers: HeaderMap) -> 
         Err(d) => return deny_response(&state, &d).await,
     };
     let memberships = match &ctx.user {
-        Some(u) => state.saas.memberships_of_user(u.id).await,
+        Some(u) => match state.saas.memberships_of_user(u.id).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, user = %u.id, "user memberships could not be loaded");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "membership_storage_unavailable",
+                        "reason": "authoritative membership records could not be loaded",
+                    })),
+                )
+                    .into_response();
+            }
+        },
         None => Vec::new(),
     };
     let orgs: Vec<serde_json::Value> = {
         let mut v = Vec::new();
         for m in &memberships {
-            if let Some(o) = state.saas.organization(m.organization_id).await {
-                v.push(json!({
-                    "organization_id": o.id,
-                    "slug": o.slug,
-                    "name": o.name,
-                    "status": o.status.as_str(),
-                    "role": m.role.as_str(),
-                    "membership_status": m.status.as_str(),
-                }));
-            }
+            let o = match state.saas.organization(m.organization_id).await {
+                Ok(Some(value)) => value,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::error!(error = %error, organization = %m.organization_id, "user organization could not be loaded");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "organization_storage_unavailable",
+                            "reason": "authoritative organization records could not be loaded",
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            v.push(json!({
+                "organization_id": o.id,
+                "slug": o.slug,
+                "name": o.name,
+                "status": o.status.as_str(),
+                "role": m.role.as_str(),
+                "membership_status": m.status.as_str(),
+            }));
         }
         v
     };
@@ -324,10 +460,24 @@ pub async fn update_profile(
 
     // A password change invalidates every existing session.
     let revoked = if password_changed {
-        let n = state
+        let n = match state
             .saas
             .revoke_user_sessions(user.id, "password changed", now)
-            .await;
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, user = %user.id, "user sessions could not be revoked after password change");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "session_storage_unavailable",
+                        "reason": "authoritative session records could not be updated",
+                    })),
+                )
+                    .into_response();
+            }
+        };
         state
             .audit
             .success(
@@ -375,12 +525,36 @@ pub async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> Respon
     // Revoke by looking the session up through the user's own list, so a
     // caller cannot revoke somebody else's session id.
     let now = Utc::now();
+    let sessions = match state.saas.sessions_of_user(user.id).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, user = %user.id, "user sessions could not be loaded for logout");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "session_storage_unavailable",
+                    "reason": "authoritative session records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
     let mut revoked = false;
-    for s in state.saas.sessions_of_user(user.id).await {
+    for s in sessions {
         if s.id.to_string() == *session_id {
             let mut s = s;
             if s.revoke("logout", now) {
-                let _ = state.saas.update_session(&s).await;
+                if let Err(error) = state.saas.update_session(&s).await {
+                    tracing::error!(error = %error, session = %s.id, "session revocation failed");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "session_storage_unavailable",
+                            "reason": "session could not be revoked",
+                        })),
+                    )
+                        .into_response();
+                }
                 revoked = true;
             }
         }

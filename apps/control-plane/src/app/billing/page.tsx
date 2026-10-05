@@ -16,7 +16,6 @@ import {
   UsageLimits,
   CommercialState,
   InvoiceRecord,
-  AVAILABLE_PLANS,
   PlanTier,
 } from "@/lib/commercial";
 
@@ -25,6 +24,8 @@ export default function BillingPage() {
   const [usage, setUsage] = useState<UsageLimits | null>(null);
   const [, setComm] = useState<CommercialState | null>(null);
   const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
+  const [plans, setPlans] = useState<PlanTier[]>([]);
+  const [pricingStatus, setPricingStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null);
@@ -32,16 +33,19 @@ export default function BillingPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [b, u, c, inv] = await Promise.all([
-        commercial.billingStatus().catch(() => null),
-        commercial.usageLimits().catch(() => null),
-        commercial.commercialState().catch(() => null),
-        commercial.invoices().then((r) => r.invoices).catch(() => []),
+      const [b, u, c, inv, p] = await Promise.all([
+        commercial.billingStatus(),
+        commercial.usageLimits(),
+        commercial.commercialState(),
+        commercial.invoices(),
+        commercial.pricing(),
       ]);
       setBilling(b);
       setUsage(u);
       setComm(c);
-      setInvoices(inv);
+      setInvoices(inv.invoices);
+      setPlans(p.plans);
+      setPricingStatus(p.pricing_status ?? null);
     } catch (e) {
       setError(toDisplayError(e));
     } finally {
@@ -123,9 +127,12 @@ export default function BillingPage() {
 
             {/* Plan Comparison & Self-Service Upgrade */}
             <section className="card">
-              <h2>Available Institutional Tiers</h2>
+              <h2>Available Subscription Plans</h2>
+              {pricingStatus && pricingStatus !== "active" && (
+                <p className="muted small">Prices are not available from the configured billing provider; checkout may be refused.</p>
+              )}
               <div className="grid-3" style={{ marginTop: "1rem" }}>
-                {AVAILABLE_PLANS.map((plan) => {
+                {plans.length === 0 ? <p className="muted">No public plans are available.</p> : plans.map((plan) => {
                   const isCurrent = billing?.plan_code.toLowerCase() === plan.code.toLowerCase();
                   return (
                     <div
@@ -141,7 +148,9 @@ export default function BillingPage() {
                         {isCurrent && <span className="tag tag--active">Current Plan</span>}
                       </div>
                       <p style={{ fontSize: "1.5rem", fontWeight: 700, margin: "0.2rem 0" }}>
-                        ${plan.price_monthly_usd} <span className="muted small" style={{ fontSize: "0.85rem", fontWeight: 400 }}>/ month</span>
+                        {plan.prices_available && plan.price_monthly_usd_cents !== null
+                          ? `$${(plan.price_monthly_usd_cents / 100).toFixed(2)} / month`
+                          : "Price supplied at checkout"}
                       </p>
                       <p className="muted small">{plan.description}</p>
                       <ul style={{ paddingLeft: "1.2rem", margin: "0.5rem 0" }}>

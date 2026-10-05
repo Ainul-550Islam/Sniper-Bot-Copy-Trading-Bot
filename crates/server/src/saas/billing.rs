@@ -41,7 +41,7 @@ impl BillingService {
         let org_record = state
             .saas
             .organization(org)
-            .await
+            .await?
             .ok_or_else(|| BotError::NotFound(format!("organization {}", org)))?;
         if org_record.status == bot_core::tenant::OrganizationStatus::Closed {
             return Err(BotError::invalid("organization is closed"));
@@ -73,7 +73,7 @@ impl BillingService {
 
         // Idempotency: durable checkout_sessions with UNIQUE (organization_id, idempotency_key).
         // If a record for this org+key already exists, return it (including across restarts and replicas).
-        if let Some(existing) = Self::find_checkout(state, org, &idempotency_key).await {
+        if let Some(existing) = Self::find_checkout(state, org, &idempotency_key).await? {
             return Ok(existing);
         }
 
@@ -254,7 +254,7 @@ impl BillingService {
         state: &ApiState,
         org: OrganizationId,
         idempotency_key: &str,
-    ) -> Option<CheckoutRecord> {
+    ) -> BotResult<Option<CheckoutRecord>> {
         if let Some(db) = &state.db {
             let row = sqlx::query(
                 "SELECT id, organization_id, plan_code, provider, provider_session_id, checkout_url, idempotency_key, status, success_url, cancel_url, expires_at, created_at, updated_at FROM checkout_sessions WHERE organization_id=$1 AND idempotency_key=$2"
@@ -263,11 +263,16 @@ impl BillingService {
             .bind(idempotency_key)
             .fetch_optional(db.pool())
             .await
-            .ok()??;
-            Self::map_checkout_row(&row).ok()
+            .map_err(|error| BotError::db(format!("checkout lookup failed: {error}")))?;
+            match row {
+                Some(row) => Self::map_checkout_row(&row).map(Some).map_err(|error| {
+                    BotError::db(format!("checkout record decode failed: {error}"))
+                }),
+                None => Ok(None),
+            }
         } else {
-            // Test-only memory fallback; production without DB fails closed via store path, but find still uses memory for hermetic tests
-            find_checkout_memory(org, idempotency_key).await
+            // Test-only memory fallback; production without DB fails closed via store path, but find still uses memory for hermetic tests.
+            Ok(find_checkout_memory(org, idempotency_key).await)
         }
     }
 
@@ -300,7 +305,7 @@ impl BillingService {
         // If payment succeeded and linked to subscription, activate subscription entitlements
         if new_status == TransactionStatus::Succeeded {
             if let Some(sub_id) = payment.subscription_id {
-                if let Some(mut sub) = state.saas.subscription_of(org).await {
+                if let Some(mut sub) = state.saas.subscription_of(org).await? {
                     if sub.id.as_uuid() == sub_id {
                         let current_end = sub.current_period_end;
                         sub.renew(current_end, now);
@@ -340,7 +345,7 @@ impl BillingService {
         let mut sub = state
             .saas
             .subscription_of(org)
-            .await
+            .await?
             .ok_or_else(|| BotError::NotFound("subscription not found".into()))?;
         sub.cancel(at_period_end, now);
         state.saas.update_subscription(&sub).await?;
@@ -567,10 +572,8 @@ impl BillingService {
         let provider_session_id: Option<String> = row
             .try_get("provider_session_id")
             .map_err(|e| e.to_string())?;
-        let checkout_url: Option<String> = row
-            .try_get("checkout_url")
-            .map(|v: Option<String>| v)
-            .unwrap_or(None);
+        let checkout_url: Option<String> =
+            row.try_get("checkout_url").map_err(|e| e.to_string())?;
         let idempotency_key: String = row.try_get("idempotency_key").map_err(|e| e.to_string())?;
         let status_s: String = row.try_get("status").map_err(|e| e.to_string())?;
         let success_url: Option<String> = row.try_get("success_url").map_err(|e| e.to_string())?;
@@ -1021,7 +1024,8 @@ mod tests {
         // Duplicate lookup after restart must return the same durable identity
         let found = BillingService::find_checkout(&state_restart, org, &key)
             .await
-            .expect("find after restart");
+            .expect("find after restart")
+            .expect("durable checkout record");
         assert_eq!(found.id, rec.id, "restart must find durable record");
 
         // The restarted process resolves the organization from durable storage alone:
@@ -1032,7 +1036,12 @@ mod tests {
             "organization must already exist durably for the restarted process"
         );
         assert!(
-            state_restart.saas.organization(org).await.is_some(),
+            state_restart
+                .saas
+                .organization(org)
+                .await
+                .expect("organization")
+                .is_some(),
             "restarted process must resolve the organization from durable storage"
         );
 

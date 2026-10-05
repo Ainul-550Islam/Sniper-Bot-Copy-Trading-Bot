@@ -41,7 +41,7 @@ export default function RiskPage() {
       <div style={{ marginBottom: "1.5rem" }}>
         <h1 style={{ margin: 0 }}>Risk Governance &amp; Safeguards</h1>
         <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-          Monitor utilization against configured drawdown limits and manage emergency circuit breakers.
+          Monitor tenant-configured safeguards and manage the organization-scoped emergency trading stop.
         </p>
       </div>
 
@@ -52,7 +52,7 @@ export default function RiskPage() {
       ) : risk ? (
         <div>
           <KillSwitchPanel killSwitchActive={risk.kill_switch_active} onRefresh={() => void loadRisk()} />
-          <RiskLimitPanel rules={risk.rules} />
+          <RiskLimitPanel rules={risk.rules} referenceAsset={risk.reference_asset} />
         </div>
       ) : null}
     </AppShell>

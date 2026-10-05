@@ -33,8 +33,8 @@ export default function TradingDashboardPage() {
     setState({ kind: "loading" });
     try {
       const [ord, pos] = await Promise.all([
-        customerTrading.orders().catch(() => ({ organization_id: "", items: [], next_cursor: null })),
-        customerTrading.positions().catch(() => ({ organization_id: "", items: [], next_cursor: null })),
+        customerTrading.orders(),
+        customerTrading.positions(),
       ]);
       setOrders(ord);
       setPositions(pos);
@@ -85,7 +85,7 @@ export default function TradingDashboardPage() {
           <div className="stat-card">
             <span className="stat-card__title">Open Positions</span>
             <span className="stat-card__value">
-              {positions ? positions.items.filter((p) => p.status === "open").length : 0}
+              {positions ? positions.items.filter((p) => p.status === "open").length : "—"}
             </span>
             <span className="stat-card__trend up">
               <span>●</span> Live mark-to-market tracking
@@ -94,7 +94,7 @@ export default function TradingDashboardPage() {
           <div className="stat-card">
             <span className="stat-card__title">Recent Orders (24h)</span>
             <span className="stat-card__value">
-              {orders ? orders.items.length : 0}
+              {orders ? orders.items.length : "—"}
             </span>
             <span className="muted small">Authoritative tenant order book</span>
           </div>
@@ -130,7 +130,7 @@ export default function TradingDashboardPage() {
           </div>
           <div className="card">
             <h3>Execution Journal</h3>
-            <p className="muted small">Inspect sub-second fill signatures, latency traces, and recovery states.</p>
+            <p className="muted small">Inspect fill signatures, recorded latency traces, and recovery states.</p>
             <Link href="/trading/executions" style={{ marginTop: "0.5rem", display: "inline-block" }}>
               <button>Open Executions →</button>
             </Link>

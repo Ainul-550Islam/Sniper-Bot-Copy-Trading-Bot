@@ -142,12 +142,21 @@ pub async fn authorize_request(
     let requested_org = requested_organization(headers);
 
     // ---- 1. A tenant API key? ------------------------------------------
-    if let Some(key) = super::api_keys::resolve_key(state, &presented).await {
+    let resolved_key = super::api_keys::resolve_key(state, &presented)
+        .await
+        .map_err(|_| Decision::unavailable("tenant API key records are temporarily unavailable"))?;
+    if let Some(key) = resolved_key {
         if let Some(reason) = key.rejection(now) {
             return Err(Decision::unauthenticated(reason));
         }
-        let Some(org) = state.saas.organization(key.organization_id).await else {
-            return Err(Decision::tenant("the key's organization no longer exists"));
+        let org = match state.saas.organization(key.organization_id).await {
+            Ok(Some(value)) => value,
+            Ok(None) => return Err(Decision::tenant("the key's organization no longer exists")),
+            Err(_) => {
+                return Err(Decision::unavailable(
+                    "tenant organization records are temporarily unavailable",
+                ))
+            }
         };
         if !bot_core::tenant::can_authenticate(org.status) {
             return Err(Decision::tenant("the organization is closed"));
@@ -169,7 +178,9 @@ pub async fn authorize_request(
             key.created_by,
             now,
         );
-        let entitlements = state.saas.entitlements_of(org.id, now).await;
+        let entitlements = state.saas.entitlements_of(org.id, now).await.map_err(|_| {
+            Decision::unavailable("tenant entitlements are temporarily unavailable")
+        })?;
         let decision = authorize(Some(&ctx), &request, Some(&entitlements));
         if !decision.is_allowed() {
             return Err(decision);
@@ -179,7 +190,14 @@ pub async fn authorize_request(
         used.last_used_at = Some(now);
         let _ = state.saas.update_api_key(&used).await;
         let user = match key.created_by {
-            Some(u) => state.saas.user(u).await,
+            Some(u) => match state.saas.user(u).await {
+                Ok(value) => value,
+                Err(_) => {
+                    return Err(Decision::unavailable(
+                        "tenant user records are temporarily unavailable",
+                    ))
+                }
+            },
             None => None,
         };
         return Ok(SaasContext {
@@ -191,11 +209,25 @@ pub async fn authorize_request(
     }
 
     // ---- 2. A user session? --------------------------------------------
-    if let Some(record) = state.saas.session_by_hash(&hash_token(&presented)).await {
+    let session_record = match state.saas.session_by_hash(&hash_token(&presented)).await {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(Decision::unavailable(
+                "session records are temporarily unavailable",
+            ))
+        }
+    };
+    if let Some(record) = session_record {
         let validated = session::validate(Some(&record), None, now)
             .map_err(|r| Decision::unauthenticated(r.as_str()))?;
-        let Some(user) = state.saas.user(validated.user_id).await else {
-            return Err(Decision::unauthenticated("session user no longer exists"));
+        let user = match state.saas.user(validated.user_id).await {
+            Ok(Some(value)) => value,
+            Ok(None) => return Err(Decision::unauthenticated("session user no longer exists")),
+            Err(_) => {
+                return Err(Decision::unavailable(
+                    "session user records are temporarily unavailable",
+                ))
+            }
         };
         if !user.can_authenticate() {
             return Err(Decision::unauthenticated("the account is not active"));
@@ -213,13 +245,21 @@ pub async fn authorize_request(
                 "no organization context: select an organization first",
             ));
         };
-        let Some(org) = state.saas.organization(target).await else {
-            // Keep the response indistinguishable from a missing membership
-            // for ordinary callers; platform staff may receive the same safe
-            // resource refusal without confirming existence.
-            return Err(Decision::resource(
-                "no access to the requested organization",
-            ));
+        let org = match state.saas.organization(target).await {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                // Keep the response indistinguishable from a missing membership
+                // for ordinary callers; platform staff may receive the same safe
+                // resource refusal without confirming existence.
+                return Err(Decision::resource(
+                    "no access to the requested organization",
+                ));
+            }
+            Err(_) => {
+                return Err(Decision::unavailable(
+                    "tenant organization records are temporarily unavailable",
+                ))
+            }
         };
         if !bot_core::tenant::can_authenticate(org.status) {
             return Err(Decision::tenant("the organization is closed"));
@@ -230,16 +270,31 @@ pub async fn authorize_request(
         let ctx = if user.platform_admin {
             AuthorizationContext::from_platform_admin(principal, &org, user.id, now)
         } else {
-            let Some(membership) = state.saas.membership(target, user.id).await else {
-                // No membership: this is a cross-tenant attempt, and the
-                // answer must not reveal whether the organization exists.
-                return Err(Decision::resource(
-                    "no membership in the requested organization",
-                ));
+            let membership = match state.saas.membership(target, user.id).await {
+                Ok(Some(value)) => value,
+                Ok(None) => {
+                    // No membership: this is a cross-tenant attempt, and the
+                    // answer must not reveal whether the organization exists.
+                    return Err(Decision::resource(
+                        "no membership in the requested organization",
+                    ));
+                }
+                Err(_) => {
+                    return Err(Decision::unavailable(
+                        "membership records are temporarily unavailable",
+                    ))
+                }
             };
             build_context(principal, &org, &membership, &user, now)
         };
-        let entitlements = state.saas.entitlements_of(org.id, now).await;
+        if let Err(reason) =
+            crate::saas::security::session_mfa_is_current(&state, org.id, record.created_at).await
+        {
+            return Err(Decision::unauthenticated(reason));
+        }
+        let entitlements = state.saas.entitlements_of(org.id, now).await.map_err(|_| {
+            Decision::unavailable("tenant entitlements are temporarily unavailable")
+        })?;
         let decision = authorize(Some(&ctx), &request, Some(&entitlements));
         if !decision.is_allowed() {
             return Err(decision);
@@ -261,10 +316,18 @@ pub async fn authorize_request(
     // reaches another tenant, because it resolves to exactly one.
     if let Some(auth) = &state.auth {
         if let Some(principal) = auth.authenticate(&presented).await {
-            let Some(org) = state.saas.organization_by_slug(DEPLOYMENT_ORG_SLUG).await else {
-                return Err(Decision::tenant(
-                    "this deployment has no organization; create one to use the SaaS API",
-                ));
+            let org = match state.saas.organization_by_slug(DEPLOYMENT_ORG_SLUG).await {
+                Ok(Some(value)) => value,
+                Ok(None) => {
+                    return Err(Decision::tenant(
+                        "this deployment has no organization; create one to use the SaaS API",
+                    ));
+                }
+                Err(_) => {
+                    return Err(Decision::unavailable(
+                        "deployment organization records are temporarily unavailable",
+                    ))
+                }
             };
             if let Some(req) = requested_org {
                 if req != org.id {
@@ -284,7 +347,9 @@ pub async fn authorize_request(
                 None,
                 now,
             );
-            let entitlements = state.saas.entitlements_of(org.id, now).await;
+            let entitlements = state.saas.entitlements_of(org.id, now).await.map_err(|_| {
+                Decision::unavailable("tenant entitlements are temporarily unavailable")
+            })?;
             let decision = authorize(Some(&ctx), &request, Some(&entitlements));
             if !decision.is_allowed() {
                 return Err(decision);

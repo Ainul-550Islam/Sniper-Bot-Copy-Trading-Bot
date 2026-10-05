@@ -41,7 +41,7 @@ export default function BacktestDetailPage() {
       <div style={{ marginBottom: "1.5rem" }}>
         <h1 style={{ margin: 0 }}>Simulation Run: {backtest?.strategy_name || runId}</h1>
         <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-          Deterministic historical replay metrics, slippage assumptions, and Sharpe analysis.
+          Worker-produced historical replay metrics, slippage assumptions, and Sharpe analysis. Metrics remain unavailable until a trusted worker records a result.
         </p>
       </div>
 

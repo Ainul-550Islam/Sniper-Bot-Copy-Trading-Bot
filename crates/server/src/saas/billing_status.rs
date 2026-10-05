@@ -78,14 +78,26 @@ async fn by_id(
         )
             .into_response();
     }
-    render(org, &state).await.into_response()
+    render(org, &state).await
 }
 
 /// The authoritative billing status: everything in the body is loaded from
 /// the store via [`BillingView`]; nothing is synthesized here.
-async fn render(organization_id: OrganizationId, state: &ApiState) -> Json<serde_json::Value> {
-    let view = BillingView::load(&state.saas, organization_id, Utc::now()).await;
-    Json(view.to_status_json())
+async fn render(organization_id: OrganizationId, state: &ApiState) -> Response {
+    match BillingView::load(&state.saas, organization_id, Utc::now()).await {
+        Ok(view) => Json(view.to_status_json()).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, organization = %organization_id, "billing status could not be loaded");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "billing_storage_unavailable",
+                    "reason": "authoritative billing records could not be loaded",
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +135,9 @@ mod tests {
         // view that a tenant with no subscription gets "none" — never a
         // default tier.
         let (store, org_id) = store_with_org().await;
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         let body = view.to_status_json();
         assert_eq!(body["plan_code"], "none");
         assert_eq!(body["subscription_status"], "none");
@@ -149,7 +163,9 @@ mod tests {
             ))
             .await
             .expect("usage recorded");
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         let body = view.to_status_json();
         assert_eq!(body["plan_code"], "pro");
         assert_eq!(body["subscription_status"], "active");

@@ -7,7 +7,7 @@
 
 import { tenantRequest } from "../customer-trading-api";
 
-export type BacktestStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type BacktestStatus = "queued" | "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export interface BacktestRecord {
   id: string;
@@ -18,19 +18,19 @@ export interface BacktestRecord {
   period_start: string;
   period_end: string;
   initial_balance_usd: number;
-  final_balance_usd?: number;
-  net_pnl_usd?: number;
-  net_roi_pct?: number;
-  max_drawdown_pct?: number;
-  total_trades?: number;
-  win_rate_pct?: number;
-  sharpe_ratio?: number;
+  final_balance_usd: number | null;
+  net_pnl_usd: number | null;
+  net_roi_pct: number | null;
+  max_drawdown_pct: number | null;
+  total_trades: number | null;
+  win_rate_pct: number | null;
+  sharpe_ratio: number | null;
   fee_rate_bps: number;
   slippage_bps: number;
   status: BacktestStatus;
   created_at: string;
-  completed_at?: string;
-  error?: string;
+  completed_at: string | null;
+  error: string | null;
 }
 
 export interface BacktestsResponse {

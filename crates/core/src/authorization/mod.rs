@@ -21,7 +21,7 @@
 //! | file | concern |
 //! |---|---|
 //! | `context.rs` | [`AuthorizationContext`]: principal + tenant + role + effective permissions |
-//! | `decision.rs` | the 8-value [`DecisionKind`] vocabulary and [`Decision`] |
+//! | `decision.rs` | the 9-value [`DecisionKind`] vocabulary and [`Decision`] |
 //!
 //! # What this layer must never do
 //!
@@ -73,6 +73,13 @@ impl<'a> AccessRequest<'a> {
             current_usage: 0.0,
             requested_usage: 0.0,
         }
+    }
+
+    /// A read-only control-plane request. This is an explicit alias for
+    /// [`AccessRequest::read`] used by collection endpoints that do not
+    /// mutate tenant state.
+    pub fn read_only(permission: Permission) -> Self {
+        Self::read(permission)
     }
 
     /// A control-plane change.

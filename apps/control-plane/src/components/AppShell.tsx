@@ -80,10 +80,10 @@ const COMMERCIAL_NAV: NavGroup[] = [
     items: [
       { href: "/billing", label: "Billing & Invoices" },
       { href: "/pricing", label: "Plan Catalog" },
-      { href: "/custody", label: "Custody & KMS" },
+      { href: "/custody", label: "Custody" },
       { href: "/integrations", label: "Integrations & Feeds" },
       { href: "/status", label: "System Status" },
-      { href: "/support", label: "Support & SLA" },
+      { href: "/support", label: "Support Tickets" },
       { href: "/docs", label: "Developer Docs" },
     ],
   },
@@ -232,7 +232,7 @@ function DashboardContent({
         <div>
           <h1>Commercial Control Center</h1>
           <p className="muted">
-            Institutional algorithmic trading platform, multi-venue routing, and KMS-governed custody.
+            Tenant control plane for strategy configuration, multi-venue routing, and configured custody providers.
           </p>
         </div>
         <div className="row">
@@ -276,11 +276,10 @@ function DashboardContent({
 
         <div className="card">
           <h4>Execution Environment</h4>
-          <p style={{ margin: "0.4rem 0 0.2rem", fontSize: "1.05rem", fontWeight: 600 }}>Sub-Second Solana Routing</p>
+          <p style={{ margin: "0.4rem 0 0.2rem", fontSize: "1.05rem", fontWeight: 600 }}>Solana Routing</p>
           <p className="muted small" style={{ margin: 0 }}>Yellowstone Geyser · Raydium v4 · Pump.fun</p>
           <div style={{ marginTop: "0.8rem", display: "flex", gap: "0.4rem" }}>
-            <span className="tag tag--healthy">Engine Online</span>
-            <span className="badge">HA Leases: Active</span>
+            <span className="tag">Deployment health is reported by status</span>
           </div>
         </div>
       </div>
@@ -291,7 +290,7 @@ function DashboardContent({
           <Link href="/trading/sniper" style={{ textDecoration: "none" }}>
             <div className="card" style={{ background: "var(--panel-2)", height: "100%" }}>
               <h3>⚡ Sniper Bot</h3>
-              <p className="muted small">Raydium &amp; Pump.fun launch detection, sub-second swap execution.</p>
+              <p className="muted small">Raydium and Pump.fun launch detection with configured execution controls.</p>
             </div>
           </Link>
           <Link href="/trading/copy" style={{ textDecoration: "none" }}>

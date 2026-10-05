@@ -13,7 +13,7 @@ import { SupportTicket, TicketPriority, createSupportTicket, listSupportTickets 
 export default function SupportPage() {
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [subject, setSubject] = useState("");
-  const [priority, setPriority] = useState<TicketPriority>("medium");
+  const [priority, setPriority] = useState<TicketPriority>("normal");
   const [description, setDescription] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -55,12 +55,12 @@ export default function SupportPage() {
   };
 
   return (
-    <AppShell title="Support & Incident SLA">
+    <AppShell title="Support & Incident Tickets">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
         <div>
-          <h1 style={{ margin: 0 }}>Enterprise Support &amp; Incident Center</h1>
+          <h1 style={{ margin: 0 }}>Support &amp; Incident Center</h1>
           <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-            File priority incident reports and track institutional SLA resolution workflows.
+            File support tickets and track the status recorded by the support system.
           </p>
         </div>
         <button onClick={() => setShowForm(!showForm)} className="btn btn-primary">
@@ -92,7 +92,7 @@ export default function SupportPage() {
 
               <div>
                 <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
-                  Severity / SLA
+                  Priority
                 </label>
                 <select
                   value={priority}
@@ -101,9 +101,9 @@ export default function SupportPage() {
                   style={{ width: "100%" }}
                 >
                   <option value="low">Low (Standard)</option>
-                  <option value="medium">Medium (4h SLA)</option>
-                  <option value="high">High (1h SLA)</option>
-                  <option value="urgent">Urgent / Critical (15m SLA)</option>
+                  <option value="normal">Normal</option>
+                  <option value="high">High</option>
+                  <option value="urgent">Urgent</option>
                 </select>
               </div>
             </div>

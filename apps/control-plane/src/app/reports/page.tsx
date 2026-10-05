@@ -3,8 +3,8 @@
 /**
  * Compliance, Accounting & Execution Reports Console (SECOND.md §65).
  *
- * Generate deterministic audit trails, capital gains tax summaries,
- * and execution reports in CSV, JSON, and PDF formats.
+ * Generate tenant-scoped audit trails, accounting ledgers, and execution reports
+ * in the formats supported by the durable report service.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -22,31 +22,10 @@ export default function ReportsPage() {
     setError(null);
     try {
       const res = await request<{ items: ReportItem[] }>("/api/saas/reports");
-      setReports(res.items || []);
-    } catch {
-      // Deterministic sample reports
-      setReports([
-        {
-          id: "rep-01",
-          name: "Q3 2026 Capital Gains & Execution Ledger",
-          type: "accounting_ledger",
-          format: "csv",
-          size_bytes: 1420500,
-          record_count: 8420,
-          created_at: new Date(Date.now() - 2 * 86400000).toISOString(),
-          download_url: "#",
-        },
-        {
-          id: "rep-02",
-          name: "SOC2 Type II Audit & Access Ledger",
-          type: "security_audit",
-          format: "json",
-          size_bytes: 384000,
-          record_count: 1250,
-          created_at: new Date(Date.now() - 5 * 86400000).toISOString(),
-          download_url: "#",
-        },
-      ]);
+      setReports(res.items);
+    } catch (err: unknown) {
+      setReports([]);
+      setError(err instanceof Error ? err.message : "Failed to load reports");
     } finally {
       setLoading(false);
     }

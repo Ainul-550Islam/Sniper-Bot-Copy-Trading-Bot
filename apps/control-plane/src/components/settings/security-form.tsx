@@ -1,19 +1,58 @@
 "use client";
 
 import { useState } from "react";
-import { enforceMfa, rotateTokens, updateIpAllowlist } from "@/lib/api/security-api";
+import { enforceMfa, rotateTokens, setupTotp, updateIpAllowlist, verifyTotp } from "@/lib/api/security-api";
 
 interface SecurityFormProps {
   mfaEnforced: boolean;
+  mfaConfigured: boolean;
   ipAllowlist: string[];
   onRefresh: () => void;
 }
 
-export default function SecurityForm({ mfaEnforced, ipAllowlist, onRefresh }: SecurityFormProps) {
+export default function SecurityForm({ mfaEnforced, mfaConfigured, ipAllowlist, onRefresh }: SecurityFormProps) {
   const [mfa, setMfa] = useState(mfaEnforced);
+  const [configured, setConfigured] = useState(mfaConfigured);
   const [cidrs, setCidrs] = useState(ipAllowlist.join("\n"));
+  const [setupData, setSetupData] = useState<{ device_id: string; secret: string; otpauth_url: string } | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+
+  const handleMfaSetup = async () => {
+    setLoading(true);
+    setMsg(null);
+    try {
+      const result = await setupTotp();
+      setSetupData({ device_id: result.device_id, secret: result.secret, otpauth_url: result.otpauth_url });
+      setMsg({ text: "Authenticator enrollment created. Verify a current six-digit code before enforcing MFA.", ok: true });
+    } catch (err: unknown) {
+      setMsg({ text: err instanceof Error ? err.message : "Failed to start MFA enrollment", ok: false });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMfaVerify = async () => {
+    if (!setupData || !/^\d{6}$/.test(mfaCode)) {
+      setMsg({ text: "Enter the six-digit authenticator code.", ok: false });
+      return;
+    }
+    setLoading(true);
+    setMsg(null);
+    try {
+      await verifyTotp(setupData.device_id, mfaCode);
+      setConfigured(true);
+      setSetupData(null);
+      setMfaCode("");
+      setMsg({ text: "Authenticator verified and stored securely.", ok: true });
+      await onRefresh();
+    } catch (err: unknown) {
+      setMsg({ text: err instanceof Error ? err.message : "MFA verification failed", ok: false });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleMfaToggle = async () => {
     setLoading(true);
@@ -86,13 +125,37 @@ export default function SecurityForm({ mfaEnforced, ipAllowlist, onRefresh }: Se
           Require all tenant members to configure hardware or TOTP multi-factor authentication before accessing
           trading execution surfaces.
         </p>
-        <button
-          onClick={handleMfaToggle}
-          disabled={loading}
-          className={`btn ${mfa ? "btn-secondary" : "btn-primary"}`}
-        >
-          {mfa ? "Disable Mandatory MFA" : "Enforce MFA Org-Wide"}
-        </button>
+        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", alignItems: "center" }}>
+          <button onClick={handleMfaSetup} disabled={loading} className="btn btn-secondary">
+            {configured ? "Replace Authenticator" : "Set Up Authenticator"}
+          </button>
+          <button
+            onClick={handleMfaToggle}
+            disabled={loading || (!mfa && !configured)}
+            className={`btn ${mfa ? "btn-secondary" : "btn-primary"}`}
+          >
+            {mfa ? "Disable Mandatory MFA" : "Enforce MFA Org-Wide"}
+          </button>
+        </div>
+        {setupData && (
+          <div className="card" style={{ marginTop: "1rem", background: "var(--panel-2)" }}>
+            <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Add this secret to an authenticator app:</div>
+            <code style={{ display: "block", margin: "0.5rem 0", wordBreak: "break-all" }}>{setupData.secret}</code>
+            <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>{setupData.otpauth_url}</div>
+            <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem" }}>
+              <input
+                value={mfaCode}
+                onChange={(event) => setMfaCode(event.target.value)}
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="123456"
+                className="input"
+                style={{ maxWidth: "140px" }}
+              />
+              <button onClick={handleMfaVerify} disabled={loading} className="btn btn-primary">Verify Code</button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="card">

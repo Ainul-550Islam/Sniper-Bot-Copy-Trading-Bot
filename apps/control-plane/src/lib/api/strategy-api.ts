@@ -1,13 +1,17 @@
 /**
- * Strategy Management API Client (SECOND.md §76).
+ * Tenant strategy API client.
  *
- * Fully typed client for tenant-scoped strategy CRUD, validation,
- * parameter configuration, and lifecycle archiving.
+ * The browser-facing model intentionally keeps the names used by the control
+ * plane UI (`module_family` and `parameters`). The Rust API uses its canonical
+ * wire names (`module` and `config_json` on responses, `module` and `config`
+ * on writes). This adapter performs that translation in one place so pages do
+ * not send a shape the server cannot deserialize or render a mismatched
+ * response as if it were authoritative.
  */
 
 import { tenantRequest } from "../customer-trading-api";
 
-export type StrategyStatus = "draft" | "active" | "paused" | "archived";
+export type StrategyStatus = "active" | "paused" | "archived";
 export type StrategyModule = "sniper" | "copy" | "polymarket";
 
 export interface SniperParams {
@@ -48,9 +52,29 @@ export interface StrategyRecord {
   updated_at: string;
 }
 
+interface ServerStrategyRecord {
+  id: string;
+  organization_id: string;
+  name: string;
+  description: string;
+  module: string;
+  mode: "paper" | "simulate" | "live";
+  status: StrategyStatus;
+  version: number;
+  config_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface StrategiesResponse {
   organization_id: string;
   items: StrategyRecord[];
+  count: number;
+}
+
+interface ServerStrategiesResponse {
+  organization_id: string;
+  items: ServerStrategyRecord[];
   count: number;
 }
 
@@ -68,50 +92,82 @@ export interface UpdateStrategyInput {
   parameters?: Record<string, unknown>;
 }
 
-/**
- * Fetch all strategies owned by the tenant.
- */
+function normalizeModule(module: string): StrategyModule {
+  if (module === "sniper" || module === "copy" || module === "polymarket") {
+    return module;
+  }
+  throw new Error(`strategy-api: server returned unsupported module '${module}'`);
+}
+
+function fromServer(record: ServerStrategyRecord): StrategyRecord {
+  return {
+    id: record.id,
+    organization_id: record.organization_id,
+    module_family: normalizeModule(record.module),
+    name: record.name,
+    description: record.description,
+    status: record.status,
+    version: record.version,
+    parameters: record.config_json,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+  };
+}
+
+function toServerCreate(input: CreateStrategyInput): Record<string, unknown> {
+  return {
+    name: input.name.trim(),
+    description: input.description?.trim() ?? "",
+    module: input.module_family,
+    mode: "paper",
+    config: input.parameters,
+  };
+}
+
+function toServerUpdate(input: UpdateStrategyInput): Record<string, unknown> {
+  return {
+    ...(input.name === undefined ? {} : { name: input.name.trim() }),
+    ...(input.description === undefined ? {} : { description: input.description.trim() }),
+    ...(input.status === undefined ? {} : { status: input.status }),
+    ...(input.parameters === undefined ? {} : { config: input.parameters }),
+  };
+}
+
+/** Fetch all strategies owned by the tenant. */
 export async function listStrategies(module?: string): Promise<StrategyRecord[]> {
   const query = module ? `?module=${encodeURIComponent(module)}` : "";
-  const res = await tenantRequest<StrategiesResponse>(`/api/tenant/strategies${query}`);
-  return res.items;
+  const response = await tenantRequest<ServerStrategiesResponse>(`/api/tenant/strategies${query}`);
+  return response.items.map(fromServer);
 }
 
-/**
- * Fetch single strategy by unique ID.
- */
+/** Fetch a single strategy by its tenant-scoped id. */
 export async function getStrategy(id: string): Promise<StrategyRecord> {
-  return tenantRequest<StrategyRecord>(`/api/tenant/strategies/${encodeURIComponent(id)}`);
+  const response = await tenantRequest<ServerStrategyRecord>(`/api/tenant/strategies/${encodeURIComponent(id)}`);
+  return fromServer(response);
 }
 
-/**
- * Create a new tenant trading strategy.
- */
+/** Create a tenant trading strategy using the Rust API wire contract. */
 export async function createStrategy(input: CreateStrategyInput): Promise<StrategyRecord> {
-  return tenantRequest<StrategyRecord>("/api/tenant/strategies", {
+  const response = await tenantRequest<ServerStrategyRecord>("/api/tenant/strategies", {
     method: "POST",
-    body: input,
+    body: toServerCreate(input),
   });
+  return fromServer(response);
 }
 
-/**
- * Update an existing strategy and increment its version.
- */
+/** Update a strategy and return the server's canonical record. */
 export async function updateStrategy(id: string, input: UpdateStrategyInput): Promise<StrategyRecord> {
-  return tenantRequest<StrategyRecord>(`/api/tenant/strategies/${encodeURIComponent(id)}`, {
+  const response = await tenantRequest<ServerStrategyRecord>(`/api/tenant/strategies/${encodeURIComponent(id)}`, {
     method: "PUT",
-    body: input,
+    body: toServerUpdate(input),
   });
+  return fromServer(response);
 }
 
-/**
- * Archive a strategy.
- */
-export async function archiveStrategy(id: string): Promise<{ success: boolean; id: string; status: string }> {
-  return tenantRequest<{ success: boolean; id: string; status: string }>(
+/** Archive a strategy. */
+export async function archiveStrategy(id: string): Promise<{ archived: boolean; id?: string; status?: string }> {
+  return tenantRequest<{ archived: boolean; id?: string; status?: string }>(
     `/api/tenant/strategies/${encodeURIComponent(id)}`,
-    {
-      method: "DELETE",
-    },
+    { method: "DELETE" },
   );
 }

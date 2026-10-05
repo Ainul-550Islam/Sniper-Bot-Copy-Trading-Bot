@@ -244,6 +244,24 @@ fn d_a_role_without_the_permission_is_denied() {
         Some(&ents)
     )
     .is_allowed());
+    assert!(authorize(
+        Some(&security),
+        &AccessRequest::read_only(Permission::ApiKeyRead),
+        Some(&ents)
+    )
+    .is_allowed());
+    assert!(authorize(
+        Some(&security),
+        &AccessRequest::manage(Permission::ApiKeyWrite),
+        Some(&ents)
+    )
+    .is_allowed());
+    assert!(authorize(
+        Some(&trader),
+        &AccessRequest::manage(Permission::BotConfigure),
+        Some(&ents)
+    )
+    .is_allowed());
 
     // A suspended membership holds nothing at all.
     let mut m = Membership::new(

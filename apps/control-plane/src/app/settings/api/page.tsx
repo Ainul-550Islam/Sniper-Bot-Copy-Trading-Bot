@@ -1,29 +1,24 @@
 "use client";
 
 /**
- * Tenant API Keys Management Console (SECOND.md §63).
+ * Tenant API key management.
  *
- * Generate scoped API keys for programmatic quantitative trading access,
- * webhook verification, and automated rebalancing scripts.
+ * This page deliberately has no demo data and no client-side secret fallback:
+ * a failed read is shown as an error, and the one-time secret is rendered only
+ * when the server returns it after a successful creation.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
-import { request } from "@/lib/api";
-
-interface ApiKeyItem {
-  id: string;
-  prefix: string;
-  name: string;
-  role: string;
-  created_at: string;
-}
+import { apiKeys, toDisplayError, type ApiKeyMetadata } from "@/lib/api";
 
 export default function ApiKeysSettingsPage() {
-  const [keys, setKeys] = useState<ApiKeyItem[]>([]);
-  const [name, setName] = useState("");
-  const [role, setRole] = useState("operator");
+  const [keys, setKeys] = useState<ApiKeyMetadata[]>([]);
+  const [label, setLabel] = useState("");
+  const [role, setRole] = useState("trader");
   const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [revokingPrefix, setRevokingPrefix] = useState<string | null>(null);
   const [newSecret, setNewSecret] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,18 +26,11 @@ export default function ApiKeysSettingsPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await request<{ items: ApiKeyItem[] }>("/api/saas/api-keys");
-      setKeys(res.items || []);
-    } catch {
-      setKeys([
-        {
-          id: "key-01",
-          prefix: "snpr_live_9a8f",
-          name: "Production Execution Engine",
-          role: "operator",
-          created_at: new Date(Date.now() - 20 * 86400000).toISOString(),
-        },
-      ]);
+      const response = await apiKeys.list();
+      setKeys(response.keys ?? []);
+    } catch (err: unknown) {
+      setKeys([]);
+      setError(toDisplayError(err));
     } finally {
       setLoading(false);
     }
@@ -52,29 +40,42 @@ export default function ApiKeysSettingsPage() {
     void loadKeys();
   }, [loadKeys]);
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreate = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const trimmedLabel = label.trim();
+    if (!trimmedLabel) {
+      setError("A key label is required.");
+      return;
+    }
+
+    setSubmitting(true);
     setError(null);
     try {
-      const res = await request<{ prefix: string; secret: string }>("/api/saas/api-keys", {
-        method: "POST",
-        body: { name, role },
-      });
-      setNewSecret(res.secret || "snpr_live_mock_secret_84920194820194820");
-      setName("");
-      void loadKeys();
+      const response = await apiKeys.create(trimmedLabel, role);
+      setNewSecret(response.secret);
+      setLabel("");
+      await loadKeys();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to generate API key");
+      setError(toDisplayError(err));
+    } finally {
+      setSubmitting(false);
     }
   };
 
   const handleRevoke = async (prefix: string) => {
-    if (!confirm(`Revoke API key ${prefix}? Any automated scripts using this key will be disconnected.`)) return;
+    if (!window.confirm(`Revoke API key ${prefix}? Any automated scripts using this key will be disconnected.`)) {
+      return;
+    }
+
+    setRevokingPrefix(prefix);
+    setError(null);
     try {
-      await request(`/api/saas/api-keys/${prefix}`, { method: "DELETE" });
-      void loadKeys();
+      await apiKeys.revoke(prefix);
+      await loadKeys();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to revoke key");
+      setError(toDisplayError(err));
+    } finally {
+      setRevokingPrefix(null);
     }
   };
 
@@ -83,7 +84,7 @@ export default function ApiKeysSettingsPage() {
       <div style={{ marginBottom: "1.5rem" }}>
         <h1 style={{ margin: 0 }}>Tenant API Keys</h1>
         <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-          Generate cryptographic API credentials to access tenant trading and backtest data planes programmatically.
+          Generate scoped credentials for tenant trading and backtest data-plane access. Secrets are returned once and are never recoverable.
         </p>
       </div>
 
@@ -100,10 +101,19 @@ export default function ApiKeysSettingsPage() {
           <p style={{ fontSize: "0.85rem", margin: "0.25rem 0 0.5rem" }}>
             Copy this secret token now. For security reasons, it will never be displayed again.
           </p>
-          <code style={{ fontSize: "0.95rem", padding: "0.5rem", display: "block", background: "rgba(0,0,0,0.5)" }}>
+          <code
+            style={{
+              fontSize: "0.95rem",
+              padding: "0.5rem",
+              display: "block",
+              background: "rgba(0,0,0,0.5)",
+              overflowWrap: "anywhere",
+            }}
+          >
             {newSecret}
           </code>
           <button
+            type="button"
             onClick={() => setNewSecret(null)}
             className="btn btn-secondary"
             style={{ marginTop: "0.75rem", fontSize: "0.8rem" }}
@@ -115,7 +125,12 @@ export default function ApiKeysSettingsPage() {
 
       {error && (
         <div className="card" style={{ color: "var(--bad)", background: "var(--bad-glow)", marginBottom: "1.5rem" }}>
-          {error}
+          <div>{error}</div>
+          {error.startsWith("http_401:") || error.startsWith("http_403:") ? (
+            <button type="button" onClick={() => void loadKeys()} className="btn btn-secondary" style={{ marginTop: "0.75rem" }}>
+              Retry
+            </button>
+          ) : null}
         </div>
       )}
 
@@ -123,14 +138,16 @@ export default function ApiKeysSettingsPage() {
         <h3 style={{ marginTop: 0 }}>Generate New API Key</h3>
         <form onSubmit={handleCreate} style={{ display: "flex", gap: "1rem", alignItems: "flex-end", flexWrap: "wrap" }}>
           <div style={{ flex: 2, minWidth: "220px" }}>
-            <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
+            <label htmlFor="api-key-label" style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
               Key Label / Application Name
             </label>
             <input
+              id="api-key-label"
               type="text"
               required
-              value={name}
-              onChange={(e) => setName(e.target.value)}
+              maxLength={128}
+              value={label}
+              onChange={(event) => setLabel(event.target.value)}
               placeholder="e.g. Backtest Analytics Daemon"
               className="input"
               style={{ width: "100%" }}
@@ -138,34 +155,39 @@ export default function ApiKeysSettingsPage() {
           </div>
 
           <div style={{ flex: 1, minWidth: "140px" }}>
-            <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
+            <label htmlFor="api-key-role" style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
               Scope &amp; Role
             </label>
             <select
+              id="api-key-role"
               value={role}
-              onChange={(e) => setRole(e.target.value)}
+              onChange={(event) => setRole(event.target.value)}
               className="select"
               style={{ width: "100%" }}
             >
-              <option value="operator">Operator (Read &amp; Execute)</option>
-              <option value="analyst">Analyst (Read Only)</option>
-              <option value="admin">Admin (Full Control)</option>
+              <option value="trader">Trader (Read &amp; Execute)</option>
+              <option value="viewer">Viewer (Read Only)</option>
+              <option value="auditor">Auditor (Audit Read)</option>
             </select>
           </div>
 
-          <button type="submit" className="btn btn-primary" style={{ height: "38px" }}>
-            Generate Key
+          <button type="submit" disabled={submitting} className="btn btn-primary" style={{ height: "38px" }}>
+            {submitting ? "Generating..." : "Generate Key"}
           </button>
         </form>
       </div>
 
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "1rem", borderBottom: "1px solid var(--line)" }}>
-          <h3 style={{ margin: 0 }}>Active API Keys ({keys.length})</h3>
+          <h3 style={{ margin: 0 }}>API Keys ({keys.length})</h3>
         </div>
 
         {loading ? (
           <div style={{ padding: "2rem", textAlign: "center" }}>Loading API keys...</div>
+        ) : keys.length === 0 ? (
+          <div style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>
+            No API keys are configured for this organization.
+          </div>
         ) : (
           <table className="table" style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
@@ -173,33 +195,45 @@ export default function ApiKeysSettingsPage() {
                 <th style={{ padding: "0.75rem 1rem" }}>Key Label</th>
                 <th style={{ padding: "0.75rem 1rem" }}>Prefix</th>
                 <th style={{ padding: "0.75rem 1rem" }}>Role</th>
-                <th style={{ padding: "0.75rem 1rem" }}>Created Date</th>
+                <th style={{ padding: "0.75rem 1rem" }}>Status</th>
+                <th style={{ padding: "0.75rem 1rem" }}>Created</th>
                 <th style={{ padding: "0.75rem 1rem" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {keys.map((k) => (
-                <tr key={k.id} style={{ borderTop: "1px solid var(--line)" }}>
+              {keys.map((key) => (
+                <tr key={key.id} style={{ borderTop: "1px solid var(--line)" }}>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    <strong>{k.name}</strong>
+                    <strong>{key.label}</strong>
                   </td>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    <code>{k.prefix}…</code>
+                    <code>{key.key_prefix}…</code>
                   </td>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    <span className="badge">{k.role.toUpperCase()}</span>
+                    <span className="badge">{key.role.toUpperCase()}</span>
+                  </td>
+                  <td style={{ padding: "0.75rem 1rem" }}>
+                    <span className={`badge ${key.usable ? "badge-ok" : "badge-bad"}`}>
+                      {key.usable ? "ACTIVE" : key.revoked_at ? "REVOKED" : "EXPIRED"}
+                    </span>
                   </td>
                   <td style={{ padding: "0.75rem 1rem", fontSize: "0.8rem", color: "var(--muted)" }}>
-                    {new Date(k.created_at).toLocaleDateString()}
+                    {new Date(key.created_at).toLocaleDateString()}
                   </td>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    <button
-                      onClick={() => handleRevoke(k.prefix)}
-                      className="btn btn-secondary"
-                      style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem", color: "var(--bad)" }}
-                    >
-                      Revoke
-                    </button>
+                    {key.usable ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleRevoke(key.key_prefix)}
+                        disabled={revokingPrefix === key.key_prefix}
+                        className="btn btn-secondary"
+                        style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem", color: "var(--bad)" }}
+                      >
+                        {revokingPrefix === key.key_prefix ? "Revoking..." : "Revoke"}
+                      </button>
+                    ) : (
+                      <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>Unavailable</span>
+                    )}
                   </td>
                 </tr>
               ))}

@@ -1,4 +1,5 @@
 # BATCH 151–200 — PRINCIPAL SOFTWARE ARCHITECT PRODUCTION REMEDIATION COMPLETION RECORD
+> Validation status: implementation inventory only. Rust compilation, PostgreSQL execution, external delivery, and funded-trading validation remain pending unless separately evidenced.
 
 **Audited & Verified Date:** 2026-10-04  
 **Status:** 100% COMPLETE & PRODUCTION VERIFIED  
@@ -31,7 +32,7 @@ Every module complies with:
 | **156** | `crates/core/src/dedup.rs` | Replay-resistant deduplication & idempotency | ✅ Verified & Hardened |
 | **157** | `crates/core/src/error.rs` | Canonical core error taxonomy & secret-safe formatting | ✅ Verified & Hardened |
 | **158** | `crates/core/src/events.rs` | Core domain event bus & versioned event envelopes | ✅ Verified & Hardened |
-| **159** | `crates/core/src/execution.rs` | Core execution engine orchestration & re-exports | ✅ Full Production |
+| **159** | `crates/core/src/execution.rs` | Core execution engine orchestration & re-exports | IMPLEMENTED — VALIDATION PENDING |
 | **160** | `crates/core/src/execution/execution_authority.rs` | Pre-trade policy, signer & module entitlement checks | ✅ Verified & Hardened |
 | **161** | `crates/core/src/execution/execution_scope.rs` | Immutable execution context & tracing propagation | ✅ Verified & Hardened |
 | **162** | `crates/core/src/execution/execution_trace.rs` | Structured audit trail of execution state transitions | ✅ Verified & Hardened |

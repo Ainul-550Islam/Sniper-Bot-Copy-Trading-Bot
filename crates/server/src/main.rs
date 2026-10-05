@@ -24,6 +24,8 @@ mod dashboard;
 mod ha;
 pub mod module_runtime;
 mod obs;
+pub mod openapi_team_security;
+pub mod openapi_trading_data_plane;
 pub mod ops;
 mod persist;
 pub mod provisioning;
@@ -755,8 +757,9 @@ async fn main() -> anyhow::Result<()> {
     // keeps using their deployment key; it maps to this organization and
     // can never reach another one.
     let saas = Arc::new(saas::SaasStore::with_database(db.clone()).await?);
-    if saas::ensure_deployment_organization(&saas).await.is_none() {
-        anyhow::bail!("failed to initialize the deployment organization");
+    match saas::ensure_deployment_organization(&saas).await? {
+        Some(_) => {}
+        None => anyhow::bail!("failed to initialize the deployment organization"),
     }
 
     // ---- control plane -----------------------------------------------------

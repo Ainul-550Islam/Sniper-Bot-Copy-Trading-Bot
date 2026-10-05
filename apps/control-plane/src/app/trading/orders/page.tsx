@@ -22,7 +22,7 @@ export default function OrdersPage() {
           <div>
             <h1>Orders Book &amp; Lifecycle</h1>
             <p className="muted">
-              Inspect submitted, filled, and pending algorithmic orders with sub-second execution drill-down.
+              Inspect submitted, filled, and pending algorithmic orders with recorded execution details.
             </p>
           </div>
         </div>

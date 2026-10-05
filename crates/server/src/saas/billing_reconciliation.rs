@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use uuid::Uuid;
+use sqlx::Row;
 
 use bot_core::authorization::AccessRequest;
 #[cfg(test)]
@@ -29,6 +29,7 @@ use bot_core::tenant::OrganizationId;
 
 use crate::api::ApiState;
 use crate::saas::middleware::{authorize_request, deny_response};
+use crate::saas::postgres::PostgresSaasRepo;
 
 #[derive(Debug, Deserialize)]
 pub struct ReconcileRequest {
@@ -62,7 +63,8 @@ pub fn routes() -> Router<ApiState> {
         )
 }
 
-/// In-memory idempotency for reconcile decisions (dry demo; durable would be reconciliations table).
+/// Compatibility map for no-database tests/development. PostgreSQL uses the
+/// durable `saas_runtime_records` adapter when configured.
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -73,6 +75,26 @@ fn reconcile_store() -> &'static Mutex<HashMap<String, ReconciliationDecision>> 
 
 fn reconcile_key(org: OrganizationId, provider: &str, event_id: &str) -> String {
     format!("{}:{}:{}", org, provider, event_id)
+}
+
+fn decision_response(
+    organization_id: OrganizationId,
+    decision: &ReconciliationDecision,
+    idempotent: bool,
+) -> Response {
+    let response = ReconcileResponse {
+        organization_id: organization_id.to_string(),
+        action: decision.action.as_str().into(),
+        reason: decision.reason.clone(),
+        idempotent,
+        decided_at: decision.decided_at.to_rfc3339(),
+        internal_subscription_status: decision
+            .internal_snapshot
+            .subscription_status
+            .map(|status| status.as_str().into()),
+        provider_event_kind: decision.provider_snapshot.event_kind.as_str().into(),
+    };
+    (axum::http::StatusCode::OK, Json(json!(response))).into_response()
 }
 
 async fn reconcile_handler(
@@ -90,13 +112,31 @@ async fn reconcile_handler(
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
     };
-    // Only billing_admin or auditor may reconcile — enforce, but BillingRead already checked;
-    // we keep check simple: require BillingRead and that caller owns org (already via context)
+    // Only durable provider evidence can drive reconciliation. The
+    // no-database process-local mode cannot prove event provenance, so this
+    // endpoint refuses it rather than producing a customer-visible decision.
+    let Some(db) = state.db.as_deref() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"reconciliation_storage_unavailable","reason":"billing reconciliation requires PostgreSQL-backed provider evidence"})),
+        )
+            .into_response();
+    };
     let org = ctx.organization.id;
 
     // Resolve internal snapshot (from SaasStore + billing store)
     let now = Utc::now();
-    let sub = state.saas.subscription_of(org).await;
+    let sub = match state.saas.subscription_of(org).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org, "reconciliation subscription could not be loaded");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"reconciliation_storage_unavailable","reason":"tenant subscription could not be loaded"})),
+            )
+                .into_response();
+        }
+    };
     let internal = InternalBillingSnapshot {
         organization_id: org,
         subscription_status: sub.as_ref().map(|s| s.status),
@@ -112,21 +152,87 @@ async fn reconcile_handler(
         as_of: now,
     };
 
-    // Resolve provider snapshot from request (in prod, fetched from provider_events table or live provider)
-    let provider_kind = body
+    // Reconciliation must be tied to a provider event supplied by the
+    // authenticated operator. Never invent a provider, event id, or event
+    // kind when the request is incomplete.
+    let provider_kind = match body
         .provider
         .as_deref()
         .and_then(BillingProviderKind::parse)
-        .unwrap_or(BillingProviderKind::Stripe);
-    let event_id = body
-        .provider_event_id
-        .clone()
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let kind = body
-        .event_kind
-        .as_deref()
-        .map(ProviderEventKind::parse)
-        .unwrap_or(ProviderEventKind::Unknown);
+    {
+        Some(value) => value,
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid_provider","reason":"provider is required and must be supported"})),
+            )
+                .into_response();
+        }
+    };
+    let event_id = match body.provider_event_id.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() && value.len() <= 256 => value.to_string(),
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid_provider_event_id","reason":"provider_event_id is required and must be at most 256 characters"})),
+            )
+                .into_response();
+        }
+    };
+    let kind = match body.event_kind.as_deref().map(ProviderEventKind::parse) {
+        Some(value) if value != ProviderEventKind::Unknown => value,
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid_event_kind","reason":"event_kind must identify a supported provider event"})),
+            )
+                .into_response();
+        }
+    };
+
+    let evidence = match sqlx::query(
+        "SELECT event_type, processed
+           FROM provider_events
+          WHERE organization_id = $1 AND provider = $2 AND provider_event_id = $3",
+    )
+    .bind(org.as_uuid())
+    .bind(provider_kind.as_str())
+    .bind(&event_id)
+    .fetch_optional(db.pool())
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({"error":"provider_event_not_found","reason":"reconciliation requires a verified tenant-owned provider event"})),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load provider reconciliation evidence");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"reconciliation_storage_unavailable","reason":"provider evidence could not be loaded"})),
+            )
+                .into_response();
+        }
+    };
+    let stored_kind = ProviderEventKind::parse(&evidence.get::<String, _>("event_type"));
+    if stored_kind != kind {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({"error":"provider_event_kind_mismatch","reason":"requested event kind does not match the verified provider event"})),
+        )
+            .into_response();
+    }
+    if !evidence.get::<bool, _>("processed") {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({"error":"provider_event_in_progress","reason":"provider event processing has not completed"})),
+        )
+            .into_response();
+    }
 
     let provider = ProviderBillingSnapshot {
         provider: provider_kind,
@@ -141,31 +247,47 @@ async fn reconcile_handler(
         event_timestamp: now,
     };
 
-    // Idempotency: if same org+provider+event_id already reconciled, return same decision
+    // Idempotency: PostgreSQL is authoritative whenever attached. The
+    // in-memory map is retained only for no-database test/development mode.
     let key = reconcile_key(org, provider_kind.as_str(), &event_id);
-    {
+    if let Some(db) = &state.db {
+        let repo = PostgresSaasRepo::new(db.clone());
+        match repo
+            .by_lookup::<ReconciliationDecision>("billing_reconciliation", &key)
+            .await
+        {
+            Ok(Some(previous)) => return decision_response(org, &previous, true),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(error = %error, "failed to load durable billing reconciliation");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"reconciliation_storage_unavailable","reason":"billing reconciliation could not be loaded"})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
         let map = reconcile_store().lock().expect("mutex");
-        if let Some(prev) = map.get(&key) {
-            let resp = ReconcileResponse {
-                organization_id: org.to_string(),
-                action: prev.action.as_str().into(),
-                reason: prev.reason.clone(),
-                idempotent: true,
-                decided_at: prev.decided_at.to_rfc3339(),
-                internal_subscription_status: prev
-                    .internal_snapshot
-                    .subscription_status
-                    .map(|s| s.as_str().into()),
-                provider_event_kind: prev.provider_snapshot.event_kind.as_str().into(),
-            };
-            return (axum::http::StatusCode::OK, Json(json!(resp))).into_response();
+        if let Some(previous) = map.get(&key) {
+            return decision_response(org, previous, true);
         }
     }
 
     // Never let reconciliation bypass subscription business rules:
     // If tenant is Closed, we do not Restore — we return Investigate/Suspend.
     let mut decision = reconcile(&internal, &provider, now);
-    let org_rec = state.saas.organization(org).await;
+    let org_rec = match state.saas.organization(org).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org, "reconciliation organization could not be loaded");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"reconciliation_storage_unavailable","reason":"tenant organization could not be loaded"})),
+            )
+                .into_response();
+        }
+    };
     if let Some(org_row) = org_rec {
         if org_row.status == bot_core::tenant::OrganizationStatus::Closed
             && decision.action == ReconciliationAction::Restore
@@ -179,8 +301,54 @@ async fn reconcile_handler(
         }
     }
 
-    // Persist idempotent record
-    {
+    // Persist the decision before acknowledging it. The unique lookup key
+    // makes concurrent reconciliation requests converge on one durable
+    // decision rather than diverging across replicas.
+    if let Some(db) = &state.db {
+        let repo = PostgresSaasRepo::new(db.clone());
+        match repo
+            .insert(
+                "billing_reconciliation",
+                &key,
+                Some(org),
+                None,
+                Some(&key),
+                &decision,
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => match repo
+                .by_lookup::<ReconciliationDecision>("billing_reconciliation", &key)
+                .await
+            {
+                Ok(Some(previous)) => return decision_response(org, &previous, true),
+                Ok(None) => {
+                    return (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error":"reconciliation_storage_unavailable","reason":"durable reconciliation record disappeared"})),
+                    )
+                        .into_response();
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to reload durable billing reconciliation");
+                    return (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error":"reconciliation_storage_unavailable","reason":"durable reconciliation decision could not be loaded"})),
+                    )
+                        .into_response();
+                }
+            },
+            Err(error) => {
+                tracing::error!(error = %error, "failed to persist billing reconciliation");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"reconciliation_storage_unavailable","reason":"billing reconciliation could not be persisted"})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
         let mut map = reconcile_store().lock().expect("mutex");
         map.insert(key, decision.clone());
     }
@@ -203,20 +371,8 @@ async fn reconcile_handler(
         )
         .await;
 
-    let resp = ReconcileResponse {
-        organization_id: org.to_string(),
-        action: decision.action.as_str().into(),
-        reason: decision.reason.clone(),
-        idempotent: false,
-        decided_at: decision.decided_at.to_rfc3339(),
-        internal_subscription_status: decision
-            .internal_snapshot
-            .subscription_status
-            .map(|s| s.as_str().into()),
-        provider_event_kind: decision.provider_snapshot.event_kind.as_str().into(),
-    };
-    // 200 for no_op, 202 for update/suspend/restore, 200 for investigate
-    (axum::http::StatusCode::OK, Json(json!(resp))).into_response()
+    // 200 for no_op, 202 for update/suspend/restore, 200 for investigate.
+    decision_response(org, &decision, false)
 }
 
 async fn get_reconcile(
@@ -235,28 +391,46 @@ async fn get_reconcile(
         Err(d) => return deny_response(&state, &d).await,
     };
     let org = ctx.organization.id;
+    if let Some(db) = &state.db {
+        let repo = PostgresSaasRepo::new(db.clone());
+        let decisions = match repo
+            .by_organization::<ReconciliationDecision>("billing_reconciliation", org)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to load durable billing reconciliation history");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"reconciliation_storage_unavailable","reason":"billing reconciliation could not be loaded"})),
+                )
+                    .into_response();
+            }
+        };
+        return decisions
+            .into_iter()
+            .find(|decision| decision.provider_snapshot.event_id == id)
+            .map(|decision| decision_response(org, &decision, true))
+            .unwrap_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({"error":"not_found","reason":"reconciliation not found"})),
+                )
+                    .into_response()
+            });
+    }
+
     let org_str = org.to_string();
-    // Tenant-scoped lookup: only return if key's org prefix matches caller's org (no cross-tenant leak)
+    // No-database mode retains the bounded compatibility map only for tests.
     let map = reconcile_store().lock().expect("mutex");
-    let found = map
+    match map
         .iter()
-        .find(|(k, _)| k.starts_with(&org_str) && k.contains(&id));
-    match found {
-        Some((_, dec)) => {
-            let resp = ReconcileResponse {
-                organization_id: org.to_string(),
-                action: dec.action.as_str().into(),
-                reason: dec.reason.clone(),
-                idempotent: true,
-                decided_at: dec.decided_at.to_rfc3339(),
-                internal_subscription_status: dec
-                    .internal_snapshot
-                    .subscription_status
-                    .map(|s| s.as_str().into()),
-                provider_event_kind: dec.provider_snapshot.event_kind.as_str().into(),
-            };
-            (axum::http::StatusCode::OK, Json(json!(resp))).into_response()
-        }
+        .find(|(key, decision)| {
+            key.starts_with(&org_str) && decision.provider_snapshot.event_id == id
+        })
+        .map(|(_, decision)| decision)
+    {
+        Some(decision) => decision_response(org, decision, true),
         None => (
             axum::http::StatusCode::NOT_FOUND,
             Json(json!({"error":"not_found","reason":"reconciliation not found"})),

@@ -99,6 +99,19 @@ fn rotation_store_refusal(stage: &'static str, error: &RotationStoreError) -> Re
     }
 }
 
+fn rotation_audit_refusal(reason: String) -> Response {
+    tracing::error!(%reason, "custody rotation applied without a durable custody audit record");
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "custody_audit_unavailable",
+            "applied": true,
+            "reason": reason,
+        })),
+    )
+        .into_response()
+}
+
 async fn create(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -115,9 +128,12 @@ async fn create(
         Err(d) => return deny_response(&state, &d).await,
     };
     let org = ctx.organization.id;
-    // P0 fix (PROMPT 5 §E): resolve the REAL custody profile from the
-    // profile store — tenant-scoped, fail-closed. No synthetic profile
-    // identity is ever invented here.
+    if let Err(response) = crate::saas::custody::hydrate_from_database(&state, org).await {
+        return response;
+    }
+    // Resolve the real custody profile from the durable tenant-scoped
+    // custody tables before consulting the compatibility cache. No
+    // synthetic profile identity is ever invented here.
     let profile_id = match CustodyProfileId::parse(&body.profile_id) {
         Some(id) => id,
         None => {
@@ -209,6 +225,22 @@ async fn create(
     // rotation exists for every replica, not just this one.
     if let Err(e) = state.custody_rotations().insert(&rec).await {
         return rotation_store_refusal("create", &e);
+    }
+    if let Err(reason) = crate::saas::custody::record_durable_custody_audit(
+        &state,
+        &ctx,
+        Some(profile_id),
+        None,
+        "rotation_created",
+        None,
+        None,
+        None,
+        Some(rec.provider_type.as_str()),
+        &format!("rotation_id={id}"),
+    )
+    .await
+    {
+        return rotation_audit_refusal(reason);
     }
     state
         .audit
@@ -362,6 +394,22 @@ async fn activate(
     }
     match transition_result {
         Ok((state_str, org_id)) => {
+            if let Err(reason) = crate::saas::custody::record_durable_custody_audit(
+                &state,
+                &ctx,
+                Some(rec.profile_id),
+                Some(rec.new_signer),
+                "rotation_activated",
+                None,
+                None,
+                None,
+                Some(rec.provider_type.as_str()),
+                &format!("rotation_id={uid}"),
+            )
+            .await
+            {
+                return rotation_audit_refusal(reason);
+            }
             state
                 .audit
                 .record(
@@ -469,6 +517,22 @@ async fn revoke(
     }
     match outcome {
         RevokeOutcome::Ok(state_str, force_revoked, org_id) => {
+            if let Err(reason) = crate::saas::custody::record_durable_custody_audit(
+                &state,
+                &ctx,
+                Some(rec.profile_id),
+                Some(rec.old_signer),
+                "rotation_revoked",
+                None,
+                None,
+                None,
+                Some(rec.provider_type.as_str()),
+                &format!("rotation_id={uid};force={force}"),
+            )
+            .await
+            {
+                return rotation_audit_refusal(reason);
+            }
             state
                 .audit
                 .record(

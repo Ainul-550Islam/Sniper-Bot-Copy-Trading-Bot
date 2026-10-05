@@ -177,23 +177,27 @@ impl SaasStore {
         Ok(())
     }
 
-    /// One user by id. Database errors fail closed as no identity.
-    pub async fn user(&self, id: UserId) -> Option<User> {
+    /// One user by id. Durable read failures are returned rather than
+    /// converted into a missing identity.
+    pub async fn user(&self, id: UserId) -> BotResult<Option<User>> {
         if let Some(repo) = &self.repo {
-            return repo.by_id(USER, &id.to_string()).await.ok().flatten();
+            return repo.by_id(USER, &id.to_string()).await;
         }
-        self.inner.read().await.users.get(&id).cloned()
+        Ok(self.inner.read().await.users.get(&id).cloned())
     }
 
-    /// One user by email. Database errors fail closed as no identity.
-    pub async fn user_by_email(&self, email: &str) -> Option<User> {
+    /// One user by email. Durable read failures are returned rather than
+    /// converted into a missing identity.
+    pub async fn user_by_email(&self, email: &str) -> BotResult<Option<User>> {
         let email = User::normalize_email(email);
         if let Some(repo) = &self.repo {
-            return repo.by_lookup(USER, &email).await.ok().flatten();
+            return repo.by_lookup(USER, &email).await;
         }
         let inner = self.inner.read().await;
-        let id = inner.users_by_email.get(&email)?;
-        inner.users.get(id).cloned()
+        let Some(id) = inner.users_by_email.get(&email) else {
+            return Ok(None);
+        };
+        Ok(inner.users.get(id).cloned())
     }
 
     /// Persist a changed user.
@@ -251,27 +255,27 @@ impl SaasStore {
         Ok(())
     }
 
-    /// One organization by id.
-    pub async fn organization(&self, id: OrganizationId) -> Option<Organization> {
+    /// One organization by id. Durable read failures are returned rather
+    /// than converted into a missing tenant.
+    pub async fn organization(&self, id: OrganizationId) -> BotResult<Option<Organization>> {
         if let Some(repo) = &self.repo {
-            return repo
-                .by_id(ORGANIZATION, &id.to_string())
-                .await
-                .ok()
-                .flatten();
+            return repo.by_id(ORGANIZATION, &id.to_string()).await;
         }
-        self.inner.read().await.organizations.get(&id).cloned()
+        Ok(self.inner.read().await.organizations.get(&id).cloned())
     }
 
-    /// One organization by slug.
-    pub async fn organization_by_slug(&self, slug: &str) -> Option<Organization> {
+    /// One organization by slug. Durable read failures are returned rather
+    /// than converted into a missing tenant.
+    pub async fn organization_by_slug(&self, slug: &str) -> BotResult<Option<Organization>> {
         let slug = slug.trim().to_ascii_lowercase();
         if let Some(repo) = &self.repo {
-            return repo.by_lookup(ORGANIZATION, &slug).await.ok().flatten();
+            return repo.by_lookup(ORGANIZATION, &slug).await;
         }
         let inner = self.inner.read().await;
-        let id = inner.orgs_by_slug.get(&slug)?;
-        inner.organizations.get(id).cloned()
+        let Some(id) = inner.orgs_by_slug.get(&slug) else {
+            return Ok(None);
+        };
+        Ok(inner.organizations.get(id).cloned())
     }
 
     /// Persist a changed organization.
@@ -337,30 +341,32 @@ impl SaasStore {
         Ok(())
     }
 
-    /// The membership of one user in one organization.
+    /// The membership of one user in one organization. Durable read
+    /// failures are returned rather than converted into no membership.
     pub async fn membership(
         &self,
         organization_id: OrganizationId,
         user_id: UserId,
-    ) -> Option<Membership> {
+    ) -> BotResult<Option<Membership>> {
         if let Some(repo) = &self.repo {
             let lookup = format!("{organization_id}:{user_id}");
-            return repo.by_lookup(MEMBERSHIP, &lookup).await.ok().flatten();
+            return repo.by_lookup(MEMBERSHIP, &lookup).await;
         }
-        self.inner
+        Ok(self
+            .inner
             .read()
             .await
             .memberships
             .get(&(organization_id, user_id))
-            .cloned()
+            .cloned())
     }
 
     /// Every member of one organization (tenant-scoped by construction).
-    pub async fn members(&self, organization_id: OrganizationId) -> Vec<Membership> {
+    /// A durable read failure is returned to the caller; it is never
+    /// represented as an empty tenant.
+    pub async fn members(&self, organization_id: OrganizationId) -> BotResult<Vec<Membership>> {
         let mut v: Vec<Membership> = if let Some(repo) = &self.repo {
-            repo.by_organization(MEMBERSHIP, organization_id)
-                .await
-                .unwrap_or_default()
+            repo.by_organization(MEMBERSHIP, organization_id).await?
         } else {
             self.inner
                 .read()
@@ -372,13 +378,13 @@ impl SaasStore {
                 .collect()
         };
         v.sort_by_key(|m| m.created_at);
-        v
+        Ok(v)
     }
 
     /// Every organization one user belongs to.
-    pub async fn memberships_of_user(&self, user_id: UserId) -> Vec<Membership> {
+    pub async fn memberships_of_user(&self, user_id: UserId) -> BotResult<Vec<Membership>> {
         let mut v: Vec<Membership> = if let Some(repo) = &self.repo {
-            repo.by_user(MEMBERSHIP, user_id).await.unwrap_or_default()
+            repo.by_user(MEMBERSHIP, user_id).await?
         } else {
             self.inner
                 .read()
@@ -390,7 +396,7 @@ impl SaasStore {
                 .collect()
         };
         v.sort_by_key(|m| m.created_at);
-        v
+        Ok(v)
     }
 
     /// Persist a changed membership.
@@ -453,13 +459,17 @@ impl SaasStore {
     }
 
     /// Look a session up by token hash (the plaintext never reaches here).
-    pub async fn session_by_hash(&self, token_hash: &str) -> Option<SessionRecord> {
+    /// Durable read failures are returned rather than converted into an
+    /// unknown session.
+    pub async fn session_by_hash(&self, token_hash: &str) -> BotResult<Option<SessionRecord>> {
         if let Some(repo) = &self.repo {
-            return repo.by_lookup(SESSION, token_hash).await.ok().flatten();
+            return repo.by_lookup(SESSION, token_hash).await;
         }
         let inner = self.inner.read().await;
-        let id = inner.sessions_by_hash.get(token_hash)?;
-        inner.sessions.get(id).cloned()
+        let Some(id) = inner.sessions_by_hash.get(token_hash) else {
+            return Ok(None);
+        };
+        Ok(inner.sessions.get(id).cloned())
     }
 
     /// Persist a changed session.
@@ -484,10 +494,11 @@ impl SaasStore {
     }
 
     /// Every session of one user, newest first (the "active devices" list
-    /// and the logout path).
-    pub async fn sessions_of_user(&self, user_id: UserId) -> Vec<SessionRecord> {
+    /// and the logout path). A durable read failure is returned rather than
+    /// being interpreted as "the user has no sessions".
+    pub async fn sessions_of_user(&self, user_id: UserId) -> BotResult<Vec<SessionRecord>> {
         let mut v: Vec<SessionRecord> = if let Some(repo) = &self.repo {
-            repo.by_user(SESSION, user_id).await.unwrap_or_default()
+            repo.by_user(SESSION, user_id).await?
         } else {
             self.inner
                 .read()
@@ -499,24 +510,27 @@ impl SaasStore {
                 .collect()
         };
         v.sort_by_key(|row| std::cmp::Reverse(row.created_at));
-        v
+        Ok(v)
     }
 
-    /// Revoke every session of one user; returns how many changed.
+    /// Revoke every session of one user; returns how many changed. A failed
+    /// durable update aborts the operation instead of returning a partial
+    /// success count.
     pub async fn revoke_user_sessions(
         &self,
         user_id: UserId,
         reason: &str,
         now: DateTime<Utc>,
-    ) -> usize {
-        let mut sessions = self.sessions_of_user(user_id).await;
+    ) -> BotResult<usize> {
+        let mut sessions = self.sessions_of_user(user_id).await?;
         let mut n = 0;
         for session in &mut sessions {
-            if session.revoke(reason, now) && self.update_session(session).await.is_ok() {
+            if session.revoke(reason, now) {
+                self.update_session(session).await?;
                 n += 1;
             }
         }
-        n
+        Ok(n)
     }
 
     // --------------------------------------------------------- api keys --
@@ -554,20 +568,20 @@ impl SaasStore {
         Ok(())
     }
 
-    /// Look a key up by the hash of the presented secret.
-    pub async fn api_key_by_hash(&self, secret_hash: &str) -> Option<SaasApiKey> {
+    /// Look a key up by the hash of the presented secret. Durable read
+    /// failures are returned rather than converted into an unknown key.
+    pub async fn api_key_by_hash(&self, secret_hash: &str) -> BotResult<Option<SaasApiKey>> {
         if let Some(repo) = &self.repo {
-            return repo.by_lookup(API_KEY, secret_hash).await.ok().flatten();
+            return repo.by_lookup(API_KEY, secret_hash).await;
         }
-        self.inner.read().await.api_keys.get(secret_hash).cloned()
+        Ok(self.inner.read().await.api_keys.get(secret_hash).cloned())
     }
 
-    /// Every key of one organization, newest first. Tenant-scoped.
-    pub async fn api_keys_of(&self, organization_id: OrganizationId) -> Vec<SaasApiKey> {
+    /// Every key of one organization, newest first. Tenant-scoped. A
+    /// durable read failure is returned rather than an empty key list.
+    pub async fn api_keys_of(&self, organization_id: OrganizationId) -> BotResult<Vec<SaasApiKey>> {
         let mut v: Vec<SaasApiKey> = if let Some(repo) = &self.repo {
-            repo.by_organization(API_KEY, organization_id)
-                .await
-                .unwrap_or_default()
+            repo.by_organization(API_KEY, organization_id).await?
         } else {
             self.inner
                 .read()
@@ -579,7 +593,7 @@ impl SaasStore {
                 .collect()
         };
         v.sort_by_key(|row| std::cmp::Reverse(row.created_at));
-        v
+        Ok(v)
     }
 
     /// Persist a changed key (revocation, last-used).
@@ -649,22 +663,26 @@ impl SaasStore {
 
     // ---------------------------------------------------------- billing --
 
-    /// One plan by code.
-    pub async fn plan_by_code(&self, code: PlanCode) -> Option<Plan> {
+    /// One plan by code. Durable read failures are returned rather than
+    /// converted into an unknown plan.
+    pub async fn plan_by_code(&self, code: PlanCode) -> BotResult<Option<Plan>> {
         if let Some(repo) = &self.repo {
-            return repo.by_lookup(PLAN, code.as_str()).await.ok().flatten();
+            return repo.by_lookup(PLAN, code.as_str()).await;
         }
         let inner = self.inner.read().await;
-        let id = inner.plans_by_code.get(&code)?;
-        inner.plans.get(id).cloned()
+        let Some(id) = inner.plans_by_code.get(&code) else {
+            return Ok(None);
+        };
+        Ok(inner.plans.get(id).cloned())
     }
 
-    /// One plan by id.
-    pub async fn plan(&self, id: PlanId) -> Option<Plan> {
+    /// One plan by id. Durable read failures are returned rather than
+    /// converted into an unknown plan.
+    pub async fn plan(&self, id: PlanId) -> BotResult<Option<Plan>> {
         if let Some(repo) = &self.repo {
-            return repo.by_id(PLAN, &id.to_string()).await.ok().flatten();
+            return repo.by_id(PLAN, &id.to_string()).await;
         }
-        self.inner.read().await.plans.get(&id).cloned()
+        Ok(self.inner.read().await.plans.get(&id).cloned())
     }
 
     /// The whole catalogue, weakest tier first.
@@ -695,7 +713,7 @@ impl SaasStore {
     ) -> BotResult<Subscription> {
         let plan = self
             .plan_by_code(code)
-            .await
+            .await?
             .ok_or_else(|| BotError::NotFound(format!("plan {code}")))?;
         let sub = Subscription::manual(organization_id, plan.id, now);
         let rows = entitlements_from_plan(organization_id, &plan, now);
@@ -708,21 +726,24 @@ impl SaasStore {
         Ok(sub)
     }
 
-    /// The tenant's subscription.
-    pub async fn subscription_of(&self, organization_id: OrganizationId) -> Option<Subscription> {
+    /// The tenant's subscription. Durable read failures are returned rather
+    /// than converted into no subscription.
+    pub async fn subscription_of(
+        &self,
+        organization_id: OrganizationId,
+    ) -> BotResult<Option<Subscription>> {
         if let Some(repo) = &self.repo {
             return repo
                 .by_lookup(SUBSCRIPTION, &organization_id.to_string())
-                .await
-                .ok()
-                .flatten();
+                .await;
         }
-        self.inner
+        Ok(self
+            .inner
             .read()
             .await
             .subscriptions
             .get(&organization_id)
-            .cloned()
+            .cloned())
     }
 
     /// Persist a changed subscription.
@@ -778,31 +799,29 @@ impl SaasStore {
         Ok(())
     }
 
-    /// The tenant's effective entitlements at `now`.
+    /// The tenant's effective entitlements at `now`. Every durable lookup
+    /// is fallible; an unavailable subscription or entitlement read must not
+    /// be interpreted as a tenant with default access.
     pub async fn entitlements_of(
         &self,
         organization_id: OrganizationId,
         now: DateTime<Utc>,
-    ) -> EntitlementSet {
+    ) -> BotResult<EntitlementSet> {
         if let Some(repo) = &self.repo {
             let sub: Option<Subscription> = repo
                 .by_lookup(SUBSCRIPTION, &organization_id.to_string())
-                .await
-                .ok()
-                .flatten();
+                .await?;
             let plan = match &sub {
-                Some(subscription) => repo
-                    .by_id(PLAN, &subscription.plan_id.to_string())
-                    .await
-                    .ok()
-                    .flatten(),
+                Some(subscription) => repo.by_id(PLAN, &subscription.plan_id.to_string()).await?,
                 None => None,
             };
-            let rows: Vec<Entitlement> = repo
-                .by_organization(ENTITLEMENT, organization_id)
-                .await
-                .unwrap_or_default();
-            return EntitlementSet::resolve(plan.as_ref(), sub.as_ref(), &rows, now);
+            let rows: Vec<Entitlement> = repo.by_organization(ENTITLEMENT, organization_id).await?;
+            return Ok(EntitlementSet::resolve(
+                plan.as_ref(),
+                sub.as_ref(),
+                &rows,
+                now,
+            ));
         }
         let inner = self.inner.read().await;
         let sub = inner.subscriptions.get(&organization_id);
@@ -812,7 +831,7 @@ impl SaasStore {
             .get(&organization_id)
             .cloned()
             .unwrap_or_default();
-        EntitlementSet::resolve(plan, sub, &rows, now)
+        Ok(EntitlementSet::resolve(plan, sub, &rows, now))
     }
 
     // ------------------------------------------------------------ usage --
@@ -846,27 +865,27 @@ impl SaasStore {
         Ok(true)
     }
 
-    /// Total of one metric for one tenant in one `YYYY-MM` period.
+    /// Total of one metric for one tenant in one `YYYY-MM` period. Durable
+    /// query failures are returned instead of being converted into zero
+    /// usage.
     pub async fn usage_total(
         &self,
         organization_id: OrganizationId,
         metric: UsageMetric,
         period: &str,
-    ) -> f64 {
+    ) -> BotResult<f64> {
         let events: Vec<UsageEvent> = if let Some(repo) = &self.repo {
-            repo.by_organization(USAGE, organization_id)
-                .await
-                .unwrap_or_default()
+            repo.by_organization(USAGE, organization_id).await?
         } else {
             self.inner.read().await.usage.clone()
         };
-        events
+        Ok(events
             .iter()
             .filter(|e| {
                 e.organization_id == organization_id && e.metric == metric && e.period() == period
             })
             .map(|e| e.quantity)
-            .sum()
+            .sum())
     }
 
     // ---------------------------------------------------- payments --
@@ -934,32 +953,35 @@ impl SaasStore {
     }
 
     /// One payment by id, ownership-checked: a foreign organization id
-    /// can never read another tenant's transaction.
+    /// can never read another tenant's transaction. Durable read failures
+    /// are returned rather than converted into a missing transaction.
     pub async fn payment_of(
         &self,
         organization_id: OrganizationId,
         id: PaymentId,
-    ) -> Option<PaymentTransaction> {
+    ) -> BotResult<Option<PaymentTransaction>> {
         if let Some(repo) = &self.repo {
-            let found: Option<PaymentTransaction> =
-                repo.by_id(PAYMENT, &id.to_string()).await.ok().flatten();
-            return found.filter(|p| p.organization_id == organization_id);
+            let found: Option<PaymentTransaction> = repo.by_id(PAYMENT, &id.to_string()).await?;
+            return Ok(found.filter(|p| p.organization_id == organization_id));
         }
-        self.inner
+        Ok(self
+            .inner
             .read()
             .await
             .payments
             .get(&id)
             .filter(|p| p.organization_id == organization_id)
-            .cloned()
+            .cloned())
     }
 
-    /// All payments for one tenant, oldest first.
-    pub async fn payments_of(&self, organization_id: OrganizationId) -> Vec<PaymentTransaction> {
+    /// All payments for one tenant, oldest first. Durable read failures are
+    /// returned rather than an empty payment history.
+    pub async fn payments_of(
+        &self,
+        organization_id: OrganizationId,
+    ) -> BotResult<Vec<PaymentTransaction>> {
         let mut out: Vec<PaymentTransaction> = if let Some(repo) = &self.repo {
-            repo.by_organization(PAYMENT, organization_id)
-                .await
-                .unwrap_or_default()
+            repo.by_organization(PAYMENT, organization_id).await?
         } else {
             self.inner
                 .read()
@@ -971,7 +993,7 @@ impl SaasStore {
                 .collect()
         };
         out.sort_by_key(|p| p.created_at);
-        out
+        Ok(out)
     }
 
     // ----------------------------------------------------- provisioning --
@@ -1006,12 +1028,16 @@ impl SaasStore {
             .clone())
     }
 
-    /// One job by request key.
-    pub async fn job_by_request_key(&self, request_key: &str) -> Option<ProvisioningJob> {
+    /// One job by request key. Durable read failures are returned rather
+    /// than converted into a missing job.
+    pub async fn job_by_request_key(
+        &self,
+        request_key: &str,
+    ) -> BotResult<Option<ProvisioningJob>> {
         if let Some(repo) = &self.repo {
-            return repo.by_lookup(JOB, request_key).await.ok().flatten();
+            return repo.by_lookup(JOB, request_key).await;
         }
-        self.inner.read().await.jobs.get(request_key).cloned()
+        Ok(self.inner.read().await.jobs.get(request_key).cloned())
     }
 
     /// Persist a changed job.
@@ -1035,10 +1061,11 @@ impl SaasStore {
         Ok(())
     }
 
-    /// Jobs a worker may resume, oldest first.
-    pub async fn resumable_jobs(&self, limit: usize) -> Vec<ProvisioningJob> {
+    /// Jobs a worker may resume, oldest first. A durable read failure is
+    /// returned so a worker never silently concludes that no work exists.
+    pub async fn resumable_jobs(&self, limit: usize) -> BotResult<Vec<ProvisioningJob>> {
         let mut v: Vec<ProvisioningJob> = if let Some(repo) = &self.repo {
-            repo.all(JOB).await.unwrap_or_default()
+            repo.all(JOB).await?
         } else {
             self.inner.read().await.jobs.values().cloned().collect()
         }
@@ -1047,7 +1074,7 @@ impl SaasStore {
         .collect();
         v.sort_by_key(|j| j.created_at);
         v.truncate(limit);
-        v
+        Ok(v)
     }
 
     /// The role a tenant API key's scopes narrow to, resolved once so the
@@ -1113,8 +1140,16 @@ mod postgres_tests {
         assert!(first.is_durable());
         assert!(second.is_durable());
         for code in PlanCode::ALL {
-            let a = first.plan_by_code(code).await.expect("first plan");
-            let b = second.plan_by_code(code).await.expect("second plan");
+            let a = first
+                .plan_by_code(code)
+                .await
+                .expect("first plan lookup")
+                .expect("first plan");
+            let b = second
+                .plan_by_code(code)
+                .await
+                .expect("second plan lookup")
+                .expect("second plan");
             assert_eq!(a.id, b.id);
             assert_eq!(a.limits, b.limits);
         }
@@ -1123,6 +1158,7 @@ mod postgres_tests {
         let plan = first
             .plan_by_code(PlanCode::Business)
             .await
+            .expect("business plan lookup")
             .expect("business plan");
         let now = Utc::now();
         let subscription = first
@@ -1133,12 +1169,17 @@ mod postgres_tests {
             second
                 .subscription_of(organization_id)
                 .await
+                .expect("replica subscription lookup")
                 .expect("replica subscription")
                 .id,
             subscription.id
         );
         assert_eq!(
-            second.entitlements_of(organization_id, now).await.len(),
+            second
+                .entitlements_of(organization_id, now)
+                .await
+                .expect("entitlements")
+                .len(),
             plan.limits.len()
         );
 
@@ -1163,6 +1204,7 @@ mod postgres_tests {
         let key = second
             .api_key_by_hash(&created.key.secret_hash)
             .await
+            .expect("key lookup survives the restart")
             .expect("key survives the restart");
         assert_eq!(key.id, created.key.id);
         assert_eq!(key.organization_id, organization_id);
@@ -1178,6 +1220,7 @@ mod postgres_tests {
         let seen_by_second = second
             .api_key_by_hash(&created.key.secret_hash)
             .await
+            .expect("revoked record lookup")
             .expect("revoked record is still there");
         assert!(!seen_by_second.is_usable(now), "revoked key stops working");
         assert_eq!(seen_by_second.rejection(now), Some("api_key_revoked"));
@@ -1200,6 +1243,7 @@ mod postgres_tests {
         let seen_expired = second
             .api_key_by_hash(&expired_record.secret_hash)
             .await
+            .expect("expired record lookup")
             .expect("expired record is there");
         assert!(!seen_expired.is_usable(now), "expired key stops working");
         assert_eq!(seen_expired.rejection(now), Some("api_key_expired"));

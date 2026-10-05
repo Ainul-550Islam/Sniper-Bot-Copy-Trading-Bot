@@ -17,32 +17,26 @@ pub fn validate_strategy_params(
     match module {
         crate::models::BotModule::Sniper => {
             let params: SniperStrategyParams = serde_json::from_value(config_json.clone())
-                .map_err(|e| BotError::invalid_input(format!("invalid sniper params: {e}")))?;
+                .map_err(|e| BotError::invalid(format!("invalid sniper params: {e}")))?;
             if params.entry_amount_lamports == 0 {
-                return Err(BotError::invalid_input("entry amount must be positive"));
+                return Err(BotError::invalid("entry amount must be positive"));
             }
             if params.max_slippage_bps > 5000 {
-                return Err(BotError::invalid_input(
-                    "slippage cannot exceed 5000 bps (50%)",
-                ));
+                return Err(BotError::invalid("slippage cannot exceed 5000 bps (50%)"));
             }
         }
         crate::models::BotModule::Copy => {
             let params: CopyStrategyParams = serde_json::from_value(config_json.clone())
-                .map_err(|e| BotError::invalid_input(format!("invalid copy params: {e}")))?;
+                .map_err(|e| BotError::invalid(format!("invalid copy params: {e}")))?;
             if params.allocation_per_trade_lamports == 0 {
-                return Err(BotError::invalid_input(
-                    "allocation per trade must be positive",
-                ));
+                return Err(BotError::invalid("allocation per trade must be positive"));
             }
         }
         crate::models::BotModule::Polymarket => {
             let params: PolymarketStrategyParams = serde_json::from_value(config_json.clone())
-                .map_err(|e| BotError::invalid_input(format!("invalid polymarket params: {e}")))?;
+                .map_err(|e| BotError::invalid(format!("invalid polymarket params: {e}")))?;
             if params.max_position_size_usdc_units == 0 {
-                return Err(BotError::invalid_input(
-                    "max position size must be positive",
-                ));
+                return Err(BotError::invalid("max position size must be positive"));
             }
         }
         _ => {}

@@ -372,15 +372,23 @@ fn decode_row(r: &sqlx::postgres::PgRow) -> Result<RotationRecord, RotationStore
     let new_signer = SignerId::parse(&new_str)
         .ok_or_else(|| RotationStoreError::Corrupt("unparseable new_signer_id".to_string()))?;
 
-    let provider_str: String = r.try_get("provider_type").unwrap_or_default();
-    let provider_type = ProviderType::parse(&provider_str).unwrap_or(ProviderType::Local);
+    let provider_str: String = r
+        .try_get("provider_type")
+        .map_err(|e| RotationStoreError::Corrupt(e.to_string()))?;
+    let provider_type = ProviderType::parse(&provider_str).ok_or_else(|| {
+        RotationStoreError::Corrupt(format!("unknown rotation provider type {provider_str}"))
+    })?;
 
     let org_uuid: Uuid = r
         .try_get("organization_id")
         .map_err(|e| RotationStoreError::Corrupt(e.to_string()))?;
 
-    let created_at: DateTime<Utc> = r.try_get("created_at").unwrap_or_else(|_| Utc::now());
-    let updated_at: DateTime<Utc> = r.try_get("updated_at").unwrap_or(created_at);
+    let created_at: DateTime<Utc> = r
+        .try_get("created_at")
+        .map_err(|e| RotationStoreError::Corrupt(e.to_string()))?;
+    let updated_at: DateTime<Utc> = r
+        .try_get("updated_at")
+        .map_err(|e| RotationStoreError::Corrupt(e.to_string()))?;
 
     Ok(RotationRecord {
         id: r
@@ -394,10 +402,18 @@ fn decode_row(r: &sqlx::postgres::PgRow) -> Result<RotationRecord, RotationStore
         state,
         created_at,
         updated_at,
-        activated_at: r.try_get("activated_at").unwrap_or(None),
-        revoked_at: r.try_get("revoked_at").unwrap_or(None),
-        failure_reason: r.try_get("failure_reason").unwrap_or_default(),
-        force_revoked: r.try_get("force_revoked").unwrap_or(false),
+        activated_at: r
+            .try_get("activated_at")
+            .map_err(|e| RotationStoreError::Corrupt(e.to_string()))?,
+        revoked_at: r
+            .try_get("revoked_at")
+            .map_err(|e| RotationStoreError::Corrupt(e.to_string()))?,
+        failure_reason: r
+            .try_get("failure_reason")
+            .map_err(|e| RotationStoreError::Corrupt(e.to_string()))?,
+        force_revoked: r
+            .try_get("force_revoked")
+            .map_err(|e| RotationStoreError::Corrupt(e.to_string()))?,
     })
 }
 

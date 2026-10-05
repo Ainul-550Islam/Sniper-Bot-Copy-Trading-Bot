@@ -411,8 +411,17 @@ fn redact_secrets_recursive(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Object(map) => {
             const SENSITIVE_KEYS: &[&str] = &[
-                "secret", "key", "password", "token", "credential", "private", "api_key",
-                "webhook_secret", "access_key", "secret_key", "signing_key",
+                "secret",
+                "key",
+                "password",
+                "token",
+                "credential",
+                "private",
+                "api_key",
+                "webhook_secret",
+                "access_key",
+                "secret_key",
+                "signing_key",
             ];
             for (k, val) in map.iter_mut() {
                 let lower = k.to_ascii_lowercase();

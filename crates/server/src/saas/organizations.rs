@@ -74,12 +74,26 @@ pub async fn create_organization(
     // Creating an organization needs an authenticated USER, but not an
     // existing tenant — so this endpoint authenticates the session directly
     // rather than through the tenant-scoped middleware.
-    let Some(user) = super::session_user(&state, &headers).await else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "deny_unauthenticated" })),
-        )
-            .into_response();
+    let user = match super::session_user(&state, &headers).await {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "deny_unauthenticated" })),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "organization creation identity lookup failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "identity_storage_unavailable",
+                    "reason": "identity records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
     };
 
     let plan = body
@@ -171,8 +185,8 @@ async fn run_provisioning(
             ProvisioningStep::OrganizationCreated => {
                 // Idempotent: reuse the row if a previous attempt created it.
                 let org = match state.saas.organization_by_slug(slug).await {
-                    Some(o) => o,
-                    None => {
+                    Ok(Some(o)) => o,
+                    Ok(None) => {
                         let o = Organization::new(
                             OrganizationId::new(),
                             slug,
@@ -187,38 +201,99 @@ async fn run_provisioning(
                         }
                         o
                     }
+                    Err(error) => {
+                        tracing::error!(error = %error, slug, "provisioning organization lookup failed");
+                        job.record_failure("organization lookup unavailable", now);
+                        let _ = state.saas.update_job(job).await;
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "organization lookup unavailable",
+                        )
+                            .into_response());
+                    }
                 };
                 job.organization_id = Some(org.id);
                 job.complete_step(step, now);
             }
             ProvisioningStep::MembershipCreated => {
                 let org_id = job.organization_id.expect("set by the previous step");
-                if state.saas.membership(org_id, user_id).await.is_none()
-                    && super::attach_owner(
-                        &state.saas,
-                        org_id,
-                        &state.saas.user(user_id).await.ok_or_else(|| {
-                            (
+                let membership = match state.saas.membership(org_id, user_id).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!(error = %error, organization = %org_id, user = %user_id, "provisioning membership lookup failed");
+                        job.record_failure("membership lookup unavailable", now);
+                        let _ = state.saas.update_job(job).await;
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "membership lookup unavailable",
+                        )
+                            .into_response());
+                    }
+                };
+                if membership.is_none() {
+                    let user = match state.saas.user(user_id).await {
+                        Ok(Some(value)) => value,
+                        Ok(None) => {
+                            job.record_failure("provisioning user vanished", now);
+                            let _ = state.saas.update_job(job).await;
+                            return Err((
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 "provisioning user vanished",
                             )
-                                .into_response()
-                        })?,
-                    )
-                    .await
-                    .is_none()
-                {
-                    job.record_failure("could not create owner membership", now);
-                    let _ = state.saas.update_job(job).await;
-                    return Err(
-                        (StatusCode::CONFLICT, "could not create owner membership").into_response()
-                    );
+                                .into_response());
+                        }
+                        Err(error) => {
+                            tracing::error!(error = %error, user = %user_id, "provisioning user lookup failed");
+                            job.record_failure("user lookup unavailable", now);
+                            let _ = state.saas.update_job(job).await;
+                            return Err((
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "user lookup unavailable",
+                            )
+                                .into_response());
+                        }
+                    };
+                    match super::attach_owner(&state.saas, org_id, &user).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            job.record_failure("could not create owner membership", now);
+                            let _ = state.saas.update_job(job).await;
+                            return Err((
+                                StatusCode::CONFLICT,
+                                "could not create owner membership",
+                            )
+                                .into_response());
+                        }
+                        Err(error) => {
+                            tracing::error!(error = %error, organization = %org_id, user = %user.id, "owner membership persistence failed");
+                            job.record_failure("owner membership storage unavailable", now);
+                            let _ = state.saas.update_job(job).await;
+                            return Err((
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "owner membership storage unavailable",
+                            )
+                                .into_response());
+                        }
+                    }
                 }
                 job.complete_step(step, now);
             }
             ProvisioningStep::PlanAssigned => {
                 let org_id = job.organization_id.expect("set by an earlier step");
-                if state.saas.subscription_of(org_id).await.is_none() {
+                let subscription = match state.saas.subscription_of(org_id).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!(error = %error, organization = %org_id, "provisioning subscription lookup failed");
+                        job.record_failure("subscription lookup unavailable", now);
+                        let _ = state.saas.update_job(job).await;
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "subscription lookup unavailable",
+                        )
+                            .into_response());
+                    }
+                };
+                if subscription.is_none() {
                     if let Err(e) = state.saas.assign_plan(org_id, plan, now).await {
                         job.record_failure(e.to_string(), now);
                         let _ = state.saas.update_job(job).await;
@@ -252,11 +327,20 @@ async fn run_provisioning(
         )
             .into_response()
     })?;
-    state
-        .saas
-        .organization(org_id)
-        .await
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "organization vanished").into_response())
+    match state.saas.organization(org_id).await {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => {
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "organization vanished").into_response())
+        }
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org_id, "provisioned organization could not be loaded");
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "organization lookup unavailable",
+            )
+                .into_response())
+        }
+    }
 }
 
 /// `GET /api/saas/organizations/:id` — read one tenant. The id must be the
@@ -284,12 +368,46 @@ pub async fn get_organization(
         ctx.organization.clone()
     } else {
         match state.saas.organization(requested).await {
-            Some(o) => o,
-            None => return (StatusCode::NOT_FOUND, "no such organization").into_response(),
+            Ok(Some(o)) => o,
+            Ok(None) => return (StatusCode::NOT_FOUND, "no such organization").into_response(),
+            Err(error) => {
+                tracing::error!(error = %error, organization = %requested, "organization could not be loaded");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "organization lookup unavailable",
+                )
+                    .into_response();
+            }
         }
     };
-    let subscription = state.saas.subscription_of(org.id).await;
-    let entitlements = state.saas.entitlements_of(org.id, Utc::now()).await;
+    let subscription = match state.saas.subscription_of(org.id).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org.id, "organization subscription could not be loaded");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "billing_storage_unavailable",
+                    "reason": "authoritative subscription could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
+    let entitlements = match state.saas.entitlements_of(org.id, Utc::now()).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org.id, "organization entitlements could not be loaded");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "billing_storage_unavailable",
+                    "reason": "authoritative entitlements could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
     Json(json!({
         "organization": org,
         "subscription": subscription,
@@ -335,8 +453,16 @@ pub async fn update_organization(
         return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
     }
     let mut org = match state.saas.organization(requested).await {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "no such organization").into_response(),
+        Ok(Some(o)) => o,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such organization").into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, organization = %requested, "organization could not be loaded for update");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "organization lookup unavailable",
+            )
+                .into_response();
+        }
     };
     org.name = body.name.trim().to_string();
     org.updated_at = Utc::now();
@@ -390,10 +516,36 @@ pub async fn list_members(
         req
     };
 
-    let members = state.saas.members(requested).await;
+    let members = match state.saas.members(requested).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %requested, "organization members could not be loaded");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "membership_storage_unavailable",
+                    "reason": "authoritative membership records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
     let mut out = Vec::new();
     for m in members {
-        let profile = state.saas.user(m.user_id).await.map(|u| u.profile());
+        let profile = match state.saas.user(m.user_id).await {
+            Ok(value) => value.map(|u| u.profile()),
+            Err(error) => {
+                tracing::error!(error = %error, user = %m.user_id, "organization member profile could not be loaded");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "user_storage_unavailable",
+                        "reason": "authoritative member profiles could not be loaded",
+                    })),
+                )
+                    .into_response();
+            }
+        };
         out.push(json!({
             "membership_id": m.id,
             "user": profile,
@@ -451,8 +603,16 @@ pub async fn suspend_organization(
         .await;
     }
     let mut org = match state.saas.organization(requested).await {
-        Some(o) => o,
-        None => return (StatusCode::NOT_FOUND, "no such organization").into_response(),
+        Ok(Some(o)) => o,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such organization").into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, organization = %requested, "organization could not be loaded for suspension");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "organization lookup unavailable",
+            )
+                .into_response();
+        }
     };
     let now = Utc::now();
     if body.suspended {

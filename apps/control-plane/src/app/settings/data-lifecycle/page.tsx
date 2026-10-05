@@ -18,12 +18,8 @@ export default function DataLifecyclePage() {
   const loadData = useCallback(async () => {
     setError(null);
     try {
-      const me = await request<{ organizations?: Array<{ organization_id: string }> }>("/api/saas/users/me").catch(() => null);
-      let targetOrg = me?.organizations?.[0]?.organization_id ?? null;
-      if (!targetOrg) {
-        const b = await commercial.billingStatus().catch(() => null);
-        targetOrg = b?.organization_id ?? null;
-      }
+      const me = await request<{ organizations?: Array<{ organization_id: string }> }>("/api/saas/users/me");
+      const targetOrg = me.organizations?.[0]?.organization_id ?? null;
       if (!targetOrg) throw new Error("No organization found for lifecycle status");
       const s = await commercial.lifecycleStatus(targetOrg);
       setStatus(s);
@@ -114,7 +110,7 @@ export default function DataLifecyclePage() {
 
             {/* Deterministic Data Exports */}
             <section className="card">
-              <h2>Deterministic Data Exports (GDPR &amp; SOC2 Audit)</h2>
+              <h2>Deterministic Data Exports and Audit Records</h2>
               <p className="muted small">
                 Download cryptographically verifiable exports of your organization&apos;s complete ledger, orders, and audit trail.
               </p>

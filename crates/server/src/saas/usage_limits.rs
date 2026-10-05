@@ -28,6 +28,7 @@ use serde_json::json;
 use bot_core::authorization::AccessRequest;
 use bot_core::billing::usage::UsageMetric;
 use bot_core::billing::usage_policy::{evaluate_all, UsageThresholds};
+use bot_core::error::BotResult;
 use bot_core::membership::Permission;
 use bot_core::tenant::OrganizationId;
 
@@ -51,9 +52,20 @@ async fn my_limits(State(state): State<ApiState>, headers: HeaderMap) -> Respons
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
     };
-    render_from_store(ctx.organization.id, &state.saas)
-        .await
-        .into_response()
+    match render_from_store(ctx.organization.id, &state.saas).await {
+        Ok(value) => value.into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, organization = %ctx.organization.id, "usage limits could not be loaded");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "usage_storage_unavailable",
+                    "reason": "authoritative usage records could not be loaded",
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn by_id(
@@ -90,7 +102,20 @@ async fn by_id(
         )
             .into_response();
     }
-    render_from_store(org, &state.saas).await.into_response()
+    match render_from_store(org, &state.saas).await {
+        Ok(value) => value.into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org, "usage limits could not be loaded");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "usage_storage_unavailable",
+                    "reason": "authoritative usage records could not be loaded",
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// The feature keys this surface evaluates, each mapped to the usage
@@ -115,14 +140,14 @@ fn measured_features() -> Vec<(&'static str, UsageMetric)> {
 pub(crate) async fn render_from_store(
     org: OrganizationId,
     store: &crate::saas::SaasStore,
-) -> Json<serde_json::Value> {
+) -> BotResult<Json<serde_json::Value>> {
     let now = Utc::now();
     let period = now.format("%Y-%m").to_string();
 
     // REAL plan: the organization's active subscription, if any.
-    let subscription = store.subscription_of(org).await;
+    let subscription = store.subscription_of(org).await?;
     let plan = match &subscription {
-        Some(sub) => store.plan(sub.plan_id).await,
+        Some(sub) => store.plan(sub.plan_id).await?,
         None => None,
     };
 
@@ -130,7 +155,7 @@ pub(crate) async fn render_from_store(
     // awaited sequentially — a control-plane read, not a hot path.
     let mut resolved: Vec<(String, f64)> = Vec::with_capacity(measured_features().len());
     for (feature, metric) in measured_features() {
-        let total = store.usage_total(org, metric, &period).await;
+        let total = store.usage_total(org, metric, &period).await?;
         resolved.push((feature.to_string(), total));
     }
 
@@ -150,14 +175,14 @@ pub(crate) async fn render_from_store(
                     })
                 })
                 .collect();
-            Json(json!({
+            Ok(Json(json!({
                 "organization_id": org.to_string(),
                 "period": period,
                 "plan_code": plan.code.as_str(),
                 "plan_source": "subscription",
                 "limits": items,
                 "as_of": now.to_rfc3339(),
-            }))
+            })))
         }
         // No subscription: the honest answer. The authoritative billing
         // view's invariant is "no subscription → no plan surfaced", and
@@ -178,7 +203,7 @@ pub(crate) async fn render_from_store(
                     })
                 })
                 .collect();
-            Json(json!({
+            Ok(Json(json!({
                 "organization_id": org.to_string(),
                 "period": period,
                 "plan_code": "none",
@@ -186,7 +211,7 @@ pub(crate) async fn render_from_store(
                 "detail": "no active subscription — no plan limits apply; usage totals below are your recorded events",
                 "limits": usage_only,
                 "as_of": now.to_rfc3339(),
-            }))
+            })))
         }
     }
 }
@@ -356,7 +381,7 @@ mod tests {
         store: &crate::saas::SaasStore,
         org: OrganizationId,
     ) -> serde_json::Value {
-        let Json(value) = render_from_store(org, store).await;
+        let Json(value) = render_from_store(org, store).await.expect("usage limits");
         value
     }
 

@@ -17,7 +17,7 @@ export default function BacktestTable({ items, loading, onRefresh }: BacktestTab
     return (
       <div className="card" style={{ textAlign: "center", padding: "2rem" }}>
         <p style={{ color: "var(--muted)", margin: 0 }}>
-          No backtest simulations executed yet. Run a historical simulation to analyze Sharpe ratio and max drawdown.
+          No backtest runs have been recorded for this tenant.
         </p>
       </div>
     );
@@ -48,8 +48,9 @@ export default function BacktestTable({ items, loading, onRefresh }: BacktestTab
           </thead>
           <tbody>
             {items.map((item) => {
-              const pnl = item.net_pnl_usd ?? 0;
-              const isProfit = pnl >= 0;
+              const pnl = item.net_pnl_usd;
+              const isUnavailable = pnl === null;
+              const isProfit = !isUnavailable && pnl >= 0;
               return (
                 <tr key={item.id} style={{ borderTop: "1px solid var(--line)" }}>
                   <td style={{ padding: "0.75rem 1rem" }}>
@@ -63,33 +64,27 @@ export default function BacktestTable({ items, loading, onRefresh }: BacktestTab
                   <td style={{ padding: "0.75rem 1rem", fontSize: "0.85rem" }}>
                     <div>${item.initial_balance_usd.toLocaleString()}</div>
                     <div style={{ color: "var(--muted)" }}>
-                      ${(item.final_balance_usd ?? item.initial_balance_usd).toLocaleString()}
+                      {item.final_balance_usd === null ? "Unavailable" : `$${item.final_balance_usd.toLocaleString()}`}
                     </div>
                   </td>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    <span style={{ color: isProfit ? "var(--ok)" : "var(--bad)", fontWeight: 600 }}>
-                      {isProfit ? "+" : ""}${pnl.toFixed(2)} ({item.net_roi_pct ? `${item.net_roi_pct}%` : "0%"})
+                    <span style={{ color: isUnavailable ? "var(--muted)" : isProfit ? "var(--ok)" : "var(--bad)", fontWeight: 600 }}>
+                      {isUnavailable ? "Unavailable" : `${isProfit ? "+" : ""}$${pnl.toFixed(2)}`}
+                      {item.net_roi_pct === null ? " (ROI unavailable)" : ` (${item.net_roi_pct}%)`}
                     </span>
                   </td>
                   <td style={{ padding: "0.75rem 1rem", color: "var(--bad)" }}>
-                    {item.max_drawdown_pct ? `${item.max_drawdown_pct}%` : "0.0%"}
+                    {item.max_drawdown_pct === null ? "Unavailable" : `${item.max_drawdown_pct}%`}
                   </td>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    {item.win_rate_pct ? `${item.win_rate_pct}%` : "—"} ({item.total_trades ?? 0} trades)
+                    {item.win_rate_pct === null ? "Unavailable" : `${item.win_rate_pct}%`}
+                    {item.total_trades === null ? " (trade count unavailable)" : ` (${item.total_trades} trades)`}
                   </td>
                   <td style={{ padding: "0.75rem 1rem", fontWeight: 600 }}>
-                    {item.sharpe_ratio ?? "—"}
+                    {item.sharpe_ratio ?? "Unavailable"}
                   </td>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    <span
-                      className={`badge ${
-                        item.status === "completed"
-                          ? "badge-ok"
-                          : item.status === "running"
-                          ? "badge-warn"
-                          : "badge-bad"
-                      }`}
-                    >
+                    <span className={`badge ${item.status === "completed" ? "badge-ok" : item.status === "running" || item.status === "queued" || item.status === "pending" ? "badge-warn" : "badge-bad"}`}>
                       {item.status.toUpperCase()}
                     </span>
                   </td>

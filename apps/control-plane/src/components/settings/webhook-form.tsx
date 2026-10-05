@@ -105,7 +105,7 @@ export default function WebhookForm({ webhooks, onRefresh }: WebhookFormProps) {
               required
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://api.acme-quant.com/webhooks/bot-events"
+              placeholder="https://your-domain.example/webhooks/bot-events"
               className="input"
               style={{ width: "100%" }}
             />

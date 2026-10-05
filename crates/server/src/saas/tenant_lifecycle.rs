@@ -128,13 +128,21 @@ async fn suspend(
             .into_response();
     }
     let mut org = match state.saas.organization(org_id).await {
-        Some(o) => o,
-        None => {
+        Ok(Some(o)) => o,
+        Ok(None) => {
             return (
                 axum::http::StatusCode::NOT_FOUND,
                 Json(json!({"error":"not_found","reason":"organization not found"})),
             )
                 .into_response()
+        }
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org_id, "organization lookup failed during lifecycle operation");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"lifecycle_storage_unavailable","reason":"authoritative organization data could not be loaded"})),
+            )
+                .into_response();
         }
     };
     if org.status == OrganizationStatus::Closed {
@@ -233,13 +241,21 @@ async fn resume(
             .into_response();
     }
     let mut org = match state.saas.organization(org_id).await {
-        Some(o) => o,
-        None => {
+        Ok(Some(o)) => o,
+        Ok(None) => {
             return (
                 axum::http::StatusCode::NOT_FOUND,
                 Json(json!({"error":"not_found","reason":"organization not found"})),
             )
                 .into_response()
+        }
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org_id, "organization lookup failed during lifecycle operation");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"lifecycle_storage_unavailable","reason":"authoritative organization data could not be loaded"})),
+            )
+                .into_response();
         }
     };
     if org.status == OrganizationStatus::Closed {
@@ -328,13 +344,21 @@ async fn request_close(
     }
 
     let mut org = match state.saas.organization(org_id).await {
-        Some(o) => o,
-        None => {
+        Ok(Some(o)) => o,
+        Ok(None) => {
             return (
                 axum::http::StatusCode::NOT_FOUND,
                 Json(json!({"error":"not_found","reason":"organization not found"})),
             )
                 .into_response()
+        }
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org_id, "organization lookup failed during lifecycle operation");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"lifecycle_storage_unavailable","reason":"authoritative organization data could not be loaded"})),
+            )
+                .into_response();
         }
     };
 
@@ -462,13 +486,21 @@ async fn lifecycle_status(
             .into_response();
     }
     let org = match state.saas.organization(org_id).await {
-        Some(o) => o,
-        None => {
+        Ok(Some(o)) => o,
+        Ok(None) => {
             return (
                 axum::http::StatusCode::NOT_FOUND,
                 Json(json!({"error":"not_found","reason":"organization not found"})),
             )
                 .into_response()
+        }
+        Err(error) => {
+            tracing::error!(error = %error, organization = %org_id, "organization lookup failed during lifecycle operation");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"lifecycle_storage_unavailable","reason":"authoritative organization data could not be loaded"})),
+            )
+                .into_response();
         }
     };
     let job = active_job_for(org_id);

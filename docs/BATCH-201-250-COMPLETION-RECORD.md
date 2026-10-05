@@ -1,4 +1,5 @@
 # BATCH 201–250 — ACCOUNTING, AUTHORIZATION, BILLING, CUSTODY & DB FOUNDATIONS COMPLETION RECORD
+> Validation status: implementation inventory only. Rust compilation, PostgreSQL execution, external delivery, and funded-trading validation remain pending unless separately evidenced.
 
 **Audited & Verified Date:** 2026-10-04  
 **Status:** 100% COMPLETE & PRODUCTION VERIFIED  
@@ -43,12 +44,12 @@ Every module complies with:
 | **217** | `crates/core/src/billing/billing_state.rs` | Subscription billing state machine (Active, PastDue, Canceled) | ✅ Verified & Hardened |
 | **218** | `crates/core/src/billing/checkout.rs` | Checkout session creation & idempotency validation | ✅ Verified & Hardened |
 | **219** | `crates/core/src/billing/dunning.rs` | Automated dunning, grace periods & retry schedules | ✅ Verified & Hardened |
-| **220** | `crates/core/src/billing/entitlements.rs` | Plan feature entitlements & quota verification | ✅ Full Production |
-| **221** | `crates/core/src/billing/events.rs` | Typed domain events for subscription & invoice changes | ✅ Full Production |
+| **220** | `crates/core/src/billing/entitlements.rs` | Plan feature entitlements & quota verification | IMPLEMENTED — VALIDATION PENDING |
+| **221** | `crates/core/src/billing/events.rs` | Typed domain events for subscription & invoice changes | IMPLEMENTED — VALIDATION PENDING |
 | **222** | `crates/core/src/billing/invoice.rs` | Invoice records, payment status & exact cents | ✅ Verified & Hardened |
-| **223** | `crates/core/src/billing/lifecycle.rs` | Valid subscription lifecycle state transitions | ✅ Full Production |
+| **223** | `crates/core/src/billing/lifecycle.rs` | Valid subscription lifecycle state transitions | IMPLEMENTED — VALIDATION PENDING |
 | **224** | `crates/core/src/billing/mod.rs` | Billing subsystem exports & store trait | ✅ Verified & Hardened |
-| **225** | `crates/core/src/billing/payment_intent.rs` | Payment intent domain models & settlement | ✅ Full Production |
+| **225** | `crates/core/src/billing/payment_intent.rs` | Payment intent domain models & settlement | IMPLEMENTED — VALIDATION PENDING |
 | **226** | `crates/core/src/billing/plan.rs` | Plan catalogue (Starter, Pro, Enterprise) | ✅ Verified & Hardened |
 | **227** | `crates/core/src/billing/provider_config.rs` | Provider configuration & secret-safe runtime loading | ✅ Verified & Hardened |
 | **228** | `crates/core/src/billing/provider_events.rs` | Stripe & Paddle webhook payload normalization | ✅ Verified & Hardened |

@@ -12,12 +12,12 @@ import AppShell from "@/components/AppShell";
 import { createStrategy } from "@/lib/api/strategy-api";
 
 export default function CopyConfigPage() {
-  const [name, setName] = useState("Whale Alpha Mirror");
-  const [leadWallets, setLeadWallets] = useState("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM");
-  const [copyRatioPct, setCopyRatioPct] = useState(50);
-  const [maxTradeSol, setMaxTradeSol] = useState(2.0);
-  const [followSells, setFollowSells] = useState(true);
-  const [minLeadBalanceSol, setMinLeadBalanceSol] = useState(10.0);
+  const [name, setName] = useState("");
+  const [leadWallets, setLeadWallets] = useState("");
+  const [copyRatioPct, setCopyRatioPct] = useState<number | "">("");
+  const [maxTradeSol, setMaxTradeSol] = useState<number | "">("");
+  const [followSells, setFollowSells] = useState(false);
+  const [minLeadBalanceSol, setMinLeadBalanceSol] = useState<number | "">("");
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<{ message: string; ok: boolean } | null>(null);
 
@@ -44,7 +44,7 @@ export default function CopyConfigPage() {
           min_lead_balance_sol: minLeadBalanceSol,
         },
       });
-      setStatus({ message: "Copy trading configuration saved and active!", ok: true });
+      setStatus({ message: "Copy trading strategy saved to the authenticated tenant.", ok: true });
     } catch (err: unknown) {
       setStatus({ message: err instanceof Error ? err.message : "Failed to save configuration", ok: false });
     } finally {

@@ -53,7 +53,8 @@ impl<'a> StrategyClient<'a> {
             .get("items")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([]));
-        serde_json::from_value(items).map_err(|e| crate::error::BotError::invalid_input(e.to_string()))
+        serde_json::from_value(items)
+            .map_err(|e| crate::error::BotError::invalid_input(e.to_string()))
     }
 
     /// Fetch a single strategy by ID.
@@ -81,6 +82,9 @@ impl<'a> StrategyClient<'a> {
             .client
             .delete(&format!("/api/tenant/strategies/{}", id))
             .await?;
-        Ok(res.get("archived").and_then(|v| v.as_bool()).unwrap_or(true))
+        Ok(res
+            .get("archived")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true))
     }
 }

@@ -26,6 +26,7 @@ use bot_core::billing::plan::Plan;
 use bot_core::billing::subscription::{Subscription, SubscriptionStatus};
 use bot_core::billing::usage::UsageMetric;
 use bot_core::billing::EntitlementSet;
+use bot_core::error::BotResult;
 use bot_core::tenant::{Organization, OrganizationId, OrganizationStatus};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -76,28 +77,33 @@ pub struct UsageSummary {
 }
 
 impl UsageSummary {
-    async fn load(store: &SaasStore, organization_id: OrganizationId, period: &str) -> Self {
+    async fn load(
+        store: &SaasStore,
+        organization_id: OrganizationId,
+        period: &str,
+    ) -> BotResult<Self> {
         // Sequential awaits over six metrics; the store is the source of
-        // truth and this endpoint is control-plane, not hot-path.
+        // truth and this endpoint is control-plane, not hot-path. A failed
+        // query is propagated instead of becoming a fabricated zero.
         let orders_submitted = store
             .usage_total(organization_id, UsageMetric::OrdersSubmitted, period)
-            .await;
+            .await?;
         let fills_booked = store
             .usage_total(organization_id, UsageMetric::FillsBooked, period)
-            .await;
+            .await?;
         let api_requests = store
             .usage_total(organization_id, UsageMetric::ApiRequests, period)
-            .await;
+            .await?;
         let module_runtime_seconds = store
             .usage_total(organization_id, UsageMetric::ModuleRuntimeSeconds, period)
-            .await;
+            .await?;
         let export_rows = store
             .usage_total(organization_id, UsageMetric::ExportRows, period)
-            .await;
+            .await?;
         let active_members = store
             .usage_total(organization_id, UsageMetric::ActiveMembers, period)
-            .await;
-        Self {
+            .await?;
+        Ok(Self {
             period: period.to_string(),
             orders_submitted,
             fills_booked,
@@ -105,7 +111,7 @@ impl UsageSummary {
             module_runtime_seconds,
             export_rows,
             active_members,
-        }
+        })
     }
 }
 
@@ -128,18 +134,18 @@ impl BillingView {
         store: &SaasStore,
         organization_id: OrganizationId,
         now: DateTime<Utc>,
-    ) -> Self {
-        let organization = store.organization(organization_id).await;
-        let subscription = store.subscription_of(organization_id).await;
+    ) -> BotResult<Self> {
+        let organization = store.organization(organization_id).await?;
+        let subscription = store.subscription_of(organization_id).await?;
         let plan = match &subscription {
-            Some(sub) => store.plan(sub.plan_id).await,
+            Some(sub) => store.plan(sub.plan_id).await?,
             None => None,
         };
-        let entitlements = store.entitlements_of(organization_id, now).await;
+        let entitlements = store.entitlements_of(organization_id, now).await?;
         let usage =
-            UsageSummary::load(store, organization_id, &now.format("%Y-%m").to_string()).await;
+            UsageSummary::load(store, organization_id, &now.format("%Y-%m").to_string()).await?;
         let dunning = derive_dunning(&organization, &subscription, now);
-        Self {
+        Ok(Self {
             organization_id,
             organization,
             subscription,
@@ -148,7 +154,7 @@ impl BillingView {
             usage,
             dunning,
             as_of: now,
-        }
+        })
     }
 
     /// Plan code, or `"none"` when there is no subscription on record.
@@ -349,7 +355,9 @@ mod tests {
     #[tokio::test]
     async fn no_subscription_is_explicit_none_not_a_default_tier() {
         let (store, org_id) = store_with_org(OrganizationStatus::Active).await;
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(view.plan_code(), "none");
         assert_eq!(view.subscription_status(), "none");
         assert_eq!(view.billing_provider(), "none");
@@ -369,7 +377,9 @@ mod tests {
             .assign_plan(org_id, PlanCode::Pro, Utc::now())
             .await
             .expect("plan assigned");
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(view.plan_code(), "pro");
         assert_eq!(view.plan_name(), "Pro");
         assert_eq!(view.subscription_status(), "active");
@@ -388,7 +398,9 @@ mod tests {
     async fn usage_totals_come_from_recorded_events_only() {
         let (store, org_id) = store_with_org(OrganizationStatus::Active).await;
         // Nothing recorded: a real zero.
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(view.usage.api_requests, 0.0);
         assert_eq!(view.usage.orders_submitted, 0.0);
 
@@ -414,7 +426,9 @@ mod tests {
         let dup = usage_event(org_id, UsageMetric::ApiRequests, 7.0, "api-1");
         assert!(!store.record_usage(&dup).await.expect("recorded"));
 
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(view.usage.api_requests, 12.0);
         assert_eq!(view.usage.orders_submitted, 3.0);
         let json = view.to_status_json();
@@ -431,7 +445,9 @@ mod tests {
             .record_usage(&usage_event(org_b, UsageMetric::ApiRequests, 99.0, "b-1"))
             .await
             .expect("recorded");
-        let view = BillingView::load(&store, org_a, Utc::now()).await;
+        let view = BillingView::load(&store, org_a, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(
             view.usage.api_requests, 0.0,
             "org A sees only its own usage"
@@ -445,7 +461,9 @@ mod tests {
             .assign_plan(org_id, PlanCode::Starter, Utc::now())
             .await
             .expect("plan");
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(view.dunning, DunningState::BillingSuspended);
         assert_eq!(view.suspension_reason(), Some("organization_suspended"));
         let consistency = view.consistency();
@@ -465,11 +483,17 @@ mod tests {
             .assign_plan(org_id, PlanCode::Pro, Utc::now())
             .await
             .expect("plan");
-        let mut sub = store.subscription_of(org_id).await.expect("sub");
+        let mut sub = store
+            .subscription_of(org_id)
+            .await
+            .expect("subscription lookup")
+            .expect("sub");
         sub.status = SubscriptionStatus::PastDue;
         sub.current_period_end = Some(Utc::now() + chrono::Duration::days(3));
         store.update_subscription(&sub).await.expect("updated");
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(view.dunning, DunningState::GracePeriod);
         assert!(view.grace_until().is_some());
         assert_eq!(view.payment_state(), Some("failed"));
@@ -485,11 +509,17 @@ mod tests {
             .assign_plan(org_id, PlanCode::Pro, Utc::now())
             .await
             .expect("plan");
-        let mut sub = store.subscription_of(org_id).await.expect("sub");
+        let mut sub = store
+            .subscription_of(org_id)
+            .await
+            .expect("subscription lookup")
+            .expect("sub");
         sub.status = SubscriptionStatus::PastDue;
         sub.current_period_end = Some(Utc::now() - chrono::Duration::hours(1));
         store.update_subscription(&sub).await.expect("updated");
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         assert_eq!(view.dunning, DunningState::PaymentFailed);
         assert!(view.grace_until().is_none());
     }
@@ -497,7 +527,9 @@ mod tests {
     #[tokio::test]
     async fn plan_without_subscription_row_is_reported_not_invented() {
         let (store, org_id) = store_with_org(OrganizationStatus::Active).await;
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         // No subscription: even if a plan somehow existed in the catalogue
         // it must not be surfaced for this tenant.
         assert_eq!(view.plan_code(), "none");
@@ -511,7 +543,9 @@ mod tests {
             .assign_plan(org_id, PlanCode::Business, Utc::now())
             .await
             .expect("plan");
-        let view = BillingView::load(&store, org_id, Utc::now()).await;
+        let view = BillingView::load(&store, org_id, Utc::now())
+            .await
+            .expect("billing view");
         let s = view.to_status_json().to_string().to_ascii_lowercase();
         for banned in ["secret", "private", "sk-", "password", "api_token"] {
             assert!(!s.contains(banned), "leaked: {banned}");

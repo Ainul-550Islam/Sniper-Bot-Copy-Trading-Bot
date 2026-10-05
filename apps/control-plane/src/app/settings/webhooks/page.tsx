@@ -1,16 +1,18 @@
 "use client";
 
 /**
- * Outbound Webhooks Management Console (SECOND.md §64).
+ * Outbound webhook management.
  *
- * Register, test, and monitor secure webhook endpoints for instant trade notifications,
- * risk limit breaches, and custody key lifecycle events.
+ * The page renders only the server's tenant-scoped records. It never replaces
+ * an unavailable API with a sample endpoint, because doing so can make an
+ * operator believe that notifications are configured when they are not.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 import WebhookForm from "@/components/settings/webhook-form";
 import { WebhookEndpoint, listWebhooks } from "@/lib/api/webhook-api";
+import { toDisplayError } from "@/lib/api";
 
 export default function WebhooksPage() {
   const [webhooks, setWebhooks] = useState<WebhookEndpoint[]>([]);
@@ -23,19 +25,9 @@ export default function WebhooksPage() {
     try {
       const data = await listWebhooks();
       setWebhooks(data);
-    } catch {
-      // Sample mock webhook for demo view
-      setWebhooks([
-        {
-          id: "whk-01",
-          organization_id: "org-01",
-          url: "https://api.acme-quant.com/webhooks/bot-events",
-          description: "Production Risk Alerting Pipeline",
-          events: ["trade.executed", "risk.limit_breached", "circuit_breaker.tripped"],
-          is_active: true,
-          created_at: new Date(Date.now() - 10 * 86400000).toISOString(),
-        },
-      ]);
+    } catch (err: unknown) {
+      setWebhooks([]);
+      setError(toDisplayError(err));
     } finally {
       setLoading(false);
     }
@@ -50,13 +42,16 @@ export default function WebhooksPage() {
       <div style={{ marginBottom: "1.5rem" }}>
         <h1 style={{ margin: 0 }}>Outbound Webhooks &amp; Event Relayers</h1>
         <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-          Subscribe external systems to real-time execution events, risk alerts, and lifecycle status changes.
+          Subscribe external systems to execution events, risk alerts, and lifecycle status changes.
         </p>
       </div>
 
       {error && (
         <div className="card" style={{ color: "var(--bad)", background: "var(--bad-glow)", marginBottom: "1.5rem" }}>
-          {error}
+          <div>{error}</div>
+          <button type="button" onClick={() => void loadWebhooks()} className="btn btn-secondary" style={{ marginTop: "0.75rem" }}>
+            Retry
+          </button>
         </div>
       )}
 

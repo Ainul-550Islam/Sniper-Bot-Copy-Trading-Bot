@@ -1,43 +1,22 @@
 //! Tenant copy-trading handlers (PROMPT 3/10 #64).
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 use bot_core::membership::Permission;
 use bot_core::models::BotModule;
-use bot_core::tenant::OrganizationId;
+
+use super::config_store::{read_module, write_module};
 
 use super::authorization_chain::{guard, guard_manage, TradingModuleFamily};
 use super::module_controls::{apply_control, feature_key_for, status_payload, ControlAction};
 use super::orders::{plane_error, unavailable};
 use crate::api::ApiState;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CopyConfigPayload {
-    pub organization_id: String,
-    pub max_exposure_usd: f64,
-    pub allocation_per_trade_sol: f64,
-    pub max_slippage_bps: u32,
-    pub mirror_buys: bool,
-    pub mirror_sells: bool,
-    pub stale_event_timeout_seconds: u32,
-    pub allowed_tokens: Vec<String>,
-    pub blocked_tokens: Vec<String>,
-    pub dry_run: bool,
-    pub copy_ratio_pct: f64,
-    pub updated_at: String,
-}
-
-static COPY_CONFIG_STORE: LazyLock<Arc<Mutex<HashMap<OrganizationId, CopyConfigPayload>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 /// `GET /api/tenant/copy/leaders`
 pub async fn leaders(
@@ -204,6 +183,76 @@ pub async fn controls(
     apply_control(&state, &auth, BotModule::Copy, action).await
 }
 
+fn validate_config(body: Value) -> Result<Map<String, Value>, Response> {
+    let Some(object) = body.as_object() else {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config", "detail": "configuration body must be a JSON object" }))).into_response());
+    };
+    const ALLOWED: &[&str] = &[
+        "max_exposure_usd",
+        "allocation_per_trade_sol",
+        "max_slippage_bps",
+        "mirror_buys",
+        "mirror_sells",
+        "stale_event_timeout_seconds",
+        "allowed_tokens",
+        "blocked_tokens",
+        "dry_run",
+        "copy_ratio_pct",
+    ];
+    if let Some(unknown) = object.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "unknown_config_field", "detail": format!("unsupported copy configuration field: {unknown}") }))).into_response());
+    }
+    for key in [
+        "max_exposure_usd",
+        "allocation_per_trade_sol",
+        "copy_ratio_pct",
+    ] {
+        if let Some(value) = object.get(key) {
+            let Some(number) = value.as_f64() else {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} must be a number") }))).into_response());
+            };
+            if !number.is_finite()
+                || number < 0.0
+                || number > 1_000_000_000.0
+                || (key == "copy_ratio_pct" && number > 1_000.0)
+            {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} is outside its allowed range") }))).into_response());
+            }
+        }
+    }
+    if let Some(value) = object.get("max_slippage_bps") {
+        if value.as_u64().is_none_or(|number| number > 10_000) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": "max_slippage_bps must be an integer between 0 and 10000" }))).into_response());
+        }
+    }
+    if let Some(value) = object.get("stale_event_timeout_seconds") {
+        if value.as_u64().is_none_or(|number| number > 31_536_000) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": "stale_event_timeout_seconds is outside its allowed range" }))).into_response());
+        }
+    }
+    for key in ["mirror_buys", "mirror_sells", "dry_run"] {
+        if object.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} must be boolean") }))).into_response());
+        }
+    }
+    for key in ["allowed_tokens", "blocked_tokens"] {
+        if let Some(value) = object.get(key) {
+            let Some(items) = value.as_array() else {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} must be an array of strings") }))).into_response());
+            };
+            if items.len() > 10_000
+                || items.iter().any(|item| {
+                    item.as_str()
+                        .is_none_or(|text| text.is_empty() || text.len() > 128)
+                })
+            {
+                return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid_config_field", "detail": format!("{key} contains an invalid item") }))).into_response());
+            }
+        }
+    }
+    Ok(object.clone())
+}
+
 /// `GET /api/tenant/copy/config`
 pub async fn get_config(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     let auth = match guard(
@@ -214,35 +263,26 @@ pub async fn get_config(State(state): State<ApiState>, headers: HeaderMap) -> Re
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-
-    let org = auth.organization_id();
-    let mut lock = COPY_CONFIG_STORE.lock().unwrap();
-    let cfg = lock.entry(org).or_insert_with(|| CopyConfigPayload {
-        organization_id: org.to_string(),
-        max_exposure_usd: 1000.0,
-        allocation_per_trade_sol: 0.25,
-        max_slippage_bps: 100,
-        mirror_buys: true,
-        mirror_sells: true,
-        stale_event_timeout_seconds: 15,
-        allowed_tokens: vec![],
-        blocked_tokens: vec![],
-        dry_run: true,
-        copy_ratio_pct: 100.0,
-        updated_at: Utc::now().to_rfc3339(),
-    });
-
-    (StatusCode::OK, Json(cfg.clone())).into_response()
+    let Some(db) = state.db.as_deref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "trading_data_plane_unavailable", "detail": "copy configuration requires PostgreSQL" }))).into_response();
+    };
+    match read_module(db, auth.organization_id(), "copy").await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to read tenant copy configuration");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "config_storage_error", "detail": "copy configuration could not be loaded" }))).into_response()
+        }
+    }
 }
 
 /// `PUT /api/tenant/copy/config`
 pub async fn update_config(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<Value>,
 ) -> Response {
     let auth = match guard_manage(
         &state,
@@ -252,64 +292,29 @@ pub async fn update_config(
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-
-    let org = auth.organization_id();
-    let mut lock = COPY_CONFIG_STORE.lock().unwrap();
-    let current = lock.entry(org).or_insert_with(|| CopyConfigPayload {
-        organization_id: org.to_string(),
-        max_exposure_usd: 1000.0,
-        allocation_per_trade_sol: 0.25,
-        max_slippage_bps: 100,
-        mirror_buys: true,
-        mirror_sells: true,
-        stale_event_timeout_seconds: 15,
-        allowed_tokens: vec![],
-        blocked_tokens: vec![],
-        dry_run: true,
-        copy_ratio_pct: 100.0,
-        updated_at: Utc::now().to_rfc3339(),
-    });
-
-    if let Some(v) = body.get("max_exposure_usd").and_then(|x| x.as_f64()) {
-        current.max_exposure_usd = v;
+    let patch = match validate_config(body) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Some(db) = state.db.as_deref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "trading_data_plane_unavailable", "detail": "copy configuration requires PostgreSQL" }))).into_response();
+    };
+    match write_module(
+        db,
+        auth.organization_id(),
+        "copy",
+        &patch,
+        &auth.ctx.actor_label(),
+    )
+    .await
+    {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to write tenant copy configuration");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "config_storage_error", "detail": "copy configuration could not be saved" }))).into_response()
+        }
     }
-    if let Some(v) = body.get("allocation_per_trade_sol").and_then(|x| x.as_f64()) {
-        current.allocation_per_trade_sol = v;
-    }
-    if let Some(v) = body.get("max_slippage_bps").and_then(|x| x.as_u64()) {
-        current.max_slippage_bps = v as u32;
-    }
-    if let Some(v) = body.get("mirror_buys").and_then(|x| x.as_bool()) {
-        current.mirror_buys = v;
-    }
-    if let Some(v) = body.get("mirror_sells").and_then(|x| x.as_bool()) {
-        current.mirror_sells = v;
-    }
-    if let Some(v) = body.get("stale_event_timeout_seconds").and_then(|x| x.as_u64()) {
-        current.stale_event_timeout_seconds = v as u32;
-    }
-    if let Some(v) = body.get("dry_run").and_then(|x| x.as_bool()) {
-        current.dry_run = v;
-    }
-    if let Some(v) = body.get("copy_ratio_pct").and_then(|x| x.as_f64()) {
-        current.copy_ratio_pct = v;
-    }
-    if let Some(v) = body.get("allowed_tokens").and_then(|x| x.as_array()) {
-        current.allowed_tokens = v
-            .iter()
-            .filter_map(|s| s.as_str().map(|str_val| str_val.to_string()))
-            .collect();
-    }
-    if let Some(v) = body.get("blocked_tokens").and_then(|x| x.as_array()) {
-        current.blocked_tokens = v
-            .iter()
-            .filter_map(|s| s.as_str().map(|str_val| str_val.to_string()))
-            .collect();
-    }
-    current.updated_at = Utc::now().to_rfc3339();
-
-    (StatusCode::OK, Json(current.clone())).into_response()
 }

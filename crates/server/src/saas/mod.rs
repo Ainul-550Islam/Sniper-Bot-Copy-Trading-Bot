@@ -78,6 +78,7 @@ use axum::Router;
 use chrono::Utc;
 
 use bot_core::billing::PlanCode;
+use bot_core::error::BotResult;
 use bot_core::membership::{Membership, MembershipRole};
 use bot_core::session::hash_token;
 use bot_core::tenant::{Organization, OrganizationId, User};
@@ -172,7 +173,10 @@ pub fn routes() -> Router<ApiState> {
 /// Used by the two endpoints that exist BEFORE a tenant does: creating the
 /// first organization, and reading one's own profile right after signup.
 /// Everything else goes through [`middleware::authorize_request`].
-pub async fn session_user(state: &ApiState, headers: &axum::http::HeaderMap) -> Option<User> {
+pub async fn session_user(
+    state: &ApiState,
+    headers: &axum::http::HeaderMap,
+) -> BotResult<Option<User>> {
     let presented = headers
         .get(middleware::AUTH_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -188,13 +192,22 @@ pub async fn session_user(state: &ApiState, headers: &axum::http::HeaderMap) -> 
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.trim().to_string())
         })
-        .filter(|v| !v.is_empty())?;
+        .filter(|v| !v.is_empty());
+    let Some(presented) = presented else {
+        return Ok(None);
+    };
 
-    let record = state.saas.session_by_hash(&hash_token(&presented)).await?;
+    let Some(record) = state.saas.session_by_hash(&hash_token(&presented)).await? else {
+        return Ok(None);
+    };
     let now = Utc::now();
-    let validated = bot_core::session::validate(Some(&record), None, now).ok()?;
-    let user = state.saas.user(validated.user_id).await?;
-    user.can_authenticate().then_some(user)
+    let Ok(validated) = bot_core::session::validate(Some(&record), None, now) else {
+        return Ok(None);
+    };
+    let Some(user) = state.saas.user(validated.user_id).await? else {
+        return Ok(None);
+    };
+    Ok(user.can_authenticate().then_some(user))
 }
 
 /// Ensure the deployment organization exists.
@@ -212,28 +225,29 @@ pub async fn session_user(state: &ApiState, headers: &axum::http::HeaderMap) -> 
 /// fail every plan-entitlement check once the runtime entitlement gates
 /// land. An operator's later plan change is never clobbered: the plan is
 /// only assigned when the organization has no subscription at all.
-pub async fn ensure_deployment_organization(store: &SaasStore) -> Option<Organization> {
-    let org = if let Some(existing) = store.organization_by_slug(DEPLOYMENT_ORG_SLUG).await {
-        existing
-    } else {
-        let now = Utc::now();
-        let org = Organization::new(
-            OrganizationId::new(),
-            DEPLOYMENT_ORG_SLUG,
-            "Deployment",
-            None,
-            now,
-        );
-        store.create_organization(&org).await.ok()?;
-        org
+pub async fn ensure_deployment_organization(store: &SaasStore) -> BotResult<Option<Organization>> {
+    let org = match store.organization_by_slug(DEPLOYMENT_ORG_SLUG).await? {
+        Some(existing) => existing,
+        None => {
+            let now = Utc::now();
+            let org = Organization::new(
+                OrganizationId::new(),
+                DEPLOYMENT_ORG_SLUG,
+                "Deployment",
+                None,
+                now,
+            );
+            store.create_organization(&org).await?;
+            org
+        }
     };
     // Business tier: the deployment operator already had every module.
-    if store.subscription_of(org.id).await.is_none() {
-        let _ = store
+    if store.subscription_of(org.id).await?.is_none() {
+        store
             .assign_plan(org.id, PlanCode::Business, Utc::now())
-            .await;
+            .await?;
     }
-    Some(org)
+    Ok(Some(org))
 }
 
 /// Attach an owner membership for a bootstrap user (used by tests and by
@@ -242,9 +256,9 @@ pub async fn attach_owner(
     store: &SaasStore,
     organization_id: OrganizationId,
     user: &User,
-) -> Option<Membership> {
-    if let Some(existing) = store.membership(organization_id, user.id).await {
-        return Some(existing);
+) -> BotResult<Option<Membership>> {
+    if let Some(existing) = store.membership(organization_id, user.id).await? {
+        return Ok(Some(existing));
     }
     let m = Membership::new(
         organization_id,
@@ -253,6 +267,6 @@ pub async fn attach_owner(
         None,
         Utc::now(),
     );
-    store.create_membership(&m).await.ok()?;
-    Some(m)
+    store.create_membership(&m).await?;
+    Ok(Some(m))
 }

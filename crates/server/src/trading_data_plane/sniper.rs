@@ -1,43 +1,169 @@
-//! Tenant Sniper controls, configuration and status (§J, spec file 74).
+//! Tenant Sniper controls and durable configuration.
+//!
+//! Status and controls use the tenant authorization chain. Configuration is
+//! stored in the shared durable tenant configuration document; this handler
+//! never creates a process-local config or supplies trading defaults.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 use bot_core::membership::Permission;
 use bot_core::models::BotModule;
-use bot_core::tenant::OrganizationId;
 
 use super::authorization_chain::{guard, guard_manage, TradingModuleFamily};
+use super::config_store::{read_module, write_module};
 use super::module_controls::{apply_control, feature_key_for, status_payload, ControlAction};
 use crate::api::ApiState;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SniperConfigPayload {
-    pub organization_id: String,
-    pub min_liquidity_sol: f64,
-    pub max_slippage_bps: u32,
-    pub anti_mev_protection: bool,
-    pub priority_fee_lamports: u64,
-    pub entry_amount_sol: f64,
-    pub take_profit_pct: f64,
-    pub stop_loss_pct: f64,
-    pub trailing_stop_pct: f64,
-    pub auto_sell_timeout_seconds: u32,
-    pub dry_run: bool,
-    pub blacklisted_tokens: Vec<String>,
-    pub dex_routing: String,
-    pub updated_at: String,
+fn error_response(status: StatusCode, error: &'static str, detail: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({
+            "error": error,
+            "detail": detail.into(),
+        })),
+    )
+        .into_response()
 }
 
-static CONFIG_STORE: LazyLock<Arc<Mutex<HashMap<OrganizationId, SniperConfigPayload>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+fn validate_patch(body: Value) -> Result<Map<String, Value>, Response> {
+    let Some(object) = body.as_object() else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            "configuration body must be a JSON object",
+        ));
+    };
+    const ALLOWED: &[&str] = &[
+        "min_liquidity_sol",
+        "max_slippage_bps",
+        "anti_mev_protection",
+        "priority_fee_lamports",
+        "entry_amount_sol",
+        "take_profit_pct",
+        "stop_loss_pct",
+        "trailing_stop_pct",
+        "auto_sell_timeout_seconds",
+        "dry_run",
+        "blacklisted_tokens",
+        "dex_routing",
+    ];
+    if let Some(unknown) = object.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "unknown_config_field",
+            format!("unsupported sniper configuration field: {unknown}"),
+        ));
+    }
+
+    let finite_number = |key: &str, minimum: f64, maximum: f64| -> Result<(), Response> {
+        if let Some(value) = object.get(key) {
+            let Some(number) = value.as_f64() else {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_config_field",
+                    format!("{key} must be a number"),
+                ));
+            };
+            if !number.is_finite() || number < minimum || number > maximum {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_config_field",
+                    format!("{key} must be between {minimum} and {maximum}"),
+                ));
+            }
+        }
+        Ok(())
+    };
+    finite_number("min_liquidity_sol", 0.0, 10_000_000.0)?;
+    finite_number("entry_amount_sol", 0.0, 10_000_000.0)?;
+    finite_number("take_profit_pct", 0.0, 100_000.0)?;
+    finite_number("stop_loss_pct", 0.0, 100.0)?;
+    finite_number("trailing_stop_pct", 0.0, 100.0)?;
+
+    if let Some(value) = object.get("max_slippage_bps") {
+        if value.as_u64().is_none_or(|number| number > 10_000) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_config_field",
+                "max_slippage_bps must be an integer between 0 and 10000",
+            ));
+        }
+    }
+    if let Some(value) = object.get("priority_fee_lamports") {
+        if value.as_u64().is_none_or(|number| number > 10_000_000_000) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_config_field",
+                "priority_fee_lamports must be an integer between 0 and 10000000000",
+            ));
+        }
+    }
+    if let Some(value) = object.get("auto_sell_timeout_seconds") {
+        if value.as_u64().is_none_or(|number| number > 31_536_000) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_config_field",
+                "auto_sell_timeout_seconds must be an integer between 0 and 31536000",
+            ));
+        }
+    }
+    if let Some(value) = object.get("anti_mev_protection") {
+        if !value.is_boolean() {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_config_field",
+                "anti_mev_protection must be boolean",
+            ));
+        }
+    }
+    if let Some(value) = object.get("dry_run") {
+        if !value.is_boolean() {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_config_field",
+                "dry_run must be boolean",
+            ));
+        }
+    }
+    if let Some(value) = object.get("blacklisted_tokens") {
+        let Some(items) = value.as_array() else {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_config_field",
+                "blacklisted_tokens must be an array of strings",
+            ));
+        };
+        if items.len() > 10_000
+            || items.iter().any(|item| {
+                item.as_str()
+                    .is_none_or(|text| text.is_empty() || text.len() > 128)
+            })
+        {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_config_field",
+                "blacklisted_tokens contains an invalid item",
+            ));
+        }
+    }
+    if let Some(value) = object.get("dex_routing") {
+        if !matches!(
+            value.as_str(),
+            Some("auto" | "raydium_v4" | "pumpfun" | "pumpswap")
+        ) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_config_field",
+                "dex_routing is not supported",
+            ));
+        }
+    }
+    Ok(object.clone())
+}
 
 /// `GET /api/tenant/sniper/status`
 pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Response {
@@ -49,7 +175,7 @@ pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Respon
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
     (
@@ -71,10 +197,10 @@ pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Respon
 pub async fn controls(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<Value>,
 ) -> Response {
     let action = match ControlAction::parse(&body) {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
     let permission = match action {
@@ -82,7 +208,7 @@ pub async fn controls(
         ControlAction::Disable { .. } => Permission::BotStop,
     };
     let auth = match guard_manage(&state, &headers, permission, TradingModuleFamily::Sniper).await {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
     apply_control(&state, &auth, BotModule::Sniper, action).await
@@ -98,37 +224,34 @@ pub async fn get_config(State(state): State<ApiState>, headers: HeaderMap) -> Re
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-
-    let org = auth.organization_id();
-    let mut lock = CONFIG_STORE.lock().unwrap();
-    let cfg = lock.entry(org).or_insert_with(|| SniperConfigPayload {
-        organization_id: org.to_string(),
-        min_liquidity_sol: 5.0,
-        max_slippage_bps: 150,
-        anti_mev_protection: true,
-        priority_fee_lamports: 500_000,
-        entry_amount_sol: 0.5,
-        take_profit_pct: 100.0,
-        stop_loss_pct: 20.0,
-        trailing_stop_pct: 10.0,
-        auto_sell_timeout_seconds: 300,
-        dry_run: true,
-        blacklisted_tokens: vec![],
-        dex_routing: "auto".into(),
-        updated_at: Utc::now().to_rfc3339(),
-    });
-
-    (StatusCode::OK, Json(cfg.clone())).into_response()
+    let Some(db) = state.db.as_deref() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trading_data_plane_unavailable",
+            "sniper configuration requires PostgreSQL",
+        );
+    };
+    match read_module(db, auth.organization_id(), "sniper").await {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to read tenant sniper configuration");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config_storage_error",
+                "sniper configuration could not be loaded",
+            )
+        }
+    }
 }
 
 /// `PUT /api/tenant/sniper/config`
 pub async fn update_config(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<Value>,
 ) -> Response {
     let auth = match guard_manage(
         &state,
@@ -138,69 +261,37 @@ pub async fn update_config(
     )
     .await
     {
-        Ok(a) => a,
+        Ok(value) => value,
         Err(response) => return response,
     };
-
-    let org = auth.organization_id();
-    let mut lock = CONFIG_STORE.lock().unwrap();
-    let current = lock.entry(org).or_insert_with(|| SniperConfigPayload {
-        organization_id: org.to_string(),
-        min_liquidity_sol: 5.0,
-        max_slippage_bps: 150,
-        anti_mev_protection: true,
-        priority_fee_lamports: 500_000,
-        entry_amount_sol: 0.5,
-        take_profit_pct: 100.0,
-        stop_loss_pct: 20.0,
-        trailing_stop_pct: 10.0,
-        auto_sell_timeout_seconds: 300,
-        dry_run: true,
-        blacklisted_tokens: vec![],
-        dex_routing: "auto".into(),
-        updated_at: Utc::now().to_rfc3339(),
-    });
-
-    if let Some(v) = body.get("min_liquidity_sol").and_then(|x| x.as_f64()) {
-        current.min_liquidity_sol = v;
+    let patch = match validate_patch(body) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Some(db) = state.db.as_deref() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trading_data_plane_unavailable",
+            "sniper configuration requires PostgreSQL",
+        );
+    };
+    match write_module(
+        db,
+        auth.organization_id(),
+        "sniper",
+        &patch,
+        &auth.ctx.actor_label(),
+    )
+    .await
+    {
+        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to write tenant sniper configuration");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config_storage_error",
+                "sniper configuration could not be saved",
+            )
+        }
     }
-    if let Some(v) = body.get("max_slippage_bps").and_then(|x| x.as_u64()) {
-        current.max_slippage_bps = v as u32;
-    }
-    if let Some(v) = body.get("anti_mev_protection").and_then(|x| x.as_bool()) {
-        current.anti_mev_protection = v;
-    }
-    if let Some(v) = body.get("priority_fee_lamports").and_then(|x| x.as_u64()) {
-        current.priority_fee_lamports = v;
-    }
-    if let Some(v) = body.get("entry_amount_sol").and_then(|x| x.as_f64()) {
-        current.entry_amount_sol = v;
-    }
-    if let Some(v) = body.get("take_profit_pct").and_then(|x| x.as_f64()) {
-        current.take_profit_pct = v;
-    }
-    if let Some(v) = body.get("stop_loss_pct").and_then(|x| x.as_f64()) {
-        current.stop_loss_pct = v;
-    }
-    if let Some(v) = body.get("trailing_stop_pct").and_then(|x| x.as_f64()) {
-        current.trailing_stop_pct = v;
-    }
-    if let Some(v) = body.get("auto_sell_timeout_seconds").and_then(|x| x.as_u64()) {
-        current.auto_sell_timeout_seconds = v as u32;
-    }
-    if let Some(v) = body.get("dry_run").and_then(|x| x.as_bool()) {
-        current.dry_run = v;
-    }
-    if let Some(v) = body.get("blacklisted_tokens").and_then(|x| x.as_array()) {
-        current.blacklisted_tokens = v
-            .iter()
-            .filter_map(|s| s.as_str().map(|str_val| str_val.to_string()))
-            .collect();
-    }
-    if let Some(v) = body.get("dex_routing").and_then(|x| x.as_str()) {
-        current.dex_routing = v.to_string();
-    }
-    current.updated_at = Utc::now().to_rfc3339();
-
-    (StatusCode::OK, Json(current.clone())).into_response()
 }

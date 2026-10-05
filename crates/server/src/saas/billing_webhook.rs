@@ -14,10 +14,10 @@
 //! Absolute rules:
 //!
 //! * **Duplicate webhook ⇒ no duplicate mutation.** The provider event id is
-//!   checked and then durably recorded (the migration-0018 runtime-record
-//!   store) before the acknowledgement is sent. Without a database the
-//!   marker falls back to a process-local set, which is documented and only
-//!   exists for single-process test runs.
+//!   atomically claimed in the migration-0019 `provider_events` table and
+//!   marked complete before the acknowledgement is sent. Without a database
+//!   the marker falls back to a bounded process-local set, which is
+//!   documented and only exists for single-process test runs.
 //! * **Invalid signature ⇒ 401 and zero state change.**
 //! * **Unknown event type ⇒ a deterministic `ignored` answer**, no mutation.
 //! * **Never trust client-provided subscription state**: the payload carries
@@ -35,6 +35,8 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use sqlx::Row;
 use tracing::warn;
 
 use bot_core::billing::{BillingProvider, PlanCode, SubscriptionStatus};
@@ -106,9 +108,10 @@ fn memory_markers() -> &'static Mutex<HashSet<String>> {
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Has this provider event id already been processed? Durable when the
-/// database is attached, process-local otherwise (documented fallback).
-async fn already_processed(state: &ApiState, event_id: &str) -> bool {
+/// Read-only compatibility check for the pre-0019 runtime marker. The
+/// processing pipeline uses `claim_event`, which closes the concurrent
+/// read-then-write replay window in `provider_events`.
+async fn legacy_marker_exists(state: &ApiState, event_id: &str) -> bool {
     if let Some(db) = &state.db {
         let repo = PostgresSaasRepo::new(db.clone());
         matches!(
@@ -124,38 +127,150 @@ async fn already_processed(state: &ApiState, event_id: &str) -> bool {
     }
 }
 
-/// Record a processed event id so a replay can never re-apply it.
+/// Read-only compatibility check used by tests and legacy callers.
+async fn already_processed(state: &ApiState, event_id: &str) -> bool {
+    legacy_marker_exists(state, event_id).await
+}
+
+/// Atomically claim an event before applying its state transition. `Ok(true)`
+/// means a completed duplicate; `Ok(false)` grants this request ownership.
+async fn claim_event(
+    state: &ApiState,
+    event: &crate::saas::provider::VerifiedProviderEvent,
+) -> Result<bool, String> {
+    if state.db.is_some() && legacy_marker_exists(state, &event.event_id).await {
+        return Ok(true);
+    }
+    if let Some(db) = &state.db {
+        let organization_id = event
+            .payload
+            .get("organization_id")
+            .and_then(|value| value.as_str())
+            .and_then(OrganizationId::parse)
+            .map(|value| value.as_uuid());
+        let payload_hash = hex::encode(Sha256::digest(event.payload.to_string().as_bytes()));
+        let claimed = sqlx::query(
+            "INSERT INTO provider_events
+                 (id, organization_id, provider, provider_event_id, event_type,
+                  idempotency_key, payload_hash, processed)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,false)
+             ON CONFLICT DO NOTHING
+             RETURNING id",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(organization_id)
+        .bind(event.provider.as_str())
+        .bind(&event.event_id)
+        .bind(&event.event_type)
+        .bind(&event.event_id)
+        .bind(payload_hash)
+        .fetch_optional(db.pool())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "billing webhook durable claim failed");
+            "durable billing webhook claim could not be completed".to_string()
+        })?;
+        if claimed.is_some() {
+            return Ok(false);
+        }
+        let existing = sqlx::query(
+            "SELECT processed FROM provider_events
+              WHERE provider = $1 AND provider_event_id = $2",
+        )
+        .bind(event.provider.as_str())
+        .bind(&event.event_id)
+        .fetch_optional(db.pool())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "billing webhook claim state read failed");
+            "durable billing webhook claim state could not be read".to_string()
+        })?;
+        let Some(row) = existing else {
+            return Err("durable billing webhook claim disappeared".to_string());
+        };
+        let processed: bool = row.try_get("processed").map_err(|error| {
+            tracing::error!(error = %error, "billing webhook claim state was invalid");
+            "durable billing webhook claim state was invalid".to_string()
+        })?;
+        return if processed {
+            Ok(true)
+        } else {
+            Err("billing webhook event is already being processed; retry later".to_string())
+        };
+    }
+
+    let mut seen = memory_markers().lock().expect("marker mutex");
+    if seen.contains(&event.event_id) {
+        return Ok(true);
+    }
+    if seen.len() >= 10_000 {
+        return Err(
+            "process-local billing webhook replay cache is full; configure PostgreSQL".to_string(),
+        );
+    }
+    seen.insert(event.event_id.clone());
+    Ok(false)
+}
+
+/// Release an unfinished claim after a validation/domain rejection.
+async fn release_event_claim(
+    state: &ApiState,
+    event: &crate::saas::provider::VerifiedProviderEvent,
+) -> Result<(), String> {
+    if let Some(db) = &state.db {
+        let result = sqlx::query(
+            "DELETE FROM provider_events
+              WHERE provider = $1 AND provider_event_id = $2 AND processed = false",
+        )
+        .bind(event.provider.as_str())
+        .bind(&event.event_id)
+        .execute(db.pool())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "billing webhook claim release failed");
+            "durable billing webhook claim could not be released".to_string()
+        })?;
+        if result.rows_affected() != 1 {
+            return Err("billing webhook claim was already completed or missing".to_string());
+        }
+        return Ok(());
+    }
+    memory_markers()
+        .lock()
+        .expect("marker mutex")
+        .remove(&event.event_id);
+    Ok(())
+}
+
+/// Complete the durable claim after a state transition succeeds.
 async fn record_processed(
     state: &ApiState,
-    provider: BillingProvider,
-    event_id: &str,
-    event_type: &str,
-) {
-    let now = Utc::now();
-    let record = json!({
-        "event_id": event_id,
-        "provider": provider.as_str(),
-        "type": event_type,
-        "processed_at": now,
-    });
+    event: &crate::saas::provider::VerifiedProviderEvent,
+) -> Result<(), String> {
     if let Some(db) = &state.db {
-        let repo = PostgresSaasRepo::new(db.clone());
-        let _ = repo
-            .insert(
-                WEBHOOK_EVENT_KIND,
-                event_id,
-                None,
-                None,
-                Some(event_id),
-                &record,
-            )
-            .await;
-    } else {
-        let mut seen = memory_markers().lock().expect("marker mutex");
-        if seen.len() < 10_000 {
-            seen.insert(event_id.to_string());
+        let result = sqlx::query(
+            "UPDATE provider_events
+                SET processed = true, processed_at = now()
+              WHERE provider = $1 AND provider_event_id = $2 AND processed = false",
+        )
+        .bind(event.provider.as_str())
+        .bind(&event.event_id)
+        .execute(db.pool())
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "billing webhook durable completion failed");
+            "durable billing webhook completion could not be persisted".to_string()
+        })?;
+        if result.rows_affected() != 1 {
+            return Err("billing webhook claim was missing during completion".to_string());
         }
+        return Ok(());
     }
+    memory_markers()
+        .lock()
+        .expect("marker mutex")
+        .insert(event.event_id.clone());
+    Ok(())
 }
 
 /// What applying one verified event did.
@@ -187,6 +302,7 @@ pub async fn apply_event(
         .saas
         .organization(organization_id)
         .await
+        .map_err(|error| format!("organization lookup failed: {error}"))?
         .ok_or_else(|| "organization does not exist".to_string())?;
     if !bot_core::tenant::can_authenticate(org.status) {
         return Err("organization is closed".to_string());
@@ -216,6 +332,7 @@ pub async fn apply_event(
                 .saas
                 .subscription_of(organization_id)
                 .await
+                .map_err(|error| format!("subscription lookup failed: {error}"))?
                 .ok_or_else(|| "organization has no subscription".to_string())?;
             match status_event {
                 "subscription.payment_failed" => sub.status = SubscriptionStatus::PastDue,
@@ -257,17 +374,35 @@ pub async fn process_verified(
     state: &ApiState,
     event: &crate::saas::provider::VerifiedProviderEvent,
 ) -> Response {
-    if already_processed(state, &event.event_id).await {
-        return (
-            axum::http::StatusCode::OK,
-            Json(json!({ "status": "duplicate" })),
-        )
-            .into_response();
+    match claim_event(state, event).await {
+        Ok(true) => {
+            return (
+                axum::http::StatusCode::OK,
+                Json(json!({ "status": "duplicate" })),
+            )
+                .into_response();
+        }
+        Ok(false) => {}
+        Err(reason) => {
+            warn!(event = %event.event_id, %reason, "billing webhook durable claim unavailable");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "status": "unavailable", "reason": reason })),
+            )
+                .into_response();
+        }
     }
     let now = Utc::now();
     match apply_event(state, event, now).await {
         Ok(ApplyOutcome::Applied(summary)) => {
-            record_processed(state, event.provider, &event.event_id, &event.event_type).await;
+            if let Err(reason) = record_processed(state, event).await {
+                tracing::error!(event = %event.event_id, %reason, "billing webhook applied but durable completion failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "status": "unavailable", "reason": reason })),
+                )
+                    .into_response();
+            }
             // The SaaS event stream frame carries the tenant id so the
             // websocket layer can scope it (visible_to).
             let org_ref = event
@@ -298,7 +433,14 @@ pub async fn process_verified(
                 .into_response()
         }
         Ok(ApplyOutcome::Ignored) => {
-            record_processed(state, event.provider, &event.event_id, &event.event_type).await;
+            if let Err(reason) = record_processed(state, event).await {
+                tracing::error!(event = %event.event_id, %reason, "ignored billing webhook could not be durably completed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "status": "unavailable", "reason": reason })),
+                )
+                    .into_response();
+            }
             state
                 .audit
                 .record(
@@ -316,8 +458,17 @@ pub async fn process_verified(
                 .into_response()
         }
         Err(reason) => {
-            // Nothing was mutated and no marker was recorded, so the provider
-            // may safely retry a corrected event.
+            // The claim is not a completion marker. Release it so a
+            // corrected provider retry is not permanently classified as a
+            // duplicate.
+            if let Err(release_reason) = release_event_claim(state, event).await {
+                tracing::error!(event = %event.event_id, %release_reason, "billing webhook rejection claim release failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "status": "unavailable", "reason": release_reason })),
+                )
+                    .into_response();
+            }
             warn!(event = %event.event_id, %reason, "billing webhook rejected");
             state
                 .audit
@@ -479,7 +630,12 @@ mod tests {
         )
         .await;
         assert_eq!(first.status(), StatusCode::OK);
-        let sub = state.saas.subscription_of(org).await.expect("subscription");
+        let sub = state
+            .saas
+            .subscription_of(org)
+            .await
+            .expect("subscription lookup")
+            .expect("subscription");
         assert_eq!(sub.status, SubscriptionStatus::PastDue);
         let updated_after_first = sub.updated_at;
 
@@ -499,6 +655,7 @@ mod tests {
                 .saas
                 .subscription_of(org)
                 .await
+                .expect("subscription lookup")
                 .expect("subscription")
                 .updated_at,
             updated_after_first,
@@ -515,6 +672,7 @@ mod tests {
                 .saas
                 .entitlements_of(org, Utc::now())
                 .await
+                .expect("entitlements")
                 .allows(bot_core::billing::features::MODULE_POLYMARKET),
             "business grants polymarket"
         );
@@ -529,7 +687,11 @@ mod tests {
         )
         .await;
         assert_eq!(downgrade.status(), StatusCode::OK);
-        let set = state.saas.entitlements_of(org, Utc::now()).await;
+        let set = state
+            .saas
+            .entitlements_of(org, Utc::now())
+            .await
+            .expect("entitlements");
         assert!(
             !set.allows(bot_core::billing::features::MODULE_POLYMARKET),
             "starter must not keep the polymarket grant"
@@ -556,6 +718,7 @@ mod tests {
                 .saas
                 .subscription_of(org)
                 .await
+                .expect("subscription lookup")
                 .expect("subscription")
                 .is_effective(Utc::now()),
             "the rejection must not disturb the current plan"
@@ -566,7 +729,12 @@ mod tests {
     async fn unknown_types_and_bad_payloads_change_nothing() {
         let state = test_state();
         let org = seed_organization(&state, PlanCode::Pro).await;
-        let before = state.saas.subscription_of(org).await.expect("subscription");
+        let before = state
+            .saas
+            .subscription_of(org)
+            .await
+            .expect("subscription lookup")
+            .expect("subscription");
 
         let ignored = process_verified(
             &state,
@@ -600,7 +768,12 @@ mod tests {
 
         // A client-supplied status field is NEVER trusted: only the event
         // type decides, and an unknown type mutates nothing.
-        let after = state.saas.subscription_of(org).await.expect("subscription");
+        let after = state
+            .saas
+            .subscription_of(org)
+            .await
+            .expect("subscription lookup")
+            .expect("subscription");
         assert_eq!(after.status, before.status);
         assert_eq!(after.updated_at, before.updated_at);
     }
@@ -621,7 +794,12 @@ mod tests {
         )
         .await;
         assert_eq!(renewed.status(), StatusCode::OK);
-        let sub = state.saas.subscription_of(org).await.expect("subscription");
+        let sub = state
+            .saas
+            .subscription_of(org)
+            .await
+            .expect("subscription lookup")
+            .expect("subscription");
         assert!(sub.is_effective(Utc::now()));
         assert!(sub.current_period_end.is_some());
 
@@ -635,7 +813,12 @@ mod tests {
         )
         .await;
         assert_eq!(canceled.status(), StatusCode::OK);
-        let sub = state.saas.subscription_of(org).await.expect("subscription");
+        let sub = state
+            .saas
+            .subscription_of(org)
+            .await
+            .expect("subscription lookup")
+            .expect("subscription");
         assert_eq!(sub.status, SubscriptionStatus::Canceled);
         assert!(
             !sub.is_effective(Utc::now()),
@@ -647,7 +830,12 @@ mod tests {
     async fn closed_tenants_are_never_mutated() {
         let state = test_state();
         let org = seed_organization(&state, PlanCode::Business).await;
-        let mut closed = state.saas.organization(org).await.expect("org");
+        let mut closed = state
+            .saas
+            .organization(org)
+            .await
+            .expect("organization lookup")
+            .expect("org");
         closed.status = bot_core::tenant::OrganizationStatus::Closed;
         state
             .saas

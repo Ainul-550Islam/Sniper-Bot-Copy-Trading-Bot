@@ -53,6 +53,17 @@ use bot_core::tenant::{OrganizationId, UserId};
 use super::middleware::{authorize_request, deny_response, SaasContext};
 use crate::api::ApiState;
 
+fn key_storage_error() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "api_key_storage_unavailable",
+            "reason": "tenant API key records could not be loaded",
+        })),
+    )
+        .into_response()
+}
+
 /// One tenant API key. Contains no secret material.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SaasApiKey {
@@ -191,9 +202,12 @@ pub fn build_api_key(
 /// Hash-only lookup: the plaintext is hashed and compared, so the store
 /// never sees the secret. Returns `None` for an unknown hash — the caller
 /// must not distinguish "unknown" from "revoked" to a client.
-pub async fn resolve_key(state: &ApiState, presented: &str) -> Option<SaasApiKey> {
+pub async fn resolve_key(
+    state: &ApiState,
+    presented: &str,
+) -> bot_core::error::BotResult<Option<SaasApiKey>> {
     if presented.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
     state.saas.api_key_by_hash(&hash_token(presented)).await
 }
@@ -234,18 +248,27 @@ pub async fn create_key(
         Err(d) => return deny_response(&state, &d).await,
     };
 
-    // Plan limit: how many keys may exist at once.
-    let current = state
-        .saas
-        .api_keys_of(existing_keys(&ctx))
-        .await
-        .iter()
-        .filter(|k| k.is_usable(Utc::now()))
-        .count() as f64;
-    let entitlements = state
+    // Plan limit: how many keys may exist at once. A durable read failure
+    // must not be interpreted as zero existing keys or default entitlements.
+    let keys = match state.saas.api_keys_of(existing_keys(&ctx)).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "tenant API keys could not be loaded for creation");
+            return key_storage_error();
+        }
+    };
+    let current = keys.iter().filter(|k| k.is_usable(Utc::now())).count() as f64;
+    let entitlements = match state
         .saas
         .entitlements_of(ctx.organization.id, Utc::now())
-        .await;
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "tenant entitlements could not be loaded for API key creation");
+            return key_storage_error();
+        }
+    };
     let request = AccessRequest::manage(Permission::ApiKeyCreate).consuming(
         features::MAX_API_KEYS,
         current,
@@ -354,7 +377,13 @@ pub async fn list_keys(State(state): State<ApiState>, headers: HeaderMap) -> Res
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
     };
-    let keys = state.saas.api_keys_of(ctx.organization.id).await;
+    let keys = match state.saas.api_keys_of(ctx.organization.id).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "tenant API keys could not be loaded");
+            return key_storage_error();
+        }
+    };
     let list: Vec<serde_json::Value> = keys.iter().map(|k| k.metadata()).collect();
     Json(json!({ "count": list.len(), "keys": list })).into_response()
 }
@@ -377,7 +406,13 @@ pub async fn revoke_key(
     };
     // Tenant-scoped lookup: a prefix from another organization is simply
     // not in this list, so cross-tenant revocation is impossible.
-    let keys = state.saas.api_keys_of(ctx.organization.id).await;
+    let keys = match state.saas.api_keys_of(ctx.organization.id).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "tenant API keys could not be loaded for revocation");
+            return key_storage_error();
+        }
+    };
     let Some(mut key) = keys.into_iter().find(|k| k.key_prefix == prefix) else {
         return (StatusCode::NOT_FOUND, "no such key in this organization").into_response();
     };

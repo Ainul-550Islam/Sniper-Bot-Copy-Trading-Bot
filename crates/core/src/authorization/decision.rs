@@ -41,11 +41,13 @@ pub enum DecisionKind {
     DenySuspended,
     /// The plan does not include the feature, or a limit is exhausted.
     DenyEntitlement,
+    /// Durable authorization evidence could not be loaded.
+    DenyUnavailable,
 }
 
 impl DecisionKind {
     /// Every kind, in gate order.
-    pub const ALL: [DecisionKind; 8] = [
+    pub const ALL: [DecisionKind; 9] = [
         DecisionKind::Allow,
         DecisionKind::DenyUnauthenticated,
         DecisionKind::DenyTenant,
@@ -54,6 +56,7 @@ impl DecisionKind {
         DecisionKind::DenyResource,
         DecisionKind::DenySuspended,
         DecisionKind::DenyEntitlement,
+        DecisionKind::DenyUnavailable,
     ];
 
     /// Stable label (metrics, audit, API error body).
@@ -67,6 +70,7 @@ impl DecisionKind {
             DecisionKind::DenyResource => "deny_resource",
             DecisionKind::DenySuspended => "deny_suspended",
             DecisionKind::DenyEntitlement => "deny_entitlement",
+            DecisionKind::DenyUnavailable => "deny_unavailable",
         }
     }
 
@@ -93,6 +97,7 @@ impl DecisionKind {
             DecisionKind::Allow => 200,
             DecisionKind::DenyUnauthenticated => 401,
             DecisionKind::DenyEntitlement => 402,
+            DecisionKind::DenyUnavailable => 503,
             _ => 403,
         }
     }
@@ -178,6 +183,13 @@ impl Decision {
         Decision::deny(DecisionKind::DenyEntitlement, reason)
     }
 
+    /// Durable authorization evidence was unavailable. This maps to HTTP 503
+    /// so clients do not treat an infrastructure failure as a denial caused
+    /// by the tenant's plan or permissions.
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Decision::deny(DecisionKind::DenyUnavailable, reason)
+    }
+
     /// True on allow.
     pub fn is_allowed(&self) -> bool {
         self.kind.is_allowed()
@@ -210,7 +222,7 @@ mod tests {
             assert_eq!(DecisionKind::parse(d.as_str()), Some(d));
         }
         assert_eq!(DecisionKind::parse("deny_because_i_said_so"), None);
-        assert_eq!(DecisionKind::ALL.len(), 8);
+        assert_eq!(DecisionKind::ALL.len(), 9);
         // Exactly one allow.
         assert_eq!(
             DecisionKind::ALL.iter().filter(|d| d.is_allowed()).count(),
@@ -243,6 +255,10 @@ mod tests {
             Decision::entitlement("plan lacks it").kind,
             DecisionKind::DenyEntitlement
         );
+        assert_eq!(
+            Decision::unavailable("database unavailable").kind,
+            DecisionKind::DenyUnavailable
+        );
         for d in DecisionKind::ALL {
             if d.is_allowed() {
                 continue;
@@ -260,6 +276,7 @@ mod tests {
             402,
             "payment required is the honest answer for a plan limit"
         );
+        assert_eq!(DecisionKind::DenyUnavailable.http_status(), 503);
         for d in [
             DecisionKind::DenyTenant,
             DecisionKind::DenyRole,

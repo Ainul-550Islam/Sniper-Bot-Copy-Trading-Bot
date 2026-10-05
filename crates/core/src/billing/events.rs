@@ -63,11 +63,21 @@ pub enum BillingEvent {
 impl BillingEvent {
     pub fn organization_id(&self) -> OrganizationId {
         match self {
-            Self::SubscriptionCreated { organization_id, .. } => *organization_id,
-            Self::PlanChanged { organization_id, .. } => *organization_id,
-            Self::InvoiceSettled { organization_id, .. } => *organization_id,
-            Self::PaymentFailed { organization_id, .. } => *organization_id,
-            Self::DunningStateChanged { organization_id, .. } => *organization_id,
+            Self::SubscriptionCreated {
+                organization_id, ..
+            } => *organization_id,
+            Self::PlanChanged {
+                organization_id, ..
+            } => *organization_id,
+            Self::InvoiceSettled {
+                organization_id, ..
+            } => *organization_id,
+            Self::PaymentFailed {
+                organization_id, ..
+            } => *organization_id,
+            Self::DunningStateChanged {
+                organization_id, ..
+            } => *organization_id,
         }
     }
 

@@ -7,7 +7,7 @@
 
 import { request } from "../api";
 
-export type TeamRole = "owner" | "admin" | "operator" | "analyst" | "viewer";
+export type TeamRole = "org_owner" | "org_admin" | "trader" | "security_admin" | "billing_admin" | "auditor" | "viewer";
 
 export interface TeamMember {
   id: string;
