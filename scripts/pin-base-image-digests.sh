@@ -42,6 +42,7 @@ IMAGES=(
     "rust:1.98.1-bookworm"
     "debian:bookworm-slim"
     "certbot/certbot:v3.1.0"
+    "node:22-bookworm-slim"
 )
 
 ACCEPT='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'

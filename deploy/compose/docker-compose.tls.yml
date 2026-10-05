@@ -11,7 +11,7 @@
 #   docker compose -f docker-compose.yml -f deploy/compose/docker-compose.tls.yml up -d
 #
 # First run only — obtain the certificate before nginx can serve :443:
-#   ./scripts/obtain-certificate.sh
+#   ./scripts/bootstrap-tls.sh
 #
 # Every image is pinned BY DIGEST (P0 §7). A tag is a mutable pointer; a
 # digest is the image. Refresh the pins with:
@@ -30,6 +30,12 @@ services:
       # container network (not loopback) so nginx can reach it.
       API_BIND_HOST: 0.0.0.0
       TRUST_PROXY_HEADERS: "true"
+
+  control-plane:
+    ports: !override []
+    environment:
+      PORT: 3000
+      NEXT_PUBLIC_API_ORIGIN: ""
 
   nginx:
     # nginx:1.27-alpine

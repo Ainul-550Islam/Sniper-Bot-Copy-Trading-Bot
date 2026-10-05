@@ -251,6 +251,12 @@ export const operator = {
   positions: () => request<Json>("/api/positions"),
   risk: () => request<Json>("/api/risk/global"),
   portfolio: () => request<Json>("/api/accounting/portfolio"),
-  findings: () => request<Json>("/api/reconciliation/findings"),
+  findings: () => request<Json>("/api/accounting/findings"),
   ha: () => request<Json>("/api/ha"),
 };
+
+export function toDisplayError(e: unknown): string {
+  if (e instanceof ApiError) return `${e.kind}: ${e.reason}`;
+  if (e instanceof Error) return e.message;
+  return 'request failed';
+}

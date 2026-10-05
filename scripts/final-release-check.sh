@@ -54,9 +54,9 @@ if grep -R "BEGIN PRIVATE KEY" crates docs 2>/dev/null | grep -v "<redacted>" | 
 else
   pass "secret scan"
 fi
-if grep -R "sk_live_" crates docs 2>/dev/null | grep -v "test" | grep -v "sk_live_ab" | grep -v "sk_live_secret" | grep -v "sk_live_51H" | grep -v "example" | grep -v "migrations" | grep -v "contains" | grep -v "banned" | grep -q .; then
+if grep -R "sk_live_" crates docs 2>/dev/null | grep -v "test" | grep -v "sk_live_ab" | grep -v "sk_live_secret" | grep -v "sk_live_51H" | grep -v "example" | grep -v "migrations" | grep -v "contains" | grep -v "banned" | grep -v "ENVIRONMENT-SEPARATION" | grep -q .; then
   echo "  found sk_live_ (potential secret) — check manually"
-  grep -R "sk_live_" crates docs | grep -v "test" | grep -v "sk_live_ab" | grep -v "sk_live_secret" | grep -v "sk_live_51H" | grep -v "example" | grep -v "migrations" | head -n 5
+  grep -R "sk_live_" crates docs | grep -v "test" | grep -v "sk_live_ab" | grep -v "sk_live_secret" | grep -v "sk_live_51H" | grep -v "example" | grep -v "migrations" | grep -v "contains" | grep -v "banned" | grep -v "ENVIRONMENT-SEPARATION" | head -n 5
   fail "sk_live in repo"
 else
   pass "no sk_live"

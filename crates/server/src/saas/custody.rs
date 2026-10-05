@@ -91,7 +91,11 @@ pub fn routes() -> Router<ApiState> {
         )
         .route(
             "/api/saas/custody/signers",
-            axum::routing::post(create_signer),
+            axum::routing::post(create_signer).get(list_signers),
+        )
+        .route(
+            "/api/saas/custody/profiles/:id/signers",
+            axum::routing::get(list_profile_signers),
         )
         .route(
             "/api/saas/custody/signers/:id/activate",
@@ -210,12 +214,7 @@ async fn create_profile(
         profile.description = desc;
     }
 
-    // Persist to store + DB (durable; a failed durable write is logged,
-    // never silent — the in-process map stays the resolution source).
-    {
-        let mut map = profiles_store().lock().expect("mutex");
-        map.insert(profile.id, profile.clone());
-    }
+    // Persist to DB first when configured (durable & fail-closed).
     if let Some(db) = &state.db {
         ensure_organization_row(db, &ctx.organization).await;
         if let Err(error) = sqlx::query("INSERT INTO custody_profiles (id, organization_id, name, provider_type, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
@@ -223,7 +222,15 @@ async fn create_profile(
             .execute(db.pool()).await
         {
             warn!(%error, profile = %profile.id, "custody profile durable insert failed");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile"})),
+            ).into_response();
         }
+    }
+    {
+        let mut map = profiles_store().lock().expect("mutex");
+        map.insert(profile.id, profile.clone());
     }
 
     state.audit.record("saas", "saas.custody.profile.created", Some(&profile.id.to_string()),
@@ -330,11 +337,8 @@ async fn activate_profile(
     profile.status = CustodyStatus::Active;
     profile.activated_at = Some(Utc::now());
     profile.updated_at = Utc::now();
-    {
-        let mut map = profiles_store().lock().expect("mutex");
-        map.insert(pid, profile.clone());
-    }
-    // Durable status write (logged on failure, never silent).
+
+    // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
         if let Err(error) = sqlx::query(
             "UPDATE custody_profiles SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5",
@@ -348,7 +352,15 @@ async fn activate_profile(
         .await
         {
             warn!(%error, profile = %pid, "custody profile durable activation write failed");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile activation"})),
+            ).into_response();
         }
+    }
+    {
+        let mut map = profiles_store().lock().expect("mutex");
+        map.insert(pid, profile.clone());
     }
     state
         .audit
@@ -408,11 +420,8 @@ async fn revoke_profile(
     profile.status = CustodyStatus::Revoked;
     profile.revoked_at = Some(Utc::now());
     profile.updated_at = Utc::now();
-    {
-        let mut map = profiles_store().lock().expect("mutex");
-        map.insert(pid, profile.clone());
-    }
-    // Durable status write (logged on failure, never silent).
+
+    // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
         if let Err(error) = sqlx::query(
             "UPDATE custody_profiles SET status = $1, updated_at = $2, revoked_at = $3, revoke_reason = $4 WHERE id = $5 AND organization_id = $6",
@@ -427,7 +436,15 @@ async fn revoke_profile(
         .await
         {
             warn!(%error, profile = %pid, "custody profile durable revocation write failed");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"persistence_failed","reason":"database write failed for custody profile revocation"})),
+            ).into_response();
         }
+    }
+    {
+        let mut map = profiles_store().lock().expect("mutex");
+        map.insert(pid, profile.clone());
     }
     state
         .audit
@@ -522,10 +539,7 @@ async fn create_signer(
         .collect();
     signer.provider_ref = body.provider_ref;
 
-    {
-        let mut map = signers_store().lock().expect("mutex");
-        map.insert(signer.id, signer.clone());
-    }
+    // Durable insert (fail-closed: DB first).
     if let Some(db) = &state.db {
         ensure_organization_row(db, &ctx.organization).await;
         if let Err(error) = sqlx::query("INSERT INTO custody_signers (id, organization_id, custody_profile_id, logical_identity, provider_type, public_address, capabilities, status, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING")
@@ -533,7 +547,15 @@ async fn create_signer(
             .execute(db.pool()).await
         {
             warn!(%error, signer = %signer.id, "custody signer durable insert failed");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer"})),
+            ).into_response();
         }
+    }
+    {
+        let mut map = signers_store().lock().expect("mutex");
+        map.insert(signer.id, signer.clone());
     }
 
     state.audit.record("saas", "saas.custody.signer.created", Some(&signer.id.to_string()),
@@ -544,6 +566,70 @@ async fn create_signer(
     (
         axum::http::StatusCode::CREATED,
         Json(json!(SignerView::from(signer))),
+    )
+        .into_response()
+}
+
+async fn list_signers(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    let ctx = match authorize_request(
+        &state,
+        &headers,
+        AccessRequest::read(Permission::WalletRead),
+    )
+    .await
+    {
+        Ok(ctx) => ctx,
+        Err(d) => return deny_response(&state, &d).await,
+    };
+    let map = signers_store().lock().expect("mutex");
+    let signers: Vec<SignerView> = map
+        .values()
+        .filter(|s| s.organization_id == ctx.organization.id)
+        .cloned()
+        .map(SignerView::from)
+        .collect();
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({"organization_id": ctx.organization.id.to_string(), "signers": signers})),
+    )
+        .into_response()
+}
+
+async fn list_profile_signers(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let ctx = match authorize_request(
+        &state,
+        &headers,
+        AccessRequest::read(Permission::WalletRead),
+    )
+    .await
+    {
+        Ok(ctx) => ctx,
+        Err(d) => return deny_response(&state, &d).await,
+    };
+    let pid = match CustodyProfileId::parse(&id) {
+        Some(v) => v,
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid_id","reason":"profile id must be uuid"})),
+            )
+                .into_response()
+        }
+    };
+    let map = signers_store().lock().expect("mutex");
+    let signers: Vec<SignerView> = map
+        .values()
+        .filter(|s| s.organization_id == ctx.organization.id && s.custody_profile_id == pid)
+        .cloned()
+        .map(SignerView::from)
+        .collect();
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({"organization_id": ctx.organization.id.to_string(), "profile_id": pid.to_string(), "signers": signers})),
     )
         .into_response()
 }
@@ -598,11 +684,8 @@ async fn activate_signer(
     signer.status = CustodyStatus::Active;
     signer.activated_at = Some(Utc::now());
     signer.updated_at = Utc::now();
-    {
-        let mut map = signers_store().lock().expect("mutex");
-        map.insert(sid, signer.clone());
-    }
-    // Durable status write (logged on failure, never silent).
+
+    // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
         if let Err(error) = sqlx::query(
             "UPDATE custody_signers SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5",
@@ -616,7 +699,15 @@ async fn activate_signer(
         .await
         {
             warn!(%error, signer = %sid, "custody signer durable activation write failed");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer activation"})),
+            ).into_response();
         }
+    }
+    {
+        let mut map = signers_store().lock().expect("mutex");
+        map.insert(sid, signer.clone());
     }
     state.audit.record("saas", "saas.custody.signer.activated", Some(&sid.to_string()),
         bot_core::audit::AuditOutcome::Success,
@@ -669,11 +760,8 @@ async fn revoke_signer(
     signer.status = CustodyStatus::Revoked;
     signer.revoked_at = Some(Utc::now());
     signer.updated_at = Utc::now();
-    {
-        let mut map = signers_store().lock().expect("mutex");
-        map.insert(sid, signer.clone());
-    }
-    // Durable status write (logged on failure, never silent).
+
+    // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
         if let Err(error) = sqlx::query(
             "UPDATE custody_signers SET status = $1, updated_at = $2, revoked_at = $3, revoke_reason = $4 WHERE id = $5 AND organization_id = $6",
@@ -688,7 +776,15 @@ async fn revoke_signer(
         .await
         {
             warn!(%error, signer = %sid, "custody signer durable revocation write failed");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"persistence_failed","reason":"database write failed for custody signer revocation"})),
+            ).into_response();
         }
+    }
+    {
+        let mut map = signers_store().lock().expect("mutex");
+        map.insert(sid, signer.clone());
     }
     state.audit.record("saas", "saas.custody.signer.revoked", Some(&sid.to_string()),
         bot_core::audit::AuditOutcome::Success,
@@ -750,6 +846,24 @@ async fn attach_capability(
     if !signer.capabilities.contains(&cap) {
         signer.capabilities.push(cap.clone());
         signer.updated_at = Utc::now();
+        if let Some(db) = &state.db {
+            if let Err(error) = sqlx::query(
+                "UPDATE custody_signers SET capabilities = $1, updated_at = $2 WHERE id = $3 AND organization_id = $4",
+            )
+            .bind(serde_json::to_value(&signer.capabilities).unwrap_or_default())
+            .bind(signer.updated_at)
+            .bind(sid.as_uuid())
+            .bind(ctx.organization.id.as_uuid())
+            .execute(db.pool())
+            .await
+            {
+                warn!(%error, signer = %sid, "custody signer durable capability update failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"persistence_failed","reason":"database write failed for signer capabilities"})),
+                ).into_response();
+            }
+        }
         {
             let mut map = signers_store().lock().expect("mutex");
             map.insert(sid, signer.clone());

@@ -3,6 +3,7 @@
 **/target
 **/*.rs.bk
 *.pdb
+.cargo/bin/
 
 # Secrets — NEVER commit
 .env

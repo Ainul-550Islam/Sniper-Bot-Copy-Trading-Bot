@@ -16,10 +16,10 @@ CURRENT-BUYER-STATE).
 
 | Measure | Count |
 | --- | --- |
-| Rust source files (crates/) | 564|
-| Docs files (docs/) | 122|
-| TypeScript/TSX files (apps/control-plane) | 30|
-| Database migrations (forward-only) | 35 (high-water `0035`)|
+| Rust source files (crates/) | 573|
+| Docs files (docs/) | 132|
+| TypeScript/TSX files (apps/control-plane) | 29|
+| Database migrations (forward-only) | 36 (high-water `0036`)|
 | Version | 0.1.0 (VERSION = Cargo.toml = manifest) |
 | Workspace members | crates/core (bot-core), solana-kit, module-sniper, module-copy, module-polymarket, module-telegram, server (sniper-suite), saas-sdk |
 | Standalone program | programs/staking-suite (native Solana program, pre-deployment placeholder id) |

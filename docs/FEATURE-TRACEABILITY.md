@@ -145,3 +145,20 @@ Nothing here is listed merely because a document mentions it.
 on 2026-09-19 (file exists + named symbol grep + named test target exists).
 Rows marked NOT RUN are environment-blocked vendor-side and are wired for
 buyer execution — never counted as passes.
+
+
+## COMMERCIAL SAAS CONTROL PLANE WORKSPACES (BATCH 1–50)
+
+| Feature | Source file | Function / Component | Verification | Status |
+|---|---|---|---|---|
+| Strategy Library & Versioning | `apps/control-plane/src/app/strategies/page.tsx` | `StrategiesPage` | Turbopack Build | EXECUTED |
+| Historical Backtesting Engine | `apps/control-plane/src/app/backtests/page.tsx` | `BacktestsPage` | Turbopack Build | EXECUTED |
+| DEX & CLOB Market Screener | `apps/control-plane/src/app/markets/page.tsx` | `MarketsPage` | Turbopack Build | EXECUTED |
+| Sniper Strategy Parameters | `apps/control-plane/src/app/trading/sniper/config/page.tsx` | `SniperConfigPage` | Turbopack Build | EXECUTED |
+| Copy Trading Wallet Rules | `apps/control-plane/src/app/trading/copy/config/page.tsx` | `CopyConfigPage` | Turbopack Build | EXECUTED |
+| Polymarket CLOB Strategy Rules | `apps/control-plane/src/app/trading/polymarket/config/page.tsx` | `PolymarketConfigPage` | Turbopack Build | EXECUTED |
+| Integration Feeds Health | `apps/control-plane/src/app/integrations/page.tsx` | `IntegrationsPage` | Turbopack Build | EXECUTED |
+| Team RBAC Administration | `apps/control-plane/src/app/settings/team/page.tsx` | `TeamPage` | Turbopack Build | EXECUTED |
+| Security & API Key Governance | `apps/control-plane/src/app/settings/security/page.tsx` | `SecuritySettingsPage` | Turbopack Build | EXECUTED |
+| Commercial Analytics & Latency | `apps/control-plane/src/app/analytics/page.tsx` | `AnalyticsPage` | Turbopack Build | EXECUTED |
+| Guided Customer Onboarding | `apps/control-plane/src/app/onboarding/page.tsx` | `OnboardingPage` | Turbopack Build | EXECUTED |

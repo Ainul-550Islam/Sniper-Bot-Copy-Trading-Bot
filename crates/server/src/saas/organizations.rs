@@ -360,20 +360,36 @@ pub async fn list_members(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let Some(requested) = OrganizationId::parse(&id) else {
-        return (StatusCode::BAD_REQUEST, "invalid organization id").into_response();
+    let requested = if id == "current" {
+        let ctx = match authorize_request(
+            &state,
+            &headers,
+            AccessRequest::read_only(Permission::UsersRead),
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(d) => return deny_response(&state, &d).await,
+        };
+        ctx.organization.id
+    } else {
+        let Some(req) = OrganizationId::parse(&id) else {
+            return (StatusCode::BAD_REQUEST, "invalid organization id").into_response();
+        };
+        let ctx = match authorize_request(
+            &state,
+            &headers,
+            AccessRequest::read(Permission::UsersRead).on_resource(req),
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(d) => return deny_response(&state, &d).await,
+        };
+        let _ = &ctx;
+        req
     };
-    let ctx = match authorize_request(
-        &state,
-        &headers,
-        AccessRequest::read(Permission::UsersRead).on_resource(requested),
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(d) => return deny_response(&state, &d).await,
-    };
-    let _ = &ctx;
+
     let members = state.saas.members(requested).await;
     let mut out = Vec::new();
     for m in members {
@@ -386,7 +402,7 @@ pub async fn list_members(
             "created_at": m.created_at,
         }));
     }
-    Json(json!({ "count": out.len(), "members": out })).into_response()
+    Json(json!({ "count": out.len(), "members": out, "items": out })).into_response()
 }
 
 /// Suspension body.

@@ -68,3 +68,17 @@ therefore starts from this register, not from aspirational claims.
 * `docs/CURRENT-MARKETING-CLAIMS-2026.md` — the exact allowed claim vocabulary
 * `docs/FINAL-BUYER-GAP-LEDGER.md` — the running gap ledger this register summarizes
 * `docs/KNOWN-LIMITATIONS.md` — the technical limitations list
+
+
+## Batch 1–50 Commercial UX & Workflow Closure (2026-10-03)
+
+The following previously documented commercial gaps have been closed in source:
+* **Strategy Library & Versioning:** Fully implemented in `apps/control-plane/src/app/strategies/page.tsx` and `lib/customer-trading-api.ts`.
+* **Historical Backtesting Workspace:** Implemented with fee/slippage modeling in `apps/control-plane/src/app/backtests/page.tsx`.
+* **Market Screener & Liquidity Scoring:** Implemented in `apps/control-plane/src/app/markets/page.tsx`.
+* **Dedicated Module Configuration Workspaces:** Implemented for Sniper (`sniper/config`), Copy Trading (`copy/config`), and Polymarket CLOB (`polymarket/config`).
+* **Subscription Self-Service & Quotas:** Plan upgrade checkout, invoice ledger, and usage limits implemented in `billing/page.tsx` and `lib/commercial.ts`.
+* **Team RBAC & Member Governance:** Organization invitations, role administration (Owner, Admin, Trader, Viewer, Auditor) in `settings/team/page.tsx`.
+* **Security & Memory Session Governance:** In-memory session lifetime, scoped API key generation in `settings/security/page.tsx`.
+* **Execution Quality Analytics:** Sub-50ms latency benchmarking, PnL curve visualization in `analytics/page.tsx`.
+* **Guided 6-Step Customer Onboarding:** Persistent workflow checklist in `onboarding/page.tsx`.

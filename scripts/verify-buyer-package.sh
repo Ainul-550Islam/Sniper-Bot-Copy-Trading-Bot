@@ -55,10 +55,20 @@ if [ "$VER" != "$MAN_VER" ]; then echo "MISMATCH VERSION $VER vs manifest $MAN_V
 CARGO_VER="$(grep -E '^version =' "$ROOT/Cargo.toml" | head -n1 | sed 's/.*\"\(.*\)\"/\1/')"
 if [ "$VER" != "$CARGO_VER" ]; then echo "MISMATCH Cargo.toml $CARGO_VER vs VERSION $VER"; FAIL=1; else echo "Cargo.toml consistent"; fi
 
-# migration count consistency: check 0024 exists and manifest says 24
-if [ ! -f "$ROOT/crates/core/migrations/0024_trading_tenant_backfill_constraints.sql" ]; then echo "MISSING migration 0024"; FAIL=1; else echo "OK migration 0024"; fi
-MAN_MIG="$(python3 -c "import json; d=json.load(open('$ROOT/release-manifest.json')); print(d.get('components',{}).get('database_migrations',{}).get('count',''))" 2>/dev/null || echo "")"
-if [ "$MAN_MIG" != "24" ]; then echo "WARN manifest migration count $MAN_MIG != 24"; fi
+# migration count consistency: verify high-water migration exists and manifest matches actual
+MIG_ACTUAL="$(find "$ROOT/crates/core/migrations" -maxdepth 1 -name '*.sql' 2>/dev/null | wc -l | tr -d ' ')"
+MIG_LATEST="$(find "$ROOT/crates/core/migrations" -maxdepth 1 -name '*.sql' 2>/dev/null | sort | tail -1)"
+if [ -n "$MIG_LATEST" ] && [ -f "$MIG_LATEST" ]; then
+  echo "OK migration high-water $(basename "$MIG_LATEST")"
+else
+  echo "MISSING migrations in crates/core/migrations"; FAIL=1
+fi
+MAN_MIG="$(python3 -c "import json; d=json.load(open('$ROOT/release-manifest.json')); print(d.get('components',{}).get('database_migrations',{}).get('count', d.get('migrations','')))" 2>/dev/null || echo "")"
+if [ "$MAN_MIG" != "$MIG_ACTUAL" ]; then
+  echo "MISMATCH manifest migration count $MAN_MIG != actual $MIG_ACTUAL"; FAIL=1
+else
+  echo "OK migration count consistent ($MIG_ACTUAL)"
+fi
 
 # workspace members count 8
 MEMBERS="$(grep -c 'crates/' "$ROOT/Cargo.toml" | tr -d '[:space:]' || echo 0)"

@@ -227,6 +227,7 @@ mod tests {
             &[
                 ("KMS_KEY_ID", Some("1234abcd-12ab-34cd-56ef-1234567890ab")),
                 ("KMS_REGION", Some("eu-west-1")),
+                ("KMS_ENDPOINT", None),
                 ("AWS_ACCESS_KEY_ID", Some("AKIAEXAMPLE")),
                 ("AWS_SECRET_ACCESS_KEY", Some("secret")),
             ],

@@ -3,6 +3,8 @@
 //! Keep dependencies minimal. Target stable public API usage, not server internals.
 //! Do not copy server implementation into SDK.
 
+pub mod alerts;
+pub mod backtest;
 pub mod billing;
 pub mod client;
 pub mod commercial;
@@ -10,6 +12,11 @@ pub mod custody;
 pub mod error;
 pub mod models;
 pub mod ops;
+pub mod portfolio;
+pub mod risk;
+pub mod strategy;
+pub mod support;
+pub mod team_security;
 
 pub use client::{SaasClient, SaasClientBuilder};
 pub use error::{SdkError, SdkErrorKind};

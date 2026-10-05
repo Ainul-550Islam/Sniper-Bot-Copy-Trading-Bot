@@ -219,10 +219,13 @@ let ws;
 function connectWs(){
   const proto=location.protocol==='https:'?'wss':'ws';
   const k=key();
-  const url=proto+'://'+location.host+'/api/events'+(k?('?key='+encodeURIComponent(k)):'');
+  const url=proto+'://'+location.host+'/api/saas/events';
   if(ws){ try{ ws.onclose=null; ws.close(); }catch(e){} }
   ws=new WebSocket(url);
-  ws.onopen=()=>{ $('#conn').innerHTML='<span class="dot ok"></span>live'; };
+  ws.onopen=()=>{
+    $('#conn').innerHTML='<span class="dot ok"></span>live';
+    if(k) ws.send(JSON.stringify({type:'auth',token:k}));
+  };
   ws.onclose=()=>{ $('#conn').innerHTML='<span class="dot bad"></span>disconnected'; setTimeout(connectWs,2000); };
   ws.onerror=()=>{ try{ws.close()}catch(e){} };
   ws.onmessage=(m)=>{ try{ pushFeed(JSON.parse(m.data)); }catch(e){} };

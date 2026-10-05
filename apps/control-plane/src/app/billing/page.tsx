@@ -1,88 +1,264 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { commercial, toDisplayError, BillingStatus, UsageLimits, CommercialState } from "@/lib/commercial";
+/**
+ * Commercial Billing & Subscription Self-Service Desk (Commercial Readiness).
+ *
+ * Full self-service billing experience: plan comparison tiers, upgrade checkout creation,
+ * invoice history with downloadable records, usage limits consumption, and dunning state.
+ */
 
-type State = { billing: BillingStatus | null; usage: UsageLimits | null; commercial: CommercialState | null; loading: boolean; error: string | null };
+import { useEffect, useState, useCallback } from "react";
+import { AppShell } from "@/components/AppShell";
+import {
+  commercial,
+  toDisplayError,
+  BillingStatus,
+  UsageLimits,
+  CommercialState,
+  InvoiceRecord,
+  AVAILABLE_PLANS,
+  PlanTier,
+} from "@/lib/commercial";
 
 export default function BillingPage() {
-  const [state, setState] = useState<State>({ billing: null, usage: null, commercial: null, loading: true, error: null });
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [usage, setUsage] = useState<UsageLimits | null>(null);
+  const [, setComm] = useState<CommercialState | null>(null);
+  const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [checkoutNotice, setCheckoutNotice] = useState<string | null>(null);
+  const [upgradingCode, setUpgradingCode] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const [billing, usage, comm] = await Promise.all([
-          commercial.billingStatus().catch(() => null),
-          commercial.usageLimits().catch(() => null),
-          commercial.commercialState().catch(() => null),
-        ]);
-        if (!cancelled) setState({ billing, usage, commercial: comm, loading: false, error: null });
-      } catch (e) {
-        if (!cancelled) setState((s) => ({ ...s, loading: false, error: toDisplayError(e) }));
-      }
+  const loadData = useCallback(async () => {
+    try {
+      const [b, u, c, inv] = await Promise.all([
+        commercial.billingStatus().catch(() => null),
+        commercial.usageLimits().catch(() => null),
+        commercial.commercialState().catch(() => null),
+        commercial.invoices().then((r) => r.invoices).catch(() => []),
+      ]);
+      setBilling(b);
+      setUsage(u);
+      setComm(c);
+      setInvoices(inv);
+    } catch (e) {
+      setError(toDisplayError(e));
+    } finally {
+      setLoading(false);
     }
-    load();
-    return () => { cancelled = true; };
   }, []);
 
-  if (state.loading) return <main className="card"><p>Loading billing status…</p></main>;
-  if (state.error) return <main className="card"><p role="alert" className="error">{state.error}</p></main>;
-  if (!state.billing && !state.commercial) return <main className="card"><p className="muted">No billing data available.</p></main>;
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
 
-  const b = state.billing;
-  const u = state.usage;
-  const c = state.commercial;
+  const handleUpgrade = useCallback(async (plan: PlanTier) => {
+    setUpgradingCode(plan.code);
+    setCheckoutNotice(null);
+    setError(null);
+    try {
+      const idempotencyKey = "chk_upgrade_" + plan.code;
+      const res = await commercial.createCheckout(plan.code, idempotencyKey, "manual");
+      if (res.checkout_url && typeof window !== "undefined") {
+        window.location.assign(res.checkout_url);
+      } else {
+        setCheckoutNotice(
+          `Checkout session created for ${plan.name} (${res.id}). Provider instructions: ${res.instructions ?? "Contact account administrator to complete payment."}`,
+        );
+      }
+      await loadData();
+    } catch (err) {
+      setError(toDisplayError(err));
+    } finally {
+      setUpgradingCode(null);
+    }
+  }, [loadData]);
 
   return (
-    <main id="main" className="stack">
-      <h1>Billing &amp; Commercial State</h1>
-      {b && (
-        <section className="card">
-          <h2>Plan &amp; Subscription</h2>
-          <dl>
-            <dt>Plan</dt><dd>{b.plan_code} (v{b.plan_version})</dd>
-            <dt>Subscription</dt><dd>{b.subscription_status}</dd>
-            <dt>Provider</dt><dd>{b.billing_provider}</dd>
-            <dt>Entitlements</dt><dd>{b.entitlements_active ? "active" : "suspended"}</dd>
-            <dt>Dunning</dt><dd>{b.dunning_state}{b.grace_until ? ` — grace until ${b.grace_until}` : ""}</dd>
-            {b.suspension_reason && <><dt>Suspension</dt><dd>{b.suspension_reason}</dd></>}
-            <dt>As of</dt><dd>{b.as_of}</dd>
-          </dl>
-        </section>
-      )}
-      {u && (
-        <section className="card">
-          <h2>Usage &amp; Limits ({u.period})</h2>
-          {u.limits.length === 0 ? <p className="muted">No limits configured.</p> : (
-            <table>
-              <thead><tr><th>Feature</th><th>State</th><th>Current / Limit</th><th>Allows</th></tr></thead>
-              <tbody>
-                {u.limits.map((l) => (
-                  <tr key={l.feature}>
-                    <td>{l.feature}</td>
-                    <td>{l.state}</td>
-                    <td>{l.current} / {l.limit ?? "∞"} {l.remaining != null ? `(${l.remaining} left)` : ""}</td>
-                    <td>{l.allows ? "yes" : "no"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          <p className="muted small">Plan: {u.plan_code} — as of {u.as_of}</p>
-        </section>
-      )}
-      {c && (
-        <section className="card">
-          <h2>Commercial State</h2>
-          <dl>
-            <dt>Lifecycle</dt><dd>{c.lifecycle_status}</dd>
-            <dt>Consistent</dt><dd>{c.commercial_consistent ? "yes" : "no — review required"}</dd>
-            <dt>Billing</dt><dd>{c.subscription_status} / {c.dunning_state}</dd>
-          </dl>
-        </section>
-      )}
-      <p className="muted small">All values are server-authoritative. Provider secrets are never shown.</p>
-    </main>
+    <AppShell>
+      <div className="stack">
+        <div className="row-between">
+          <div>
+            <h1>Subscription &amp; Commercial Billing</h1>
+            <p className="muted">
+              Manage your subscription tier, track real-time quota usage, review invoices, and upgrade features.
+            </p>
+          </div>
+        </div>
+
+        {error && <div className="notice danger">{error}</div>}
+        {checkoutNotice && <div className="notice success">{checkoutNotice}</div>}
+
+        {loading ? (
+          <p className="muted">Loading subscription and usage status…</p>
+        ) : (
+          <>
+            {/* Active Subscription Overview */}
+            {billing && (
+              <div className="grid-3">
+                <div className="stat-card">
+                  <span className="stat-card__title">Current Plan Tier</span>
+                  <span className="stat-card__value">{billing.plan_code.toUpperCase()}</span>
+                  <span className={`tag ${billing.entitlements_active ? "tag--active" : "tag--suspended"}`} style={{ width: "fit-content", marginTop: "0.4rem" }}>
+                    {billing.entitlements_active ? "Entitlements Active" : "Suspended"}
+                  </span>
+                </div>
+
+                <div className="stat-card">
+                  <span className="stat-card__title">Billing Provider</span>
+                  <span className="stat-card__value">{billing.billing_provider.toUpperCase()}</span>
+                  <span className="muted small">Status: {billing.subscription_status}</span>
+                </div>
+
+                <div className="stat-card">
+                  <span className="stat-card__title">Dunning State</span>
+                  <span className="stat-card__value">{billing.dunning_state.toUpperCase()}</span>
+                  <span className="muted small">
+                    {billing.grace_until ? `Grace period until ${new Date(billing.grace_until).toLocaleDateString()}` : "Good Standing"}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Plan Comparison & Self-Service Upgrade */}
+            <section className="card">
+              <h2>Available Institutional Tiers</h2>
+              <div className="grid-3" style={{ marginTop: "1rem" }}>
+                {AVAILABLE_PLANS.map((plan) => {
+                  const isCurrent = billing?.plan_code.toLowerCase() === plan.code.toLowerCase();
+                  return (
+                    <div
+                      key={plan.code}
+                      className="card stack"
+                      style={{
+                        background: "var(--panel-2)",
+                        border: isCurrent ? "2px solid var(--accent)" : "1px solid var(--line)",
+                      }}
+                    >
+                      <div className="row-between">
+                        <h3>{plan.name}</h3>
+                        {isCurrent && <span className="tag tag--active">Current Plan</span>}
+                      </div>
+                      <p style={{ fontSize: "1.5rem", fontWeight: 700, margin: "0.2rem 0" }}>
+                        ${plan.price_monthly_usd} <span className="muted small" style={{ fontSize: "0.85rem", fontWeight: 400 }}>/ month</span>
+                      </p>
+                      <p className="muted small">{plan.description}</p>
+                      <ul style={{ paddingLeft: "1.2rem", margin: "0.5rem 0" }}>
+                        {plan.features.map((f, idx) => (
+                          <li key={idx} className="small" style={{ marginBottom: "0.3rem" }}>
+                            {f}
+                          </li>
+                        ))}
+                      </ul>
+                      <button
+                        className={isCurrent ? "" : "primary"}
+                        disabled={isCurrent || upgradingCode === plan.code}
+                        onClick={() => handleUpgrade(plan)}
+                        style={{ marginTop: "auto" }}
+                      >
+                        {isCurrent ? "Active Plan" : upgradingCode === plan.code ? "Initiating Checkout…" : `Upgrade to ${plan.name}`}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* Usage Quotas & Limits */}
+            {usage && (
+              <section className="card">
+                <h2>Usage Quotas &amp; Tier Limits ({usage.period})</h2>
+                {usage.limits.length === 0 ? (
+                  <p className="muted" style={{ marginTop: "0.5rem" }}>No feature limits configured for this tier.</p>
+                ) : (
+                  <div style={{ marginTop: "1rem", overflowX: "auto" }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Feature / Dimension</th>
+                          <th>Status</th>
+                          <th>Current Usage / Tier Limit</th>
+                          <th>Capacity Remaining</th>
+                          <th>Access Allowed</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {usage.limits.map((l) => (
+                          <tr key={l.feature}>
+                            <td><strong>{l.feature}</strong></td>
+                            <td>
+                              <span className={`tag tag--${l.state === "ok" ? "healthy" : "warning"}`}>{l.state}</span>
+                            </td>
+                            <td>
+                              {l.current} / {l.limit != null ? l.limit : "Unlimited"}
+                            </td>
+                            <td>{l.remaining != null ? `${l.remaining} units` : "∞"}</td>
+                            <td>
+                              <span className={l.allows ? "success" : "error"}>{l.allows ? "✓ Yes" : "✕ Blocked"}</span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            )}
+
+            {/* Invoice History */}
+            <section className="card">
+              <h2>Invoice History &amp; Receipts</h2>
+              {invoices.length === 0 ? (
+                <p className="muted" style={{ marginTop: "0.5rem" }}>
+                  No invoices generated yet for this organization.
+                </p>
+              ) : (
+                <div style={{ marginTop: "1rem", overflowX: "auto" }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Invoice ID</th>
+                        <th>Created Date</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th>Paid Date</th>
+                        <th>Receipt</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invoices.map((inv) => (
+                        <tr key={inv.id}>
+                          <td><code>{inv.id.slice(0, 12)}…</code></td>
+                          <td>{new Date(inv.created_at).toLocaleDateString()}</td>
+                          <td>
+                            ${(inv.amount_due_cents / 100).toFixed(2)} {inv.currency.toUpperCase()}
+                          </td>
+                          <td>
+                            <span className={`tag tag--${inv.status === "paid" ? "healthy" : "warning"}`}>
+                              {inv.status}
+                            </span>
+                          </td>
+                          <td>{inv.paid_at ? new Date(inv.paid_at).toLocaleDateString() : "—"}</td>
+                          <td>
+                            {inv.hosted_invoice_url ? (
+                              <a href={inv.hosted_invoice_url} target="_blank" rel="noreferrer">
+                                View Invoice ↗
+                              </a>
+                            ) : (
+                              <span className="muted">System Receipt</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </>
+        )}
+      </div>
+    </AppShell>
   );
 }

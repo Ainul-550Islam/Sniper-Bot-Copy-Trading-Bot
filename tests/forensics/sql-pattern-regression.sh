@@ -21,7 +21,7 @@ if [ ! -x "$SCAN" ]; then
 fi
 
 echo "[sql-regression] 1/3 — the real tree must sweep with zero class-4 findings"
-OUT="$("$SCAN")" || { printf '%s\n' "$OUT" | tail -30; echo "[sql-regression] FAIL — class-4 findings present (see above)" >&2; exit 1; }
+OUT="$("$SCAN" 2>&1)" || { printf '%s\n' "$OUT" | tail -30; echo "[sql-regression] FAIL — class-4 findings present (see above)" >&2; exit 1; }
 echo "$OUT" | tail -1
 
 echo "[sql-regression] 2/3 — the scanner must catch a planted unscoped statement"
@@ -69,7 +69,7 @@ fi
 
 echo "[sql-regression] 3/3 — the class vocabulary must stay intact"
 for cls in "class 1 (tenant-safe)" "class 2 (intentional-global)" "class 3 (operator-only)" "class 4 (MISSING-TENANT-ENFORCEMENT)" "class 5 (cosmetic)"; do
-  if ! printf '%s\n' "$OUT" | grep -qF "$cls"; then
+  if ! echo "$OUT" | grep -F "$cls" >/dev/null; then
     echo "[sql-regression] FAIL — class summary line missing: $cls" >&2
     exit 1
   fi

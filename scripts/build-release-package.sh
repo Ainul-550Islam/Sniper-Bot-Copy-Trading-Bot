@@ -10,20 +10,21 @@ mkdir -p "$OUT"/{source,docs,evidence,sbom,licenses,checksums,manifests}
 # Copy source excluding target/node_modules/.git/.env/secrets/private keys/caches/build outputs
 # Use rsync if available; fallback to tar pipeline. Both must exclude identical patterns.
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --exclude='target/' --exclude='**/target/' --exclude='node_modules/' --exclude='**/node_modules/' --exclude='.git/' --exclude='.env' --exclude='secrets/' --exclude='*.pem' --exclude='*.key' --exclude='__pycache__/' --exclude='.turbo/' --exclude='.next/' --exclude='**/.next/' --exclude='out/' --exclude='**/out/' --exclude='dist/' --exclude='build/' --exclude='.vercel/' --exclude='buyer-release/' --exclude='sbom.json' --exclude='sbom.cyclonedx.json' --exclude='licenses.json' --exclude='licenses.csv' \
+  rsync -a --exclude='target/' --exclude='**/target/' --exclude='node_modules/' --exclude='**/node_modules/' --exclude='.git/' --exclude='.env' --exclude='secrets/' --exclude='*.pem' --exclude='*.key' --exclude='__pycache__/' --exclude='.turbo/' --exclude='.next/' --exclude='**/.next/' --exclude='out/' --exclude='**/out/' --exclude='dist/' --exclude='build/' --exclude='.vercel/' --exclude='buyer-release/' \
     "$ROOT"/ "$OUT/source/"
 else
   mkdir -p "$OUT/source"
   # Fallback: use tar pipeline with same excludes
-  tar -C "$ROOT" --exclude='target' --exclude='node_modules' --exclude='.git' --exclude='.env' --exclude='secrets' --exclude='buyer-release' --exclude='.next' --exclude='out' --exclude='dist' --exclude='build' --exclude='.turbo' --exclude='sbom.json' --exclude='sbom.cyclonedx.json' --exclude='licenses.json' --exclude='licenses.csv' -cf - . | tar -C "$OUT/source" -xf -
+  tar -C "$ROOT" --exclude='target' --exclude='node_modules' --exclude='.git' --exclude='.env' --exclude='secrets' --exclude='buyer-release' --exclude='.next' --exclude='out' --exclude='dist' --exclude='build' --exclude='.turbo' -cf - . | tar -C "$OUT/source" -xf -
 fi
 # Prune any accidentally copied excludes (defense in depth)
 rm -rf "$OUT/source/target" "$OUT/source/node_modules" "$OUT/source/.git" "$OUT/source/buyer-release" 2>/dev/null || true
 rm -rf "$OUT/source/apps/control-plane/.next" "$OUT/source/.next" "$OUT/source/out" "$OUT/source/dist" "$OUT/source/build" "$OUT/source/.turbo" "$OUT/source/.vercel" 2>/dev/null || true
 rm -rf "$OUT/source/programs/staking-suite/target" 2>/dev/null || true
-rm -f "$OUT/source/sbom.json" "$OUT/source/sbom.cyclonedx.json" "$OUT/source/licenses.json" "$OUT/source/licenses.csv" 2>/dev/null || true
+rm -rf "$OUT/source/.cargo/bin" 2>/dev/null || true
 find "$OUT/source" -name ".env" -delete 2>/dev/null || true
 find "$OUT/source" -name "*.pem" -o -name "*.key" | xargs rm -f 2>/dev/null || true
+chmod +x "$OUT/source/scripts/"*.sh "$OUT/source/tests/release/"*.sh "$OUT/source/tests/business/"*.sh "$OUT/source/tests/forensics/"*.sh 2>/dev/null || true
 
 # Copy the CONTENTS, never the directory itself: `cp -r "$ROOT/docs" "$OUT/docs"` nests the
 # tree one level deeper (buyer-release/docs/docs/...) when $OUT/docs already exists, which

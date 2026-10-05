@@ -17,6 +17,8 @@ pub mod dashboard;
 pub mod ha;
 pub mod module_runtime;
 pub mod obs;
+pub mod openapi_team_security;
+pub mod openapi_trading_data_plane;
 pub mod ops;
 pub mod persist;
 pub mod provisioning;

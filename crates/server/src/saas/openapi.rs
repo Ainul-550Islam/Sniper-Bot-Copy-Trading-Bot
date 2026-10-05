@@ -607,9 +607,12 @@ pub fn base_document() -> Value {
 /// `document()`, which every request to `/api/saas/openapi.json` and the
 /// artifact test both call, so a conflict cannot reach a release.
 fn merge_api_fragments(doc: &mut Value) {
-    use crate::api::{openapi_billing, openapi_commercial, openapi_custody, openapi_ops};
+    use crate::api::{
+        openapi_billing, openapi_commercial, openapi_custody, openapi_ops, openapi_product,
+    };
+    use crate::{openapi_team_security, openapi_trading_data_plane};
 
-    let fragments: [(&str, Value, Value); 4] = [
+    let fragments: [(&str, Value, Value); 7] = [
         (
             "billing",
             openapi_billing::billing_paths(),
@@ -626,6 +629,21 @@ fn merge_api_fragments(doc: &mut Value) {
             openapi_custody::custody_schemas(),
         ),
         ("ops", openapi_ops::paths(), openapi_ops::schemas()),
+        (
+            "trading_data_plane",
+            openapi_trading_data_plane::trading_data_plane_paths(),
+            openapi_trading_data_plane::trading_data_plane_schemas(),
+        ),
+        (
+            "team_security",
+            openapi_team_security::team_security_paths(),
+            openapi_team_security::team_security_schemas(),
+        ),
+        (
+            "product",
+            openapi_product::product_paths(),
+            openapi_product::product_schemas(),
+        ),
     ];
 
     for (name, paths, schemas) in fragments {

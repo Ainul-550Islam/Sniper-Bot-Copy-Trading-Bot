@@ -69,7 +69,7 @@ step "version consistency (VERSION == workspace == staking)" version_check
 toolchain_check() {
     local pin docker ci
     pin="$(awk -F'"' '/^channel/{print $2;exit}' rust-toolchain.toml)"
-    docker="$(grep -oE 'FROM rust:[0-9.]+-bookworm' Dockerfile | head -1 | sed 's/FROM rust://; s/-bookworm//')"
+    docker="$(grep -oE '(FROM rust:[0-9.]+-bookworm|# rust:[0-9.]+-bookworm)' Dockerfile | head -1 | sed 's/.*rust://; s/-bookworm//')"
     ci="$(grep -oE 'dtolnay/rust-toolchain@[0-9.]+' .github/workflows/ci.yml | sed 's|.*@||' | sort -u | tr '\n' ' ')"
     echo "pin=$pin dockerfile=$docker ci-explicit=[$ci]"
     [ -n "$pin" ] && [ "$docker" = "$pin" ] && case " $ci " in *" $pin "*) true;; *) false;; esac

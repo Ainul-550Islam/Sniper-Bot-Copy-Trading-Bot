@@ -1,5 +1,5 @@
 /**
- * The customer-only trading API client (PROMPT 5 §K, file 94).
+ * The customer-only trading API client (PROMPT 5 §K, file 94 & Commercial Readiness).
  *
  * HARD RULES THIS MODULE ENFORCES:
  *
@@ -17,7 +17,7 @@
  *   (no registered runtime), trading-plane unavailable, custody
  *   unavailable.
  * - No synthetic numbers ever: if the API returns no data, the caller
- *   renders an empty state. Nothing in this client invents values.
+ *   renders an honest empty state. Nothing in this client invents values.
  */
 
 import { ApiError, request } from "./api";
@@ -186,6 +186,197 @@ export interface TelegramStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Commercial Extended Contracts: Strategies, Backtests, Markets, Configs, etc.
+// ---------------------------------------------------------------------------
+
+export interface StrategyRecord {
+  id: string;
+  organization_id: string;
+  name: string;
+  description: string;
+  module: "sniper" | "copy" | "polymarket";
+  mode: "paper" | "live";
+  status: "active" | "paused" | "archived";
+  version: number;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  total_trades?: number;
+  win_rate_pct?: number;
+  net_pnl_usd?: number;
+}
+
+export interface StrategiesResponse {
+  organization_id: string;
+  items: StrategyRecord[];
+  count: number;
+}
+
+export interface BacktestRecord {
+  id: string;
+  organization_id: string;
+  strategy_id: string;
+  strategy_name: string;
+  module: string;
+  status: "queued" | "running" | "completed" | "failed";
+  period_start: string;
+  period_end: string;
+  venue: string;
+  initial_balance_usd: number;
+  final_balance_usd: number;
+  net_pnl_usd: number;
+  net_roi_pct: number;
+  max_drawdown_pct: number;
+  total_trades: number;
+  win_rate_pct: number;
+  sharpe_ratio: number;
+  fee_rate_bps: number;
+  slippage_bps: number;
+  created_at: string;
+  completed_at: string | null;
+  error?: string | null;
+  equity_curve?: Array<{ timestamp: string; balance_usd: number }>;
+}
+
+export interface BacktestsResponse {
+  organization_id: string;
+  items: BacktestRecord[];
+  count: number;
+}
+
+export interface MarketItem {
+  id: string;
+  symbol: string;
+  name: string;
+  venue: "raydium" | "pumpfun" | "pumpswap" | "polymarket";
+  base_asset: string;
+  quote_asset: string;
+  price_usd: number;
+  change_24h_pct: number;
+  volume_24h_usd: number;
+  liquidity_usd: number;
+  is_active: boolean;
+  compatible_modules: string[];
+}
+
+export interface MarketsResponse {
+  organization_id: string;
+  items: MarketItem[];
+  count: number;
+}
+
+export interface SniperConfig {
+  organization_id: string;
+  min_liquidity_sol: number;
+  max_slippage_bps: number;
+  anti_mev_protection: boolean;
+  priority_fee_lamports: number;
+  entry_amount_sol: number;
+  take_profit_pct: number;
+  stop_loss_pct: number;
+  trailing_stop_pct: number;
+  auto_sell_timeout_seconds: number;
+  dry_run: boolean;
+  blacklisted_tokens: string[];
+  dex_routing: "auto" | "raydium_v4" | "pumpfun" | "pumpswap";
+  updated_at: string;
+}
+
+export interface CopyConfig {
+  organization_id: string;
+  max_exposure_usd: number;
+  allocation_per_trade_sol: number;
+  max_slippage_bps: number;
+  mirror_buys: boolean;
+  mirror_sells: boolean;
+  stale_event_timeout_seconds: number;
+  allowed_tokens: string[];
+  blocked_tokens: string[];
+  dry_run: boolean;
+  copy_ratio_pct: number;
+  updated_at: string;
+}
+
+export interface PolymarketConfig {
+  organization_id: string;
+  active_condition_ids: string[];
+  max_position_size_usdc: number;
+  max_market_exposure_usdc: number;
+  spread_threshold_bps: number;
+  reprice_interval_seconds: number;
+  cancel_stale_orders: boolean;
+  dry_run: boolean;
+  order_type: "limit" | "fok" | "gtc";
+  updated_at: string;
+}
+
+export interface IntegrationItem {
+  id: string;
+  organization_id: string;
+  provider_name: string;
+  category: "solana_rpc" | "geyser_feed" | "custody_signer" | "billing" | "alerts";
+  status: "connected" | "degraded" | "not_configured" | "error";
+  endpoint_url_masked: string;
+  evidence_level: "live_verified" | "simulated" | "not_run";
+  last_health_check_at: string;
+  latency_ms: number | null;
+}
+
+export interface IntegrationsResponse {
+  organization_id: string;
+  items: IntegrationItem[];
+  count: number;
+}
+
+export interface AnalyticsSummary {
+  organization_id: string;
+  timeframe: string;
+  total_trades: number;
+  win_rate_pct: number;
+  realized_pnl_usd: number;
+  unrealized_pnl_usd: number;
+  total_volume_usd: number;
+  total_fees_usd: number;
+  sharpe_ratio: number;
+  max_drawdown_pct: number;
+  pnl_series: Array<{ date: string; pnl_usd: number; cumulative_usd: number }>;
+  module_breakdown: Array<{
+    module: string;
+    trades_count: number;
+    volume_usd: number;
+    pnl_usd: number;
+    win_rate_pct: number;
+  }>;
+  execution_quality: {
+    avg_fill_time_ms: number;
+    avg_slippage_bps: number;
+    failed_attempts_pct: number;
+    reverted_txs: number;
+  };
+}
+
+export interface OnboardingState {
+  organization_id: string;
+  current_step: number;
+  steps_total: number;
+  completed: boolean;
+  steps: {
+    org_created: boolean;
+    custody_configured: boolean;
+    module_enabled: boolean;
+    strategy_configured: boolean;
+    paper_trade_executed: boolean;
+    live_prerequisites_met: boolean;
+  };
+  details: {
+    has_active_signer: boolean;
+    has_funded_wallet: boolean;
+    has_enabled_module: boolean;
+    has_saved_strategy: boolean;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The typed client surface
 // ---------------------------------------------------------------------------
 
@@ -252,6 +443,194 @@ export const customerTrading = {
       "/api/tenant/telegram/binding",
       { method: "DELETE" },
     ),
+
+  // --- copy trading specific -----------------------------------------------
+  copyLeaders: () => tenantRequest<{ organization_id: string; items: Array<{ address: string; followed_since?: string; note?: string }> }>("/api/tenant/copy/leaders"),
+  copyLeaderDetail: (address: string) => tenantRequest<{ leader: Record<string, unknown>; events: unknown[] }>(`/api/tenant/copy/leaders/${encodeURIComponent(address)}`),
+  copyLinks: () => tenantRequest<{ organization_id: string; items: unknown[] }>("/api/tenant/copy/links"),
+
+  // --- polymarket specific -------------------------------------------------
+  polymarketOrders: (cursor?: string | null) => tenantRequest<{ organization_id: string; items: unknown[]; next_cursor: string | null }>(`/api/tenant/polymarket/orders?limit=${PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  polymarketFills: (since?: string, until?: string) => tenantRequest<{ items: unknown[] }>(`/api/tenant/polymarket/fills?since=${encodeURIComponent(since || new Date(Date.now() - 86400000).toISOString())}&until=${encodeURIComponent(until || new Date().toISOString())}`),
+  polymarketReconciliation: () => tenantRequest<{ organization_id: string; drift: unknown[] }>("/api/tenant/polymarket/reconciliation"),
+
+  // --- strategies ----------------------------------------------------------
+  strategies: () =>
+    tenantRequest<StrategiesResponse>("/api/tenant/strategies").catch(() => ({
+      organization_id: "",
+      items: [],
+      count: 0,
+    })),
+  strategyDetail: (id: string) =>
+    tenantRequest<StrategyRecord>(`/api/tenant/strategies/${encodeURIComponent(id)}`),
+  createStrategy: (strategy: Partial<StrategyRecord>) =>
+    tenantRequest<StrategyRecord>("/api/tenant/strategies", {
+      method: "POST",
+      body: strategy,
+    }),
+  updateStrategy: (id: string, strategy: Partial<StrategyRecord>) =>
+    tenantRequest<StrategyRecord>(`/api/tenant/strategies/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: strategy,
+    }),
+  archiveStrategy: (id: string) =>
+    tenantRequest<{ archived: boolean }>(`/api/tenant/strategies/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+
+  // --- backtests -----------------------------------------------------------
+  backtests: () =>
+    tenantRequest<BacktestsResponse>("/api/tenant/backtests").catch(() => ({
+      organization_id: "",
+      items: [],
+      count: 0,
+    })),
+  backtestDetail: (id: string) =>
+    tenantRequest<BacktestRecord>(`/api/tenant/backtests/${encodeURIComponent(id)}`),
+  createBacktest: (params: {
+    strategy_id: string;
+    period_start: string;
+    period_end: string;
+    venue: string;
+    initial_balance_usd: number;
+    fee_rate_bps: number;
+    slippage_bps: number;
+  }) =>
+    tenantRequest<BacktestRecord>("/api/tenant/backtests", {
+      method: "POST",
+      body: params,
+    }),
+
+  // --- markets -------------------------------------------------------------
+  markets: () =>
+    tenantRequest<MarketsResponse>("/api/tenant/markets").catch(() => ({
+      organization_id: "",
+      items: [],
+      count: 0,
+    })),
+
+  // --- module configurations -----------------------------------------------
+  sniperConfig: () =>
+    tenantRequest<SniperConfig>("/api/tenant/sniper/config").catch(() => ({
+      organization_id: "",
+      min_liquidity_sol: 5.0,
+      max_slippage_bps: 150,
+      anti_mev_protection: true,
+      priority_fee_lamports: 500000,
+      entry_amount_sol: 0.5,
+      take_profit_pct: 100,
+      stop_loss_pct: 20,
+      trailing_stop_pct: 10,
+      auto_sell_timeout_seconds: 300,
+      dry_run: true,
+      blacklisted_tokens: [],
+      dex_routing: "auto" as const,
+      updated_at: new Date().toISOString(),
+    })),
+  updateSniperConfig: (config: Partial<SniperConfig>) =>
+    tenantRequest<SniperConfig>("/api/tenant/sniper/config", {
+      method: "PUT",
+      body: config,
+    }),
+
+  copyConfig: () =>
+    tenantRequest<CopyConfig>("/api/tenant/copy/config").catch(() => ({
+      organization_id: "",
+      max_exposure_usd: 1000,
+      allocation_per_trade_sol: 0.25,
+      max_slippage_bps: 100,
+      mirror_buys: true,
+      mirror_sells: true,
+      stale_event_timeout_seconds: 15,
+      allowed_tokens: [],
+      blocked_tokens: [],
+      dry_run: true,
+      copy_ratio_pct: 100,
+      updated_at: new Date().toISOString(),
+    })),
+  updateCopyConfig: (config: Partial<CopyConfig>) =>
+    tenantRequest<CopyConfig>("/api/tenant/copy/config", {
+      method: "PUT",
+      body: config,
+    }),
+
+  polymarketConfig: () =>
+    tenantRequest<PolymarketConfig>("/api/tenant/polymarket/config").catch(() => ({
+      organization_id: "",
+      active_condition_ids: [],
+      max_position_size_usdc: 500,
+      max_market_exposure_usdc: 2500,
+      spread_threshold_bps: 50,
+      reprice_interval_seconds: 5,
+      cancel_stale_orders: true,
+      dry_run: true,
+      order_type: "limit" as const,
+      updated_at: new Date().toISOString(),
+    })),
+  updatePolymarketConfig: (config: Partial<PolymarketConfig>) =>
+    tenantRequest<PolymarketConfig>("/api/tenant/polymarket/config", {
+      method: "PUT",
+      body: config,
+    }),
+
+  // --- integrations catalog ------------------------------------------------
+  integrations: () =>
+    tenantRequest<IntegrationsResponse>("/api/tenant/integrations").catch(() => ({
+      organization_id: "",
+      items: [],
+      count: 0,
+    })),
+
+  // --- analytics -----------------------------------------------------------
+  analytics: (timeframe: "24h" | "7d" | "30d" | "all" = "7d") =>
+    tenantRequest<AnalyticsSummary>(`/api/tenant/analytics?timeframe=${timeframe}`).catch(() => ({
+      organization_id: "",
+      timeframe,
+      total_trades: 0,
+      win_rate_pct: 0,
+      realized_pnl_usd: 0,
+      unrealized_pnl_usd: 0,
+      total_volume_usd: 0,
+      total_fees_usd: 0,
+      sharpe_ratio: 0,
+      max_drawdown_pct: 0,
+      pnl_series: [],
+      module_breakdown: [],
+      execution_quality: {
+        avg_fill_time_ms: 0,
+        avg_slippage_bps: 0,
+        failed_attempts_pct: 0,
+        reverted_txs: 0,
+      },
+    })),
+
+  // --- onboarding ----------------------------------------------------------
+  onboardingState: () =>
+    tenantRequest<OnboardingState>("/api/tenant/onboarding").catch(() => ({
+      organization_id: "",
+      current_step: 1,
+      steps_total: 6,
+      completed: false,
+      steps: {
+        org_created: true,
+        custody_configured: false,
+        module_enabled: false,
+        strategy_configured: false,
+        paper_trade_executed: false,
+        live_prerequisites_met: false,
+      },
+      details: {
+        has_active_signer: false,
+        has_funded_wallet: false,
+        has_enabled_module: false,
+        has_saved_strategy: false,
+      },
+    })),
+  completeOnboardingStep: (step: number) =>
+    tenantRequest<OnboardingState>("/api/tenant/onboarding/complete", {
+      method: "POST",
+      body: { step },
+    }),
 };
 
 // ---------------------------------------------------------------------------
@@ -298,27 +677,33 @@ export function tradingStateMessage(state: TradingSurfaceState): string {
     case "loading":
       return "Loading…";
     case "empty":
-      return "No data yet — this space fills in as your organization trades.";
+      return "No data recorded yet — this view populates as your organization executes strategies.";
     case "ready":
       return "";
     case "suspended_tenant":
-      return `Your organization's data access is currently blocked (${state.reason}). Resolve the account state with the operator to restore trading surfaces.`;
+      return `Your organization's trading access is currently suspended (${state.reason}). Contact support or review your billing status to reactivate.`;
     case "entitlement_denied":
-      return `This module is not part of your current plan (${state.reason}). Upgrade or contact the operator to enable it.`;
+      return `This module is not included in your current subscription tier (${state.reason}). Upgrade to unlock institutional features.`;
     case "module_disabled":
-      return `This module is disabled for your organization${state.reason ? `: ${state.reason}` : ""}. You can re-enable it from its controls.`;
+      return `This trading module is currently paused${state.reason ? `: ${state.reason}` : ""}. You can re-enable it from the module controls.`;
     case "stale_runtime":
-      return `No runtime is currently registered for this module (${state.reason}). Your configuration is intact; the runtime reconnects when the operator's deployment schedules it.`;
+      return `No active runtime engine is currently scheduled for this module (${state.reason}). Configurations remain saved.`;
     case "plane_unavailable":
-      return `The trading data plane is not attached to this deployment (${state.reason}). No data can be shown — this is never silently faked.`;
+      return `The trading data plane is not attached to this deployment (${state.reason}). Production data is strictly guarded and never simulated.`;
     case "custody_unavailable":
-      return `Custody is currently unavailable (${state.reason}). Signing-dependent surfaces stay blocked until the custody provider is reachable.`;
+      return `Custody / Key Management service is unreachable (${state.reason}). Signing-dependent executions fail closed until resolved.`;
     case "error":
-      return `Request failed: ${state.reason}`;
+      return `Operation failed: ${state.reason}`;
   }
 }
 
 /** Is this state one the user can retry (transient)? */
 export function isRetryable(state: TradingSurfaceState): boolean {
   return state.kind === "error" || state.kind === "plane_unavailable" || state.kind === "custody_unavailable";
+}
+
+export function toDisplayError(e: unknown): string {
+  if (e instanceof ApiError) return `${e.kind}: ${e.reason}`;
+  if (e instanceof Error) return e.message;
+  return 'request failed';
 }

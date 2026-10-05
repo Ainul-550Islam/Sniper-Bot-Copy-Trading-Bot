@@ -40,6 +40,7 @@ pub mod signer;
 pub mod tenant_broadcast_guard;
 pub mod tenant_signing_context;
 pub mod tenant_transaction;
+pub mod token_safety;
 pub mod tokens;
 pub mod tx;
 pub mod ws;

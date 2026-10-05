@@ -24,8 +24,8 @@
       "programs/staking-suite (native Solana program, own lockfile, built with cargo build-sbf / agave 2.1.21)"
     ],
     "database_migrations": {
-      "count": 35,
-      "high_water_mark": "0035",
+      "count": 38,
+      "high_water_mark": "0038",
       "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)",
       "added_0019_0022": "0019_saas_billing_provider (plan/subscription/entitlement/usage/checkout/invoice/payment + billing pricing), 0020_saas_custody (profile + keys + address), 0021_saas_lifecycle (retention policy, purge lifecycle, job claims) \u2014 forward-only, Batch 1; 0022_checkout_url (durable provider checkout_url persistence for Stripe/Paddle end-to-end wiring) \u2014 forward_only",
       "added_0023": "0023_trading_tenant_columns (nullable organization_id ownership column + organizations(id) ON DELETE RESTRICT foreign key on all 32 core trading-truth tables \u2014 OMS orders/order_status_history/executions/transactions/idempotency_keys, positions/trades/balance_snapshots, dedup_keys/risk_events/audit_events, reconciliation_state, execution_intents, execution_claims/execution_claim_events, execution_lifecycle/execution_lifecycle_events, copy_leaders/copy_leader_events/copy_events/copy_links, poly_signals/poly_orders/poly_fills/poly_recon_findings, ledger_events/ledger_postings/global_positions/global_risk_decisions/kill_switches/kill_switch_events/accounting_recon_findings \u2014 STEP 1 of the enterprise tenant-isolation program; deterministic legacy backfill, NOT NULL, tenant-leading indexes and tenant-composite uniqueness follow in 0024) \u2014 forward-only",
@@ -34,7 +34,7 @@
       "added_0026_0034": "PROMPT 3/10 enterprise tenant-isolation program, atomic PK/arbiter swaps + tenant data plane: 0026_orders_tenant_conflict (orders PK (id) -> (organization_id, id), idempotency_keys arbiter -> (organization_id, scope, key)); 0027_idempotency_tenant_conflict; 0028_execution_claims_tenant_conflict (execution_claims/execution_claim_events arbiters -> tenant-composite); 0029_copy_links_tenant_conflict (copy_leaders (organization_id, address), copy_events (organization_id, event_id), copy_links (organization_id, position_id)); 0030_polymarket_orders_tenant_conflict (poly_signals/poly_orders/poly_fills tenant-composite); 0031_execution_intents_tenant_conflict; 0032_tenant_worker_claims (worker_claims: one tenant-local leadership lane per (organization_id, purpose) with fencing generation \u2014 the global ha_leases plane stays global); 0033_accounting_tenant_conflict (ledger/postings/global positions/risk/kill-switch/accounting recon tenant-composite + reconciliation_state PK (organization_id, kind, subject)); 0034_reporting_tenant_indexes (tenant-leading indexes for the reporting/data-plane query paths) \u2014 all forward-only"
     },
     "api_endpoints_documented": 55,
-    "docs_count": 122,
+    "docs_count": 149,
     "web_apps": [
       {
         "name": "apps/control-plane",
@@ -356,15 +356,15 @@
       "notes": "workspace run requires --test-threads=1 (PG-backed suites) and a clean tenant_test database; default-parallelism workspace run raced db_integration audit-chain tests (environment, not code); an earlier workspace attempt failed at link stage with 'ld: signal 7 bus error' due to sandbox disk exhaustion (target/ 14G) \u2014 resolved by clearing target/debug/incremental"
     },
     "manifest": {
-      "product_files": 856,
-      "rust_files": 564,
-      "docs_files": 122,
-      "tree_digest": "c989a22cb6c767f542dcc3ec083cec176652dde0645c4518fee8d36266ff058d",
+      "product_files": 1045,
+      "rust_files": 616,
+      "docs_files": 149,
+      "tree_digest": "cddeb979346ef6f579e459d346de1e85c2bebf81b9c11fde93b74bc5ed60309e",
       "generated_by": "scripts/update-release-manifest.sh"
     }
   },
-  "docs_files": 122,
-  "rust_files": 564,
-  "test_count": 1740,
-  "migrations": 35
+  "docs_files": 149,
+  "rust_files": 616,
+  "test_count": 1787,
+  "migrations": 38
 }

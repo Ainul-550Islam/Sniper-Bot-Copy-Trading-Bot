@@ -22,6 +22,7 @@ pub mod openapi_billing;
 pub mod openapi_commercial;
 pub mod openapi_custody;
 pub mod openapi_ops;
+pub mod openapi_product;
 /// The `/api/ops/**` operator surface (platform-admin only).
 pub mod ops_routes;
 
@@ -162,6 +163,7 @@ pub fn router(state: ApiState) -> Router {
             get(accounting_events).post(accounting_event_post),
         )
         .route("/api/accounting/findings", get(accounting_findings))
+        .route("/api/reconciliation/findings", get(accounting_findings))
         .route("/api/risk/global", get(risk_global))
         .route("/api/risk/kill-switch", post(risk_kill_switch))
         .route("/api/ha", get(ha_status))
@@ -366,15 +368,24 @@ async fn health() -> Response {
     Json(json!({ "ok": true })).into_response()
 }
 
-async fn status(State(state): State<ApiState>) -> Response {
+async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "status_read").await {
+        return e;
+    }
     Json(state.shared.summary().await).into_response()
 }
 
-async fn modules(State(state): State<ApiState>) -> Response {
+async fn modules(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "modules_read").await {
+        return e;
+    }
     Json(state.shared.all_module_status().await).into_response()
 }
 
-async fn positions(State(state): State<ApiState>) -> Response {
+async fn positions(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "positions_read").await {
+        return e;
+    }
     Json(state.shared.open_positions().await).into_response()
 }
 
@@ -383,19 +394,52 @@ struct TradeQuery {
     limit: Option<usize>,
 }
 
-async fn trades(State(state): State<ApiState>, Query(q): Query<TradeQuery>) -> Response {
+async fn trades(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<TradeQuery>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "trades_read").await {
+        return e;
+    }
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     Json(state.shared.trades(limit).await).into_response()
 }
 
+/// Recursive redaction helper to strip sensitive fields from any JSON level.
+fn redact_secrets_recursive(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            const SENSITIVE_KEYS: &[&str] = &[
+                "secret", "key", "password", "token", "credential", "private", "api_key",
+                "webhook_secret", "access_key", "secret_key", "signing_key",
+            ];
+            for (k, val) in map.iter_mut() {
+                let lower = k.to_ascii_lowercase();
+                if SENSITIVE_KEYS.iter().any(|s| lower.contains(s)) {
+                    *val = serde_json::json!("<redacted>");
+                } else {
+                    redact_secrets_recursive(val);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                redact_secrets_recursive(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A secrets-redacted view of the running config.
-async fn config_view(State(state): State<ApiState>) -> Response {
+async fn config_view(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "config_read").await {
+        return e;
+    }
     let cfg = state.shared.config_snapshot().await;
     let mut v = serde_json::to_value(&cfg).unwrap_or_else(|_| json!({}));
-    if let Some(obj) = v.as_object_mut() {
-        // Never leak key material over the API.
-        obj.insert("secrets".to_string(), json!("<redacted>"));
-    }
+    redact_secrets_recursive(&mut v);
     Json(v).into_response()
 }
 

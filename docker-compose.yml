@@ -81,6 +81,21 @@ services:
       # to expose a non-loopback bind without API auth configured anyway.
       - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-8080}:8080"
 
+  control-plane:
+    image: ${CONTROL_PLANE_IMAGE:-sniper-control-plane:local}
+    build:
+      context: ./apps/control-plane
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - bot
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      NEXT_PUBLIC_API_ORIGIN: ${NEXT_PUBLIC_API_ORIGIN:-}
+    ports:
+      - "${CONTROL_PLANE_BIND_HOST:-127.0.0.1}:${CONTROL_PLANE_PORT:-3000}:3000"
+
 volumes:
   pgdata:
   redisdata:

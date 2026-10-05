@@ -23,6 +23,8 @@
 //! for orders, fills, positions, risk, the ledger, HA leases or feed
 //! cursors — those stay in TASK 1–6.
 
+pub mod activity;
+pub mod alerts;
 pub mod api_keys;
 pub mod audit_export;
 pub mod backup_status;
@@ -39,20 +41,31 @@ pub mod custody_rotation;
 pub mod custody_rotation_store;
 pub mod data_lifecycle;
 pub mod export;
+pub mod feature_catalog;
 pub mod invoices;
 pub mod middleware;
+pub mod notifications;
 pub mod openapi;
 pub mod organizations;
 pub mod payment_webhooks;
+pub mod portfolio;
 pub mod postgres;
+pub mod pricing;
 pub mod provider;
 pub mod readiness;
+pub mod reports;
+pub mod risk_dashboard;
+pub mod security;
 pub mod security_summary;
+pub mod status;
 pub mod store;
+pub mod support;
+pub mod team;
 pub mod tenant_lifecycle;
 pub mod usage_limits;
 pub mod users;
 pub mod wallet_access;
+pub mod webhooks;
 pub mod websocket_auth;
 pub mod websocket_replay_store;
 
@@ -137,6 +150,20 @@ pub fn routes() -> Router<ApiState> {
         // --- BATCH 4: security summary + backup status ---
         .merge(security_summary::routes())
         .merge(backup_status::routes())
+        // --- SECOND.md §85-§89: team, security, webhooks, reports, support ---
+        .merge(team::routes())
+        .merge(security::routes())
+        .merge(webhooks::routes())
+        .merge(reports::routes())
+        .merge(support::routes())
+        // --- THIRD.md §133-§141: portfolio, risk, alerts, status, pricing, notifications, activity ---
+        .merge(portfolio::routes())
+        .merge(risk_dashboard::routes())
+        .merge(alerts::routes())
+        .merge(status::routes())
+        .merge(pricing::routes())
+        .merge(notifications::routes())
+        .merge(activity::routes())
 }
 
 /// Resolve the user behind a presented session token, without requiring a

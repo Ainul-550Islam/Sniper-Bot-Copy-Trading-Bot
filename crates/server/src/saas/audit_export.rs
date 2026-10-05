@@ -136,15 +136,56 @@ async fn fetch_audit_records(
     limit: usize,
     offset: usize,
 ) -> Vec<AuditExportRecord> {
-    // In prod: query audit_events table with org filter
-    // In test/memory: synthesize deterministic records from audit trail if available, else empty
-    let _ = state;
-    let _ = org;
-    let _ = from;
-    let _ = to;
-    // For now, return empty deterministic set — pagination still works
-    let all: Vec<AuditExportRecord> = Vec::new();
-    all.into_iter().skip(offset).take(limit).collect()
+    if let Some(db) = &state.db {
+        use sqlx::Row;
+        let query = r#"
+            SELECT id::text,
+                   COALESCE(organization_id::text, $6) as organization_id,
+                   actor,
+                   action,
+                   outcome,
+                   ts,
+                   detail
+            FROM audit_events
+            WHERE (organization_id = $1 OR organization_id IS NULL)
+              AND ts >= $2
+              AND ts <= $3
+            ORDER BY ts ASC, id ASC
+            LIMIT $4 OFFSET $5
+        "#;
+        if let Ok(rows) = sqlx::query(query)
+            .bind(org.as_uuid())
+            .bind(from)
+            .bind(to)
+            .bind(limit as i64)
+            .bind(offset as i64)
+            .bind(org.to_string())
+            .fetch_all(db.pool())
+            .await
+        {
+            let mut list = Vec::new();
+            for r in rows {
+                let id: String = r.try_get("id").unwrap_or_default();
+                let org_id: String = r.try_get("organization_id").unwrap_or_else(|_| org.to_string());
+                let actor: String = r.try_get("actor").unwrap_or_default();
+                let action: String = r.try_get("action").unwrap_or_default();
+                let outcome: String = r.try_get("outcome").unwrap_or_default();
+                let ts: DateTime<Utc> = r.try_get("ts").unwrap_or_else(|_| Utc::now());
+                let detail: serde_json::Value = r.try_get("detail").unwrap_or_else(|_| serde_json::json!({}));
+                list.push(AuditExportRecord {
+                    id,
+                    organization_id: org_id,
+                    actor,
+                    action,
+                    outcome,
+                    at: ts.to_rfc3339(),
+                    detail,
+                });
+            }
+            return list;
+        }
+    }
+    Vec::new()
 }
 
 fn redact_record(mut r: AuditExportRecord) -> AuditExportRecord {

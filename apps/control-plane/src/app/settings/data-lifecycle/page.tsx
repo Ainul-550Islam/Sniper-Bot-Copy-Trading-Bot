@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
+import { AppShell } from "@/components/AppShell";
 import { commercial, toDisplayError, LifecycleStatus } from "@/lib/commercial";
-import { request } from "@/lib/api";
+import { request, exportsApi, ApiError } from "@/lib/api";
 
 export default function DataLifecyclePage() {
   const [status, setStatus] = useState<LifecycleStatus | null>(null);
@@ -11,15 +12,14 @@ export default function DataLifecyclePage() {
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [exportData, setExportData] = useState<any>(null);
+  const [exportKind, setExportKind] = useState<string | null>(null);
 
-  async function load() {
+  const loadData = useCallback(async () => {
     setError(null);
     try {
-      // We need organizationId — fetch from current user membership via /api/saas/users/me
       const me = await request<{ organizations?: Array<{ organization_id: string }> }>("/api/saas/users/me").catch(() => null);
-      const orgId = (me as any)?.organizations?.[0]?.organization_id ?? (me as any)?.user?.id ?? null;
-      // Fallback: try billing status to get org
-      let targetOrg = orgId;
+      let targetOrg = me?.organizations?.[0]?.organization_id ?? null;
       if (!targetOrg) {
         const b = await commercial.billingStatus().catch(() => null);
         targetOrg = b?.organization_id ?? null;
@@ -32,22 +32,39 @@ export default function DataLifecyclePage() {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
+
+  async function handleExport(kind: string) {
+    setExportKind(kind);
+    try {
+      const res = await exportsApi.get(kind);
+      setExportData(res);
+    } catch (e) {
+      setError(e instanceof ApiError ? `${e.kind}: ${e.reason}` : "Export failed");
+    }
   }
 
-  useEffect(() => { load(); }, []);
-
   async function requestClose() {
-    if (confirm !== "CLOSE") { setError("Please type CLOSE to confirm"); return; }
-    setBusy(true); setError(null); setMessage(null);
+    if (confirm !== "CLOSE") {
+      setError("Please type CLOSE to confirm account deprovisioning");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setMessage(null);
     try {
       const orgId = status?.organization_id;
-      if (!orgId) throw new Error("No organization");
+      if (!orgId) throw new Error("No active organization identified");
       await request(`/api/saas/organizations/${encodeURIComponent(orgId)}/suspension`, {
         method: "POST",
-        body: { reason: "customer requested closure" },
+        body: { reason: "Customer requested organization deprovisioning and closure" },
       });
-      setMessage("Closure requested — trading is now disabled. Credentials will be revoked, sessions invalidated, and custody drained. Retention will schedule purge eligibility. This action is irreversible.");
-      await load();
+      setMessage("Closure requested — trading is now disabled. Credentials will be revoked and retention policy scheduled.");
+      await loadData();
     } catch (e) {
       setError(toDisplayError(e));
     } finally {
@@ -55,39 +72,97 @@ export default function DataLifecyclePage() {
     }
   }
 
-  if (loading) return <main className="card"><p>Loading lifecycle status…</p></main>;
-
   return (
-    <main id="main" className="stack">
-      <h1>Data &amp; Lifecycle</h1>
-      {error && <p role="alert" className="error">{error}</p>}
-      {message && <p className="success">{message}</p>}
-      {status ? (
-        <section className="card">
-          <h2>Tenant Status: {status.organization_status}</h2>
-          <dl>
-            <dt>Phase</dt><dd>{status.phase}</dd>
-            <dt>Organization</dt><dd>{status.organization_id}</dd>
-            <dt>Custody revoked</dt><dd>{status.custody_revoked ? "yes" : "no"}</dd>
-            <dt>Sessions invalidated</dt><dd>{status.sessions_invalidated ? "yes" : "no"}</dd>
-            <dt>Retention scheduled</dt><dd>{status.retention_scheduled ? "yes" : "no"}</dd>
-            <dt>Purge eligible</dt><dd>{status.purge_eligible_at ?? "not yet"}</dd>
-          </dl>
-          <p className="muted small">Suspended tenants cannot trade or manage resources but can read and reduce. Closed tenants are denied everything.</p>
-        </section>
-      ) : <p className="muted">No lifecycle data.</p>}
+    <AppShell>
+      <div className="stack">
+        <div className="row-between">
+          <div>
+            <h1>Data Lifecycle &amp; Privacy Compliance</h1>
+            <p className="muted">
+              Deterministic audit exports, legal data retention policies, and formal tenant deprovisioning controls.
+            </p>
+          </div>
+        </div>
 
-      <section className="card">
-        <h2>Request Closure / Deprovision</h2>
-        <p className="muted">This will irreversibly close the tenant, disable trading, revoke credentials and API keys, invalidate sessions, disconnect websockets, and schedule retention. Financial and audit records are preserved.</p>
-        <label>
-          Type <code>CLOSE</code> to confirm
-          <input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="CLOSE" />
-        </label>
-        <button className="primary" disabled={busy || confirm !== "CLOSE"} onClick={requestClose}>
-          {busy ? "Working…" : "Request closure"}
-        </button>
-      </section>
-    </main>
+        {error && <div className="notice danger">{error}</div>}
+        {message && <div className="notice success">{message}</div>}
+
+        {loading ? (
+          <p className="muted">Loading lifecycle state…</p>
+        ) : (
+          <>
+            {/* Status Card */}
+            {status && (
+              <section className="card">
+                <h2>Tenant Lifecycle State: {status.organization_status.toUpperCase()}</h2>
+                <div className="grid-3" style={{ marginTop: "1rem" }}>
+                  <div className="stat-card" style={{ background: "var(--panel-2)" }}>
+                    <span className="stat-card__title">Lifecycle Phase</span>
+                    <span className="stat-card__value" style={{ fontSize: "1.2rem" }}>{status.phase.toUpperCase()}</span>
+                  </div>
+                  <div className="stat-card" style={{ background: "var(--panel-2)" }}>
+                    <span className="stat-card__title">Retention Scheduled</span>
+                    <span className="stat-card__value" style={{ fontSize: "1.2rem" }}>{status.retention_scheduled ? "YES" : "NO"}</span>
+                  </div>
+                  <div className="stat-card" style={{ background: "var(--panel-2)" }}>
+                    <span className="stat-card__title">Purge Eligible At</span>
+                    <span className="stat-card__value" style={{ fontSize: "1.2rem" }}>{status.purge_eligible_at ?? "Not Scheduled"}</span>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {/* Deterministic Data Exports */}
+            <section className="card">
+              <h2>Deterministic Data Exports (GDPR &amp; SOC2 Audit)</h2>
+              <p className="muted small">
+                Download cryptographically verifiable exports of your organization&apos;s complete ledger, orders, and audit trail.
+              </p>
+              <div className="row" style={{ marginTop: "1rem" }}>
+                {["audit", "subscription", "usage", "wallets", "api_keys", "profile"].map((k) => (
+                  <button key={k} type="button" onClick={() => void handleExport(k)}>
+                    Export {k.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+
+              {exportData && (
+                <div style={{ marginTop: "1rem" }}>
+                  <h3>Export: {exportKind}</h3>
+                  <pre className="json">{JSON.stringify(exportData, null, 2)}</pre>
+                </div>
+              )}
+            </section>
+
+            {/* Tenant Deprovisioning */}
+            <section className="card" style={{ borderLeft: "4px solid var(--bad)" }}>
+              <h2>Request Organization Closure &amp; Data Purge</h2>
+              <p className="muted small">
+                Closing an organization permanently disables automated trading, revokes API keys, disconnects WebSockets,
+                and schedules data purge according to statutory financial retention requirements.
+              </p>
+              <div className="form" style={{ marginTop: "1rem", maxWidth: "480px" }}>
+                <div className="form-group">
+                  <label htmlFor="confirmClose">Type <code>CLOSE</code> to confirm</label>
+                  <input
+                    id="confirmClose"
+                    value={confirm}
+                    onChange={(e) => setConfirm(e.target.value)}
+                    placeholder="CLOSE"
+                  />
+                </div>
+                <button
+                  className="danger"
+                  disabled={busy || confirm !== "CLOSE"}
+                  onClick={() => void requestClose()}
+                >
+                  {busy ? "Processing…" : "Request Irreversible Deprovisioning"}
+                </button>
+              </div>
+            </section>
+          </>
+        )}
+      </div>
+    </AppShell>
   );
 }

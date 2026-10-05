@@ -609,6 +609,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn sign_against_unreachable_endpoint_fails_closed_with_typed_error() {
         let _lock = crate::custody::test_support::ENV_LOCK
             .lock()
@@ -624,7 +625,6 @@ mod tests {
         let (config, state) = KmsConfig::from_env();
         assert!(state.ready());
         let client = KmsClient::new(&config);
-        drop(_lock); // release the env lock before awaiting
         let err = client
             .sign_ed25519("k1", b"message")
             .await

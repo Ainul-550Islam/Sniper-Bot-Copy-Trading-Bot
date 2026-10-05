@@ -1,15 +1,15 @@
 "use client";
 
 /**
- * Telegram tenant binding/status page (PROMPT 5 §K, file 88).
+ * Telegram Tenant Alert Binding & Control Page (PROMPT 5 §K, file 88 & Commercial Readiness).
  *
- * Shows the control-plane module status and manages THIS organization's
- * notification binding (`/api/tenant/telegram/binding`). The page states
- * plainly what the binding is and what the deployment currently does
- * with it — no delivery claim that is not true.
+ * Shows the control-plane module status, manages THIS organization's
+ * notification binding (`/api/tenant/telegram/binding`), and provides
+ * safe status confirmation.
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { AppShell } from "@/components/AppShell";
 import {
   classifyTradingError,
   customerTrading,
@@ -32,6 +32,9 @@ export default function TelegramPage() {
       const response = await customerTrading.telegramStatus();
       setStatus(response);
       setNotice(null);
+      if (response.binding?.chat_id) {
+        setChatId(String(response.binding.chat_id));
+      }
       if (response.runtime === null) {
         setState({ kind: "stale_runtime", reason: response.runtime_detail ?? "no runtime registered" });
       } else {
@@ -55,7 +58,7 @@ export default function TelegramPage() {
     setBusy(true);
     try {
       const response = await customerTrading.bindTelegram(parsed);
-      setNotice(response.detail);
+      setNotice(response.detail || "Telegram chat binding updated.");
     } catch (e) {
       setNotice(tradingStateMessage(classifyTradingError(e)));
     } finally {
@@ -68,7 +71,8 @@ export default function TelegramPage() {
     setBusy(true);
     try {
       const response = await customerTrading.unbindTelegram();
-      setNotice(response.detail);
+      setNotice(response.detail || "Telegram binding removed.");
+      setChatId("");
     } catch (e) {
       setNotice(tradingStateMessage(classifyTradingError(e)));
     } finally {
@@ -78,72 +82,102 @@ export default function TelegramPage() {
   }
 
   return (
-    <main id="main" className="stack">
-      <h1>Telegram</h1>
-      <section className="card" aria-label="Telegram status">
-        <h2>Status</h2>
-        {state.kind === "loading" && <p>Loading Telegram status…</p>}
-        {state.kind !== "loading" && state.kind !== "ready" && (
-          <p role="alert" className="error">
-            {tradingStateMessage(state)}
-            {isRetryable(state) && (
-              <>
-                <br />
-                <button onClick={() => void load()} className="link">Retry</button>
-              </>
-            )}
-          </p>
-        )}
-        {state.kind === "ready" && status && (
-          <ul>
-            <li>
-              Runtime phase: <strong>{status.runtime?.phase}</strong> since{" "}
-              {status.runtime ? new Date(status.runtime.since).toLocaleString() : "—"}
-            </li>
-            <li>
-              Entitlement: control plane — every authenticated tenant has it; it never trades.
-            </li>
-          </ul>
-        )}
-      </section>
-
-      <section className="card" aria-label="Telegram binding">
-        <h2>Notification binding</h2>
-        {status?.binding ? (
-          <p>
-            Bound to chat <code>{status.binding.chat_id}</code> since{" "}
-            {new Date(status.binding.bound_at).toLocaleString()} (by {status.binding.bound_by}).
-          </p>
-        ) : (
-          <p>No binding is configured for your organization yet.</p>
-        )}
-        <p className="muted">{status?.binding_detail?.purpose ?? "Records your organization's declared Telegram notification chat."}</p>
-        <p className="muted">{status?.binding_detail?.delivery ?? "The deployment-level alert forwarder currently routes to the deployment alert chat; per-tenant routing is a deployment-side integration step."}</p>
-        <div className="row">
-          <label>
-            Chat id{" "}
-            <input
-              inputMode="numeric"
-              placeholder="e.g. -1001234567890"
-              value={chatId}
-              onChange={(e) => setChatId(e.target.value)}
-            />
-          </label>
-          <button disabled={busy} onClick={() => void bind()}>
-            Save binding
-          </button>
-          {status?.binding && (
-            <button disabled={busy} onClick={() => void unbind()}>
-              Remove binding
-            </button>
-          )}
+    <AppShell>
+      <div className="stack">
+        <div className="row-between">
+          <div>
+            <h1>Telegram Notification &amp; Alert Dispatch</h1>
+            <p className="muted">
+              Receive real-time execution alerts, risk trigger warnings, and daily PnL summaries in your private Telegram channel.
+            </p>
+          </div>
         </div>
-        {notice && <p role="status">{notice}</p>}
-        <p className="muted">
-          The chat id is a public Telegram identifier; no bot token material is ever stored or
-          shown here — the token stays in the operator environment.
-        </p>
-      </section>
-    </main>
+
+        {/* Status Alerts */}
+        {state.kind !== "loading" && state.kind !== "ready" && (
+          <div className="notice warn" role="alert">
+            <p>{tradingStateMessage(state)}</p>
+            {isRetryable(state) && (
+              <button onClick={() => void load()} className="link" style={{ marginTop: "0.4rem" }}>
+                Retry connection
+              </button>
+            )}
+          </div>
+        )}
+
+        {notice && <div className="notice success">{notice}</div>}
+
+        <div className="grid-2">
+          {/* Status Card */}
+          <section className="card">
+            <h2>Bot Service Status</h2>
+            {status ? (
+              <div className="stack" style={{ marginTop: "1rem" }}>
+                <p>
+                  <strong>Runtime Phase:</strong> <span className={`tag tag--${status.runtime?.phase}`}>{status.runtime?.phase ?? "idle"}</span>
+                </p>
+                <p>
+                  <strong>Runtime Since:</strong> {status.runtime ? new Date(status.runtime.since).toLocaleString() : "—"}
+                </p>
+                <p>
+                  <strong>Entitlement:</strong> Control Plane Notification Service (Included in all tiers).
+                </p>
+                <p className="muted small">
+                  The Telegram dispatcher operates fail-safe: failures to deliver Telegram messages never block live on-chain execution.
+                </p>
+              </div>
+            ) : (
+              <p className="muted">Loading status…</p>
+            )}
+          </section>
+
+          {/* Binding Card */}
+          <section className="card">
+            <h2>Tenant Chat ID Binding</h2>
+            {status?.binding ? (
+              <div style={{ marginTop: "0.5rem" }}>
+                <p>
+                  Active binding: <code>{status.binding.chat_id}</code>
+                </p>
+                <p className="muted small">
+                  Bound at {new Date(status.binding.bound_at).toLocaleString()} by {status.binding.bound_by}
+                </p>
+              </div>
+            ) : (
+              <p className="muted" style={{ marginTop: "0.5rem" }}>
+                No private Telegram chat configured yet for this organization.
+              </p>
+            )}
+
+            <div className="form" style={{ marginTop: "1rem" }}>
+              <div className="form-group">
+                <label htmlFor="chatId">Telegram Chat ID (Numeric)</label>
+                <input
+                  id="chatId"
+                  inputMode="numeric"
+                  placeholder="e.g. -1001234567890 or 12345678"
+                  value={chatId}
+                  onChange={(e) => setChatId(e.target.value)}
+                />
+                <small className="muted">
+                  Message <code>@userinfobot</code> or your team group ID in Telegram to retrieve your chat ID.
+                </small>
+              </div>
+
+              <div className="row">
+                <button className="primary" disabled={busy || !chatId.trim()} onClick={() => void bind()}>
+                  {busy ? "Saving…" : "Save Chat Binding"}
+                </button>
+                {status?.binding && (
+                  <button className="danger" disabled={busy} onClick={() => void unbind()}>
+                    Unbind Chat
+                  </button>
+                )}
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </AppShell>
   );
 }

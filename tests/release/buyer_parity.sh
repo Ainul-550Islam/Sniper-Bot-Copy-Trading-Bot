@@ -14,7 +14,7 @@ BUYER="$ROOT/buyer-release"
 FAIL=0
 
 echo "[buyer-parity] 1/4 — buyer source must be in byte parity with the canonical tree"
-if ! "$ROOT/scripts/compare-canonical-to-buyer-source.sh" >/dev/null 2>&1; then
+if ! bash "$ROOT/scripts/compare-canonical-to-buyer-source.sh" >/dev/null 2>&1; then
   echo "[buyer-parity] FAIL — source parity broken; run scripts/rebuild-buyer-release.sh" >&2
   FAIL=1
 else

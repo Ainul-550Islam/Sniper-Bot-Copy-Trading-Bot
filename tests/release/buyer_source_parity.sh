@@ -15,7 +15,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 COMPARE="$ROOT/scripts/compare-canonical-to-buyer-source.sh"
 
 echo "[parity-test] 1/2 — the real buyer tree must be in parity"
-if "$COMPARE"; then
+if bash "$COMPARE"; then
   echo "[parity-test] real tree parity: OK"
 else
   echo "[parity-test] real tree parity: DRIFT DETECTED (see report above)" >&2
@@ -42,7 +42,7 @@ done
 # Plant the drift: tamper one known-parity file in the scratch buyer tree.
 printf '\ntampered-by-parity-regression\n' >> "$SCRATCH/buyer-release/source/VERSION"
 
-if "$SCRATCH/scripts/compare-canonical-to-buyer-source.sh" >/dev/null 2>&1; then
+if bash "$SCRATCH/scripts/compare-canonical-to-buyer-source.sh" >/dev/null 2>&1; then
   echo "[parity-test] FAIL — the compare script did NOT flag the planted drift" >&2
   exit 1
 else

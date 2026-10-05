@@ -74,12 +74,20 @@ if [ -z "$missing" ]; then
 else
   bad "missing required files:$missing"
 fi
-# migrations 0001-0024 (contiguous, forward-only) — 24 migrations
+# migrations (contiguous 0001..high-water, forward-only)
+MIG_HIGH_RAW="$(find crates/core/migrations -maxdepth 1 -name '*.sql' 2>/dev/null | sed 's|.*/\([0-9]*\)_.*|\1|' | sort -n | tail -1)"
+MIG_HIGH_RAW="${MIG_HIGH_RAW:-0}"
+MIG_HIGH_NUM=$((10#$MIG_HIGH_RAW))
 migmissing=""
-for i in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019 0020 0021 0022 0023 0024; do
-  ls crates/core/migrations/${i}_*.sql >/dev/null 2>&1 || migmissing="$migmissing $i"
-done
-[ -z "$migmissing" ] && ok "migrations 0001-0024 present" || bad "missing migrations:$migmissing"
+if [ "$MIG_HIGH_NUM" -gt 0 ]; then
+  for ((i=1; i<=MIG_HIGH_NUM; i++)); do
+    prefix="$(printf "%04d" "$i")"
+    ls crates/core/migrations/${prefix}_*.sql >/dev/null 2>&1 || migmissing="$migmissing $prefix"
+  done
+  [ -z "$migmissing" ] && ok "migrations contiguous 0001..$(printf "%04d" "$MIG_HIGH_NUM") present" || bad "missing migrations:$migmissing"
+else
+  bad "no migrations found under crates/core/migrations"
+fi
 
 # ---------------------------------------------------------- 2. version id --
 V_FILE="$(tr -d '[:space:]' < VERSION)"

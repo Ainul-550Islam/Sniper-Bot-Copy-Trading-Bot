@@ -1,15 +1,19 @@
 //! Tenant polymarket handlers (PROMPT 3/10 #65).
 
 use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use bot_core::membership::Permission;
 use bot_core::models::BotModule;
+use bot_core::tenant::OrganizationId;
 
 use super::authorization_chain::{guard, guard_manage, TradingModuleFamily};
 use super::executions::window;
@@ -17,16 +21,29 @@ use super::module_controls::{apply_control, feature_key_for, status_payload, Con
 use super::orders::{page_request, plane_error};
 use crate::api::ApiState;
 
-/// `GET /api/tenant/polymarket/orders?limit=&cursor=` — the caller's
-/// mirror book (keyset-paginated, newest submission first).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolymarketConfigPayload {
+    pub organization_id: String,
+    pub active_condition_ids: Vec<String>,
+    pub max_position_size_usdc: f64,
+    pub max_market_exposure_usdc: f64,
+    pub spread_threshold_bps: u32,
+    pub reprice_interval_seconds: u32,
+    pub cancel_stale_orders: bool,
+    pub dry_run: bool,
+    pub order_type: String,
+    pub updated_at: String,
+}
+
+static POLYMARKET_CONFIG_STORE: LazyLock<Arc<Mutex<HashMap<OrganizationId, PolymarketConfigPayload>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+/// `GET /api/tenant/polymarket/orders?limit=&cursor=`
 pub async fn orders(
     State(state): State<ApiState>,
     headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    // §H: the full customer-API authorization chain — authenticate →
-    // organization (credential-side only) → plane → lifecycle →
-    // entitlement → module family. Denials carry typed codes.
     let auth = match super::authorization_chain::guard(
         &state,
         &headers,
@@ -74,15 +91,12 @@ pub async fn orders(
     }
 }
 
-/// `GET /api/tenant/polymarket/orders/:venue_order_id` — the caller's
-/// mirror row for that venue order, with its fills.
+/// `GET /api/tenant/polymarket/orders/:venue_order_id`
 pub async fn order(
     State(state): State<ApiState>,
     headers: axum::http::HeaderMap,
     Path(venue_order_id): Path<String>,
 ) -> Response {
-    // §H: full customer-API authorization chain (authenticate → org
-    // from credential → plane → lifecycle → entitlement → module family).
     let auth = match super::authorization_chain::guard(
         &state,
         &headers,
@@ -122,15 +136,12 @@ pub async fn order(
         .into_response()
 }
 
-/// `GET /api/tenant/polymarket/fills?since=&until=` — the caller's
-/// booked fills in a window.
+/// `GET /api/tenant/polymarket/fills?since=&until=`
 pub async fn fills(
     State(state): State<ApiState>,
     headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    // §H: full customer-API authorization chain (authenticate → org
-    // from credential → plane → lifecycle → entitlement → module family).
     let auth = match super::authorization_chain::guard(
         &state,
         &headers,
@@ -160,15 +171,12 @@ pub async fn fills(
     }
 }
 
-/// `GET /api/tenant/polymarket/reconciliation` — the caller's mirror
-/// drift (operator triage, tenant-scoped).
+/// `GET /api/tenant/polymarket/reconciliation`
 pub async fn reconciliation(
     State(state): State<ApiState>,
     headers: axum::http::HeaderMap,
     Query(_params): Query<HashMap<String, String>>,
 ) -> Response {
-    // §H: full customer-API authorization chain (authenticate → org
-    // from credential → plane → lifecycle → entitlement → module family).
     let auth = match super::authorization_chain::guard(
         &state,
         &headers,
@@ -197,9 +205,7 @@ pub async fn reconciliation(
     }
 }
 
-/// `GET /api/tenant/polymarket/status` — the caller's polymarket module
-/// state: entitlement (verified by the chain), tenant override, runtime
-/// phase.
+/// `GET /api/tenant/polymarket/status`
 pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     let auth = match guard(
         &state,
@@ -227,9 +233,7 @@ pub async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Respon
         .into_response()
 }
 
-/// `POST /api/tenant/polymarket/controls` — tenant-level enable/disable
-/// for the caller's OWN organization (runtime lifecycle stays
-/// runtime-owned).
+/// `POST /api/tenant/polymarket/controls`
 pub async fn controls(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -255,4 +259,101 @@ pub async fn controls(
         Err(response) => return response,
     };
     apply_control(&state, &auth, BotModule::Polymarket, action).await
+}
+
+/// `GET /api/tenant/polymarket/config`
+pub async fn get_config(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    let auth = match guard(
+        &state,
+        &headers,
+        Permission::BotRead,
+        TradingModuleFamily::Polymarket,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(response) => return response,
+    };
+
+    let org = auth.organization_id();
+    let mut lock = POLYMARKET_CONFIG_STORE.lock().unwrap();
+    let cfg = lock.entry(org).or_insert_with(|| PolymarketConfigPayload {
+        organization_id: org.to_string(),
+        active_condition_ids: vec![],
+        max_position_size_usdc: 500.0,
+        max_market_exposure_usdc: 2500.0,
+        spread_threshold_bps: 50,
+        reprice_interval_seconds: 5,
+        cancel_stale_orders: true,
+        dry_run: true,
+        order_type: "limit".into(),
+        updated_at: Utc::now().to_rfc3339(),
+    });
+
+    (StatusCode::OK, Json(cfg.clone())).into_response()
+}
+
+/// `PUT /api/tenant/polymarket/config`
+pub async fn update_config(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let auth = match guard_manage(
+        &state,
+        &headers,
+        Permission::BotConfigure,
+        TradingModuleFamily::Polymarket,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(response) => return response,
+    };
+
+    let org = auth.organization_id();
+    let mut lock = POLYMARKET_CONFIG_STORE.lock().unwrap();
+    let current = lock.entry(org).or_insert_with(|| PolymarketConfigPayload {
+        organization_id: org.to_string(),
+        active_condition_ids: vec![],
+        max_position_size_usdc: 500.0,
+        max_market_exposure_usdc: 2500.0,
+        spread_threshold_bps: 50,
+        reprice_interval_seconds: 5,
+        cancel_stale_orders: true,
+        dry_run: true,
+        order_type: "limit".into(),
+        updated_at: Utc::now().to_rfc3339(),
+    });
+
+    if let Some(v) = body.get("max_position_size_usdc").and_then(|x| x.as_f64()) {
+        current.max_position_size_usdc = v;
+    }
+    if let Some(v) = body.get("max_market_exposure_usdc").and_then(|x| x.as_f64()) {
+        current.max_market_exposure_usdc = v;
+    }
+    if let Some(v) = body.get("spread_threshold_bps").and_then(|x| x.as_u64()) {
+        current.spread_threshold_bps = v as u32;
+    }
+    if let Some(v) = body.get("reprice_interval_seconds").and_then(|x| x.as_u64()) {
+        current.reprice_interval_seconds = v as u32;
+    }
+    if let Some(v) = body.get("cancel_stale_orders").and_then(|x| x.as_bool()) {
+        current.cancel_stale_orders = v;
+    }
+    if let Some(v) = body.get("dry_run").and_then(|x| x.as_bool()) {
+        current.dry_run = v;
+    }
+    if let Some(v) = body.get("order_type").and_then(|x| x.as_str()) {
+        current.order_type = v.to_string();
+    }
+    if let Some(v) = body.get("active_condition_ids").and_then(|x| x.as_array()) {
+        current.active_condition_ids = v
+            .iter()
+            .filter_map(|s| s.as_str().map(|str_val| str_val.to_string()))
+            .collect();
+    }
+    current.updated_at = Utc::now().to_rfc3339();
+
+    (StatusCode::OK, Json(current.clone())).into_response()
 }

@@ -405,15 +405,13 @@ fn decode_row(r: &sqlx::postgres::PgRow) -> Result<RotationRecord, RotationStore
 mod tests {
     use super::*;
 
-    fn record(org: OrganizationId, profile: &str, old: &str, new: &str) -> RotationRecord {
-        RotationRecord::new(
-            org,
-            CustodyProfileId::parse(profile).expect("profile id"),
-            SignerId::parse(old).expect("old signer"),
-            SignerId::parse(new).expect("new signer"),
-            ProviderType::Local,
-            Utc::now(),
-        )
+    fn record(
+        org: OrganizationId,
+        profile: CustodyProfileId,
+        old: SignerId,
+        new: SignerId,
+    ) -> RotationRecord {
+        RotationRecord::new(org, profile, old, new, ProviderType::Local, Utc::now())
     }
 
     /// Memory mode round-trips and admits it is not durable.
@@ -423,7 +421,12 @@ mod tests {
         let s = CustodyRotationStore::new(None);
         assert!(!s.is_durable());
         let org = OrganizationId::new();
-        let rec = record(org, "profile-a", "signer-old", "signer-new");
+        let rec = record(
+            org,
+            CustodyProfileId::new(),
+            SignerId::new(),
+            SignerId::new(),
+        );
 
         s.insert(&rec).await.expect("insert");
         let got = s.get(rec.id).await.expect("get").expect("present");
@@ -438,13 +441,15 @@ mod tests {
         reset_cache();
         let s = CustodyRotationStore::new(None);
         let org = OrganizationId::new();
+        let prof = CustodyProfileId::new();
+        let old = SignerId::new();
+        let new1 = SignerId::new();
+        let new2 = SignerId::new();
 
-        s.insert(&record(org, "profile-a", "signer-old", "signer-new"))
+        s.insert(&record(org, prof, old, new1))
             .await
             .expect("first");
-        let second = s
-            .insert(&record(org, "profile-a", "signer-old", "signer-third"))
-            .await;
+        let second = s.insert(&record(org, prof, old, new2)).await;
         assert_eq!(second, Err(RotationStoreError::ConflictInFlight));
     }
 
@@ -456,11 +461,14 @@ mod tests {
         let s = CustodyRotationStore::new(None);
         let a = OrganizationId::new();
         let b = OrganizationId::new();
+        let prof = CustodyProfileId::new();
+        let old = SignerId::new();
+        let new_s = SignerId::new();
 
-        s.insert(&record(a, "profile-a", "signer-old", "signer-new"))
+        s.insert(&record(a, prof, old, new_s))
             .await
             .expect("tenant a");
-        s.insert(&record(b, "profile-a", "signer-old", "signer-new"))
+        s.insert(&record(b, prof, old, new_s))
             .await
             .expect("tenant b must not be blocked by tenant a");
 
