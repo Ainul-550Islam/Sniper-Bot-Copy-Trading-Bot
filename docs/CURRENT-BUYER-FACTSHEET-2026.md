@@ -1,17 +1,17 @@
-# CURRENT BUYER FACTSHEET (2026-10-01)
+# CURRENT BUYER FACTSHEET (2026-10-06)
 
 EVIDENCE-LEVEL: CODE
 
 One page for a buyer: what you are buying, what it measures, what is
 proven, what is not, and how to check every line yourself. Dated
-2026-10-01. Every count is machine-measured; every limitation is
+2026-10-06. Every count is machine-measured; every limitation is
 stated plainly.
 
 ## The product (8 crates + 1 program + 1 web app)
 
 | Component | What it is | Evidence level |
 | --- | --- | --- |
-| bot-core (crates/core) | Domain core: orders, positions, executions, transactions, ledger, audit hash chain, tenant model, 36 forward-only migrations | INTEGRATION_TEST |
+| bot-core (crates/core) | Domain core: orders, positions, executions, transactions, ledger, audit hash chain, tenant model, 43 forward-only migrations | INTEGRATION_TEST |
 | solana-kit | Solana/RPC kit used by the modules | UNIT_TEST |
 | module-sniper | Sniper engine (deterministic detect/entry/exit) | UNIT_TEST |
 | module-copy | Copy-trading engine (event dedup, ordering, mirror/exit/recovery) | UNIT_TEST + INTEGRATION_TEST |
@@ -22,11 +22,11 @@ stated plainly.
 | programs/staking-suite | Native Solana staking/token-fee program (PRE-DEPLOYMENT: placeholder id, never on-chain) | UNIT_TEST |
 | apps/control-plane | Customer web UI (Next.js): honest empty/error/denied states everywhere | Static typecheck |
 
-## Measured facts (2026-10-01)
+## Measured facts (2026-10-06)
 
-* 573 Rust files in `crates/` (+ the staking program), 29 TS/TSX files
-  in the control plane, 132 documents in `docs/`.
-* 36 forward-only migrations (high-water `0036`), no down-migrations by
+* 617 Rust files in `crates/` (+ the staking program), 96 TS/TSX files
+  in the control plane, 149 documents in `docs/`.
+* 43 forward-only migrations (high-water `0043`), no down-migrations by
   design.
 * 55 documented API endpoints; one authorization chain in front of all
   tenant surfaces.

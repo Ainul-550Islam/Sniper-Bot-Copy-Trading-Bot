@@ -7,7 +7,7 @@
 ## 1. SELLER PROVIDES
 
 - [ ] Source delivery: git archive `sniper-suite.tar.gz` + `release-manifest.json` + `Cargo.lock` + `programs/staking-suite/Cargo.lock`
-- [ ] Build environment: `rust-toolchain.toml` 1.98.1, `Dockerfile` 1.98.1-bookworm, `apps/control-plane` npm 10.8.2 + `package-lock.json` 211KB lockfileVersion 3
+- [ ] Build environment: `rust-toolchain.toml` 1.98.1, `Dockerfile` 1.98.1-bookworm, `apps/control-plane` npm 10.8.2 + `package-lock.json` 216KB lockfileVersion 3
 - [ ] Database: migrations `0001` → `0022` forward-only (22 files), `DATABASE_URL` required for production, `db_integration` 26/26 historical PG 17.11, now `postgres_saas_integration` harness
 - [ ] Redis: optional, `REDIS_URL`, `redis_saas_integration` dedup/lease/rate-limit, restart ephemeral documented
 - [ ] Env vars: see `deployment_preflight.rs` — `DATABASE_URL`, `REDIS_URL`, `CORS_ORIGINS`, secret refs (`*_REF`), `signer_mode`, `billing_provider`, `EXECUTION_MODE`
@@ -36,7 +36,7 @@
 ## 3. BUYER MUST VERIFY
 
 - [ ] Run `scripts/release-evidence.sh` → inspect `release-evidence/summary.json` (`format:check:clippy:test:postgres:redis:frontend:secret:stale:manifest:package` each `PASS/WARN/BLOCK/NOT_RUN`)
-- [ ] Run `scripts/verify-buyer-package.sh` → `PASS` (VERSION + Cargo.toml + manifest 0.1.0 consistent, 22 migrations, `BUYER-TRUTH-REGISTER` + `BUYER-EVIDENCE-PACK` + `BUYER-HANDOVER-CHECKLIST` present)
+- [ ] Run `scripts/verify-buyer-package.sh` → `PASS` (VERSION + Cargo.toml + manifest 0.1.0 consistent, 43 migrations through `0043`, `BUYER-TRUTH-REGISTER` + `BUYER-EVIDENCE-PACK` + `BUYER-HANDOVER-CHECKLIST` present)
 - [ ] Run `scripts/verify-delivery.sh` + `scripts/release-check.sh` → `PASS`
 - [ ] Execute Postgres integration: `POSTGRES_URL=postgres://... cargo test --test postgres_saas_integration -- --nocapture` → expect `PASS` when PG up, else `NOT_RUN` (not `FAIL`)
 - [ ] Execute Redis integration: `REDIS_URL=redis://... cargo test --test redis_saas_integration` → `PASS` or `NOT_RUN`

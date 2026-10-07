@@ -24,6 +24,7 @@ pub struct MarketTicker {
 }
 
 impl MarketTicker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         symbol: String,

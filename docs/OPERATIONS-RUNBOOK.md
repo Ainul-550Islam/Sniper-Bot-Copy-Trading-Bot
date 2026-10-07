@@ -1,6 +1,6 @@
 # Operations Runbook — sniper-suite 0.1.0
 
-> **Current:** 22 migrations, 343 rs, 8 members, version 0.1.0, `rust-toolchain.toml` 1.98.1. Commands are real and correspond to `scripts/*` and `docs/*`.
+> **Current (2026-10-06):** 43 forward-only migrations through `0043`, 616 Rust files under `crates/`, 8 members, version 0.1.0, `rust-toolchain.toml` 1.98.1. Commands are real and correspond to `scripts/*` and `docs/*`.
 
 ## 1. Startup
 

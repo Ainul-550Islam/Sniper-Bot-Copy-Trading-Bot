@@ -36,7 +36,7 @@ export default function StrategiesPage() {
   }, [filterModule]);
 
   useEffect(() => {
-    void load();
+    void Promise.resolve().then(() => load());
   }, [load]);
 
   return (

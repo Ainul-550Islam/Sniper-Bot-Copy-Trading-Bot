@@ -67,6 +67,10 @@ def walk(root: Path, apply_exclusions: bool):
                 continue
             if rel.name in EXCLUDED_FILES:
                 continue
+            # TypeScript emits this local incremental cache during typecheck/build;
+            # it is generated state, not buyer source, and must never affect parity.
+            if rel.name.endswith(".tsbuildinfo"):
+                continue
         else:
             # Buyer side: only prune dependency/build dirs that can never
             # be legitimately present (they are contamination and are

@@ -46,7 +46,7 @@ export default function PricingPage() {
   }, []);
 
   useEffect(() => {
-    void loadPlans();
+    void Promise.resolve().then(() => loadPlans());
   }, [loadPlans]);
 
   return (

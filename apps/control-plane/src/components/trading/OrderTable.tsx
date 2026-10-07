@@ -38,7 +38,7 @@ export default function OrderTable({ onShowExecutions }: { onShowExecutions?: (o
   }, []);
 
   useEffect(() => {
-    void load(null);
+    void Promise.resolve().then(() => load(null));
   }, [load]);
 
   async function cancel(id: string) {

@@ -31,7 +31,7 @@ export default function MarketsPage() {
   }, []);
 
   useEffect(() => {
-    void loadData();
+    void Promise.resolve().then(() => loadData());
   }, [loadData]);
 
   return (

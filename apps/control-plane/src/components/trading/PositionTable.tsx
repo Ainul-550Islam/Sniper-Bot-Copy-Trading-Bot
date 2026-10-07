@@ -40,7 +40,7 @@ export default function PositionTable() {
   }, []);
 
   useEffect(() => {
-    void load(null);
+    void Promise.resolve().then(() => load(null));
   }, [load]);
 
   return (

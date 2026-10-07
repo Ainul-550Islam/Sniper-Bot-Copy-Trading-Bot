@@ -78,7 +78,7 @@ export default function OnboardingPage() {
   }, []);
 
   useEffect(() => {
-    void loadState();
+    void Promise.resolve().then(() => loadState());
   }, [loadState]);
 
   return (

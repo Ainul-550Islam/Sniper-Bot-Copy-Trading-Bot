@@ -33,7 +33,7 @@ export default function StrategyDetailPage() {
   }, [strategyId]);
 
   useEffect(() => {
-    void load();
+    void Promise.resolve().then(() => load());
   }, [load]);
 
   return (

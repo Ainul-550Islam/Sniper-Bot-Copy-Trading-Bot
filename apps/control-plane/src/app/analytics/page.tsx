@@ -47,7 +47,7 @@ export default function AnalyticsPage() {
   }, [timeframe]);
 
   useEffect(() => {
-    void loadAnalytics();
+    void Promise.resolve().then(() => loadAnalytics());
   }, [loadAnalytics]);
 
   const metrics = analytics

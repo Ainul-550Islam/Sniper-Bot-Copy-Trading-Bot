@@ -1,12 +1,12 @@
 # API Compatibility Matrix — sniper-suite 0.1.0
 
-> No claim of semantic versioning unless enforced. Version 0.1.0, 22 migrations, 8 members. Legacy path status accurate.
+> No claim of semantic versioning unless enforced. Version 0.1.0, 43 forward-only migrations through `0043`, 8 members. Legacy path status accurate.
 
 ## Versioning
 
 - **App version:** `0.1.0` (`VERSION`, `Cargo.toml` workspace, `release-manifest.json`, `GET /health` `version`)
 - **No SemVer guarantee yet:** Pre-1.0, breaking changes allowed with minor bump + `CHANGELOG.md` entry (per `docs/RELEASE.md` §1). No automated semver check in CI.
-- **Schema:** DB forward-only 22 migrations, additive.
+- **Schema:** DB forward-only 43 migrations through `0043`, additive.
 
 ## REST
 

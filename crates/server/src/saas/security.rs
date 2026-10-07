@@ -198,6 +198,11 @@ fn totp_code(secret: &[u8], counter: u64) -> String {
     format!("{:06}", value % 1_000_000)
 }
 
+#[allow(deprecated)]
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    ring::constant_time::verify_slices_are_equal(left, right).is_ok()
+}
+
 fn verify_totp_code(secret: &[u8], code: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
     if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
         return false;
@@ -210,7 +215,7 @@ fn verify_totp_code(secret: &[u8], code: &str, now: chrono::DateTime<chrono::Utc
             counter.saturating_add(offset as u64)
         };
         let expected = totp_code(secret, candidate);
-        ring::constant_time::verify_slices_are_equal(expected.as_bytes(), code.as_bytes()).is_ok()
+        constant_time_equal(expected.as_bytes(), code.as_bytes())
     })
 }
 

@@ -74,8 +74,6 @@ fn current_step(steps: &OnboardingSteps) -> u32 {
         4
     } else if !steps.paper_trade_executed {
         5
-    } else if !steps.live_prerequisites_met {
-        6
     } else {
         6
     }
@@ -224,7 +222,7 @@ async fn load_state(
     let saved_strategy = sqlx::query(
         "SELECT EXISTS (
              SELECT 1
-               FROM strategies
+               FROM tenant_strategies
               WHERE organization_id = $1
                 AND status NOT IN ('archived', 'deleted')
          ) AS value",

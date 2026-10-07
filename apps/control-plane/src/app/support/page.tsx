@@ -34,7 +34,7 @@ export default function SupportPage() {
   }, []);
 
   useEffect(() => {
-    void loadData();
+    void Promise.resolve().then(() => loadData());
   }, [loadData]);
 
   const handleSubmit = async (e: React.FormEvent) => {

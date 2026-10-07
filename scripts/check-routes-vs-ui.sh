@@ -16,6 +16,7 @@ pairs=(
   "/api/saas/pricing|pricing"
   "/api/saas/security/status|security"
   "/api/saas/team/invites|team"
+  "/api/saas/team/invites/accept|accept-invite"
   "/api/saas/risk-dashboard|risk"
   "/api/tenant/analytics|analytics"
   "/api/tenant/integrations|integrations"

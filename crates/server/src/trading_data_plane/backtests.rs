@@ -21,7 +21,7 @@ use bot_core::strategy::StrategyId;
 use super::authorization_chain::{guard, guard_manage, TradingModuleFamily};
 use crate::api::ApiState;
 
-const MAX_INITIAL_BALANCE_CENTS: f64 = 100_000_000_000_00.0;
+const MAX_INITIAL_BALANCE_CENTS: f64 = 10_000_000_000_000.0;
 const MAX_PERIOD: Duration = Duration::days(3650);
 const MAX_VENUE_LENGTH: usize = 32;
 
@@ -184,7 +184,7 @@ const SELECT_RUN: &str = "SELECT b.id, b.organization_id, b.strategy_id, s.name 
                                   b.slippage_bps, b.status, b.result_json, b.error,
                                   b.created_at, b.completed_at
                              FROM backtest_runs b
-                             JOIN strategies s ON s.id = b.strategy_id
+                             JOIN tenant_strategies s ON s.id = b.strategy_id
                             WHERE b.organization_id = $1";
 
 /// `GET /api/tenant/backtests`.
@@ -317,7 +317,7 @@ pub async fn create(
     };
 
     let strategy_exists = sqlx::query(
-        "SELECT 1 FROM strategies WHERE id = $1 AND organization_id = $2 AND status <> 'archived'",
+        "SELECT 1 FROM tenant_strategies WHERE id = $1 AND organization_id = $2 AND status <> 'archived'",
     )
     .bind(strategy_id)
     .bind(auth.organization_id().as_uuid())

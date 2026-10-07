@@ -260,9 +260,10 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
         )
         .await
         {
-            let status = if reason == "mfa_challenge_required" {
-                StatusCode::UNAUTHORIZED
-            } else if reason == "invalid_totp_code" {
+            let status = if matches!(
+                reason.as_str(),
+                "mfa_challenge_required" | "invalid_totp_code"
+            ) {
                 StatusCode::UNAUTHORIZED
             } else {
                 StatusCode::SERVICE_UNAVAILABLE

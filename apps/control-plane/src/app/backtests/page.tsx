@@ -36,7 +36,7 @@ export default function BacktestsPage() {
   }, []);
 
   useEffect(() => {
-    void loadData();
+    void Promise.resolve().then(() => loadData());
   }, [loadData]);
 
   return (

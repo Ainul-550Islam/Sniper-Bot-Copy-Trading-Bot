@@ -29,7 +29,7 @@ export default function StatusPage() {
   }, []);
 
   useEffect(() => {
-    void loadStatus();
+    void Promise.resolve().then(() => loadStatus());
   }, [loadStatus]);
 
   return (

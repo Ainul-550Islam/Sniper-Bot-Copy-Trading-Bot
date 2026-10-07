@@ -63,6 +63,10 @@ def product_files():
             continue
         if rel.name in EXCLUDED_FILES:
             continue
+        # TypeScript emits this local incremental cache during typecheck/build;
+        # it is generated state, not buyer source, and must not enter the mirror.
+        if rel.name.endswith(".tsbuildinfo"):
+            continue
         yield rel, p
 
 wanted = dict(product_files())

@@ -74,6 +74,21 @@ pub fn team_security_paths() -> Value {
                 }
             }
         },
+        "/api/saas/team/invites/accept": {
+            "post": {
+                "operationId": "saas.acceptInvite",
+                "summary": "Accept a one-time tenant invitation",
+                "tags": ["Team & Access"],
+                "security": [],
+                "responses": {
+                    "200": { "description": "Invitation accepted and session issued" },
+                    "400": { "description": "Invalid password or invitation token" },
+                    "404": { "description": "Invitation not found or expired" },
+                    "409": { "description": "Invitation already used or membership already exists" },
+                    "503": { "description": "Identity storage unavailable" }
+                }
+            }
+        },
         "/api/saas/team/invites/{id}": {
             "delete": {
                 "summary": "Revoke a pending tenant invitation",

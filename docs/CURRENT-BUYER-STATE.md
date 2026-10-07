@@ -1,4 +1,4 @@
-# CURRENT BUYER STATE (2026-09-30)
+# CURRENT BUYER STATE (2026-10-06)
 
 EVIDENCE-LEVEL: CODE
 
@@ -7,15 +7,15 @@ measured today. Counts below are produced by the same measurement the
 manifest uses (`scripts/update-release-manifest.sh`); they are facts,
 not targets.
 
-## Current counts (canonical product tree, 2026-09-30)
+## Current counts (canonical product tree, 2026-10-06)
 
 | Measure | Count |
 | --- | --- |
-| Product files (all) | 828 (manifest `verification.manifest.product_files`) |
-| Rust source files (crates/) | 573 (manifest `rust_files`; programs/staking-suite counted separately as a component)|
-| Docs files (`docs/`) | 132 (includes this file)|
-| TypeScript/TSX files (`apps/control-plane`) | 29|
-| Database migrations (forward-only) | 36 (high-water `0036`)|
+| Product files (all) | 1049 (manifest `verification.manifest.product_files`) |
+| Rust source files (crates/) | 617 (manifest `rust_files`; programs/staking-suite counted separately as a component)|
+| Docs files (`docs/`) | 149 (includes this file)|
+| TypeScript/TSX files (`apps/control-plane`) | 96|
+| Database migrations (forward-only) | 43 (high-water `0043`)|
 | Version | 0.1.0 (VERSION = Cargo.toml = manifest) |
 | Workspace members | crates/core (bot-core), solana-kit, module-sniper, module-copy, module-polymarket, module-telegram, server (sniper-suite), saas-sdk |
 | Standalone program | programs/staking-suite (native Solana program) |
@@ -43,7 +43,7 @@ not targets.
 * **Release tooling**: parity compare, buyer rebuild, manifest refresh,
   integrity verification, marketing-claim rejection, parity regression
   test.
-* **Docs**: 108 documents including the 2026 status set
+* **Docs**: 149 documents including the 2026 status set
   (MARKETING-CLAIMS, LIVE-EVIDENCE-MATRIX, POLYMARKET-COMPATIBILITY,
   CUSTODY-STATUS, BILLING-STATUS, CUSTOMER-SaaS-STATUS,
   BUYER-HANDOVER-STATUS — this file, and CURRENT-BUYER-STATE).
@@ -62,7 +62,7 @@ not targets.
 6. **Tenant module controls and the telegram binding store are
    process-local** (same contract as the custody store) — the
    DB-backed path is a migration, not a redesign.
-7. **Buyer source parity**: the canonical tree moved on 2026-09-30;
+7. **Buyer source parity**: the canonical tree moved on 2026-10-06;
    run `scripts/rebuild-buyer-release.sh` then
    `scripts/verify-release-integrity.sh` to re-mirror and verify.
 

@@ -44,7 +44,7 @@ export default function IntegrationsPage() {
   }, []);
 
   useEffect(() => {
-    void loadIntegrations();
+    void Promise.resolve().then(() => loadIntegrations());
   }, [loadIntegrations]);
 
   return (

@@ -1,6 +1,6 @@
-# Architecture Overview — sniper-suite 0.1.0 (2026-09-24)
+# Architecture Overview — sniper-suite 0.1.0 (2026-10-06)
 
-> **Current values:** Version 0.1.0 · 22 migrations · 343 Rust sources · 8 workspace members · 70→101 docs · 1331 tests (grep)
+> **Current values:** Version 0.1.0 · 43 forward-only migrations through `0043` · 616 Rust files under `crates/` · 8 workspace members · 149 docs · 1783 `#[test]` attributes
 
 ## 1. Workspace & Crates
 
@@ -73,7 +73,7 @@ All default to `EXECUTION_MODE=dry_run`; live requires `execution.mode=live` + `
 
 ## 8. Frontend
 
-- `apps/control-plane` — Next.js 16 App Router (next 16.3.6), 5 routes (billing/custody/data-lifecycle…), `package-lock.json` 6171 lines v3, `npm ci`, `npm run typecheck` (strict), `npm run build` (5 static routes: `/`, `/_not-found`, `/billing`, `/custody`, `/settings/data-lifecycle`), `npm run lint`
+- `apps/control-plane` — Next.js 16 App Router (next 16.3.8), 5 routes (billing/custody/data-lifecycle…), `package-lock.json` 6171 lines v3, `npm ci`, `npm run typecheck` (strict), `npm run build` (5 static routes: `/`, `/_not-found`, `/billing`, `/custody`, `/settings/data-lifecycle`), `npm run lint` (0 warnings; new configured findings are errors)
 
 ## 9. Deployment Boundaries (Implemented vs External)
 
@@ -89,4 +89,4 @@ All default to `EXECUTION_MODE=dry_run`; live requires `execution.mode=live` + `
 
 Every external row is `EXTERNAL_REQUIRED` / `NOT_EXECUTED` in `crates/server/src/ops/external_validation.rs` and `docs/FINAL-BUYER-GAP-LEDGER.md` — never claimed VERIFIED without execution.
 
-> **Verification:** `cargo check --workspace`, `cargo test -p saas-sdk`, `ls crates/server/src/ops/*.rs | wc -l` (41), `find crates -name "*.rs" | wc -l` (343), `ls docs/*.md | wc -l` (70 → 101), `release-manifest.json` `docs_files`/`migrations`.
+> **Verification:** `cargo check --workspace --lib`, `cargo test -p saas-sdk`, `ls crates/server/src/ops/*.rs | wc -l` (41), `find crates -name "*.rs" | wc -l` (616), `ls docs/*.md | wc -l` (149), `release-manifest.json` `docs_files`/`migrations`.

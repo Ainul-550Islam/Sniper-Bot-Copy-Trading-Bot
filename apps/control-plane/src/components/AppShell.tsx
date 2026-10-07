@@ -1,27 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { TenantGate, TenantSwitcher } from "@/components/TenantSwitcher";
-import {
-  apiKeys,
-  type ApiKeyCreated,
-  type ApiKeyMetadata,
-  type Json,
-  operator,
-  exportsApi,
-  auth,
-  tenants,
-  ApiError,
-} from "@/lib/api";
+import { TenantSwitcher } from "@/components/TenantSwitcher";
 import {
   clearSession,
   hasLiveSession,
   logout,
   msUntilExpiry,
-  refresh,
   selectOrganization,
   sessionStore,
 } from "@/lib/auth";
@@ -116,7 +104,7 @@ function SessionBadge() {
   );
 }
 
-export function AppShell({ children, title }: { children?: React.ReactNode; title?: string }) {
+export function AppShell({ children }: { children?: React.ReactNode; title?: string }) {
   const pathname = usePathname();
   const state = sessionStore.getSnapshot();
   const [, forceRender] = useState(0);

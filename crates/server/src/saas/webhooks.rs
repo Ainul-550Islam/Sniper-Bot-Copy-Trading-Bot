@@ -218,12 +218,11 @@ async fn resolve_public_socket(url: &Url) -> Result<SocketAddr, String> {
     let port = url
         .port_or_known_default()
         .ok_or_else(|| "webhook port is unavailable".to_string())?;
-    let addresses = lookup_host((host, port))
+    let mut addresses = lookup_host((host, port))
         .await
         .map_err(|_| "webhook host could not be resolved".to_string())?;
     addresses
-        .filter(|address| !forbidden_ip(address.ip()))
-        .next()
+        .find(|address| !forbidden_ip(address.ip()))
         .ok_or_else(|| "webhook host resolves only to reserved or private addresses".to_string())
 }
 

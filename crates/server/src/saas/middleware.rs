@@ -288,7 +288,7 @@ pub async fn authorize_request(
             build_context(principal, &org, &membership, &user, now)
         };
         if let Err(reason) =
-            crate::saas::security::session_mfa_is_current(&state, org.id, record.created_at).await
+            crate::saas::security::session_mfa_is_current(state, org.id, record.created_at).await
         {
             return Err(Decision::unauthenticated(reason));
         }

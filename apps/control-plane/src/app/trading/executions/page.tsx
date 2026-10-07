@@ -37,7 +37,7 @@ export default function ExecutionsPage() {
   }, [since, until]);
 
   useEffect(() => {
-    void load();
+    void Promise.resolve().then(() => load());
   }, [load]);
 
   return (

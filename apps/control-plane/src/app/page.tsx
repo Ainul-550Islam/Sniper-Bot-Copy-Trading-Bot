@@ -13,7 +13,6 @@ import { hasLiveSession, login, register, sessionStore } from "@/lib/auth";
  * `lib/api`); no component here crafts fetch calls.
  */
 export default function Page() {
-  const state = sessionStore.getSnapshot();
   const [, forceRender] = useState(0);
 
   // Keep the (externally stored) session state in render.

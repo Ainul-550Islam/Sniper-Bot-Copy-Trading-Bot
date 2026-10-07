@@ -37,7 +37,7 @@ export default function ApiKeysSettingsPage() {
   }, []);
 
   useEffect(() => {
-    void loadKeys();
+    void Promise.resolve().then(() => loadKeys());
   }, [loadKeys]);
 
   const handleCreate = async (event: React.FormEvent<HTMLFormElement>) => {

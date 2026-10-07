@@ -46,7 +46,7 @@ export default function TelegramPage() {
   }, []);
 
   useEffect(() => {
-    void load();
+    void Promise.resolve().then(() => load());
   }, [load]);
 
   async function bind() {

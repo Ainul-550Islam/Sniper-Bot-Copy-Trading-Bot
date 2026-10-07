@@ -12,7 +12,7 @@
 ## 1. Current Verified Architecture — VERIFIED
 
 - **Workspace members (8):** `Cargo.toml:8` → `cargo metadata` shows `core, solana-kit, module-sniper, module-copy, module-polymarket, module-telegram, server, saas-sdk` — `find crates -name "*.rs" | wc -l` = **343** (317+23 batch7)
-- **Migrations (22):** `ls crates/core/migrations/*.sql` → `0001_bootstrap` … `0022_checkout_url` (see `release-manifest.json: database_migrations.count=22, high_water=0022`)
+- **Migrations (43):** `ls crates/core/migrations/*.sql` → forward-only `0001` … `0043` (see `release-manifest.json: database_migrations.count=43, high_water=0043`)
 - **Binary:** `crates/server` (Axum control plane + 5 modules + staking program `programs/staking-suite` with own lockfile)
 - **Frontend:** `apps/control-plane` (Next.js 16 App Router, `package-lock.json` 211 KB, `lockfileVersion:3`, deterministic `npm ci`)
 
@@ -72,15 +72,15 @@ Run: `grep -rn "organization_id" crates/server/src/saas --include="*.rs" | head`
 
 ## 5. Test Evidence — VERIFIED (hermetic), NOT_RUN (gated integrations)
 
-**Current counts (2026-09-23, `cargo test`):**
+**Current counts (2026-10-06, measured and re-run where hermetic):**
 
 | Suite | Command | Result |
 |---|---|---|
-| `bot-core --lib` | `cargo test -p bot-core --lib` | **507 passed / 0 failed** (re-run 2026-09-26) (incl. billing: provider_config 8, billing_state 6, dunning 8, usage_policy 8; custody: provider_config 7, rotation 7) |
-| `saas-sdk` | `cargo test -p saas-sdk` | **32 passed / 0 failed** (incl. commercial 4; re-run 2026-09-26) |
-| `sniper-suite --no-run` | `cargo test -p sniper-suite --no-run` | compiles (105+ tests; full run requires 2m) |
-| `grep "#[test]"` | `grep -r "#[test]" crates --include="*.rs" | wc -l` | **1331** occurrences (crates scope; 2026-09-26 baseline 1330 + 1 Batch-10 frontend dependency-guard test) |
-| `frontend` | `npm ci && npm run typecheck && npm run build` | `PASS` after `npm install --package-lock-only` |
+| `bot-core --lib` | `cargo test -p bot-core --lib -- --test-threads=1` | **605 passed / 0 failed** (2026-10-06; includes billing/custody/tenant suites) |
+| `saas-sdk` | `cargo test -p saas-sdk -- --test-threads=1` | **34 passed / 0 failed** plus 0 doctests |
+| `sniper-suite --lib` | `cargo test -p sniper-suite --lib --no-run` | resource-limited in this sandbox: rustc received SIGKILL during test-binary compilation; `cargo check --workspace --lib` and per-crate clippy pass |
+| `grep "#[test]"` | `grep -r "#[test]" crates --include="*.rs" | wc -l` | **1783** occurrences (crates scope; release manifest is refreshed from this count) |
+| `frontend` | `npm ci --ignore-scripts && npm run typecheck && npm run build` | `PASS` on 2026-10-06 |
 
 **Gated:** `db_integration` (26) **executed 2026-09-26 against real PostgreSQL 17.11** (26/26); `redis_integration` (10) and `distributed_integration` (4) remain `NOT_RUN` in this sandbox without `REDIS_URL`. See `crates/server/src/ops/integration_matrix.rs` `default_for_current`.
 
@@ -90,7 +90,7 @@ Run: `grep -rn "organization_id" crates/server/src/saas --include="*.rs" | head`
 
 ## 6. Frontend Evidence — VERIFIED
 
-- **Lockfile:** `apps/control-plane/package-lock.json` 211 KB, `lockfileVersion:3`, deterministic `npm ci --ignore-scripts` in CI.
+- **Lockfile:** `apps/control-plane/package-lock.json` 216 KB, `lockfileVersion:3`, deterministic `npm ci --ignore-scripts` in CI; production-only `npm audit --omit=dev` reports zero vulnerabilities.
 - **CI:** `.github/workflows/frontend-ci.yml` — install, `npm ls` consistency check (`node -e` compares `package.json` vs `lockfile`), `lint` (where configured), `typecheck` (hard gate), `build` (`NEXT_TELEMETRY_DISABLED=1`).
 - **Pages:**
   - `apps/control-plane/src/app/billing/page.tsx` — plan, subscription, payment/invoice summary, usage/limits, dunning/grace; loading/error/empty; no secrets.
@@ -107,7 +107,7 @@ Run: `grep -rn "organization_id" crates/server/src/saas --include="*.rs" | head`
 3. **External security audit** — code reviews + secret scans done; formal audit `NOT DONE`.
 4. **Production deployment** — `docker-compose.yml` template + `health/ready` endpoints done; no `docker compose up` / `/health` / funded wallet proof in this repo — `NOT EXECUTED`.
 5. **Funded live trading** — paper/simulate only in tests; `EXECUTION_MODE=live` is fail-closed and requires operator explicit action.
-6. **Release-manifest history preserved** — current values are `migrations=21`, `members=8`, `docs ~67`; historical `18`/ `7`/ `146 files` remain in docs with `HISTORICAL` label (see `ops/stale_claims.rs`).
+6. **Release-manifest history preserved** — current values are `migrations=43`, `members=8`, `docs=149`, `rust_files=616`; older snapshots remain in dated historical documents (see `ops/stale_claims.rs`).
 
 ---
 
@@ -161,7 +161,7 @@ See `docs/BUYER-DEPLOYMENT.md §14` + `ops/release_readiness.rs` + `ops/health_r
 2. `cargo check --workspace` → 0 errors
 3. `cargo test --workspace -- --test-threads=1` with PostgreSQL 17.11 → PASS — **executed 2026-09-26: 70 suites / 2077 passed / 0 failed / 13 ignored**; hermetic subset `bot-core` 507 + `saas-sdk` 32 + `sniper-suite` 105; Redis-gated 10 remain `NOT_RUN` without `REDIS_URL`
 4. `npm ci && npm run typecheck && npm run build` → PASS
-5. `release-manifest.json` consistent with `BUYER-TRUTH-REGISTER` (8 members, 22 migrations, 101 docs)
+5. `release-manifest.json` consistent with the current tree (8 members, 43 migrations, 149 docs, 616 Rust files)
 6. `stale_claims` scan → 0 non-historical
 7. `secrets_scan` → PASS
 8. `health_report` overall `Healthy` (or `Degraded` with reason)
@@ -206,7 +206,7 @@ cargo test --workspace -- --test-threads=1  # full, needs PG/Redis
 | Evidence & live/funded gates (GAP-004 guard) | `ops/external_evidence.rs` 4 tests + `external_evidence_verify.rs` 4 tests + `ops/live_gate.rs` 5 tests + `ops/funded_mode_guard.rs` 5 tests + `scripts/run-external-validation.sh` | **HARNESS READY** — every result has `validation_id/gap_id/provider/environment/timestamp/command/mode/status/evidence_hash/redacted_metadata/endpoint_ref` with SHA256 (canonical: timestamp excluded); verify rejects tampered never upgrades NOT_RUN to PASS; live_gate fail-closed; funded guard never default live-funded | `cargo test --test provider_contracts` verifies every saved evidence file (hash+schema), tamper fails; `bash scripts/run-external-validation.sh all-safe` 6/6 NOT_RUN, no funded trade | `bash scripts/run-external-validation.sh all-safe` + `cargo test --test provider_contracts` for evidence verification; runbook per validation for live |
 | External audit boundary (GAP-006) | `ops/external_validation.rs` audit slot + `docs/FINAL-BUYER-GAP-LEDGER.md` GAP-006 row + `docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006 handover slot | **EXTERNAL_REQUIRED / BUYER_ACTION** — no audit performed by the seller; no report exists to ship. Boundary is code-enforced: `audit NOT DONE` and the phrase scanner (`ops/stale_claims.rs`) block `externally audited / independently audited / penetration-tested / security-certified`. | Hermetic: ledger + runbook slot only (deliberately empty until a real auditor deliverable exists) | `n/a — external auditor deliverable (handover slot: docs/EXTERNAL-VALIDATION-RUNBOOK.md § GAP-006)` |
 
-**Updated verification:** `release-manifest.json` §batch7_delivery + §external_validation_batch7_24 list exact 24 paths; current counts 343 Rust / 101 docs / 1331 tests / 22 migrations; harness invariants (§5) are now code-enforced. Historical `21 migrations / 146 files` remain labeled HISTORICAL. No live Stripe/Paddle/Vault/KMS/HSM/production/funded/audit claim without the §13 live gates.
+**Updated verification:** `release-manifest.json` and the current audit documents carry the measured tree counts: 616 Rust / 149 docs / 1783 `#[test]` attributes / 43 migrations; the external-validation harness remains code-enforced. Older batch snapshots remain dated historical records. No live Stripe/Paddle/Vault/KMS/HSM/production/funded/audit claim without the §13 live gates.
 
 **This evidence pack separates:** `VERIFIED` (hermetic code + tests) / `PARTIAL` (boundary done, live creds missing) / `NOT EXECUTED` (external / production) / `REQUIRES BUYER/OPERATOR ACTION`. No marketing claim is disguised as evidence. Batch7 makes external validation **reproducible** (harness + runbook + script) but live external systems remain **NOT_RUN until buyer provisions per runbook**.
 

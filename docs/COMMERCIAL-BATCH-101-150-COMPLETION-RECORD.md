@@ -62,7 +62,7 @@ Every service and frontend page is backed by strongly typed API clients, strict 
 | **140** | `crates/server/src/saas/feature_catalog.rs` | Feature Entitlements & Limits Catalog | IMPLEMENTED — VALIDATION PENDING |
 | **141** | `crates/server/src/saas/activity.rs` | Unified Activity Timeline Service | IMPLEMENTED — VALIDATION PENDING |
 | **142** | `crates/server/src/trading_data_plane/strategy_runtime.rs` | Strategy Runtime Bridge & Lease Fencing | IMPLEMENTED — VALIDATION PENDING |
-| **143** | `crates/server/src/trading_data_plane/backtest_service.rs` | Deterministic Backtest Engine Service | IMPLEMENTED — VALIDATION PENDING |
+| **143** | `crates/server/src/trading_data_plane/backtest_service.rs` | Deterministic pseudo-result backtest service | REMOVED — not a truthful historical-data implementation; queued backtests expose metrics only after a trusted worker writes `result_json` |
 | **144** | `crates/server/src/trading_data_plane/market_service.rs` | Multi-Venue Market Ticker Service | IMPLEMENTED — VALIDATION PENDING |
 | **145** | `crates/server/src/api/openapi_product.rs` | OpenAPI v3 Schemas for Portfolio, Risk & Alerts | IMPLEMENTED — VALIDATION PENDING |
 | **146** | `crates/saas-sdk/src/portfolio.rs` | Rust SDK Portfolio Client | IMPLEMENTED — VALIDATION PENDING |

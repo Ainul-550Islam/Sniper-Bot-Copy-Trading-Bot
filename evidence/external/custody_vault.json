@@ -3,7 +3,7 @@
   "gap_id": "GAP-002",
   "provider": "vault",
   "environment": "test",
-  "timestamp": "2026-09-27T11:56:54Z",
+  "timestamp": "2026-10-06T03:40:23Z",
   "command": "LIVE_CUSTODY=1 cargo test --test live_custody_contract -- --ignored",
   "mode": "all-safe",
   "status": "NOT_RUN",

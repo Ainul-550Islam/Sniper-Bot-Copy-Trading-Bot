@@ -64,7 +64,7 @@ export default function ExecutionStatus({ orderId }: { orderId: string }) {
   }, [orderId]);
 
   useEffect(() => {
-    void load();
+    void Promise.resolve().then(() => load());
   }, [load]);
 
   const counts: Record<LifecycleClass, number> = {

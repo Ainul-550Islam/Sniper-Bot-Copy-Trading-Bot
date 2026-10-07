@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
-import { commercial, toDisplayError } from "@/lib/commercial";
+import { commercial, toDisplayError, type CustodyHealth } from "@/lib/commercial";
 import { request } from "@/lib/api";
 
 interface CustodyProfile { id: string; name: string; provider_type: string; status: string; }
@@ -11,7 +11,7 @@ interface SignerView { id: string; public_address: string; provider_type: string
 export default function CustodyPage() {
   const [profiles, setProfiles] = useState<CustodyProfile[] | null>(null);
   const [signers, setSigners] = useState<SignerView[] | null>(null);
-  const [health, setHealth] = useState<any>(null);
+  const [health, setHealth] = useState<CustodyHealth | null>(null);
   const [rotation, setRotation] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +95,7 @@ export default function CustodyPage() {
               <h2>Provider Health &amp; Availability</h2>
               {health ? (
                 <ul style={{ marginTop: "0.5rem" }}>
-                  {(health.providers ?? []).map((p: any) => (
+                  {(health.providers ?? []).map((p) => (
                     <li key={p.provider_type} style={{ marginBottom: "0.4rem" }}>
                       <strong>{p.provider_type}</strong>: <span className={`tag tag--${p.signing_allowed ? "healthy" : "warning"}`}>{p.state}</span> — {p.detail}{" "}
                       {p.signing_allowed ? "(signing allowed)" : "(blocked)"}

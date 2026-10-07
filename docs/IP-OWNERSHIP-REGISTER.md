@@ -12,11 +12,11 @@
 | **module-polymarket** | `crates/module-polymarket/src/` | Internal | MIT | `Cargo.toml` MIT, `docs/POLYMARKET-*.md` | Repo transfer |
 | **module-telegram** | `crates/module-telegram/src/` | Internal | MIT | `Cargo.toml` MIT, `docs/MODULES.md` | Repo transfer |
 | **server** | `crates/server/src/{main.rs,api.rs,ops/*,backup/*,saas/*,security/*}` | Internal | MIT | `crates/server/Cargo.toml` MIT, 41 ops files, 5 backup | Repo transfer |
-| **saas-sdk** | `crates/saas-sdk/src/` | Internal | MIT | `Cargo.toml` MIT, `cargo test -p saas-sdk` 32/32 | Repo transfer |
+| **saas-sdk** | `crates/saas-sdk/src/` | Internal | MIT | `Cargo.toml` MIT, `cargo test -p saas-sdk` 34/34 | Repo transfer |
 | **staking-suite program** | `programs/staking-suite/src/lib.rs` | Internal (distinct, own Cargo.lock) | MIT (assumed, check `programs/staking-suite/Cargo.toml`) | `Cargo.lock` solana 2.1, `cargo build-sbf` .so 187KB (not committed, sha `57a890fa…`), `program_id` placeholder `3vEEMM...` | Repo transfer + buyer `staking-identity.sh set-id` |
 | **frontend** | `apps/control-plane/{src,package.json,package-lock.json}` | Internal (Next.js 16 MIT, React 19 MIT) | MIT (code) | `package.json` MIT, `package-lock.json` 6171 lines v3 (Batch 11) | Repo transfer |
-| **migrations** | `crates/core/migrations/0001_*.sql` → `0022_checkout_url.sql` | Internal | MIT | Forward-only, 22 contiguous, `verify-delivery.sh` PASS | Repo transfer |
-| **docs** | `docs/*.md` 70 → 101 | Internal | MIT (docs) | `docs/DATA-ROOM-INDEX.md` | Repo transfer |
+| **migrations** | `crates/core/migrations/0001_*.sql` → `0043_tenant_security_policies.sql` | Internal | MIT | Forward-only, 43 contiguous, `verify-delivery.sh` PASS | Repo transfer |
+| **docs** | `docs/*.md` (149) | Internal | MIT (docs) | `docs/DATA-ROOM-INDEX.md` | Repo transfer |
 | **third-party Rust** | `Cargo.lock` 707 entries (tokio, axum, sqlx, redis, spl, etc.) | External | MIT/Apache-2.0/BSD (see `licenses.json`) | `licenses.json`/`sbom.json` generated | Keep notices, `cargo deny` |
 | **third-party JS** | `apps/control-plane/package-lock.json` next/react | External | MIT | `package.json` | Keep notices |
 | **generated** | `target/`, `node_modules/`, `sbom.json` (generated) | Generated | — | .gitignore'd, excluded from `buyer-release` | Regenerate, not transfer |

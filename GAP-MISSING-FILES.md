@@ -6,6 +6,38 @@ Copy-ready for a coding agent. Every file line ends with `# [ACTION][PRIORITY] w
 
 TOTALS_PLACEHOLDER
 
+## Live repository reconciliation — 2026-10-06
+
+This file is an historical static gap map, not the current implementation
+contract. It was re-checked against the live tree before any additions were
+made:
+
+- **Resolved:** migration `0037` now creates `tenant_strategies`; tenant
+  strategy/backtest/onboarding SQL uses that table; and
+  `crates/core/tests/migrations_apply_clean.rs` checks the fresh-database
+  contract. The migration test compiles and skips without a disposable
+  PostgreSQL URL; it has not been claimed as a live database pass.
+- **Resolved/stale findings:** the durable SaaS handlers, strategy CRUD,
+  queued backtest API, analytics, onboarding, integrations, reports,
+  webhooks, route/UI gate, and fake-data gate already exist in the live tree.
+  Duplicate `[NEW]` files for those paths were not added.
+- **Removed for truthfulness:** the unreferenced
+  `crates/server/src/trading_data_plane/backtest_service.rs` generated
+  deterministic pseudo-results and was not a historical-data worker. It is
+  removed; queued runs expose metrics only after a trusted worker writes
+  authoritative `result_json`.
+- **Still open and not fabricated:** a trusted historical market-data source
+  and backtest worker are not present; external audit/evidence files cannot be
+  invented; and optional auth-flow, deployment, demo, and marketing assets
+  require a confirmed product scope before new business files are created.
+- **Auth-flow gap closed:** invitation acceptance now has a durable,
+  tenant-scoped `POST /api/saas/team/invites/accept` route, a one-time session
+  issuance path, OpenAPI coverage, a typed browser client, and the real
+  `/accept-invite` page. No plaintext invitation token is persisted.
+- **Verification added:** `scripts/verify-migration-graph.sh` is run by CI and
+  the final release check. It guards contiguous migrations, operator/tenant
+  strategy-table separation, and tenant runtime SQL references.
+
 ---
 
 ## 0. Legend
@@ -27,7 +59,7 @@ TOTALS_PLACEHOLDER
 1. **Never return fabricated data.** No hard-coded rows, money, PnL, names or ids (`acme-quant.com`, `usr_operator_01`, `act-01`, `alt-01`, `tkt-2026-9481`, `$48,500`). Empty state = `200` with an empty list/zero totals, or a real error. The UI must show `EmptyState` / `ErrorState`, never sample data inside a `catch`.
 2. Every handler: `authorize_request` / `guard` first → scope by `organization_id` → DB-backed → audit write → unit + integration test → present in the code-generated OpenAPI.
 3. **No claim without code + evidence.** Remove strings such as "FIPS 140-3", "HSM", "SOC2 Type II", "sub-millisecond", "zero-latency", "0% dummy data" unless an `evidence/live/*.json` with `"status": "PASSED"` backs it.
-4. Reuse existing tables before adding new ones (section 4). New migrations continue from `0039_*.sql` in `crates/core/migrations/` (last existing: `0038_authoritative_exact_accounting.sql`).
+4. Reuse existing tables before adding new ones (section 4). New migrations continue from `0044_*.sql` in `crates/core/migrations/` (last existing: `0043_tenant_security_policies.sql`).
 5. `buyer-release/source/` is generated. Never edit it; regenerate with `scripts/rebuild-buyer-release.sh` after all changes.
 6. Keep the frontend rule that the session token lives in memory only (`lib/auth.ts`); no `localStorage`.
 7. A gap is closed only by evidence (`evidence/live/*.json`, passing tests) — never by editing a document.
@@ -46,9 +78,12 @@ TOTALS_PLACEHOLDER
 | Deploy / ops | 5% | 70% | **30%** | compose + nginx + TLS + backup scripts + 3 CI workflows; no Helm; OpenAPI covers ~64 of 150 routes |
 | **Weighted** | 100% | **≈42%** | **≈58%** | assumes the build blocker in section 3 is fixed |
 
-## 3. P0-0 BUILD BLOCKER — fix before anything else
+## 3. P0-0 BUILD BLOCKER — resolved in the live tree
 
-Static evidence says `crates/server` does not compile: 22 call sites use symbols that are not defined. CI (`.github/workflows/ci.yml`) runs `cargo build --workspace --all-targets`, so it would fail on this tree. These are only what grep found; the compiler may report more.
+The original static audit said `crates/server` did not compile because 22 call sites used undefined symbols. That finding is stale: targeted `cargo check -p sniper-suite --lib` now passes, and the previously missing authorization/permission APIs are present. The remaining full-workspace result is environment/resource-dependent and is reported as unverified unless the exact CI build completes.
+
+The proposed edits below are retained as historical audit notes only; re-check
+against the live tree before changing them.
 
 ```text
 crates/core/src/authorization/
@@ -68,18 +103,18 @@ crates/core/tests/
 ## 4. Existing tables that no (or the wrong) Rust code uses — wire handlers to these first
 
 ```text
-user_mfa_devices (0038)                       # TOTP / WebAuthn / backup codes; 0 Rust files use it
-tenant_sso_configs (0038)                     # OIDC / SAML per org; 0 Rust files use it
-portfolio_snapshots_hourly (0038)             # equity curve for portfolio page; 0 Rust files use it
-tenant_daily_accounting (0038)                # daily PnL for analytics page; 0 Rust files use it
-backtest_runs (0037)                          # backtests; 0 Rust files use it
-webhook_endpoints, webhook_deliveries (0037)  # webhooks + delivery log; 0 Rust files use them
-usage_events (0017)                           # usage metering for plan limits; 0 Rust files use it
-invites (0017)                                # team invites (token_hash, status, expires_at); team.rs invite_member does not write to it
-kill_switches, kill_switch_events (0015)      # real kill switch, used by core global_risk + api.rs but NOT by saas/risk_dashboard.rs
-tenant_module_controls (0036)                 # durable per-tenant module on/off, already used by module_controls.rs
-strategies (0037)                             # referenced by 10 files, yet tenant strategies.rs handlers persist nothing
-tenant_configs, config_versions               # versioned per-tenant config; reuse for sniper/copy/polymarket config
+user_mfa_devices (0038)                       # TOTP / WebAuthn / backup codes; auth-flow integration remains open
+tenant_sso_configs (0038)                     # OIDC / SAML per org; auth-flow integration remains open
+portfolio_snapshots_hourly (0038)             # read by the authoritative portfolio service
+tenant_daily_accounting (0038)                # read by analytics and portfolio projections
+backtest_runs (0037)                          # queued and tenant-scoped in trading_data_plane/backtests.rs
+webhook_endpoints, webhook_deliveries (0037)  # used by the durable tenant webhook service
+usage_events (0017)                           # reused by billing/usage projections where available
+invites (0017)                                # invite persistence is a remaining auth-flow scope item
+kill_switches, kill_switch_events (0015)      # legacy deployment risk records; tenant kill switch uses tenant_module_controls
+tenant_module_controls (0036)                 # durable per-tenant module on/off and kill-switch state
+tenant_strategies (0037)                     # tenant strategy CRUD; deployment-level strategies remains separate
+tenant_configs, config_versions              # versioned per-tenant config; reuse for sniper/copy/polymarket config
 ```
 
 ---
@@ -341,15 +376,15 @@ apps/control-plane/src/
 ├── app/forgot-password/page.tsx        # [NEW][P1]
 ├── app/reset-password/page.tsx         # [NEW][P1]
 ├── app/verify-email/page.tsx           # [NEW][P1]
-├── app/accept-invite/page.tsx          # [NEW][P1]
+├── app/accept-invite/page.tsx          # [RESOLVED] durable invite acceptance and one-time session flow
 ├── app/settings/security/mfa/page.tsx  # [NEW][P1] TOTP enroll (secret + QR as inline SVG), verify, backup codes shown once, disable.
 ├── app/settings/sso/page.tsx           # [NEW][P1] OIDC / SAML config per org, enforce_sso, allowed_domains.
 ├── app/legal/terms/page.tsx            # [NEW][P1] placeholder text, to be completed by counsel.
 ├── app/legal/privacy/page.tsx          # [NEW][P1] placeholder text, to be completed by counsel.
 ├── app/legal/risk-disclosure/page.tsx  # [NEW][P1] trading risk, no performance guarantee, hypothetical-results language.
-├── app/error.tsx               # [NEW][P1] global error boundary.
-├── app/not-found.tsx           # [NEW][P1]
-├── app/loading.tsx             # [NEW][P1]
+├── app/error.tsx               # [RESOLVED] global error boundary with retry and reference
+├── app/not-found.tsx           # [RESOLVED] honest published-route 404
+├── app/loading.tsx             # [RESOLVED] data-free framework loading state
 ├── lib/api/auth-flows-api.ts   # [NEW][P1] forgot / reset, verify email, accept invite, MFA challenge.
 ├── lib/auth.ts                 # [MODIFY][P1] MFA challenge step; optional httpOnly-cookie session mode (today a page reload signs the user out because the token is in memory).
 ├── components/legal/ConsentCheckbox.tsx    # [NEW][P1]

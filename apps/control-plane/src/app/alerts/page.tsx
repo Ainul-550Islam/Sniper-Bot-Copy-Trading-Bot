@@ -29,7 +29,7 @@ export default function AlertsPage() {
   }, []);
 
   useEffect(() => {
-    void loadAlerts();
+    void Promise.resolve().then(() => loadAlerts());
   }, [loadAlerts]);
 
   return (

@@ -59,6 +59,10 @@ def product_files():
             continue
         if rel.name == "release-manifest.json" and len(rel.parts) == 1:
             continue
+        # TypeScript emits this local incremental cache during typecheck/build;
+        # it is not product source and must never change release measurements.
+        if rel.name.endswith(".tsbuildinfo"):
+            continue
         yield rel
 
 files = list(product_files())

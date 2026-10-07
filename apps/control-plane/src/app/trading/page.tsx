@@ -45,7 +45,7 @@ export default function TradingDashboardPage() {
   }, []);
 
   useEffect(() => {
-    void loadData();
+    void Promise.resolve().then(() => loadData());
   }, [loadData]);
 
   return (

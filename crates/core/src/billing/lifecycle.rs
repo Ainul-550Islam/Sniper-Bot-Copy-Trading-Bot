@@ -1,6 +1,5 @@
 //! Authoritative billing subscription and entitlement lifecycle transitions (FIFTH.md §223).
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::billing::subscription::SubscriptionStatus;

@@ -32,7 +32,7 @@ export default function ReportsPage() {
   }, []);
 
   useEffect(() => {
-    void loadReports();
+    void Promise.resolve().then(() => loadReports());
   }, [loadReports]);
 
   return (

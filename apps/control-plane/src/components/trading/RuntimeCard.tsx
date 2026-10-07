@@ -35,7 +35,7 @@ export default function RuntimeCard() {
   }, []);
 
   useEffect(() => {
-    void load();
+    void Promise.resolve().then(() => load());
   }, [load]);
 
   return (

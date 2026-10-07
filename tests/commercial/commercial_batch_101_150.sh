@@ -11,7 +11,9 @@ echo "======================================================================"
 echo "[commercial-101-150] Running Batch 101–150 Commercial Readiness Suite"
 echo "======================================================================"
 
-# 1. Verify all 50 target files exist
+# 1. Verify all 49 shipped target files exist. The old pseudo-result backtest
+# service is intentionally absent; the API queues jobs and exposes metrics only
+# after a trusted worker writes authoritative result_json.
 echo "[1/6] Checking presence of Batch 101–150 target files..."
 TARGET_FILES=(
   "apps/control-plane/src/app/portfolio/page.tsx"
@@ -56,7 +58,6 @@ TARGET_FILES=(
   "crates/server/src/saas/feature_catalog.rs"
   "crates/server/src/saas/activity.rs"
   "crates/server/src/trading_data_plane/strategy_runtime.rs"
-  "crates/server/src/trading_data_plane/backtest_service.rs"
   "crates/server/src/trading_data_plane/market_service.rs"
   "crates/server/src/api/openapi_product.rs"
   "crates/saas-sdk/src/portfolio.rs"
@@ -72,7 +73,7 @@ for file in "${TARGET_FILES[@]}"; do
     exit 1
   fi
 done
-echo "OK: All 50 Batch 101–150 target files present."
+echo "OK: All 49 shipped Batch 101–150 target files present; pseudo-result service is not shipped."
 
 # 2. Verify Next.js App Routes Parity
 echo "[2/6] Verifying Next.js pages & components TypeScript integrity..."

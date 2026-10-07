@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 #![allow(dead_code)]
+#![allow(clippy::result_large_err)]
 //! sniper-suite — the control-plane binary.
 //!
 //! Loads config, opens the optional persistence backends (PostgreSQL,

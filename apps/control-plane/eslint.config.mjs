@@ -9,11 +9,10 @@
 //
 // Rule level (documented, not silent): the two rule families below arrive with
 // `eslint-config-next` 16 (typescript-eslint 8 "recommended" and the React
-// Compiler-era `eslint-plugin-react-hooks` v7 rules). The frontend in this
-// repository predates both, so the pre-existing findings are reported as
-// warnings — they stay visible in every lint run and are enumerated in
-// `docs/KNOWN-LIMITATIONS.md` (row 16) — while anything new still surfaces on
-// the same run. No rule is disabled outright.
+// Compiler-era `eslint-plugin-react-hooks` v7 rules). They are hard errors for
+// every finding. Data-loader effects defer their initial async call to a
+// microtask so the effect does not synchronously cascade state updates.
+// No rule is disabled globally.
 import nextCoreWebVitals from "eslint-config-next/core-web-vitals";
 import nextTypescript from "eslint-config-next/typescript";
 
@@ -23,14 +22,8 @@ const config = [
   {
     files: ["src/**/*.{ts,tsx}"],
     rules: {
-      // 7 pre-existing sites (custody page / data-lifecycle page) parse
-      // dynamic provider payloads with `as any` narrowing. Typing them properly
-      // is a frontend task, tracked in the limitations register.
-      "@typescript-eslint/no-explicit-any": "warn",
-      // 3 pre-existing data-loading effects set loading state synchronously
-      // (AppShell ×2, data-lifecycle ×1). Restructuring them is a behaviour
-      // change and is deliberately out of scope for a dependency remediation.
-      "react-hooks/set-state-in-effect": "warn",
+      "@typescript-eslint/no-explicit-any": "error",
+      "react-hooks/set-state-in-effect": "error",
     },
   },
 ];

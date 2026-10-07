@@ -1,6 +1,6 @@
 //! Durable tenant-scoped strategy CRUD and versioning service.
 //!
-//! Strategy records are stored in migration 0037's `strategies` table. Every
+//! Strategy records are stored in migration 0037's `tenant_strategies` table. Every
 //! read and write carries the authenticated organization id, and updates lock
 //! the row before applying a versioned change.
 
@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row;
@@ -177,7 +177,7 @@ async fn fetch_one(
     let row = sqlx::query(
         "SELECT id, organization_id, name, description, module, mode, status,
                 version, config_json, created_at, updated_at
-           FROM strategies
+           FROM tenant_strategies
           WHERE id = $1 AND organization_id = $2",
     )
     .bind(strategy_id.as_uuid())
@@ -227,7 +227,7 @@ pub async fn list(
         match sqlx::query(
             "SELECT id, organization_id, name, description, module, mode, status,
                     version, config_json, created_at, updated_at
-               FROM strategies
+               FROM tenant_strategies
               WHERE organization_id = $1 AND module = $2
               ORDER BY created_at DESC, id DESC",
         )
@@ -250,7 +250,7 @@ pub async fn list(
         match sqlx::query(
             "SELECT id, organization_id, name, description, module, mode, status,
                     version, config_json, created_at, updated_at
-               FROM strategies
+               FROM tenant_strategies
               WHERE organization_id = $1
               ORDER BY created_at DESC, id DESC",
         )
@@ -382,7 +382,7 @@ pub async fn create(
         Utc::now(),
     );
     let insert = sqlx::query(
-        "INSERT INTO strategies
+        "INSERT INTO tenant_strategies
              (id, organization_id, name, description, module, mode, status,
               version, config_json, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)",
@@ -487,7 +487,7 @@ pub async fn update(
     };
     let now = Utc::now();
     let result = sqlx::query(
-        "UPDATE strategies
+        "UPDATE tenant_strategies
             SET name = $3, description = $4, status = $5, config_json = $6,
                 version = version + 1, updated_at = $7
           WHERE id = $1 AND organization_id = $2 AND version = $8",
@@ -561,7 +561,7 @@ pub async fn archive(
         }
     };
     let result = sqlx::query(
-        "UPDATE strategies
+        "UPDATE tenant_strategies
             SET status = 'archived', version = version + 1, updated_at = now()
           WHERE id = $1 AND organization_id = $2 AND status <> 'archived'",
     )

@@ -40,8 +40,8 @@ cat sbom.json | jq '.components[] | .licenses' | sort | uniq -c
 
 ## 6. Frontend
 
-- `apps/control-plane` `next 16.3.6` MIT (with `eslint-config-next 16.3.6` MIT), `react 19` MIT, `typescript` Apache-2.0 — permissive. `package-lock.json` 6171 lines v3 is real (`npm ci --ignore-scripts` → 354 packages, 2026-09-27).
-  Version history: `next 15.5.4` shipped until 2026-09-27, when it was bumped to `15.5.26` to remediate the CVSS 10.0 RCE `CVE-2025-66478` (App Router / React Server Components; fixed upstream in 15.5.7+); later the same day Batch 11 (F-2) moved the tree to `next 16.3.6`, the line in which `postcss` resolves to `8.5.23` (>= the advisory floor), so `npm audit` now reports 0 vulnerabilities.
+- `apps/control-plane` `next 16.3.8` MIT (with `eslint-config-next 16.3.8` MIT), `react 19` MIT, `typescript` Apache-2.0 — permissive. `package-lock.json` 6171 lines v3 is real (`npm ci --ignore-scripts` → 354 packages, 2026-10-06).
+  Version history: `next 15.5.4` shipped until 2026-09-27, when it was bumped through the patched 15.5.x line to remediate CVE-2025-66478; the tree then moved to Next 16.3.8, where `postcss` resolves to `8.5.23` (>= the advisory floor). `npm audit --omit=dev` reports 0 vulnerabilities; the full audit retains five high-severity development-only transitive findings.
 
 ## 7. Generated Artifacts (not licensed)
 

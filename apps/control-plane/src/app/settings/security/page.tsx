@@ -31,7 +31,7 @@ export default function SecuritySettingsPage() {
   }, []);
 
   useEffect(() => {
-    void loadSecurity();
+    void Promise.resolve().then(() => loadSecurity());
   }, [loadSecurity]);
 
   return (

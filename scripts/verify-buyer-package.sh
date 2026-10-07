@@ -180,6 +180,8 @@ excluded_files = {
 }
 generated_dirs = {".next", ".turbo", ".vercel", "out", "dist", "build", "coverage", ".venv", ".cache"}
 relocated = {"licenses.csv", "licenses.json", "sbom.json", "sbom.cyclonedx.json"}
+# TypeScript's incremental build metadata is generated state, not buyer source.
+# Keep it out of the package mirror even when a local typecheck/build created it.
 report = []
 for p in root.rglob("*"):
     if not p.is_file():
@@ -190,6 +192,8 @@ for p in root.rglob("*"):
     if len(rel.parts) > 1 and (rel.parts[0], rel.parts[1]) in skip_prefixes:
         continue
     if any(part in generated_dirs for part in rel.parts):
+        continue
+    if rel.name.endswith(".tsbuildinfo"):
         continue
     if rel.name in excluded_files:
         continue

@@ -19,7 +19,13 @@
  *   (`x-organization` can only CONFIRM, never switch).
  */
 
-import { ApiError, configureCredentials, type CurrentUserResponse, type MembershipSummary } from "@/lib/api";
+import {
+  ApiError,
+  configureCredentials,
+  type CurrentUserResponse,
+  type LoginResponse,
+  type MembershipSummary,
+} from "@/lib/api";
 
 /** Server-side session facts (no secret material). */
 export interface SessionInfo {
@@ -98,10 +104,8 @@ export function selectOrganization(organizationId: string | null): void {
   setState({ selectedOrganizationId: organizationId });
 }
 
-/** Establish a session. The token is held in memory only. */
-export async function login(email: string, password: string): Promise<void> {
-  const { auth } = await import("@/lib/api");
-  const response = await auth.login(email, password);
+/** Establish a session from a server response. The token is held in memory only. */
+export function establishSession(response: LoginResponse): void {
   token = response.token;
   const expiresAt = Date.parse(response.session.expires_at);
   setState({
@@ -115,6 +119,13 @@ export async function login(email: string, password: string): Promise<void> {
     },
     selectedOrganizationId: null,
   });
+}
+
+/** Establish a session. The token is held in memory only. */
+export async function login(email: string, password: string): Promise<void> {
+  const { auth } = await import("@/lib/api");
+  const response = await auth.login(email, password);
+  establishSession(response);
   // Immediately hydrate the membership list so the tenant switcher shows the
   // user's OWN organizations (never free-typed ids).
   await refresh();

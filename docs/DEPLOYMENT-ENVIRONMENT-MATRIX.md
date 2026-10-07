@@ -20,7 +20,7 @@
 ## Actually Tested (this repo, hermetic)
 
 - `cargo fmt --all --check` PASS
-- `cargo check --workspace` PASS (343 rs, 22 migrations, 8 members)
+- `cargo check --workspace --lib` PASS (616 Rust files, 43 migrations, 8 members)
 - `cargo test -p saas-sdk` 32/32 + `cargo test --test observability_config` etc. (1331 grep)
 - `npm ci --ignore-scripts` + `typecheck` + `build` + `lint` (frontend)
 - `docker build -t sniper-suite:ci` + smoke `curl /api/health` (in CI `docker` job)

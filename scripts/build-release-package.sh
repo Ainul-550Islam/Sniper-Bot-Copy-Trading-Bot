@@ -10,17 +10,18 @@ mkdir -p "$OUT"/{source,docs,evidence,sbom,licenses,checksums,manifests}
 # Copy source excluding target/node_modules/.git/.env/secrets/private keys/caches/build outputs
 # Use rsync if available; fallback to tar pipeline. Both must exclude identical patterns.
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --exclude='target/' --exclude='**/target/' --exclude='node_modules/' --exclude='**/node_modules/' --exclude='.git/' --exclude='.env' --exclude='secrets/' --exclude='*.pem' --exclude='*.key' --exclude='__pycache__/' --exclude='.turbo/' --exclude='.next/' --exclude='**/.next/' --exclude='out/' --exclude='**/out/' --exclude='dist/' --exclude='build/' --exclude='.vercel/' --exclude='buyer-release/' \
+  rsync -a --exclude='target/' --exclude='**/target/' --exclude='node_modules/' --exclude='**/node_modules/' --exclude='.git/' --exclude='.env' --exclude='secrets/' --exclude='*.pem' --exclude='*.key' --exclude='*.tsbuildinfo' --exclude='__pycache__/' --exclude='.turbo/' --exclude='.next/' --exclude='**/.next/' --exclude='out/' --exclude='**/out/' --exclude='dist/' --exclude='build/' --exclude='.vercel/' --exclude='buyer-release/' \
     "$ROOT"/ "$OUT/source/"
 else
   mkdir -p "$OUT/source"
   # Fallback: use tar pipeline with same excludes
-  tar -C "$ROOT" --exclude='target' --exclude='node_modules' --exclude='.git' --exclude='.env' --exclude='secrets' --exclude='buyer-release' --exclude='.next' --exclude='out' --exclude='dist' --exclude='build' --exclude='.turbo' -cf - . | tar -C "$OUT/source" -xf -
+  tar -C "$ROOT" --exclude='target' --exclude='node_modules' --exclude='.git' --exclude='.env' --exclude='secrets' --exclude='*.tsbuildinfo' --exclude='buyer-release' --exclude='.next' --exclude='out' --exclude='dist' --exclude='build' --exclude='.turbo' -cf - . | tar -C "$OUT/source" -xf -
 fi
 # Prune any accidentally copied excludes (defense in depth)
 rm -rf "$OUT/source/target" "$OUT/source/node_modules" "$OUT/source/.git" "$OUT/source/buyer-release" 2>/dev/null || true
 rm -rf "$OUT/source/apps/control-plane/.next" "$OUT/source/.next" "$OUT/source/out" "$OUT/source/dist" "$OUT/source/build" "$OUT/source/.turbo" "$OUT/source/.vercel" 2>/dev/null || true
 rm -rf "$OUT/source/programs/staking-suite/target" 2>/dev/null || true
+find "$OUT/source" -name "*.tsbuildinfo" -delete 2>/dev/null || true
 rm -rf "$OUT/source/.cargo/bin" 2>/dev/null || true
 find "$OUT/source" -name ".env" -delete 2>/dev/null || true
 find "$OUT/source" -name "*.pem" -o -name "*.key" | xargs rm -f 2>/dev/null || true
@@ -96,6 +97,10 @@ find "$OUT" -type f ! -path "$OUT/checksums/all-files.sha256" -exec sha256sum {}
 # Verify forbidden not in package
 if grep -R "target/" "$OUT/checksums/all-files.sha256" 2>/dev/null | grep -q "target/"; then
   echo "[build-release-package] FAIL: forbidden target/ found in package" >&2
+  exit 1
+fi
+if grep -R "tsbuildinfo" "$OUT/checksums/all-files.sha256" 2>/dev/null | grep -q "tsbuildinfo"; then
+  echo "[build-release-package] FAIL: generated TypeScript cache found in package" >&2
   exit 1
 fi
 if find "$OUT" -path "*node_modules*" | grep -q .; then

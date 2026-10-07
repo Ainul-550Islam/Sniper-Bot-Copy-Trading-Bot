@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { AppShell } from "@/components/AppShell";
 import { commercial, toDisplayError, LifecycleStatus } from "@/lib/commercial";
-import { request, exportsApi, ApiError } from "@/lib/api";
+import { request, exportsApi, ApiError, type ExportEnvelope } from "@/lib/api";
 
 export default function DataLifecyclePage() {
   const [status, setStatus] = useState<LifecycleStatus | null>(null);
@@ -12,7 +12,7 @@ export default function DataLifecyclePage() {
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [exportData, setExportData] = useState<any>(null);
+  const [exportData, setExportData] = useState<ExportEnvelope | null>(null);
   const [exportKind, setExportKind] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
@@ -31,7 +31,7 @@ export default function DataLifecyclePage() {
   }, []);
 
   useEffect(() => {
-    void loadData();
+    void Promise.resolve().then(() => loadData());
   }, [loadData]);
 
   async function handleExport(kind: string) {

@@ -3,10 +3,7 @@
 use axum::extract::{Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{
-    routing::{get, post},
-    Router,
-};
+use axum::{routing::get, Router};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row;

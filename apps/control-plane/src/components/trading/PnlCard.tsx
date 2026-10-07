@@ -35,7 +35,7 @@ export default function PnlCard() {
   }, []);
 
   useEffect(() => {
-    void load();
+    void Promise.resolve().then(() => load());
   }, [load]);
 
   const value =

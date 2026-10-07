@@ -91,6 +91,13 @@ else
   echo "  no release-manifest.json — skip"; pass "manifest skip"
 fi
 
+# 6b. migration graph and tenant strategy separation
+if bash "$ROOT/scripts/verify-migration-graph.sh"; then
+  pass "migration graph"
+else
+  fail "migration graph"
+fi
+
 # 7. SBOM + license exist and have sha
 echo "[7/8] SBOM/license artifacts"
 if [ -f "$ROOT/sbom.json" ]; then pass "sbom.json exists"; sha=$(sha256sum "$ROOT/sbom.json" | awk '{print $1}'); echo "    sbom sha256=$sha size=$(wc -c < "$ROOT/sbom.json")"; else fail "sbom.json missing (run scripts/generate-sbom.sh)"; fi

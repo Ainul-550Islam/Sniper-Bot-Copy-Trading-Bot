@@ -136,7 +136,10 @@ mod tests {
     fn freeze_authority_triggers_honeypot_warning() {
         let mint = Pubkey::new_unique();
         let evil_auth = Pubkey::new_unique();
-        let holders = vec![5.0; 10];
+        // Keep the freeze-authority warning isolated from the separate
+        // holder-concentration penalty so the expected verdict exercises the
+        // behavior named by this test.
+        let holders = vec![2.0; 10];
         let report =
             TokenSafetyAuditor::audit_token(&mint, None, Some(&evil_auth), &holders, 100.0, 1);
         assert_eq!(report.verdict, SafetyVerdict::Caution);

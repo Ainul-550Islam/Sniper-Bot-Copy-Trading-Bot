@@ -33,4 +33,4 @@
 | Funded trading | `EXECUTION_MODE=dry_run` default | `funded_mode_guard` | `cargo test -p sniper-suite --lib funded_mode_guard` | EXTERNAL_REQUIRED (guard PASS; funded step operator-only) |
 | External audit | — | — | n/a — external auditor deliverable (`docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006) | NOT_EXECUTED (internal cargo audit/deny only) |
 
-> **Counts:** Current repo: 343 rs, 22 migrations, 70→101 docs, 1331 tests (grep), 8 workspace members, version 0.1.0. See `release-manifest.json` and `docs/FINAL-BUYER-GAP-LEDGER.md`.
+> **Counts (2026-10-06):** Current repo: 616 Rust files under `crates/`, 43 forward-only migrations through `0043`, 149 docs, 1783 `#[test]` attributes, 8 workspace members, version 0.1.0. See `release-manifest.json` and `docs/FINAL-BUYER-GAP-LEDGER.md`.

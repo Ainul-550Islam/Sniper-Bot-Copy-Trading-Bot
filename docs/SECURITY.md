@@ -15,18 +15,18 @@ Two batches of remediation, both verified in this repository's own gates:
   `CVE-2025-55182`). The pin was raised to the patched `next 15.5.26` for the 15.5 line (superseded the same day by Batch 11 — see below).
 * **Batch 11 (F-2)** — the 15.5 line still resolved `postcss 8.4.31`, which `npm audit` rates high
   (unescaped `</style>` output; `sourceMappingURL` `.map` disclosure) and whose fix ships only in
-  `next >= 16.3.6`. The control plane now pins **`next 16.3.6`** with **`eslint-config-next 16.3.6`**,
-  which resolves **`postcss 8.5.23`**; the shipped dependency graph now audits clean (`0 vulnerabilities`).
+  `next >= 16.3.6`. The control plane now pins **`next 16.3.8`** with **`eslint-config-next 16.3.8`**,
+  which resolves **`postcss 8.5.23`**; the shipped production dependency graph now audits clean (`0 vulnerabilities`; development-only tooling findings remain documented).
 
 Verification for the current state (`npm ci` = clean dependency state):
 
 * `npm ci --ignore-scripts` → 354 packages, exit 0; lockfile/package.json consistency check as in
   `.github/workflows/frontend-ci.yml` → `lockfile consistent`.
-* `npm audit` → **`found 0 vulnerabilities`** (critical 0, high 0, moderate 0, low 0).
+* `npm run audit:production` (`npm audit --omit=dev`) → **`found 0 vulnerabilities`** (production critical/high/moderate/low 0), and this is a CI hard gate in `.github/workflows/frontend-ci.yml`. The full development audit retains five high-severity transitive findings from tooling dependencies; they do not ship in the production dependency graph and remain documented.
 * `npx tsc --noEmit` → exit 0 · `npx next build` → exit 0 (Next.js 16, 5 routes prerendered static).
 * `npm run lint` → exit 0, non-interactive (ESLint 9 flat config, `eslint-config-next/core-web-vitals`
-  + `/typescript`); the 12 pre-existing findings are reported as warnings and enumerated in
-  `docs/KNOWN-LIMITATIONS.md` row 16 — no rule is disabled.
+  + `/typescript`); the asynchronous-loader findings were resolved by deferring the initial API call to a microtask, and the rule remains a hard error in
+  `apps/control-plane/eslint.config.mjs` — no rule is disabled.
 * Regression guard: `release_manifest_integration::frontend_lockfile_pins_patched_nextjs` fails if the
   shipped tree is reverted to `next 15.5.26` / `15.5.4` or to a `postcss < 8.5.23` resolution.
 

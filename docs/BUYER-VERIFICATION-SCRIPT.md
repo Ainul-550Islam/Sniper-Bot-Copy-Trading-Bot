@@ -17,7 +17,7 @@ cat rust-toolchain.toml  # 1.98.1
 ```bash
 # 1) Format + build + lint (hard gates)
 cargo fmt --all --check              # PASS
-cargo check --workspace              # PASS (343 rs, 22 migrations, 8 members, 1.98.1)
+cargo check --workspace --lib         # PASS (616 Rust files, 43 migrations, 8 members, 1.98.1)
 cargo clippy --workspace --all-targets -- -D warnings  # PASS (per-crate in final-release-check)
 
 # 2) Unit tests (hermetic, no PG/Redis)
@@ -35,7 +35,9 @@ cd apps/control-plane
 npm ci --ignore-scripts               # deterministic, 6171 lines v3
 npm run typecheck                    # strict TS, noUncheckedIndexedAccess
 npm run build                        # 5 routes prerendered static
-npm run lint                         # eslint 9 flat config; exit 0, 12 documented warnings
+npm run test                         # 5 frontend API/truthfulness/kill-switch contract tests
+npm run audit:production             # production dependency graph: 0 vulnerabilities
+npm run lint                         # eslint 9 flat config; exit 0, 0 warnings / 0 errors
 cd ../..
 
 # 4) Release hygiene hermetic
@@ -113,6 +115,6 @@ bash scripts/final-release-check.sh  # run twice to show idempotent
 bash scripts/build-release-package.sh && bash scripts/verify-buyer-package.sh && bash scripts/verify-delivery.sh
 ```
 
-**Artifacts to inspect after:** `buyer-release/checksums/SHA256SUMS`, `sbom.json`, `licenses.json`, `release-manifest.json` (`docs_files:101`, `rust_files:343`, `test_count:1331`, `migrations:22`).
+**Artifacts to inspect after:** `buyer-release/checksums/SHA256SUMS`, `sbom.json`, `licenses.json`, `release-manifest.json` (`docs_files:149`, `rust_files:616`, `test_count:1783`, `migrations:43`, `migration_high_water:0043`).
 
 > **Separation guarantee:** HERMETIC never requires `POSTGRES_URL`/`REDIS_URL`/`STRIPE_API_KEY`/`VAULT_ADDR`; SERVICE-BACKED never claims external provider; EXTERNAL never runs on PR (see `.github/workflows/ci.yml` `external-gated` `if: workflow_dispatch`).

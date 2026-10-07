@@ -24,8 +24,8 @@
       "programs/staking-suite (native Solana program, own lockfile, built with cargo build-sbf / agave 2.1.21)"
     ],
     "database_migrations": {
-      "count": 38,
-      "high_water_mark": "0038",
+      "count": 43,
+      "high_water_mark": "0043",
       "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)",
       "added_0019_0022": "0019_saas_billing_provider (plan/subscription/entitlement/usage/checkout/invoice/payment + billing pricing), 0020_saas_custody (profile + keys + address), 0021_saas_lifecycle (retention policy, purge lifecycle, job claims) \u2014 forward-only, Batch 1; 0022_checkout_url (durable provider checkout_url persistence for Stripe/Paddle end-to-end wiring) \u2014 forward_only",
       "added_0023": "0023_trading_tenant_columns (nullable organization_id ownership column + organizations(id) ON DELETE RESTRICT foreign key on all 32 core trading-truth tables \u2014 OMS orders/order_status_history/executions/transactions/idempotency_keys, positions/trades/balance_snapshots, dedup_keys/risk_events/audit_events, reconciliation_state, execution_intents, execution_claims/execution_claim_events, execution_lifecycle/execution_lifecycle_events, copy_leaders/copy_leader_events/copy_events/copy_links, poly_signals/poly_orders/poly_fills/poly_recon_findings, ledger_events/ledger_postings/global_positions/global_risk_decisions/kill_switches/kill_switch_events/accounting_recon_findings \u2014 STEP 1 of the enterprise tenant-isolation program; deterministic legacy backfill, NOT NULL, tenant-leading indexes and tenant-composite uniqueness follow in 0024) \u2014 forward-only",
@@ -356,15 +356,15 @@
       "notes": "workspace run requires --test-threads=1 (PG-backed suites) and a clean tenant_test database; default-parallelism workspace run raced db_integration audit-chain tests (environment, not code); an earlier workspace attempt failed at link stage with 'ld: signal 7 bus error' due to sandbox disk exhaustion (target/ 14G) \u2014 resolved by clearing target/debug/incremental"
     },
     "manifest": {
-      "product_files": 1045,
-      "rust_files": 616,
+      "product_files": 1053,
+      "rust_files": 617,
       "docs_files": 149,
-      "tree_digest": "cddeb979346ef6f579e459d346de1e85c2bebf81b9c11fde93b74bc5ed60309e",
+      "tree_digest": "4c8b7cbd617bde0a4a7c1613d52a1708bfeab9890559003e3d07c42c844eaf42",
       "generated_by": "scripts/update-release-manifest.sh"
     }
   },
   "docs_files": 149,
-  "rust_files": 616,
-  "test_count": 1787,
-  "migrations": 38
+  "rust_files": 617,
+  "test_count": 1786,
+  "migrations": 43
 }

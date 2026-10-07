@@ -1,9 +1,9 @@
-# CURRENT STATE (2026-10-01)
+# CURRENT STATE (2026-10-06)
 
 EVIDENCE-LEVEL: CODE
 
 The current, dated statement of what this repository IS and MEASURES,
-as of 2026-10-01. Counts in the table below are produced by the same
+as of 2026-10-06. Counts in the table below are produced by the same
 measurement the manifest uses (`scripts/update-release-manifest.sh`)
 and are refreshed by `scripts/update-current-audit.sh`; they are facts,
 not targets. This document supersedes nothing — it is the newest
@@ -12,14 +12,14 @@ CUSTODY-STATUS-2026, CUSTOMER-SaaS-STATUS-2026,
 POLYMARKET-COMPATIBILITY-2026, BUYER-HANDOVER-STATUS-2026,
 CURRENT-BUYER-STATE).
 
-## Current counts (canonical product tree, 2026-10-01)
+## Current counts (canonical product tree, 2026-10-06)
 
 | Measure | Count |
 | --- | --- |
-| Rust source files (crates/) | 573|
-| Docs files (docs/) | 132|
-| TypeScript/TSX files (apps/control-plane) | 29|
-| Database migrations (forward-only) | 36 (high-water `0036`)|
+| Rust source files (crates/) | 617|
+| Docs files (docs/) | 149|
+| TypeScript/TSX files (apps/control-plane) | 96|
+| Database migrations (forward-only) | 43 (high-water `0043`)|
 | Version | 0.1.0 (VERSION = Cargo.toml = manifest) |
 | Workspace members | crates/core (bot-core), solana-kit, module-sniper, module-copy, module-polymarket, module-telegram, server (sniper-suite), saas-sdk |
 | Standalone program | programs/staking-suite (native Solana program, pre-deployment placeholder id) |

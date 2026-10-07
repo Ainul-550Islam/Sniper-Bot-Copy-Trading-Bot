@@ -39,7 +39,12 @@ root = Path(sys.argv[1])
 # walker; this tree has none committed).
 rust_files = sum(1 for _ in root.glob("crates/**/*.rs"))
 docs_files = len(list(root.glob("docs/*.md")))
-ts_files = len([p for p in root.glob("apps/control-plane/**/*.ts*") if "node_modules" not in p.parts and ".next" not in p.parts])
+ts_files = len([
+    p for p in root.glob("apps/control-plane/**/*.ts*")
+    if "node_modules" not in p.parts
+    and ".next" not in p.parts
+    and not p.name.endswith(".tsbuildinfo")
+])
 mig_files = sorted(root.glob("crates/core/migrations/*.sql"))
 migrations = len(mig_files)
 high_water = mig_files[-1].name.split("_")[0] if mig_files else "?"

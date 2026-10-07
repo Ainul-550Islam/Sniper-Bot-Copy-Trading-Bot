@@ -54,7 +54,7 @@ export default function BillingPage() {
   }, []);
 
   useEffect(() => {
-    void loadData();
+    void Promise.resolve().then(() => loadData());
   }, [loadData]);
 
   const handleUpgrade = useCallback(async (plan: PlanTier) => {

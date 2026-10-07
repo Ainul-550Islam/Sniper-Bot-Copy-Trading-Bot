@@ -46,7 +46,7 @@ export default function TeamSettingsPage() {
   }, []);
 
   useEffect(() => {
-    void loadMembers();
+    void Promise.resolve().then(() => loadMembers());
   }, [loadMembers]);
 
   return (

@@ -31,14 +31,14 @@ this document is the human map and does not duplicate source code.
   the standalone staking program — after TASK 1–7A, the SaaS durability
   pass, and the file-by-file integrity pass. This paragraph records that
   date; the numbers below it are no longer current.
-- **Current canonical tree (2026-09-27):** 564 files — 22 contiguous
-  migrations `0001`–`0022`, 101 docs, 287 source + 56 test Rust files (8
-  workspace crates), the standalone staking program, the Next.js control
-  plane, `data/` and `evidence/external/`. `docs/REPOSITORY-MAP.md`
-  §Counts (recomputed 2026-09-27) is authoritative for the current
-  breakdown, and `release-manifest.json` records the dated evidence,
-  including the 2026-09-26 workspace run (70 suites / 2077 passed) against
-  real PostgreSQL 17.11.
+- **Current canonical tree (2026-10-06):** the release manifest measures
+  1,046 product files (excluding the root manifest from its self-fingerprint),
+  616 Rust files under `crates/`, 92 TS/TSX files, 149 docs, 43 contiguous
+  forward-only migrations through `0043`, and 1,783 `#[test]` attributes.
+  The standalone staking program is a separate workspace component; generated
+  Cargo/Next.js caches, local toolchain binaries, session artifacts and the
+  `buyer-release/` package are excluded. `docs/REPOSITORY-MAP.md` and
+  `release-manifest.json` carry the same measured counts.
 
 ## Root artifacts
 

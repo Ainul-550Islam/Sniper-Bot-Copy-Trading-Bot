@@ -89,4 +89,4 @@
 
 > **Untested / External:** live Stripe/Paddle, live Vault/KMS/HSM, production deployment, funded trading, staking `STAKING_E2E=1`, external audit — all `EXTERNAL_REQUIRED`/`NOT_EXECUTED` (see `docs/FINAL-BUYER-GAP-LEDGER.md`).
 
-*Verification:* `cargo test --workspace -- --test-threads=1` (hermetic 1331 tests), `bash scripts/verify-delivery.sh` (7/7), `bash scripts/final-release-check.sh` (secret scan).
+*Verification:* `cargo test --workspace -- --test-threads=1` (hermetic test suites; current source inventory 1783 `#[test]` attributes), `bash scripts/verify-delivery.sh` (7/7), `bash scripts/final-release-check.sh` (secret scan).

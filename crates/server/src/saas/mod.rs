@@ -27,6 +27,7 @@ pub mod activity;
 pub mod alerts;
 pub mod api_keys;
 pub mod audit_export;
+pub mod auth_flows;
 pub mod backup_status;
 pub mod billing;
 pub mod billing_reconciliation;
@@ -92,6 +93,7 @@ pub fn routes() -> Router<ApiState> {
         // --- identity (public entry points) -----------------------------
         .route("/api/saas/users", post(users::register))
         .route("/api/saas/sessions", post(users::login))
+        .merge(auth_flows::routes())
         // --- authenticated user -----------------------------------------
         .route("/api/saas/users/me", get(users::current_user))
         .route("/api/saas/users/me", patch(users::update_profile))

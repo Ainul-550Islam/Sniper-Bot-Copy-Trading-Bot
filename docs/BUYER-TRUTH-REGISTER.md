@@ -1,7 +1,7 @@
 # BUYER TRUTH REGISTER — Single Source of Truth
 
 **Product:** `sniper-suite`
-**Date:** 2026-09-23 (Asia/Dhaka, UTC)
+**Date:** 2026-10-06 (Asia/Dhaka, UTC)
 **Freeze source:** `sniper-suite` working copy seeded from `https://github.com/Ainul-550Islam/Sniper-Bot-Copy-Trading-Bot.git`
 **Register version:** 1 (Batch 2 — buyer-proof layer)
 **Authoritative files:** This file + `release-manifest.json` + `VERSION` + `Cargo.lock` + `docs/HANDOVER.md` §3/§5
@@ -10,25 +10,37 @@
 
 ---
 
-## 1. Exact Current Counts (verified 2026-09-23; test count re-verified 2026-09-27: 1331)
+## 1. Exact Current Counts (verified 2026-10-06)
 
 | Metric | Value | Command / File | Notes |
 |--------|-------|----------------|-------|
 | **Total files on FS** (excluding `target`, `.git`, `node_modules`) | `find . -type f -not -path "./target/*" -not -path "*/node_modules/*" -not -path "./.git/*" \| wc -l` → **~14440** on this sandbox (includes build artifacts, caches) — **tracked files** are far fewer; use `git ls-files` in a git clone. This sandbox is a plain copy, not a git repo, so `git ls-files` returns 0. Tracked file count must be re-checked after `git init`. | `find . -type f \| wc -l` = 14440 |
-| **Rust source files** | `find crates -name "*.rs" \| wc -l` = **343** (317+23 batch7) | `crates/core/src`, `crates/server/src`, `crates/saas-sdk/src`, `crates/solana-kit`, `crates/module-*` |
-| **SQL migrations** | **22** → `ls crates/core/migrations/*.sql` | `0001_bootstrap` … `0018_saas_runtime_records` **plus** `0019_saas_billing_provider`, `0020_saas_custody`, `0021_saas_lifecycle` (Batch 1) and `0022_checkout_url` (MATERIAL-GAP batch, 2026-09-26) |
-| **`#[test]` occurrences** | `grep -r "#\[test\]" crates --include="*.rs" \| wc -l` = **1331** (1314 → 1330 Batch-10 harness tests → 1331 frontend dependency-guard test; 1181+121 batch7 → Batch 10 2026-09-27 added 16 evidence/validation/ledger/harness tests) | Includes unit + integration test functions. Individual `cargo test` binaries report `passed / failed`. |
+| **Rust source files** | `find crates -name "*.rs" \| wc -l` = **616** | `crates/` (programs/staking-suite is a separate component) |
+| **SQL migrations** | **43** → `ls crates/core/migrations/*.sql` | Forward-only `0001` … `0043_tenant_security_policies`; no down migrations by design. |
+| **`#[test]` occurrences** | `grep -r "#\[test\]" crates --include="*.rs" \| wc -l` = **1783** | Includes unit + integration test functions. Individual `cargo test` binaries report `passed / failed`. |
 | **Workspace members** | **8** | `Cargo.toml` `[workspace] members` = `core`, `solana-kit`, `module-sniper`, `module-copy`, `module-polymarket`, `module-telegram`, `server`, `saas-sdk` (saas-sdk added Batch 1) |
-| **Control-plane frontend files** | `find apps/control-plane -type f \| wc -l` = 19 (+ 6171 lines in `package-lock.json` after `npm ci`) | `next.config.ts`, `package.json`, `package-lock.json` (REAL, generated 2026-09-23 via `npm install --package-lock-only`), `tsconfig.json`, `src/*` |
-| **Docs** | `ls docs \| wc -l` = **101** (70 → 95 at Batch 6 → 96 at Batch 7 → 101 current) | `docs/` |
+| **Control-plane frontend files** | **92 TS/TSX files** (generated `.next`, `node_modules` and `.tsbuildinfo` excluded) + 6171-line `package-lock.json` | `next.config.ts`, `package.json`, `package-lock.json`, `tsconfig.json`, `src/*`; Next.js 16.3.8 |
+| **Docs** | `ls docs \| wc -l` = **149** | `docs/` |
 
-**Migration high-water mark:** `0022_checkout_url` (forward-only, no down migrations — `docs/BACKUP-RESTORE.md`).
+**Migration high-water mark:** `0043_tenant_security_policies` (forward-only, no down migrations — `docs/BACKUP-RESTORE.md`).
+
+### Current validation snapshot (2026-10-06)
+
+- `cargo fmt --all --check`: PASS.
+- `cargo check --workspace --lib`: PASS.
+- `cargo clippy --workspace --lib -- -D warnings`: PASS.
+- `cargo test -p bot-core --lib -- --test-threads=1`: **605 passed / 0 failed**.
+- `cargo test -p saas-sdk -- --test-threads=1`: **34 passed / 0 failed**.
+- `cargo test -p solana-kit --lib -- --test-threads=1`: **272 passed / 0 failed**.
+- Frontend `npm ci --ignore-scripts`, typecheck, build, lint and contract checks: PASS; lint has 0 warnings and 0 errors with no remaining baseline comments.
+- Frontend `npm audit --omit=dev`: **0 vulnerabilities**. Full audit retains five high-severity development-only transitive findings; see `apps/control-plane/package.json` and the release notes.
+- Heavy `sniper-suite` test-binary compilation is resource-limited in this sandbox and is not represented as a false pass.
 
 ---
 
-## 2. Test Counts with DATE and COMMAND
+## 2. Historical Batch Test Counts (preserved evidence)
 
-> **Live provider / external network gates are NOT EXECUTED** — see §5.
+> The dated rows below preserve the original evidence batch. They are not the current counts; use §1 and the current validation snapshot above for the current tree. Live provider / external network gates are NOT EXECUTED — see §5.
 
 | Suite | Command (executed 2026-09-23) | Result |
 |-------|-------------------------------|--------|
@@ -39,7 +51,7 @@
 | **core unit (Batch 1 + 2)** | `cargo test -p bot-core --lib` (partial, 2026-09-23) | **>200 passed** — `billing::provider_events` (7), `billing::reconciliation` (11), `billing::pricing` (7), `custody::resolve` (7), `custody::health` (5), `custody::credentials` (7), plus `custody::model/policy/provider`, `provisioning::deprovision/retention`, etc. Full grep count 1330 `#[test]` across workspace. |
 | **Batch 2 new tests (added)** | New test modules in 22 new files | **≈110 new tests** added (billing 7+11+7, custody 7+5+7, provisioning 5+7+5, server saas 3+3+4+3+7, security 7+3, api schemas 3+3, SDK 4+3) — counted via `grep` after Batch 2 |
 | **Workspace full** | `cargo test --workspace -- --test-threads=1` | **PASS — EXECUTED 2026-09-26** against real **PostgreSQL 17.11** (`POSTGRES_URL` set, migrations 0001–0022): **70 suites, 2077 tests passed, 0 failed** (13 ignores). Includes `sniper-suite` bin 452/452, `bot-core` lib 507/507, `db_integration` 26/26, `redis_integration` 10/10, `saas_control_plane` 19/19, `saas-sdk` 32/32. Run with `CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=1` plus a 4 GB swap file to fit the sandbox memory budget — environment settings only, no test or lint was relaxed. The re-run on the final revision of this batch (after the adapter timeout/session-id hardening) also passed: 70 suites / 2077 passed / 0 failed / exit 0. |
-| **Frontend** | `npm ci --ignore-scripts` + `npm run typecheck` + `npm run build` + `npm run lint` | **PASS** after `npm ci --ignore-scripts` (lockfile 211KB, 6171 lines, `lockfileVersion` 3; 354 packages, next 16.3.6) — re-verified 2026-09-27 (Batch 11): `typecheck` PASS, `next build` PASS (5 routes), `npm audit` 0 vulnerabilities, `npm run lint` exit 0 (12 documented warnings, row 16). `npm ls`/lockfile consistency check passes |
+| **Frontend** | `npm ci --ignore-scripts` + `npm test` + `npm run audit:production` + `npm run typecheck` + `npm run build` + `npm run lint` | **PASS** on 2026-10-06 (lockfile 216KB, 6171 lines, `lockfileVersion` 3; Next.js 16.3.8; 5 contract tests, production audit/typecheck/build/contract checks pass; lint 0 warnings / 0 errors). Full audit retains five high-severity development-only transitive findings. `npm ls`/lockfile consistency check passes |
 | **DB / Redis integration** | `cargo test -p bot-core --test db_integration` | **EXECUTED 2026-09-26** — `db_integration` 26/26 and `redis_integration` 10/10 against real services in the workspace run above. |
 | **Staking program BPF** | `cargo build-sbf` (agave 2.1.21) | **NOT EXECUTED** in this batch (historical BYTE-IDENTICAL .so at hardening pass 2026-09-18). |
 
@@ -52,7 +64,7 @@ cargo test -p saas-sdk                # 9 passed
 cargo test -p sniper-suite            # 105 passed (after route fix)
 cargo test -p bot-core --lib          # >200 passed (partial log)
 grep -r "#\[test\]" crates --include="*.rs" | wc -l  # 1331
-npm ci --ignore-scripts             # 211KB lockfile, 6171 lines, lockfileVersion 3
+npm ci --ignore-scripts             # 216KB lockfile, 6171 lines, lockfileVersion 3
 npm ci && npm run typecheck && npm run build   # PASS (frontend CI)
 find crates -name "*.rs" | wc -l      # 253
 ls crates/core/migrations/*.sql | wc -l       # 21
@@ -119,10 +131,10 @@ ls crates/core/migrations/*.sql | wc -l       # 21
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
-| Real npm lockfile | **DONE** | `apps/control-plane/package-lock.json` **211KB, 6171 lines, lockfileVersion 3** — generated `2026-09-23` via `npm install --package-lock-only`; re-verified 2026-09-27 by `npm ci --ignore-scripts` (**354 packages**) on `next 16.3.6` (Batch-11 F-2 remediation; history: 15.5.4 → 15.5.26 in Batch 10), react 19.1.0 |
+| Real npm lockfile | **DONE** | `apps/control-plane/package-lock.json` **216KB, 6171 lines, lockfileVersion 3** — re-verified 2026-10-06 by `npm ci --ignore-scripts` on Next.js 16.3.8, React 19.2.0; production-only audit is clean, while five high dev-only transitive findings remain in the full audit. |
 | Deterministic install | **DONE** | `npm ci --ignore-scripts` in `frontend-ci.yml` |
 | Typecheck / build | **DONE** | `npm run typecheck` (`tsc --noEmit`) + `npm run build` (`next build`) — both hard gates |
-| Lint | **PASS (12 documented warnings)** | `npm run lint` = `eslint .` (ESLint 9 flat config; Next 16 removed `next lint`) — non-interactive, exit 0; warnings enumerated in `docs/KNOWN-LIMITATIONS.md` row 16 |
+| Lint | **PASS (0 warnings / 0 errors)** | `npm run lint` = `eslint .` (ESLint 9 flat config; Next 16 removed `next lint`) — non-interactive, all configured rules hard-error, no remaining lint baseline |
 | Dependency consistency check | **DONE** | `npm ls` + lockfile vs package.json version check in CI |
 | Frontend CI workflow | **DONE** | `.github/workflows/frontend-ci.yml` (4 steps: install, lint, typecheck, build, plus consistency) — secrets not in logs, npm cache via `setup-node` |
 
@@ -298,7 +310,7 @@ grep -rn "api/events.*key=\|?key=\|token=" crates/server/src --include="*.rs"
 > _Batch 10 (2026-09-27) supersede note — the block above is the dated 2026-09-24 Batch-7 snapshot and is kept as-is:
 > test-count grep is `1331` (was 1314; +16 harness tests then +1 frontend dependency-guard test, Batch 10), migrations `22` (0001-0022, was 21), and the live lib re-run is
 > `cargo test -p sniper-suite --lib` = 263 passed / 0 failed / 3 ignored (was 224/224); six integration harnesses 32 passed
-> (6 ignored live). `release-manifest.json` `test_count` was synced 1314 → 1330 → 1331 (final). Current counts: see §1 of this document._
+> (6 ignored live). That block is historical evidence; the current release manifest and measured counts are maintained in §1 and the current validation snapshot above._
 
 ### Truthful external status (never default PASS)
 

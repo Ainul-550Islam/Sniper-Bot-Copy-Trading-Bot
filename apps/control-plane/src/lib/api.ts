@@ -145,6 +145,15 @@ export interface LoginResponse {
   };
 }
 
+export interface AcceptedInviteResponse extends LoginResponse {
+  organization_id: string;
+  membership: {
+    id: string;
+    role: string;
+    status: string;
+  };
+}
+
 export interface ApiKeyMetadata {
   id: string;
   key_prefix: string;
@@ -196,6 +205,16 @@ export const auth = {
     request<LoginResponse>("/api/saas/sessions", {
       method: "POST",
       body: { email, password },
+      anonymous: true,
+    }),
+  acceptInvite: (token: string, password?: string, displayName?: string) =>
+    request<AcceptedInviteResponse>("/api/saas/team/invites/accept", {
+      method: "POST",
+      body: {
+        token,
+        ...(password === undefined ? {} : { password }),
+        ...(displayName === undefined ? {} : { display_name: displayName }),
+      },
       anonymous: true,
     }),
   logout: () => request<Json>("/api/saas/users/me/logout", { method: "POST" }),

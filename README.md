@@ -62,7 +62,7 @@ delivery index (version, commits, evidence, statuses, buyer actions). Then:
 - [docs/ACCEPTANCE-CHECKLIST.md](docs/ACCEPTANCE-CHECKLIST.md) — sign-off list.
 - [docs/BUYER-RISK-REGISTER.md](docs/BUYER-RISK-REGISTER.md) — remaining risks.
 - [docs/DELIVERY-MANIFEST.md](docs/DELIVERY-MANIFEST.md) — index of the whole
-  23-document buyer/delivery package.
+  buyer/delivery package and its current machine-measured release facts.
 
 These documents were added after the 0.1.0 engineering freeze; no source
 code changed. Machine-readable facts:
@@ -586,7 +586,7 @@ STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1
 
 ```
 sniper-suite/
-├─ Cargo.toml / Cargo.lock      workspace root (7 members; programs/ excluded)
+├─ Cargo.toml / Cargo.lock      workspace root (8 members; programs/ excluded)
 ├─ config.toml.example          annotated reference config
 ├─ docker-compose.yml           bot + Postgres 16 + Redis 7 stack
 ├─ .env.template                compose env template (copy to .env)
@@ -597,11 +597,10 @@ sniper-suite/
 ├─ SECURITY.md                  vulnerability-reporting policy
 ├─ scripts/                     release-check.sh (20-gate release validation)
 │                               + verify-delivery.sh (bundle integrity check)
-├─ docs/                        36 docs: 13 engineering (architecture, API,
-│                               security, ops, release, handover, backup/
-│                               restore, testing…) + 23 buyer/delivery docs
-│                               (index: docs/DELIVERY-MANIFEST.md; start:
-│                               docs/FINAL-DELIVERY.md)
+├─ docs/                        149 current documents covering engineering,
+│                               SaaS, buyer handover, evidence, release and
+│                               operations (index: docs/DELIVERY-MANIFEST.md;
+│                               start: docs/FINAL-DELIVERY.md)
 ├─ .github/workflows/ci.yml     fmt/clippy/build/test + services + sbf + docker
 ├─ crates/
 │  ├─ core/            bot-core: config, state, events, risk, OMS, dedup,

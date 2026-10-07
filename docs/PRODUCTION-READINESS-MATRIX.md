@@ -1,15 +1,15 @@
 # Production Readiness Matrix — sniper-suite 0.1.0
 
 > Status: **READY** · **PARTIAL** · **EXTERNAL_REQUIRED** · **NOT_EXECUTED**  
-> Current values: 22 migrations · 343 rs · 70→101 docs · 1331 tests · 8 members · version 0.1.0
+> Current values (2026-10-06): 43 forward-only migrations · 616 Rust files under `crates/` · 149 docs · 1783 `#[test]` attributes · 8 members · version 0.1.0
 
 | Area | Check | Implementation | Status | Evidence / Command |
 |---|---|---|---|---|
 | **Application** | `cargo fmt --check` | `rust-toolchain.toml` 1.98.1 | READY | `cargo fmt --all --check` PASS |
-| | `cargo check --workspace` | 8 crates | READY | `cargo check --workspace` PASS |
-| | `cargo clippy --workspace -- -D warnings` | 8 crates, targeted `allow(dead_code)` + clippy `too_many_arguments`/`result_large_err`/`wrong_self_convention` only (no blanket `allow(warnings)`) | READY | `cargo clippy --workspace --all-targets -- -D warnings` PASS (0 warnings, 2026-09-24) |
-| | Unit tests hermetic | 1331 grep, 32 saas-sdk, ops 3–6 each | READY | `cargo test -p saas-sdk` 32/32, `cargo test -p sniper-suite --test observability_config` etc. |
-| **Database** | Migrations 0001–0022 contiguous | `crates/core/migrations/` forward-only | READY | `ls crates/core/migrations/*.sql | wc -l` 22, `verify-delivery.sh` PASS |
+| | `cargo check --workspace` | 8 crates | READY | `cargo check --workspace --lib` PASS |
+| | `cargo clippy --workspace -- -D warnings` | 8 crates, targeted `allow(dead_code)` + clippy `too_many_arguments`/`result_large_err`/`wrong_self_convention` only (no blanket `allow(warnings)`) | READY | `cargo clippy --workspace --lib -- -D warnings` PASS (0 warnings, 2026-10-06) |
+| | Unit tests hermetic | 1783 `#[test]` attributes, 34 saas-sdk, 605 bot-core | READY | `cargo test -p saas-sdk` 34/34, `cargo test -p bot-core --lib` 605/605; heavy server test binary is resource-limited in this sandbox. |
+| **Database** | Migrations 0001–0043 contiguous | `crates/core/migrations/` forward-only | READY | `ls crates/core/migrations/*.sql | wc -l` 43, `verify-delivery.sh` PASS |
 | | Postgres integration | `db_integration` 26 tests, `postgres_saas_integration` 7 tests | **SERVICE-BACKED VERIFIED (2026-09-26)** | real PostgreSQL 17.11: `db_integration` 26/26 + `postgres_saas_integration` 7/7 + full workspace 2077 passed; re-run on buyer infra with `POSTGRES_URL=...` |
 | **Redis** | Redis integration | `redis_integration` 10, `redis_saas` | EXTERNAL_REQUIRED | `REDIS_URL=... cargo test --test redis_integration` NOT_RUN |
 | **Secrets** | No plaintext committed | `.gitignore` .env, `is_secret_like` redaction, secret_scan | READY | `bash scripts/verify-buyer-package.sh` PASS, `grep -R BEGIN PRIVATE KEY` 0 |

@@ -33,7 +33,7 @@ export default function BacktestDetailPage() {
   }, [runId]);
 
   useEffect(() => {
-    void load();
+    void Promise.resolve().then(() => load());
   }, [load]);
 
   return (

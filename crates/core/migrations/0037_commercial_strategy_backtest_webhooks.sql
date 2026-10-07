@@ -1,7 +1,7 @@
 -- Migration 0037: Commercial strategy library, backtests, and webhook delivery infrastructure.
 -- Forward-only migration with tenant-scoped indexes.
 
-CREATE TABLE IF NOT EXISTS strategies (
+CREATE TABLE IF NOT EXISTS tenant_strategies (
     id UUID PRIMARY KEY,
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     name VARCHAR(128) NOT NULL,
@@ -15,16 +15,16 @@ CREATE TABLE IF NOT EXISTS strategies (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_strategies_org_created
-    ON strategies (organization_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tenant_strategies_org_created
+    ON tenant_strategies (organization_id, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_strategies_org_module
-    ON strategies (organization_id, module, status);
+CREATE INDEX IF NOT EXISTS idx_tenant_strategies_org_module
+    ON tenant_strategies (organization_id, module, status);
 
 CREATE TABLE IF NOT EXISTS backtest_runs (
     id UUID PRIMARY KEY,
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    strategy_id UUID NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+    strategy_id UUID NOT NULL REFERENCES tenant_strategies(id) ON DELETE CASCADE,
     venue VARCHAR(32) NOT NULL,
     period_start TIMESTAMPTZ NOT NULL,
     period_end TIMESTAMPTZ NOT NULL,

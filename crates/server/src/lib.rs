@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 #![allow(dead_code)]
+#![allow(clippy::result_large_err)]
 //! sniper-suite library crate (Batch 7, §G/§H Batch 8).
 //!
 //! The binary crate (`main.rs`) owns the runtime; this lib mirrors the

@@ -38,7 +38,7 @@ cat licenses.json | jq '.[] | select(.license=="UNKNOWN") | .name' # unknown che
 | Package | Version | License | Purpose |
 |---|---|---|---|
 | `next` | 16.3.6 | MIT | App Router (`CVE-2025-66478` remediation 2026-09-27; Batch-11 F-2 pin) |
-| `postcss` | 8.5.23 | MIT | CSS pipeline (resolved via `next 16.3.6`; fixes the 8.4.31 chain) |
+| `postcss` | 8.5.23 | MIT | CSS pipeline (resolved via `next 16.3.8`; fixes the 8.4.31 chain) |
 | `react` | 19 | MIT | UI |
 | `typescript` | 5.x | Apache-2.0 | typecheck strict |
 | `tailwindcss` | 3.x | MIT | styles |

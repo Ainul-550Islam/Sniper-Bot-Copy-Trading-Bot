@@ -92,6 +92,8 @@ SANCTIONED_GLOBAL = [
      "tamper-evident audit hash chain: the chain head must be a single deployment-wide total order (advisory lock 'audit_events_chain'), so head lookup and append are global by design"),
     ("payment_webhooks", "provider_events",
      "webhook idempotency: (provider, provider_event_id) is unique at the provider and dedup must hold across replays deployment-wide; the org is resolved from the event payload afterwards"),
+    ("billing_webhook", "provider_events",
+     "legacy billing webhook idempotency: (provider, provider_event_id) is unique at the provider and the organization is resolved from the verified payload before any state transition"),
     # --- site-level triage (each documented in docs/FORENSIC-SQL-RESEARCH-2026.md) ---
     ("postgres", "saas_runtime_records",
      "identity-resolution KV plane: kind+id / kind+lookup_key / kind+user_id fetch a globally-unique identity record (session token, email, user id) whose PAYLOAD carries organization_id; org equality is enforced by the SaaS service layer after fetch (proven by the cross-tenant suites); kind-wide listings serve operator jobs only"),

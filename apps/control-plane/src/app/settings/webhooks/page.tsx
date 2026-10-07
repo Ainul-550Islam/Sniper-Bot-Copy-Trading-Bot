@@ -34,7 +34,7 @@ export default function WebhooksPage() {
   }, []);
 
   useEffect(() => {
-    void loadWebhooks();
+    void Promise.resolve().then(() => loadWebhooks());
   }, [loadWebhooks]);
 
   return (

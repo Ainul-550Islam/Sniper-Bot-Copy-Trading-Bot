@@ -185,6 +185,7 @@ fn custody_storage_error(detail: &'static str) -> Response {
 /// observability, but `custody_audit` is the tenant-scoped report source for
 /// custody actions. In no-database test/development mode the existing
 /// process-local application audit remains the only available sink.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_durable_custody_audit(
     state: &ApiState,
     ctx: &crate::saas::middleware::SaasContext,

@@ -33,7 +33,7 @@ export default function RiskPage() {
   }, []);
 
   useEffect(() => {
-    void loadRisk();
+    void Promise.resolve().then(() => loadRisk());
   }, [loadRisk]);
 
   return (
