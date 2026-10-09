@@ -33,7 +33,7 @@
       "added_0025": "0025_tenant_runtime_registry_config (STEP 3 of the enterprise tenant-isolation program, PROMPT 2/10: durable substrate for the tenant runtime registry and configuration engine \u2014 tenant_runtimes (one row per tenant runtime INSTANCE with fencing generation, heartbeat rotation, org/generation + stale-heartbeat indexes; NOT a second scheduler or claims table \u2014 per-execution ownership stays with execution_claims (0009) and process-level HA with 0016), tenant_configs (one row per organization, typed config with versioned rollout), tenant_config_audit + tenant_decision_log (org-recent indexes), tenant_bindings (org+kind index) \u2014 forward-only",
       "added_0026_0034": "PROMPT 3/10 enterprise tenant-isolation program, atomic PK/arbiter swaps + tenant data plane: 0026_orders_tenant_conflict (orders PK (id) -> (organization_id, id), idempotency_keys arbiter -> (organization_id, scope, key)); 0027_idempotency_tenant_conflict; 0028_execution_claims_tenant_conflict (execution_claims/execution_claim_events arbiters -> tenant-composite); 0029_copy_links_tenant_conflict (copy_leaders (organization_id, address), copy_events (organization_id, event_id), copy_links (organization_id, position_id)); 0030_polymarket_orders_tenant_conflict (poly_signals/poly_orders/poly_fills tenant-composite); 0031_execution_intents_tenant_conflict; 0032_tenant_worker_claims (worker_claims: one tenant-local leadership lane per (organization_id, purpose) with fencing generation \u2014 the global ha_leases plane stays global); 0033_accounting_tenant_conflict (ledger/postings/global positions/risk/kill-switch/accounting recon tenant-composite + reconciliation_state PK (organization_id, kind, subject)); 0034_reporting_tenant_indexes (tenant-leading indexes for the reporting/data-plane query paths) \u2014 all forward-only"
     },
-    "docs_count": 102,
+    "docs_count": 155,
     "web_apps": [
       {
         "name": "apps/control-plane",
@@ -75,20 +75,20 @@
   },
   "verification": {
     "manifest": {
-      "product_files": 1212,
+      "product_files": 1275,
       "rust_files": 675,
-      "docs_files": 102,
-      "tree_digest": "a542020677d1b3585d277ff25a834e96c5dbde91587e7cdb89cc16e6aaa601cd",
+      "docs_files": 155,
+      "tree_digest": "cc3aa1082c9e565db22051d2458204f7090adbd889e040f160c4c78960abb4a3",
       "generated_by": "scripts/update-release-manifest.sh"
     }
   },
-  "docs_files": 102,
+  "docs_files": 155,
   "rust_files": 675,
-  "test_count": 2061,
+  "test_count": 2064,
   "migrations": 54,
   "test_counts": {
     "method": "grep-count of '#[test]' attribute lines under crates/ (identical to test_count)",
-    "value": 2061,
+    "value": 2064,
     "note": "Static inventory of test functions: a count, not a pass/fail result. No run logs ship in this package; re-run per docs/TESTING.md."
   },
   "verification_status": {

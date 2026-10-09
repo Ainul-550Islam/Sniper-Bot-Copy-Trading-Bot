@@ -30,10 +30,10 @@ this document is the human map and does not duplicate source code.
   pass. Live counts: `docs/STATS.md`.
 - **Current canonical tree (2026-10-06):** the release manifest measures
   <!-- stat:rust_files -->675<!-- /stat --> Rust files under `crates/`,
-  <!-- stat:docs_canonical -->101<!-- /stat --> top-level docs,
+  <!-- stat:docs_canonical -->154<!-- /stat --> top-level docs,
   <!-- stat:migrations -->54<!-- /stat --> contiguous forward-only migrations
   (high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`), and
-  <!-- stat:test_attrs_plain -->2061<!-- /stat --> `#[test]` attributes.
+  <!-- stat:test_attrs_plain -->2064<!-- /stat --> `#[test]` attributes.
   The standalone staking program is a separate workspace component; generated
   Cargo/Next.js caches, local toolchain binaries, session artifacts and the
   `buyer-release/` package are excluded. `docs/REPOSITORY-MAP.md` and
