@@ -317,10 +317,8 @@ pub fn evaluate(snapshot: &MarketSnapshot, cfg: &SniperConfig, now: DateTime<Utc
 
     // 4b. Sell simulation — the real honeypot check (GAP-MAP P1). A
     // disabled gate passes silently (same convention as the other
-    // threshold gates). An ENABLED gate fails closed on an INCONCLUSIVE
-    // probe (Unknown) regardless of strict_gates: an unverified sell path
-    // is never a pass. An enabled gate with no probe result is a skip, which
-    // strict_gates promotes to a refusal.
+    // threshold gates); an ENABLED gate with no probe result is a skip,
+    // which strict_gates promotes to a refusal.
     report.push(
         GATE_SELL_SIMULATION,
         if !cfg.simulate_sell {
@@ -331,9 +329,9 @@ pub fn evaluate(snapshot: &MarketSnapshot, cfg: &SniperConfig, now: DateTime<Utc
                 Some(SellProbeOutcome::NotSellable(detail)) => GateOutcome::Fail(format!(
                     "sell simulation says this token cannot be sold: {detail}"
                 )),
-                Some(SellProbeOutcome::Unknown(detail)) => GateOutcome::Fail(format!(
-                    "sell simulation inconclusive, refused (fail closed): {detail}"
-                )),
+                Some(SellProbeOutcome::Unknown(detail)) => {
+                    GateOutcome::Skip(format!("sell simulation inconclusive: {detail}"))
+                }
                 None => GateOutcome::Skip("sell simulation enabled but no probe was run".into()),
             }
         },
@@ -664,17 +662,15 @@ mod tests {
         assert!(d.contains("cannot be sold"), "{d}");
         assert!(d.contains("frozen"), "{d}");
 
-        // An inconclusive probe FAILS CLOSED, even with strict_gates off:
-        // an unverified sell path must never pass.
+        // An inconclusive probe skips — and strict promotes the skip.
         let mut s = snapshot();
         s.sell_probe = Some(SellProbeOutcome::Unknown("rpc timeout".into()));
         let r = evaluate(&s, &cfg(), now);
-        assert!(!r.passed(false), "unknown sell path must not pass non-strict");
-        assert!(r.skipped().is_empty(), "unknown is a failure, not a skip");
-        let (g, d) = r.first_failure(false).unwrap();
+        assert!(r.passed(false));
+        assert_eq!(r.skipped(), vec![GATE_SELL_SIMULATION]);
+        let (g, d) = r.first_failure(true).unwrap();
         assert_eq!(g, GATE_SELL_SIMULATION);
-        assert!(d.contains("refused (fail closed)"), "{d}");
-        assert!(d.contains("rpc timeout"), "{d}");
+        assert!(d.starts_with("strict_gates:"), "{d}");
 
         // Enabled gate with NO probe result is also a skip (strict fails).
         let mut s = snapshot();

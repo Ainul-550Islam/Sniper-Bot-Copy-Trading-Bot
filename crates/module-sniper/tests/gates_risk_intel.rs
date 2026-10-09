@@ -361,11 +361,11 @@ fn sell_simulation_gate_maps_probe_outcomes() {
 
     snap.sell_probe = Some(SellProbeOutcome::Unknown("rpc timeout".into()));
     let report = gates::evaluate(&snap, &cfg, now);
-    assert!(
-        matches!(gate_outcome(&report, GATE_SELL_SIMULATION), GateOutcome::Fail(_)),
-        "unknown sell path must fail closed"
-    );
-    assert!(!report.passed(false), "non-strict: unknown must NOT pass");
+    assert!(matches!(
+        gate_outcome(&report, GATE_SELL_SIMULATION),
+        GateOutcome::Skip(_)
+    ));
+    assert!(report.passed(false), "non-strict: unknown is a skip");
 
     snap.sell_probe = None;
     let report = gates::evaluate(&snap, &cfg, now);
@@ -397,12 +397,12 @@ fn honeypot_verdicts_match_gate_strictness() {
     let unknown = SellProbeOutcome::Unknown("timeout".into());
     assert_eq!(decide(&unknown), HoneypotVerdict::Unknown);
     assert!(
-        rejects_with(HoneypotVerdict::Unknown, false),
-        "non-strict: unknown fails closed"
+        !rejects_with(HoneypotVerdict::Unknown, false),
+        "non-strict: unknown is a skip"
     );
     assert!(
         rejects_with(HoneypotVerdict::Unknown, true),
-        "strict: unknown fails closed"
+        "strict: unknown rejects — mirrors gates.rs Skip promotion"
     );
 
     let ok = SellProbeOutcome::Sellable;

@@ -480,6 +480,26 @@ async fn load_pumpswap(
     })
 }
 
+/// Reason returned when a Raydium AMM v4 entry is requested with
+/// `simulate_sell = true`. Raydium has no sell simulation in this codebase, so
+/// the honeypot check cannot run; the entry is refused instead of letting the
+/// `Unknown` probe reach the gate as a skip.
+pub const RAYDIUM_SELL_SIM_UNSUPPORTED: &str = "sell simulation is not implemented for raydium_amm_v4; \
+     set simulate_sell=false to route raydium entries without a sell probe, \
+     or use a route that has one";
+
+/// Narrow Raydium guard (FIRST.md Part G). Refuses before any RPC call when the
+/// operator requires a sell simulation the venue cannot provide. It does not
+/// alter `Unknown` semantics in the gate pipeline and returns `Ok` when
+/// `simulate_sell` is off, leaving that configured behaviour unchanged.
+pub(crate) fn raydium_sell_probe_guard(cfg: &SniperConfig) -> Result<(), MarketError> {
+    if cfg.simulate_sell {
+        Err(MarketError::route(RAYDIUM_SELL_SIM_UNSUPPORTED))
+    } else {
+        Ok(())
+    }
+}
+
 async fn load_raydium(
     rpc: &Rpc,
     amm_id: &Pubkey,
@@ -490,6 +510,7 @@ async fn load_raydium(
     creator_buy: Option<f64>,
     now: DateTime<Utc>,
 ) -> Result<MarketData, MarketError> {
+    raydium_sell_probe_guard(cfg)?;
     let pool = match RaydiumPool::load(rpc, amm_id, true).await {
         Ok(p) => p,
         Err(BotError::NotFound(m)) => return Err(MarketError::not_ready(m)),
@@ -525,10 +546,11 @@ async fn load_raydium(
         }
     };
     let swappable = amm.is_swappable();
-    // Raydium AMM v4 has no simulated sell probe yet. The sell-simulation
-    // gate treats this Unknown as a refusal (fail closed), so Raydium
-    // entries are refused while `simulate_sell` is on. This is not faked as
-    // a pass. The AMM-status gate (`tradable`) covers the venue side.
+    // Raydium AMM v4 has no simulated sell probe. With `simulate_sell` on, the
+    // guard above has already refused this market, so this Unknown is only
+    // reached when simulation is off (the gate is then a silent pass by
+    // config). The AMM-status gate (`tradable`) covers the venue side only; it
+    // does not prove sellability.
     let sell_probe = Some(SellProbeOutcome::Unknown(
         "sell simulation is not implemented for raydium_amm_v4".into(),
     ));
@@ -722,5 +744,31 @@ mod holder_wiring_tests {
     fn empty_holder_table_is_an_honest_empty_table() {
         let out = to_gate_holders(&[], 1_000, &[]).expect("supply is known");
         assert!(out.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod raydium_sell_guard_tests {
+    use super::*;
+    use bot_core::config::AppConfig;
+
+    #[test]
+    fn raydium_is_refused_when_sell_simulation_is_requested() {
+        let mut cfg = AppConfig::from_defaults().raw.sniper;
+        cfg.simulate_sell = true;
+        let err = raydium_sell_probe_guard(&cfg).expect_err("simulate_sell must refuse raydium");
+        assert_eq!(err.reason, RejectReason::InvalidRoute);
+        assert!(
+            err.detail.contains("sell simulation is not implemented for raydium_amm_v4"),
+            "{}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn raydium_guard_is_silent_when_simulation_is_off() {
+        let mut cfg = AppConfig::from_defaults().raw.sniper;
+        cfg.simulate_sell = false;
+        assert!(raydium_sell_probe_guard(&cfg).is_ok());
     }
 }

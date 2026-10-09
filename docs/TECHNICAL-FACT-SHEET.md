@@ -101,7 +101,7 @@ comparisons, no projections.
 
 ## Test inventory (static)
 
-Static test inventory: <!-- stat:test_attrs_plain -->2070<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+Static test inventory: <!-- stat:test_attrs_plain -->2072<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
 
 Previous freeze/hardening pass-count tables quoted run results without
 shipping run logs and have been removed. Harnesses exist for the workspace

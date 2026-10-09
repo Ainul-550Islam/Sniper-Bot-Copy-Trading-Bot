@@ -91,7 +91,7 @@ re-audit, and `PROMPT-3-RESULT.md`).
 
 ## Test evidence (facts; labels matter)
 
-- Static test inventory: <!-- stat:test_attrs_plain -->2070<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+- Static test inventory: <!-- stat:test_attrs_plain -->2072<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
 - No test-run logs ship in this repository. Earlier pass/fail figures
   (workspace, db_integration, saas-sdk, staking validator e2e) were quoted
   without logs and have been removed; run `cargo test --workspace` yourself
