@@ -7,7 +7,7 @@ labels used throughout (taxonomy defined in `docs/HANDOVER.md` §3):
 - **VERIFIED** — executed successfully in the final engineering-freeze gate
   on the frozen tree (2026-09-18; evidence: `AUDIT.md` §27,
   `release-manifest.json`).
-- **PREVIOUSLY VERIFIED** — executed successfully in an earlier session on
+- **RECORDED IN AN EARLIER SESSION** — reported as executed in an earlier session on
   identical source (2026-09-17 era; evidence: `AUDIT.md` §26 and earlier
   sections); not re-executed in the final freeze sandbox.
 - **BUYER ACTION REQUIRED** — human/legal/operator step after transfer; not
@@ -143,8 +143,8 @@ EXECUTED item to VERIFIED without a new execution.
 
 ## 8. Infrastructure requirements (EXTERNAL INFRASTRUCTURE REQUIRED)
 
-- PostgreSQL ≥ 16 (verified against 16.4) — durable financial truth.
-- Redis 7 (verified against 7.2.10) — non-authoritative coordination/cache.
+- PostgreSQL ≥ 16 (recorded as tested against 16.4 in an earlier session) — durable financial truth.
+- Redis 7 (recorded as tested against 7.2.10 in an earlier session) — non-authoritative coordination/cache.
 - Solana RPC + WebSocket provider(s); optional Yellowstone-compatible Geyser
   provider; optional PumpPortal access.
 - Polymarket API access + Polygon key (buyer satisfies Polymarket ToS and

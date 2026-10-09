@@ -1,7 +1,7 @@
 # Technical FAQ (buyer edition)
 
 Every answer cites the source or document that backs it. If an answer says
-"not executed" or "previously verified", that is the honest status per the
+"not executed" or "recorded in an earlier session", that is the honest status per the
 taxonomy in `docs/HANDOVER.md` §3.
 
 **Is this paper-trading safe by default?**
@@ -55,7 +55,7 @@ aid, not the truth (`docs/BACKUP-RESTORE.md`, `docs/RECONCILIATION.md`).
 Money-relevant truth is unaffected — Redis holds no authoritative state.
 Dedup falls back to the Postgres/memory levels and claim coordination falls
 back to the Postgres claim store; readiness reports degradation. This is a
-design guarantee documented in `docs/BACKUP-RESTORE.md` and exercised by the
+design objective documented in `docs/BACKUP-RESTORE.md` and exercised by the
 gated integration suites.
 
 **What happens if RPC dies?**
