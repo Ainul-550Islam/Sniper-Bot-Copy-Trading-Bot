@@ -67,6 +67,13 @@ for f in "${TARGETS[@]}"; do
         [[ -z "$ref" ]] && continue
         [[ "$ref" == *"@sha256:"* ]] && continue
         [[ "$ref" == *'${'* ]] && continue
+        # Helm chart contract: the only accepted templated reference is the
+        # sniper-suite.image helper, which must still enforce a sha256 digest.
+        if [[ "$ref" == '{{ include "sniper-suite.image" . | quote }}' ]]; then
+            grep -qF 'regexMatch "^sha256:[a-f0-9]{64}$"' deploy/helm/sniper-suite/templates/_helpers.tpl \
+                || fail "sniper-suite.image helper no longer enforces a sha256 digest"
+            continue
+        fi
         echo "FAIL: $f: mutable image reference: $ref" >&2
         violations=$((violations + 1))
     done < <(grep -E '^[[:space:]]*image:[[:space:]]*[^[:space:]]' "$f" 2>/dev/null || true)
