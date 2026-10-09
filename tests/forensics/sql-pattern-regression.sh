@@ -76,5 +76,25 @@ for cls in "class 1 (tenant-safe)" "class 2 (intentional-global)" "class 3 (oper
 done
 echo "[sql-regression] all five forensic classes reported"
 
-echo "[sql-regression] PASS — zero class-4 on the real tree, drift detection proven, vocabulary intact"
+echo "[sql-regression] 4/4 — every reviewed identity/token exception must stay listed, with its reason"
+# Each entry is a reviewed global identity or token flow (see the
+# SANCTIONED_GLOBAL comment in the scanner). Removing one silently re-exposes
+# its statements, so the regression locks the exact (file, table) pairs.
+EXCEPTIONS=(
+  '("email_verification", "users"'
+  '("password_reset", "users"'
+  '("postgres", "users"'
+  '("auth_flows", "users"'
+  '("auth_flows", "invites"'
+  '("auth_flows", "saas_runtime_records"'
+)
+for pair in "${EXCEPTIONS[@]}"; do
+  if ! grep -qF "$pair" "$SCAN"; then
+    echo "[sql-regression] FAIL — reviewed exception missing from scanner: $pair" >&2
+    exit 1
+  fi
+done
+echo "[sql-regression] all six reviewed identity/token exceptions present"
+
+echo "[sql-regression] PASS — zero class-4 on the real tree, drift detection proven, vocabulary intact, exceptions locked"
 exit 0
