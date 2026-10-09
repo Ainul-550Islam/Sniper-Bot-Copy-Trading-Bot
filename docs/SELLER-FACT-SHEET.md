@@ -37,7 +37,7 @@ re-audit, and `PROMPT-3-RESULT.md`).
   (now tenant-composite since migration 0028). Evidence:
   `crates/core/src/ownership.rs`, `docs/DISTRIBUTED.md`.
 - Current software tree (measured 2026-09-29): **744 files** (excluding
-  `target/`, `.git/`, `node_modules/`, `buyer-release/`), **512 Rust files**
+  `target/`, `.git/`, `node_modules/`, `buyer-release/`), **<!-- stat:rust_files -->678<!-- /stat --> Rust files**
   (506 under `crates/` + 6 under `programs/staking-suite/`), **~196,048 Rust
   LOC**, 101 Markdown docs under `docs/`. Evidence: `release-manifest.json`
   (counts verified by `release_manifest_counts_and_version_are_current`).

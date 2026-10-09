@@ -17,7 +17,7 @@ cat rust-toolchain.toml  # 1.98.1
 ```bash
 # 1) Format + build + lint (hard gates)
 cargo fmt --all --check              # PASS
-cargo check --workspace --lib         # PASS (616 Rust files, 43 migrations, 8 members, 1.98.1)
+cargo check --workspace --lib         # NOT RUN on the current tree (last recorded PASS was 2026-09-26 with 616 Rust files, 43 migrations, 8 members; rerun to confirm)
 cargo clippy --workspace --all-targets -- -D warnings  # PASS (per-crate in final-release-check)
 
 # 2) Unit tests (hermetic, no PG/Redis)
