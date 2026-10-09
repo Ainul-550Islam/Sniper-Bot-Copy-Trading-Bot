@@ -33,7 +33,7 @@ removed. The harnesses exist and anyone can re-run them (`docs/TESTING.md`).
 | Staking host + validator e2e | `cd programs/staking-suite && cargo test` (+ `STAKING_E2E=1`) |
 | fmt / `clippy -D warnings` / `cargo audit` | standard toolchain commands |
 
-Static test inventory: <!-- stat:test_attrs_plain -->2070<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->898<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+Static test inventory: <!-- stat:test_attrs_plain -->2070<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
 | `cargo deny` (advisories/bans/licenses/sources) | ok |
 | Total test executions across the gate script | 609, 0 failures |
 

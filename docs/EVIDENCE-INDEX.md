@@ -24,7 +24,7 @@ in this tree and can be run by anyone.
 | Staking host + validator e2e | `cd programs/staking-suite && cargo test` (+ `STAKING_E2E=1`) | NOT_RUN here — no run log shipped |
 | Release gates | `scripts/release-check.sh`, `scripts/final-release-check.sh` | runnable; see `docs/STATS.md` for static counts |
 
-Static test inventory: <!-- stat:test_attrs_plain -->2070<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->898<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+Static test inventory: <!-- stat:test_attrs_plain -->2070<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
 
 ## Security & correctness claims
 

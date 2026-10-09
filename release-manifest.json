@@ -75,20 +75,20 @@
   },
   "verification": {
     "manifest": {
-      "product_files": 1278,
-      "rust_files": 677,
+      "product_files": 1281,
+      "rust_files": 678,
       "docs_files": 155,
-      "tree_digest": "d14a77fc407971efcea1f65cb8592c4e4acbf1aa806fcc7fab84cd5bc904aa07",
+      "tree_digest": "46db480947e0949566c78653bdd7d5223bfcb56fb46382e0a17d88432cb507f6",
       "generated_by": "scripts/update-release-manifest.sh"
     }
   },
   "docs_files": 155,
-  "rust_files": 677,
-  "test_count": 2067,
+  "rust_files": 678,
+  "test_count": 2070,
   "migrations": 54,
   "test_counts": {
     "method": "grep-count of '#[test]' attribute lines under crates/ (identical to test_count)",
-    "value": 2067,
+    "value": 2070,
     "note": "Static inventory of test functions: a count, not a pass/fail result. No run logs ship in this package; re-run per docs/TESTING.md."
   },
   "verification_status": {
