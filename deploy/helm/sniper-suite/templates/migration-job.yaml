@@ -1,0 +1,94 @@
+{{- if .Values.migrationJob.enabled }}
+# One-shot schema migration Job (GAP-MAP v2 helm line: "migration job").
+# Runs the SAME image with MIGRATE_ONLY=1 — main.rs applies every pending
+# migration in crates/core/migrations/ and exits 0 (or non-zero on any
+# failure, which blocks the helm upgrade because this is a pre-hook).
+#
+# Disabled by default: the server also auto-migrates at startup, which is
+# safe for single-replica deploys. Enable the Job when you run multiple
+# replicas or want schema changes applied BEFORE new pods roll.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sniper-suite.fullname" . }}-migrate
+  labels:
+    {{- include "sniper-suite.labels" . | nindent 4 }}
+  annotations:
+    # Helm hook: run before install/upgrade, replace any previous attempt.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrationJob.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "sniper-suite.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+        {{- with .Values.commonLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "sniper-suite.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: MIGRATE_ONLY
+              value: "1"
+            - name: CONFIG_PATH
+              value: /app/config.toml
+            {{- range $key, $value := .Values.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            # The migration run only needs the database. Project the same
+            # secret set as the Deployment so POSTGRES_URL is available.
+            {{- if .Values.secrets.create }}
+            {{- range $key, $_ := .Values.secrets.env }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sniper-suite.secretName" $ }}
+                  key: {{ $key }}
+            {{- end }}
+            {{- else }}
+            {{- range $key := .Values.envKeysFromExisting }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sniper-suite.secretName" $ }}
+                  key: {{ $key }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.migrationJob.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.toml
+              subPath: config.toml
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "sniper-suite.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

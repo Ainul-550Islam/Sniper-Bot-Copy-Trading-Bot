@@ -1,0 +1,123 @@
+# ============================================================================
+# .github/dependabot.yml — automated dependency updates (P1).
+#
+# Three ecosystems are actually present in this repository and each is
+# declared separately, because they have different blast radii:
+#
+#   * cargo (/)                      — the trading workspace. A bad bump
+#                                      here can change execution
+#                                      behaviour, so these PRs are
+#                                      grouped and reviewed, never
+#                                      auto-merged.
+#   * cargo (/programs/staking-suite)— the on-chain program. It has its
+#                                      OWN lockfile pinned to the Solana
+#                                      2.1 generation; see the CI comment
+#                                      in ci.yml. Patch-only, because a
+#                                      minor bump there has repeatedly
+#                                      pulled edition2024 manifests that
+#                                      the BPF toolchain cannot parse.
+#   * npm (/apps/control-plane)      — the Next.js control plane.
+#   * github-actions (/)             — the workflows themselves. An
+#                                      unpinned action is a supply-chain
+#                                      hole in the pipeline that builds
+#                                      the money-moving binary.
+#   * docker (/)                     — base image rebuilds. Advisory:
+#                                      the authoritative pins live in
+#                                      deploy/release/base-images.lock.json
+#                                      (./scripts/pin-base-image-digests.sh).
+#
+# Grouping is deliberate: one PR per ecosystem per week beats forty
+# single-crate PRs that nobody reviews and that each burn a CI matrix.
+# ============================================================================
+version: 2
+
+updates:
+  # ---------------------------------------------------------------- rust ----
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "rust"]
+    commit-message:
+      prefix: "deps(cargo)"
+    groups:
+      # Patch/minor noise in one PR.
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+      # Majors stay separate: each needs its own reading.
+      cargo-major:
+        update-types: ["major"]
+    ignore:
+      # The Solana generation is pinned on purpose (see Dockerfile and
+      # ci.yml): 2.3+ breaks `cargo build-sbf` for this program set and
+      # 4.x fails to compile solana-zk-token-sdk for BPF. A Dependabot
+      # bump here would be noise that is always closed.
+      - dependency-name: "solana-*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "spl-*"
+        update-types: ["version-update:semver-major"]
+
+  # ---------------------------------------------- rust: on-chain program ----
+  - package-ecosystem: cargo
+    directory: "/programs/staking-suite"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    labels: ["dependencies", "rust", "on-chain"]
+    commit-message:
+      prefix: "deps(program)"
+    # Patch only. This lockfile is pinned to the toolchain the validator
+    # e2e is verified against; anything larger must be a deliberate,
+    # human-driven migration.
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+
+  # ------------------------------------------------------------- frontend ----
+  - package-ecosystem: npm
+    directory: "/apps/control-plane"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "frontend"]
+    commit-message:
+      prefix: "deps(npm)"
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
+      npm-major:
+        update-types: ["major"]
+
+  # ------------------------------------------------------- github actions ----
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "ci"]
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # --------------------------------------------------------------- docker ----
+  # Advisory only. The authoritative base-image pins are digests in
+  # deploy/release/base-images.lock.json; Dependabot cannot update that
+  # file, so treat these PRs as a notification that
+  # ./scripts/pin-base-image-digests.sh should be re-run.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+    labels: ["dependencies", "docker", "advisory"]
+    commit-message:
+      prefix: "deps(docker)"

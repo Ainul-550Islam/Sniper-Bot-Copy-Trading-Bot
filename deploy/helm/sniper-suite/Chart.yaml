@@ -1,0 +1,25 @@
+# Helm chart for the sniper-suite control-plane API (GAP-MAP v2, P2).
+#
+# Deploys the Rust server binary (Dockerfile at the repo root) as a single
+# Deployment + Service, with:
+#   * a ConfigMap holding config.toml (mounted at CONFIG_PATH),
+#   * an optional Secret for connection strings / keys (or an existing one),
+#   * liveness/readiness probes against /api/health,
+#   * non-root security context (the image runs as `sniper`),
+#   * optional Ingress and journal persistence.
+#
+# Postgres/Redis are NOT part of this chart: production clusters run them
+# as managed services (see deploy/environments/). Point the chart at them
+# via `secrets.env.POSTGRES_URL` / `REDIS_URL`.
+apiVersion: v2
+name: sniper-suite
+description: Multi-tenant trading control plane (sniper-suite server)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - trading
+  - solana
+  - saas
+maintainers:
+  - name: Sniper Suite Ops

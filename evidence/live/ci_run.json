@@ -1,0 +1,11 @@
+{
+  "validation_id": "ci_run",
+  "provider": "github_actions",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "git push of the release commit; record the workflow run URL from .github/workflows/ci.yml",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"one GREEN CI run on the exact release commit: workflow run URL + commit SHA. CI in this workspace has not executed a release commit; a PASSED entry must quote the real run URL as attestation_ref"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

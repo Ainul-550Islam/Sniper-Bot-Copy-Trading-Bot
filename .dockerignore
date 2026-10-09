@@ -1,0 +1,26 @@
+# Build artifacts and local state — never ship these into the image context.
+target
+**/target
+data
+*.jsonl
+
+# Git / VCS
+.git
+.gitignore
+
+# Local secrets and overrides (bake config via a mounted file or env, not the image)
+config.toml
+.env
+*.pem
+id.json
+*-keypair.json
+
+# Editor / OS noise
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Docs that don't affect the build
+README.md
+docs

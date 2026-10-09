@@ -1,0 +1,30 @@
+{{- if .Values.autoscaling.enabled }}
+# HorizontalPodAutoscaler (GAP-MAP v2 helm line: "hpa").
+# Requires resources.requests.cpu to be set on the Deployment — the
+# metrics-server cannot compute utilisation without a request baseline.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "sniper-suite.fullname" . }}
+  labels:
+    {{- include "sniper-suite.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "sniper-suite.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      # Scale down slowly: tenant sessions are long-lived; dropping a pod
+      # mid-session is safe (stateless server) but noisy.
+      stabilizationWindowSeconds: {{ .Values.autoscaling.scaleDownStabilizationSeconds }}
+{{- end }}

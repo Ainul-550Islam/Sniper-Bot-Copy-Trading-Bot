@@ -1,0 +1,11 @@
+{
+  "validation_id": "solana_funded_preflight",
+  "provider": "solana_rpc",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "LIVE_SOLANA_FUNDED=1 RPC_URL=<redacted> SOLANA_KEYPAIR=<redacted> cargo test -p sniper-suite --test live_funded_preflight -- --ignored",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"requires LIVE_SOLANA_FUNDED=1 + RPC_URL + funded keypair; read-only balance + rent probe, never trades"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

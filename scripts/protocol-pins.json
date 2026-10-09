@@ -1,0 +1,135 @@
+{
+  "version": "2026-10-07.1",
+  "description": "Protocol pins for drift detection (GAP MAP v2). Values are copied verbatim from the codebase; check-protocol-drift.sh fails when code and pins disagree (static mode) or when on-chain reality disagrees with the pins (live mode). Updating a pin REQUIRES updating the code in the same change and re-running the drift check.",
+  "solana": {
+    "programs": {
+      "system_program": "11111111111111111111111111111111",
+      "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "token_2022_program": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+      "associated_token_program": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "rent_sysvar": "SysvarRent111111111111111111111111111111111",
+      "compute_budget_program": "ComputeBudget111111111111111111111111111111",
+      "pump_fun": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+      "pump_fun_fees": "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ",
+      "pumpswap_amm": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "raydium_amm_v4": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+      "raydium_clmm": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "raydium_cpmm": "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+      "meteora_dlmm": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "meteora_damm_v1": "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB"
+    },
+    "mints": {
+      "wsol": "So11111111111111111111111111111111111111112",
+      "usdc": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    },
+    "pump_fun_accounts": {
+      "global": "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf",
+      "event_authority": "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",
+      "fee_recipient_fallback": "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV2fskvCwf8gCDbZ"
+    },
+    "pump_fun_discriminators": {
+      "initialize": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "create": [
+        24,
+        30,
+        200,
+        40,
+        5,
+        28,
+        7,
+        119
+      ],
+      "create_v2": [
+        214,
+        144,
+        76,
+        236,
+        95,
+        139,
+        49,
+        180
+      ],
+      "buy": [
+        102,
+        6,
+        61,
+        18,
+        1,
+        218,
+        235,
+        234
+      ],
+      "sell": [
+        51,
+        230,
+        133,
+        164,
+        1,
+        127,
+        131,
+        173
+      ],
+      "buy_exact_sol_in": [
+        56,
+        252,
+        116,
+        8,
+        158,
+        223,
+        205,
+        95
+      ],
+      "buy_v2": [
+        184,
+        23,
+        238,
+        97,
+        103,
+        197,
+        211,
+        61
+      ],
+      "sell_v2": [
+        93,
+        246,
+        130,
+        60,
+        231,
+        233,
+        64,
+        178
+      ]
+    },
+    "jupiter": {
+      "quote_url": "https://quote-api.jup.ag/v6/quote",
+      "swap_url": "https://quote-api.jup.ag/v6/swap"
+    }
+  },
+  "polymarket": {
+    "polygon": {
+      "ctf_exchange_v3": "0xe3333700cA9d93003F00f0F71f8515005F6c00Aa",
+      "ctf_erc1155": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+      "collateral_usdc_proxy": "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+    },
+    "eip712": {
+      "clob_auth_domain_version": "1",
+      "order_domain_version_v2": "2",
+      "order_domain_version_v3": "3"
+    },
+    "api_hosts": {
+      "clob_url": "https://clob.polymarket.com",
+      "gamma_url": "https://gamma-api.polymarket.com",
+      "data_url": "https://data-api.polymarket.com",
+      "ws_url": "wss://ws-subscriptions-clob.polymarket.com/ws/"
+    }
+  }
+}

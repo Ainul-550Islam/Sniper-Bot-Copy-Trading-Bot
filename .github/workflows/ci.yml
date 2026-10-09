@@ -1,0 +1,640 @@
+name: CI
+
+# Freeze & baseline (BUILD PLAN §1): every push / PR must be formatted,
+# clippy-correct, build, and pass the full test suite — for BOTH the app
+# workspace (7 crates) and the standalone staking program — plus a
+# supply-chain pass (cargo-audit + cargo-deny) and a `cargo build-sbf`
+# on-chain compile of Module 4.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------- app ------
+  # Service matrices: PG (migration/schema/billing isolation/lifecycle),
+  # Redis (dedup/leases/rate-limit/handoff) both run here via the gated
+  # integration harnesses under crates/server/tests/* and crates/core/tests/*.
+  # Frontend (npm ci/typecheck/build/lint) is in frontend-ci.yml; Rust
+  # (fmt/check/clippy/unit) hard-gates here; Release (secret/stale/manifest/
+  # buyer/SBOM/license/package) runs in the `release` job below. External
+  # providers (Stripe/Paddle/Vault/KMS/HSM/funded trading) are isolated to
+  # the `external-gated` job (never on PR, requires secrets).
+  app:
+    name: App workspace (fmt / clippy / build / test)
+    runs-on: ubuntu-latest
+    # Real Postgres + Redis so the gated integration tests
+    # (crates/core/tests/{db,redis}_integration.rs) actually EXECUTE in CI
+    # instead of skipping. The app itself treats both as optional; the tests
+    # are deterministic and create unique keys per run.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sniper
+          POSTGRES_PASSWORD: sniper
+          POSTGRES_DB: sniper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sniper"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      POSTGRES_URL: postgres://sniper:sniper@localhost:5432/sniper
+      POSTGRES_MIGRATION_URL: postgres://sniper:sniper@localhost:5432/sniper_migrations
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the exact version + components. The action
+      # is pinned to the SAME version explicitly: `@stable` would silently
+      # install a different toolchain than the one this repo is verified
+      # against, so CI and the pin could diverge without anyone noticing.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: app
+
+      - name: rustfmt (hard gate)
+        run: cargo fmt --all --check
+
+      # Full -D warnings hard gate: the style/doc/deprecation backlog is
+      # cleared (missing_docs written, deprecated solana re-exports swapped
+      # for solana-system-interface, mechanical lints fixed or individually
+      # allow-ed with written justification).
+      - name: clippy (-D warnings hard gate)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: build (all targets)
+        run: cargo build --workspace --all-targets
+
+      # The clean-migration test is destructive by design, so provision a
+      # second database rather than letting it inspect or mutate the shared
+      # integration database. Its test requires POSTGRES_MIGRATION_URL and
+      # refuses POSTGRES_URL as a fallback.
+      - name: create isolated clean-migration database
+        run: psql "postgres://sniper:sniper@localhost:5432/postgres" --command 'CREATE DATABASE sniper_migrations'
+
+      # POSTGRES_URL / REDIS_URL are set job-wide, so the gated integration
+      # tests run against the service containers (single-threaded: the DB
+      # tests share the integration database; migrations_apply_clean uses
+      # only POSTGRES_MIGRATION_URL).
+      # Covers:
+      #  - PG matrix: migration/schema, billing isolation, lifecycle/retention
+      #    via crates/server/tests/postgres_saas_integration + tenant_lifecycle_integration
+      #    and crates/core/tests/db_integration (26 tests, deterministic keys)
+      #  - Redis matrix: dedup/leases/rate-limit/handoff
+      #    via crates/server/tests/redis_saas_integration
+      #    and crates/core/tests/redis_integration
+      - name: test
+        run: cargo test --workspace -- --test-threads=1
+
+      # Named re-run of the multi-replica durability suite. `--workspace`
+      # above already executes it; this step exists so the gate is legible
+      # in the job list and a failure points at the thing that broke
+      # (tenant kill-switch, custody rotation and WS replay must be shared
+      # across replicas, not per-process). It is cached, so it costs seconds.
+      - name: durable shared state across replicas
+        run: cargo test -p sniper-suite --test multi_replica_durable_state -- --test-threads=1
+
+      # The committed API contract must equal what the code serves. A
+      # stale artifact is worse than none: it reads as authoritative while
+      # being wrong. Regenerate with ./scripts/export-openapi.sh.
+      - name: openapi artifact in sync with the code
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          ./scripts/export-openapi.sh --check
+
+      # Migration gate: contiguous, zero-padded, gap-free — derived from the
+      # tree, never a hard-coded count (the previous `grep -q 22` turned the
+      # whole job red the moment migration 0023 landed).
+      - name: postgres migration gate — migrations contiguous and gap-free
+        run: |
+          set -euo pipefail
+          n=$(ls crates/core/migrations/*.sql | wc -l)
+          echo "migrations found: $n"
+          for i in $(seq -f '%04g' 1 "$n"); do
+            ls crates/core/migrations/"${i}"_*.sql >/dev/null 2>&1 \
+              || { echo "::error::missing or non-contiguous migration $i"; exit 1; }
+          done
+          dupes=$(ls crates/core/migrations/*.sql | sed -E 's#.*/([0-9]{4})_.*#\1#' | sort | uniq -d)
+          if [ -n "$dupes" ]; then echo "::error::duplicate migration prefixes: $dupes"; exit 1; fi
+
+      - name: production source truthfulness gate
+        run: ./scripts/forbid-fake-data.sh
+
+      - name: stats single-source-of-truth gate
+        run: bash tests/release/stats_current.sh
+
+      - name: server and frontend route contract gate
+        run: ./scripts/check-routes-vs-ui.sh
+
+      - name: docker compose config (syntax + interpolation gate)
+        run: |
+          cp .env.template .env
+          POSTGRES_PASSWORD=ci-only docker compose config -q
+
+  # ------------------------------------------------------- integrity-gates --
+  # GAP MAP v2 (Part 5) — offline, cargo-free honesty and contract gates.
+  # Every one of these fails closed on drift or fabricated evidence:
+  #   - openapi coverage : every /api/saas + /api/tenant route is documented
+  #                        and every documented scoped path is routed.
+  #   - protocol drift   : pinned program ids / discriminators / Polymarket
+  #                        addresses / EIP-712 versions match the compiled code.
+  #   - stats freshness  : docs/STATS.md equals the tree, recomputed by
+  #                        scripts/generate-stats.sh (single source of truth).
+  #   - marketing claims : buyer-facing docs carry no claim term without a
+  #                        PASSED evidence/live/*.json behind it.
+  integrity-gates:
+    name: Integrity gates (openapi / drift / stats / claims)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OpenAPI coverage (saas + tenant scope)
+        run: bash scripts/check-openapi-coverage.sh
+
+      - name: Protocol drift (static pins vs code)
+        run: bash scripts/check-protocol-drift.sh
+
+      - name: Statistics freshness (stats == tree, single source of truth)
+        run: bash tests/release/stats_current.sh
+
+      - name: Marketing claims (no claim without PASSED evidence)
+        run: bash scripts/verify-marketing-claims.sh
+
+      - name: Script exec bits (tracked *.sh must be 100755)
+        run: bash scripts/verify-script-modes.sh
+
+      - name: Secret scan (high-confidence patterns + tracked filenames)
+        run: bash scripts/scan-secrets.sh
+
+      - name: External validation honesty gate (no unbacked PASSED)
+        run: bash scripts/run-external-validation.sh all-safe
+
+  # ------------------------------------------------------------- deploy -----
+  # P0 §5/§6/§7 — the deployment configuration is CODE and is gated like
+  # code. These checks are offline and take seconds; there is no reason
+  # for a TLS misconfiguration, a staging/production credential overlap,
+  # or a mutable image tag to reach a release branch.
+  deploy-config:
+    name: Deployment config (TLS / env separation / image digests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Asserts protocol floor, cipher posture, HSTS and the other
+      # security headers, the :80 -> :443 redirect, that /metrics is not
+      # public, and finally runs `nginx -t` on the RENDERED config inside
+      # the same digest-pinned nginx image the deployment uses.
+      - name: TLS edge configuration
+        run: ./scripts/verify-tls-config.sh
+
+      # Template mode: staging has every live gate off, production
+      # pre-enables none of them, the two name different resources, their
+      # variable sets reconcile, and no credential is committed. The
+      # --filled comparison of real values runs on the deploy host, never
+      # here: CI must not have both environments' secrets.
+      - name: Staging / production separation
+        run: ./scripts/verify-environment-separation.sh
+
+      # Every FROM and every compose `image:` must be repo@sha256:…, and
+      # must agree with deploy/release/base-images.lock.json.
+      - name: Image digest pinning
+        run: ./scripts/verify-image-digests.sh
+
+      # Does the lock still describe reality? An upstream rebuild of a
+      # base image is EXPECTED (security patches) — this step surfaces it
+      # as a reviewable change instead of letting the pin silently rot.
+      # continue-on-error: a moved upstream tag is news, not a broken PR.
+      - name: Base image digests current (advisory)
+        continue-on-error: true
+        run: ./scripts/pin-base-image-digests.sh --check
+
+      - name: Deploy and rollback scripts are valid shell
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          bash -n scripts/deploy-release.sh
+          bash -n scripts/rollback-release.sh
+          bash -n scripts/bootstrap-tls.sh
+          bash -n scripts/export-openapi.sh
+          bash -n scripts/backup-postgres.sh
+          bash -n scripts/verify-backup-restore.sh
+          bash -n scripts/backup-offsite-sync.sh
+          bash -n scripts/backup-basebackup.sh
+          bash -n scripts/restore-pitr.sh
+          bash -n scripts/prune-wal-archive.sh
+          # archive-wal.sh is POSIX sh ON PURPOSE: it runs inside the
+          # postgres:16-alpine container, which has no bash. Checking it
+          # with `sh -n` (dash on the runner) is the gate that keeps a
+          # bashism from being added by accident.
+          sh -n scripts/archive-wal.sh
+          # SC1090/SC1091: the env files are resolved at runtime on the
+          # deploy host and cannot be followed statically.
+          # SC2016: these scripts deliberately match LITERAL '$scheme',
+          # '${' and envsubst shell-format arguments — expansion there
+          # would break the check, which is the whole point of the quotes.
+          shellcheck -e SC1090,SC1091,SC2016 \
+            scripts/deploy-release.sh \
+            scripts/rollback-release.sh \
+            scripts/bootstrap-tls.sh \
+            scripts/verify-tls-config.sh \
+            scripts/verify-image-digests.sh \
+            scripts/verify-environment-separation.sh \
+            scripts/pin-base-image-digests.sh \
+            scripts/export-openapi.sh \
+            scripts/backup-postgres.sh \
+            scripts/verify-backup-restore.sh \
+            scripts/backup-offsite-sync.sh \
+            scripts/backup-basebackup.sh \
+            scripts/restore-pitr.sh \
+            scripts/prune-wal-archive.sh \
+            scripts/archive-wal.sh
+
+      # A backup script that only works when everything is fine is not a
+      # backup script. --dry-run exercises argument handling, config
+      # resolution and the retention arithmetic without a database, so a
+      # change that breaks the scheduler is caught here and not at 2am.
+      - name: Backup script dry-run (no database required)
+        run: |
+          BACKUP_DIR="$RUNNER_TEMP/backup-dryrun" \
+          BACKUP_LEDGER_PATH="$RUNNER_TEMP/backup-dryrun/backups.jsonl" \
+          DATABASE_URL="postgres://ci:ci@127.0.0.1:5432/ci" \
+            ./scripts/backup-postgres.sh --dry-run
+
+      # An unset off-site target is a valid, documented deployment shape
+      # and must exit 0 — otherwise every single-host install fails CI and
+      # the signal gets switched off. A SET target with no tooling must
+      # fail loudly instead.
+      - name: Off-site sync is honest about not being configured
+        run: |
+          ./scripts/backup-offsite-sync.sh
+          BACKUP_DIR="$RUNNER_TEMP/offsite" \
+          BACKUP_OFFSITE_TARGET="s3://ci-bucket/prefix" \
+            ./scripts/backup-offsite-sync.sh --dry-run
+
+      # The WAL archive command is the single most dangerous script in
+      # the repository: Postgres deletes the local segment as soon as it
+      # exits 0. These four properties are executed for real, with no
+      # database, because each one of them is silent data loss if it
+      # regresses.
+      - name: WAL archive command safety properties
+        run: |
+          set -e
+          A="$RUNNER_TEMP/wal-archive"; L="$RUNNER_TEMP/wal-ledger.jsonl"
+          S="$RUNNER_TEMP/wal-src"; mkdir -p "$S"
+          head -c 65536 /dev/urandom > "$S/000000010000000000000001"
+
+          # 1. archives a segment and records a heartbeat
+          BACKUP_WAL_ARCHIVE_DIR="$A" BACKUP_LEDGER_PATH="$L" BACKUP_WAL_HEARTBEAT_SECS=0 \
+            ./scripts/archive-wal.sh "$S/000000010000000000000001" 000000010000000000000001
+          test -f "$A/000000010000000000000001"
+
+          # 2. re-archiving identical content is success, not a duplicate
+          BACKUP_WAL_ARCHIVE_DIR="$A" BACKUP_LEDGER_PATH="$L" \
+            ./scripts/archive-wal.sh "$S/000000010000000000000001" 000000010000000000000001
+
+          # 3. the same name with DIFFERENT content must be refused and
+          #    must not modify what is already archived
+          before="$(sha256sum "$A/000000010000000000000001" | cut -d' ' -f1)"
+          head -c 100 /dev/urandom > "$S/other"
+          if BACKUP_WAL_ARCHIVE_DIR="$A" BACKUP_LEDGER_PATH="$L" \
+               ./scripts/archive-wal.sh "$S/other" 000000010000000000000001 2>/dev/null; then
+            echo "archive-wal.sh OVERWROTE an existing segment"; exit 1
+          fi
+          after="$(sha256sum "$A/000000010000000000000001" | cut -d' ' -f1)"
+          test "$before" = "$after"
+
+          # 4. a segment name that is not a plain file name is refused
+          if BACKUP_WAL_ARCHIVE_DIR="$A" BACKUP_LEDGER_PATH="$L" \
+               ./scripts/archive-wal.sh "$S/other" ../escape 2>/dev/null; then
+            echo "archive-wal.sh accepted a path-traversing segment name"; exit 1
+          fi
+
+          # no partial files may ever be left visible in the archive
+          test -z "$(find "$A" -name '*.partial.*' -print -quit)"
+          # failures are recorded, successes are throttled
+          grep -q '"ok":false' "$L"
+
+      # Pruning WAL is the one operation that can destroy recoverability
+      # while every job still reports success. With no base backup it
+      # must refuse outright.
+      - name: WAL pruning refuses to run without a base backup
+        run: |
+          set +e
+          BACKUP_DIR="$RUNNER_TEMP/pitr-empty" \
+          BACKUP_WAL_ARCHIVE_DIR="$RUNNER_TEMP/wal-archive" \
+          BACKUP_BASE_DIR="$RUNNER_TEMP/pitr-empty/base" \
+            ./scripts/prune-wal-archive.sh
+          rc=$?
+          set -e
+          test "$rc" -eq 1 || { echo "expected a refusal, got exit $rc"; exit 1; }
+
+      - name: PITR drill checker reports an overdue drill
+        run: |
+          set +e
+          BACKUP_LEDGER_PATH="$RUNNER_TEMP/absent-pitr/backups.jsonl" \
+            ./scripts/restore-pitr.sh --check
+          rc=$?
+          set -e
+          test "$rc" -eq 1 || { echo "unexpected exit $rc"; exit 1; }
+
+      - name: Base backup dry-run (no database required)
+        run: |
+          BACKUP_DIR="$RUNNER_TEMP/base-dryrun" \
+          BACKUP_LEDGER_PATH="$RUNNER_TEMP/base-dryrun/backups.jsonl" \
+          DATABASE_URL="postgres://ci:ci@127.0.0.1:5432/ci" \
+            ./scripts/backup-basebackup.sh --dry-run
+
+      # Shipping the dumps off-site while leaving the WAL archive behind
+      # is the quiet failure this flag exists to prevent, so the warning
+      # itself is a gate: if it ever stops being printed, a deployment
+      # can lose its fast recovery path without anybody being told.
+      - name: Off-site sync warns when PITR artefacts are left behind
+        run: |
+          set -e
+          D="$RUNNER_TEMP/offsite-pitr"
+          mkdir -p "$D/wal-archive" "$D/base/base-1"
+          head -c 2048 /dev/urandom > "$D/pg-20261002T010000Z.dump"
+          head -c 1024 /dev/urandom > "$D/wal-archive/000000010000000000000001"
+          head -c 512  /dev/urandom > "$D/base/base-1/base.tar.gz"
+
+          out="$(BACKUP_DIR="$D" BACKUP_OFFSITE_TARGET=s3://ci-bucket/prefix \
+                 ./scripts/backup-offsite-sync.sh --dry-run 2>&1)"
+          echo "$out" | grep -q "BACKUP_OFFSITE_INCLUDE_PITR is not set" \
+            || { echo "the local-only-PITR warning disappeared"; exit 1; }
+
+          out="$(BACKUP_DIR="$D" BACKUP_OFFSITE_INCLUDE_PITR=true \
+                 BACKUP_OFFSITE_TARGET=s3://ci-bucket/prefix \
+                 ./scripts/backup-offsite-sync.sh --dry-run 2>&1)"
+          echo "$out" | grep -q "scope: dumps+pitr" \
+            || { echo "the full-scope sync did not report dumps+pitr"; exit 1; }
+          echo "$out" | grep -q "mirror .* from wal-archive" \
+            || { echo "the WAL archive was not included"; exit 1; }
+
+      # The drill checker must REPORT, not crash, on a host that has never
+      # run a drill — that is the state every fresh checkout is in, and
+      # the exit code is what a quarterly reminder job keys on.
+      - name: Restore-drill checker runs without a ledger
+        run: |
+          set +e
+          BACKUP_LEDGER_PATH="$RUNNER_TEMP/absent/backups.jsonl" \
+            ./scripts/verify-backup-restore.sh --check
+          rc=$?
+          set -e
+          # 1 = "a drill is overdue" (correct here). Anything else is a bug
+          # in the checker itself.
+          test "$rc" -eq 1 || { echo "unexpected exit $rc"; exit 1; }
+
+      # The TLS overlay must compose cleanly on top of the base file.
+      - name: compose config (base + TLS + backup + PITR overlays)
+        run: |
+          cp .env.template .env
+          POSTGRES_PASSWORD=ci-only \
+          SNIPER_PUBLIC_HOST=ci.example.test \
+            docker compose -f docker-compose.yml -f deploy/compose/docker-compose.tls.yml config -q
+          POSTGRES_PASSWORD=ci-only \
+            docker compose -f docker-compose.yml -f deploy/compose/docker-compose.backup.yml config -q
+          POSTGRES_PASSWORD=ci-only \
+            docker compose -f docker-compose.yml \
+                           -f deploy/compose/docker-compose.backup.yml \
+                           -f deploy/compose/docker-compose.pitr.yml config -q
+
+  # ------------------------------------------------------------ program ------
+  program:
+    name: Staking program (fmt / clippy / test / build-sbf)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: programs/staking-suite
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned explicitly to MIRROR the root rust-toolchain.toml (1.98.1):
+      # this job's working-directory is programs/staking-suite, which has no
+      # rust-toolchain.toml of its own, so the root pin would not apply here.
+      # Keep in sync with rust-toolchain.toml when the pin is bumped.
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: program
+          workspaces: "programs/staking-suite -> target"
+
+      - name: rustfmt (hard gate)
+        run: cargo fmt --check
+
+      - name: clippy (-D warnings hard gate)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: unit tests (host)
+        run: cargo test
+
+      # On-chain BPF compile of Module 4. Verified locally with this exact
+      # toolchain (agave 2.1.21 / platform-tools v1.43): the lockfile is
+      # pinned to the solana 2.1 generation + edition2021-era deps (see
+      # programs/staking-suite/.cargo/config.toml and rust-version). Newer
+      # CLIs do NOT work: Agave 2.3 platform-tools (Rust 1.84) cannot parse
+      # edition2024 manifests the 2.3 lock drift pulls in, and Agave 4.x
+      # fails to compile solana-zk-token-sdk for BPF (`Pedersen` syscalls).
+      - name: install Solana tools
+        uses: solana-foundation/actions/install-solana@v1
+        with:
+          solana_version: '2.1.21'
+
+      - name: build-sbf
+        run: cargo build-sbf
+
+      # Full on-chain lifecycle of Module 4 against a local
+      # solana-test-validator running the compiled .so. Locally verified:
+      #  * governance: initialize, guards, pause, parameter timelock,
+      #    two-step admin transfer;
+      #  * funded flow: one-time GenesisMint → stake (fee split) → reward
+      #    accrual → claim (mint) → unstake (vault drain) + replay/non-admin
+      #    rejections.
+      # --test-threads=1: each test spawns its own validator.
+      - name: validator e2e (gated STAKING_E2E)
+        run: STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1
+
+  # ----------------------------------------------------------- security ------
+  security:
+    name: Security (cargo-audit + cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Prebuilt binaries — fast, no compile.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: cargo-audit — app lockfile
+        run: cargo audit
+
+      - name: cargo-audit — program lockfile
+        working-directory: programs/staking-suite
+        run: cargo audit
+
+      # Vulnerabilities / duplicate-bans / untrusted sources are blocking.
+      - name: cargo-deny — advisories, bans, sources (hard gate)
+        run: cargo deny check advisories bans sources
+
+      # Allow-list confirmed against the full transitive set (2026-09):
+      # licenses are now a blocking gate.
+      - name: cargo-deny — licenses (hard gate)
+        run: cargo deny check licenses
+
+  # ------------------------------------------------------------ docker -------
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build the production image exactly as an operator would. Layer cache
+      # keeps repeat builds fast; the image itself is NOT pushed (no registry
+      # credentials in CI by design).
+      - name: build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: sniper-suite:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Smoke: the binary must start far enough to serve /api/health with the
+      # example config in paper mode (no DB, no Redis, no keys — the server
+      # degrades those to "unavailable" instead of crashing).
+      - name: smoke-test container health endpoint
+        run: |
+          docker run -d --name smoke -p 127.0.0.1:8080:8080 \
+            -e RUST_LOG=info sniper-suite:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/health > /tmp/health.json; then
+              cat /tmp/health.json; exit 0
+            fi
+            sleep 2
+          done
+          docker logs smoke
+          exit 1
+
+  # ----------------------------------------------------------- release -------
+  # Batch 5 Final Release-Hardening: deterministic build/deployment metadata,
+  # prod config validation, observable runtime, backup/restore tooling,
+  # SBOM/license/IP handover, gap ledger, and packaged buyer-release.
+  # No external secrets; never marks external dependency VERIFIED.
+  release:
+    name: Release verification (secret/stale/manifest/buyer/SBOM/license/package)
+    runs-on: ubuntu-latest
+    needs: [app, security]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - name: secret scan (no plaintext provider/wallet/webhook secrets)
+        run: |
+          set -euo pipefail
+          echo "[secret-scan] scanning crates docs scripts"
+          if grep -R "BEGIN PRIVATE KEY" crates docs 2>/dev/null | grep -v "is_secret_like" | grep -v "contains" | grep -v "secret_scan" | grep -v "SecurityCheck" | grep -v "MIIBIj" | grep -v "operator_actions" | grep -q .; then
+            echo "FAIL: real private key found" >&2
+            grep -R "BEGIN PRIVATE KEY" crates docs | grep -v "is_secret_like" | grep -v "contains" | grep -v "secret_scan" | grep -v "SecurityCheck" | grep -v "MIIBIj" | grep -v "operator_actions" || true
+            exit 1
+          fi
+          echo "secret scan PASS"
+      - name: stale manifest claim scan (docs vs release-manifest.json counts)
+        run: |
+          set -euo pipefail
+          echo "[stale-scan] checking docs vs release-manifest.json counts"
+          DOCS=$(find docs -type f | wc -l | tr -d ' ')
+          RUST=$(find crates -name "*.rs" | wc -l | tr -d ' ')
+          TESTS=$(grep -r "#\[test\]" crates 2>/dev/null | wc -l | tr -d ' ')
+          echo "docs=$DOCS rust=$RUST tests=$TESTS"
+          python3 - "$DOCS" "$RUST" "$TESTS" << 'PY'
+          import json, pathlib, sys
+          docs, rust, tests = (int(a) for a in sys.argv[1:4])
+          manifest = json.loads(pathlib.Path("release-manifest.json").read_text())
+          drift = [f"{k}: manifest={manifest.get(k)} actual={got}"
+                   for k, got in (("docs_files", docs), ("rust_files", rust), ("test_count", tests))
+                   if manifest.get(k) != got]
+          if drift:
+              print("FAIL stale manifest claim scan: " + "; ".join(drift))
+              sys.exit(1)
+          print("stale manifest claim scan PASS")
+          PY
+      - name: release manifest verification (typed, deterministic)
+        run: cargo test --test release_manifest_integration -- --nocapture
+      - name: buyer package verification (required/forbidden layout)
+        run: cargo test --test buyer_package_integration -- --nocapture
+      - name: backup/restore manifest lifecycle (DOCUMENTED->EXECUTED->VERIFIED)
+        run: cargo test --test backup_restore_integration -- --nocapture
+      - name: observability config gates (log level, OTLP redaction, metrics)
+        run: cargo test --test observability_config -- --nocapture
+      - name: generate SBOM (CycloneDX, deterministic, sha256+size+timestamp)
+        run: bash scripts/generate-sbom.sh
+      - name: generate license report (name/version/license, sha256+size+timestamp)
+        run: bash scripts/generate-license-report.sh
+      - name: build buyer-release package (exclude target/node_modules/.git/.env)
+        run: bash scripts/build-release-package.sh
+      - name: verify buyer package layout
+        run: bash scripts/verify-buyer-package.sh
+      - name: verify delivery (7 gates)
+        run: bash scripts/verify-delivery.sh
+      - name: final release check (all gates)
+        run: bash scripts/final-release-check.sh
+
+  # -------------------------------------------------- external-gated --------
+  # Isolated job for external providers: Stripe/Paddle/Vault/KMS/HSM,
+  # prod deployment, funded trading, staking E2E, external audit.
+  # NEVER runs on PR or without secrets — gated by workflow_dispatch + secrets.
+  # Code makes these verifiable (scripts/release-evidence.sh) but never
+  # auto-promotes them to VERIFIED.
+  external-gated:
+    name: External provider validation (isolated, manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: external
+      - name: external validation registry (default = NOT_EXECUTED)
+        run: cargo test --lib ops::external_validation -- --nocapture || echo "external validation defaults to NOT_EXECUTED — requires secrets"
+      - name: info — external jobs require buyer-provisioned secrets
+        run: |
+          echo "This job is isolated and only runs via workflow_dispatch on main with secrets."
+          echo "Gaps: GAP-001 Stripe/Paddle, GAP-002 Vault/KMS/HSM, GAP-003 prod deploy, GAP-004 funded trading, GAP-005 staking E2E (STAKING_E2E=1), GAP-006 external audit"
+          echo "Commands:"
+          echo "  STRIPE_API_KEY=... cargo test --test billing_integration -- --nocapture"
+          echo "  VAULT_ADDR=... cargo test --test custody"
+          echo "  STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1"
+          echo "See docs/FINAL-BUYER-GAP-LEDGER.md and crates/server/src/ops/external_validation.rs"
