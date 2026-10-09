@@ -51,10 +51,27 @@ fn rpc_at(url: String, fallbacks: Vec<String>) -> Rpc {
     .expect("rpc builds")
 }
 
+/// A real, initialized SPL mint (82 bytes). The cache serves mint reads through
+/// `token_program_of`, which validates the layout, so an empty fixture is not a
+/// valid mint and would be rejected (correctly) as malformed.
+fn mint_data() -> Vec<u8> {
+    use solana_program::program_pack::Pack;
+    use spl_token::state::Mint;
+    let mut data = vec![0u8; Mint::LEN];
+    Mint {
+        is_initialized: true,
+        decimals: 6,
+        supply: 1_000_000,
+        ..Mint::default()
+    }
+    .pack_into_slice(&mut data);
+    data
+}
+
 fn account(lamports: u64, owner: Pubkey) -> Account {
     Account {
         lamports,
-        data: Vec::new(),
+        data: mint_data(),
         owner,
         executable: false,
         rent_epoch: 0,
@@ -116,13 +133,14 @@ async fn warm_cache_serves_hot_path_reads_offline() {
     );
 
     // An unknown key is a miss that falls through to the (dead) network and
-    // comes back empty — no phantom cache hit.
+    // surfaces the transport error — no phantom cache hit.
     let cold = Pubkey::new_unique();
-    assert!(rpc
-        .get_account_cached(&cold)
-        .await
-        .expect("get_account maps the transport error to not-found")
-        .is_none());
+    // A cold miss over a dead network is a transport error, never a phantom
+    // "not found": the cache must not report absence it cannot prove.
+    assert!(
+        rpc.get_account_cached(&cold).await.is_err(),
+        "cold read over a dead network must surface the transport error"
+    );
 
     let (hits, _, _) = rpc.account_cache().stats();
     assert!(hits >= 3, "the three warm reads were counted as hits");

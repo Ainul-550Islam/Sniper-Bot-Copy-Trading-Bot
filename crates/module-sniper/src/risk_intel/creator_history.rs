@@ -125,7 +125,11 @@ impl CreatorLedger {
         if min_rugs == 0 {
             return false;
         }
-        self.stats(creator).map(|s| s.rugs >= min_rugs).unwrap_or(false)
+        // Same sample floor as `rug_rate_bps`: a creator with too few recorded
+        // launches is never called a serial rugger, however many rugs it has.
+        self.stats(creator)
+            .map(|s| s.launches >= self.min_samples.max(1) && s.rugs >= min_rugs)
+            .unwrap_or(false)
     }
 
     /// Drop records older than `cutoff` (operators may not want a 2-year-old

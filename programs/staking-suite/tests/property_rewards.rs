@@ -68,8 +68,17 @@ proptest! {
         if elapsed <= 0 || amount == 0 || rate_bps == 0 {
             prop_assert_eq!(r, 0);
         } else {
-            // A result exists and is a plain u64 (no panic reached here).
-            prop_assert!(r <= u64::MAX);
+            // Independent model: exact 128-bit result, saturating to u64::MAX
+            // when the intermediate product overflows or the quotient does not
+            // fit in u64. Never wraps.
+            let expect: u128 = match (amount as u128)
+                .checked_mul(rate_bps as u128)
+                .and_then(|v| v.checked_mul(elapsed as u128))
+            {
+                Some(n) => (n / (BPS * SECS_PER_YEAR as u128)).min(u64::MAX as u128),
+                None => u64::MAX as u128,
+            };
+            prop_assert_eq!(r as u128, expect);
         }
     }
 

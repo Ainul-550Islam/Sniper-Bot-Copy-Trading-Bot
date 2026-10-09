@@ -596,6 +596,29 @@ impl PumpContext {
         user: &Pubkey,
         fee_recipient_override: Option<Pubkey>,
     ) -> BotResult<Self> {
+        Self::load_inner(rpc, mint, user, fee_recipient_override, false).await
+    }
+
+    /// Like [`PumpContext::load`], but a graduated (complete) curve is returned
+    /// instead of rejected, so the caller's route selection can route it to
+    /// PumpSwap/Raydium/Jupiter or report INVALID_ROUTE. Used by the sniper's
+    /// market loader only; trading paths keep the strict `load`.
+    pub async fn load_for_routing(
+        rpc: &Rpc,
+        mint: &Pubkey,
+        user: &Pubkey,
+        fee_recipient_override: Option<Pubkey>,
+    ) -> BotResult<Self> {
+        Self::load_inner(rpc, mint, user, fee_recipient_override, true).await
+    }
+
+    async fn load_inner(
+        rpc: &Rpc,
+        mint: &Pubkey,
+        user: &Pubkey,
+        fee_recipient_override: Option<Pubkey>,
+        allow_graduated: bool,
+    ) -> BotResult<Self> {
         let bonding_curve = bonding_curve_pda(mint);
         let global = *PUMP_GLOBAL;
 
@@ -654,12 +677,14 @@ impl PumpContext {
                 "bonding curve {bonding_curve} has an invalid creator or zero token supply"
             )));
         }
-        if curve.is_graduated()
-            || curve.virtual_token_reserves == 0
-            || curve.virtual_sol_reserves == 0
-        {
+        // A graduated curve is refused by trading callers (they must use
+        // PumpSwap). Routing callers may load it so route selection decides.
+        // A curve with empty virtual reserves is loaded by both: the sniper's
+        // `min_liquidity` / `price_sane` gates reject it as
+        // INSUFFICIENT_LIQUIDITY, and `plan_buy` refuses to build a trade.
+        if curve.complete && !allow_graduated {
             return Err(BotError::solana(format!(
-                "bonding curve {bonding_curve} is graduated or has empty virtual reserves; use PumpSwap"
+                "bonding curve {bonding_curve} is graduated; use PumpSwap"
             )));
         }
 
@@ -1097,6 +1122,12 @@ pub fn plan_buy(
     if curve.complete {
         return Err(BotError::solana(
             "bonding curve is complete — token has graduated, use PumpSwap/Raydium",
+        ));
+    }
+    // Defence in depth: an empty curve must never be priced into a buy.
+    if curve.virtual_token_reserves == 0 || curve.virtual_sol_reserves == 0 {
+        return Err(BotError::solana(
+            "bonding curve has empty virtual reserves — no liquidity to buy against",
         ));
     }
     // Deduct the protocol fee from the SOL budget to get the curve amount.

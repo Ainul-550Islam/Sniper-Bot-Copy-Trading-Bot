@@ -277,7 +277,7 @@ pub async fn load_market(
 
     match event.protocol {
         LaunchProtocol::PumpFun => {
-            let ctx = match PumpContext::load(rpc, &mint, user, None).await {
+            let ctx = match PumpContext::load_for_routing(rpc, &mint, user, None).await {
                 Ok(ctx) => ctx,
                 Err(BotError::NotFound(m)) => return Err(MarketError::not_ready(m)),
                 Err(e) if e.to_string().contains("not found") => {
