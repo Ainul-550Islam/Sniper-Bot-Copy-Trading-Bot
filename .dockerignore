@@ -24,3 +24,20 @@ id.json
 # Docs that don't affect the build
 README.md
 docs
+
+# Release-hygiene additions: the root image copies only Cargo manifests and
+# crates/. Frontend build output, test output, session uploads, the buyer
+# package and local toolchain state must never enter the build context.
+**/node_modules
+**/.next
+**/.turbo
+**/.vercel
+**/dist
+**/out
+**/build
+**/test-results
+**/playwright-report
+uploads
+release-evidence
+buyer-release
+.cargo

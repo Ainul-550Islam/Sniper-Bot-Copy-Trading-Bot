@@ -36,7 +36,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-exec python3 - "$ROOT" <<'PY'
+exec python3 - "$ROOT" "${FORENSIC_JSON:-}" <<'PY'
+import json
 import re
 import sys
 from pathlib import Path
@@ -351,6 +352,35 @@ print("## Class summary")
 for c in (1, 2, 3, 4, 5):
     print(f"  class {c} ({CLASS_NAME[c]}): {counts.get(c, 0)}")
 class4 = [f for f in findings if f["class"] == 4]
+
+# Machine-readable report (optional): FORENSIC_JSON=<path> writes every finding
+# with its class, rationale and the verdict. The human report above is unchanged
+# and the exit code is the same as before.
+json_path = sys.argv[2] if len(sys.argv) > 2 else ""
+if json_path:
+    report = {
+        "schema": 1,
+        "verdict": "FAIL" if class4 else "PASS",
+        "class4_count": len(class4),
+        "class_counts": {str(c): counts.get(c, 0) for c in (1, 2, 3, 4, 5)},
+        "extraction_failures": list(extraction_failures),
+        "findings": [
+            {
+                "group": f["group"],
+                "class": f["class"],
+                "class_name": CLASS_NAME[f["class"]],
+                "file": f["file"],
+                "line": f["line"],
+                "table": f["table"],
+                "statement": f["sql"],
+                "rationale": f["why"],
+            }
+            for f in findings
+        ],
+    }
+    with open(json_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2)
+        fh.write("\n")
 
 if extraction_failures:
     print()
