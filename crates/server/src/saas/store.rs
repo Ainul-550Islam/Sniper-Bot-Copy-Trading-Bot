@@ -32,8 +32,8 @@ use bot_core::tenant::{Organization, OrganizationId, User, UserId};
 
 use super::api_keys::SaasApiKey;
 use super::postgres::{
-    PostgresSaasRepo, API_KEY, ENTITLEMENT, JOB, MEMBERSHIP, ORGANIZATION, PAYMENT, PLAN, SESSION,
-    SUBSCRIPTION, USAGE, USER,
+    PasswordResetCompletion, PostgresSaasRepo, API_KEY, ENTITLEMENT, JOB, MEMBERSHIP, ORGANIZATION,
+    PAYMENT, PLAN, SESSION, SUBSCRIPTION, USAGE, USER,
 };
 
 /// Everything the control plane persists.
@@ -199,6 +199,29 @@ impl SaasStore {
             return Ok(None);
         };
         Ok(inner.users.get(id).cloned())
+    }
+
+    /// Complete a password reset atomically against the authoritative
+    /// PostgreSQL identity store (see `PostgresSaasRepo::complete_password_reset`).
+    ///
+    /// Fails closed when PostgreSQL is not authoritative: an in-memory mirror
+    /// cannot share a transaction with the reset-token row, so it must never
+    /// report a reset as complete.
+    pub async fn complete_password_reset(
+        &self,
+        presented_token: &str,
+        token_hash: &str,
+        new_password_hash: &str,
+    ) -> BotResult<Option<PasswordResetCompletion>> {
+        match &self.repo {
+            Some(repo) => {
+                repo.complete_password_reset(presented_token, token_hash, new_password_hash)
+                    .await
+            }
+            None => Err(BotError::db(
+                "password reset requires the authoritative PostgreSQL identity store",
+            )),
+        }
     }
 
     /// Persist a changed user.

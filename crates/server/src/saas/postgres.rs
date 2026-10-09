@@ -30,6 +30,20 @@ pub const USAGE: &str = "usage";
 pub const JOB: &str = "provisioning_job";
 pub const PAYMENT: &str = "payment_transaction";
 
+/// Result of a committed password reset. Only returned after the whole
+/// transaction (token, password, projection, session revocation) committed.
+#[derive(Debug, Clone)]
+pub struct PasswordResetCompletion {
+    /// The account whose password changed.
+    pub user_id: uuid::Uuid,
+    /// The reset token that was consumed.
+    pub token_id: uuid::Uuid,
+    /// The account's login address (used for the best-effort alert email).
+    pub email: String,
+    /// Number of live sessions revoked in the same transaction.
+    pub sessions_revoked: usize,
+}
+
 /// Shared PostgreSQL repository.
 pub struct PostgresSaasRepo {
     db: Arc<Database>,
@@ -410,6 +424,169 @@ impl PostgresSaasRepo {
             .await
             .map_err(|error| BotError::db(format!("commit password change and session revocation: {error}")))?;
         Ok(count)
+    }
+
+    /// Complete a password reset in ONE transaction against the authoritative
+    /// identity store.
+    ///
+    /// Everything that must agree happens together: the reset token is
+    /// claimed (row lock + single-use stamp), the password hash is replaced on
+    /// the canonical `saas_runtime_records` user row (the record login reads)
+    /// and its relational projection, every open reset token for the user is
+    /// revoked, and every live session (runtime and projected) is revoked with
+    /// the same count-consistency check used elsewhere. Any failure rolls the
+    /// whole transaction back, so the token, password and sessions can never
+    /// be left half-changed.
+    ///
+    /// Returns `Ok(None)` for every refusal that must look identical to the
+    /// caller (unknown, expired, used or revoked token, token/hash mismatch,
+    /// or an account that is not active). Returns `Err` for storage failures.
+    pub async fn complete_password_reset(
+        &self,
+        presented_token: &str,
+        token_hash: &str,
+        new_password_hash: &str,
+    ) -> BotResult<Option<PasswordResetCompletion>> {
+        let mut transaction = self
+            .db
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| BotError::db(format!("begin password reset: {error}")))?;
+
+        // Row lock: a concurrent request with the same token blocks here and,
+        // once the first commits, re-evaluates the predicates and finds nothing.
+        let claimed = sqlx::query(
+            "SELECT id, user_id, token_hash
+               FROM password_reset_tokens
+              WHERE token_hash = $1
+                AND used_at IS NULL
+                AND revoked_at IS NULL
+                AND expires_at > now()
+              FOR UPDATE",
+        )
+        .bind(token_hash)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("lock password reset token: {error}")))?;
+        let Some(claimed) = claimed else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| BotError::db(format!("rollback password reset: {error}")))?;
+            return Ok(None);
+        };
+        let stored_hash: String = claimed
+            .try_get("token_hash")
+            .map_err(|error| BotError::db(format!("decode reset token hash: {error}")))?;
+        if !bot_core::session::token::verify_token(presented_token, &stored_hash) {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| BotError::db(format!("rollback password reset: {error}")))?;
+            return Ok(None);
+        }
+        let token_id: uuid::Uuid = claimed
+            .try_get("id")
+            .map_err(|error| BotError::db(format!("decode reset token id: {error}")))?;
+        let user_id: uuid::Uuid = claimed
+            .try_get("user_id")
+            .map_err(|error| BotError::db(format!("decode reset token user: {error}")))?;
+
+        let consumed = sqlx::query(
+            "UPDATE password_reset_tokens SET used_at = now() WHERE id = $1 AND used_at IS NULL",
+        )
+        .bind(token_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("consume password reset token: {error}")))?;
+        if consumed.rows_affected() != 1 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| BotError::db(format!("rollback password reset: {error}")))?;
+            return Ok(None);
+        }
+
+        // A password change invalidates every other outstanding reset link.
+        sqlx::query(
+            "UPDATE password_reset_tokens
+                SET revoked_at = now()
+              WHERE user_id = $1 AND used_at IS NULL AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("revoke outstanding reset tokens: {error}")))?;
+
+        let record_row = sqlx::query(
+            "SELECT record FROM saas_runtime_records WHERE kind = $1 AND id = $2 FOR UPDATE",
+        )
+        .bind(USER)
+        .bind(user_id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("lock user record for reset: {error}")))?;
+        let Some(record_row) = record_row else {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| BotError::db(format!("rollback password reset: {error}")))?;
+            return Ok(None);
+        };
+        let document: serde_json::Value = record_row
+            .try_get("record")
+            .map_err(|error| BotError::db(format!("decode user record for reset: {error}")))?;
+        let mut user: User = Self::decode(document)?;
+        if !matches!(user.status, bot_core::tenant::UserStatus::Active) {
+            // Suspended or deactivated accounts cannot recover through reset.
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| BotError::db(format!("rollback password reset: {error}")))?;
+            return Ok(None);
+        }
+
+        let now = chrono::Utc::now();
+        user.password_hash = new_password_hash.to_string();
+        user.updated_at = now;
+        let email = User::normalize_email(&user.email);
+        let document = Self::encode(&user)?;
+        let updated = sqlx::query(
+            "UPDATE saas_runtime_records SET record = $3, lookup_key = $4, user_id = $5, updated_at = $6 WHERE kind = $1 AND id = $2",
+        )
+        .bind(USER)
+        .bind(user.id.to_string())
+        .bind(&document)
+        .bind(&email)
+        .bind(user.id.as_uuid())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("update password record: {error}")))?;
+        if updated.rows_affected() != 1 {
+            return Err(BotError::NotFound(format!("user {}", user.id)));
+        }
+        Self::sync_identity_projection(&mut transaction, USER, &document).await?;
+
+        let sessions_revoked = Self::revoke_user_sessions_in_transaction(
+            &mut transaction,
+            user.id,
+            "password_reset",
+            now,
+        )
+        .await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| BotError::db(format!("commit password reset: {error}")))?;
+        Ok(Some(PasswordResetCompletion {
+            user_id,
+            token_id,
+            email: user.email,
+            sessions_revoked,
+        }))
     }
 
     /// Insert or replace by `(kind,id)`. Unique lookup-key conflicts with a
