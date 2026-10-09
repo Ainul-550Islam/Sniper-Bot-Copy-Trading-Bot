@@ -118,7 +118,7 @@ pub async fn request_verification(
     let token = generate_token("ver");
     let insert = sqlx::query(
         "INSERT INTO email_verifications (user_id, email, token_hash, expires_at)
-         VALUES ($1, $2, $3, now() + make_interval(mins => $4))",
+         VALUES ($1, $2, $3, now() + make_interval(mins => $4::int))",
     )
     .bind(user_id)
     .bind(&email)

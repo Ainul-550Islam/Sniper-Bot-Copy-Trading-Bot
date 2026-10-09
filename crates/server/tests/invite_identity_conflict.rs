@@ -240,16 +240,17 @@ async fn projection_collision_on_email_is_a_409_not_a_500() {
     let owner = format!("owner-{tag}@example.com");
     let scoped = org_scoped_session(saas.clone(), &db, &owner, &format!("Org {tag}")).await;
 
-    // A non-ASCII uppercase letter: to_ascii_lowercase keeps it (so the
-    // runtime lookup misses), while Postgres lower() folds it onto the
-    // existing row, so the users_email_key unique index collides.
-    let address = format!("\u{C9}{tag}@example.com");
+    // ASCII-only fixture, so the outcome does not depend on DB locale or
+    // collation. The projection-only row carries the exact address being
+    // invited. The runtime lookup misses it (no runtime record exists), and
+    // the users_email_key unique index collides on insert.
+    let address = format!("dup-{tag}@example.com");
     let existing = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'pbkdf2-sha256$1$AAAA$AAAA')",
     )
         .bind(existing)
-        .bind(format!("\u{E9}{tag}@example.com"))
+        .bind(&address)
         .execute(db.pool())
         .await
         .expect("seed projection-only account");

@@ -195,6 +195,9 @@ fn webhook_secret_for(kind: BillingProviderKind) -> Option<String> {
     std::env::var(var).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// Maximum provider event id length (characters) accepted as a dedupe key.
+const MAX_EVENT_ID_CHARS: usize = 200;
+
 /// Verify HMAC signature and parse envelope into NormalizedEvent.
 fn verify_request(
     kind: BillingProviderKind,
@@ -238,17 +241,20 @@ fn verify_request(
     // Parse envelope: {"id":"...","type":"...","data":{...}}
     let envelope: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("invalid json: {e}"))?;
-    // Cap the provider event id: it becomes a durable deduplication key,
+    // Bound the provider event id: it becomes a durable deduplication key,
     // and a hostile (or buggy) provider must not be able to balloon the
-    // `provider_events` rows with unbounded identifiers. Matches the
-    // billing_webhook envelope rule.
-    let event_id = envelope
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-        .map(|v| v.chars().take(200).collect::<String>())
-        .ok_or_else(|| "missing id".to_string())?;
+    // `provider_events` rows with unbounded identifiers. Over-length ids are
+    // REJECTED, never truncated: truncation would let distinct provider ids
+    // that share a 200-character prefix collide on the same dedupe key and
+    // silently drop the second event.
+    let event_id = match envelope.get("id").and_then(|v| v.as_str()).map(str::trim) {
+        None => return Err("missing id".to_string()),
+        Some("") => return Err("missing id".to_string()),
+        Some(value) if value.chars().count() > MAX_EVENT_ID_CHARS => {
+            return Err(format!("event id exceeds {MAX_EVENT_ID_CHARS} characters"));
+        }
+        Some(value) => value.to_string(),
+    };
     let event_type = envelope
         .get("type")
         .and_then(|v| v.as_str())
@@ -630,6 +636,52 @@ mod tests {
         );
         let err = verify_request(BillingProviderKind::Stripe, secret, &headers, body).unwrap_err();
         assert!(err.contains("tolerance"));
+    }
+
+    fn signed_headers(secret: &str, body: &[u8]) -> HeaderMap {
+        let ts = chrono::Utc::now().timestamp() as u64;
+        let sig = sign(secret, ts, body);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-provider-timestamp",
+            axum::http::HeaderValue::from_str(&ts.to_string()).unwrap(),
+        );
+        headers.insert(
+            "x-provider-signature",
+            axum::http::HeaderValue::from_str(&sig).unwrap(),
+        );
+        headers
+    }
+
+    fn body_with_id(id: &str) -> Vec<u8> {
+        format!(
+            r#"{{"id":"{id}","type":"plan.changed","data":{{"organization_id":"00000000-0000-0000-0000-000000000001","plan_code":"pro"}}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn over_length_event_ids_are_rejected_not_truncated() {
+        // Two distinct ids that share a 200-character prefix must never be
+        // collapsed onto one dedupe key. The over-length id is rejected.
+        let secret = "s";
+        let long_id = format!("{}-second", "a".repeat(200));
+        let body = body_with_id(&long_id);
+        let headers = signed_headers(secret, &body);
+        let err = verify_request(BillingProviderKind::Stripe, secret, &headers, &body)
+            .expect_err("over-length event id must be rejected");
+        assert!(err.contains("exceeds 200"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn event_id_at_the_limit_is_kept_whole() {
+        let secret = "s";
+        let id = "b".repeat(200);
+        let body = body_with_id(&id);
+        let headers = signed_headers(secret, &body);
+        let ev = verify_request(BillingProviderKind::Stripe, secret, &headers, &body)
+            .expect("an id at the limit must verify");
+        assert_eq!(ev.provider_event_id, id);
     }
 
     #[test]

@@ -491,11 +491,15 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
     );
     session.mfa_policy_updated_at = mfa_policy_version;
     if let Err(e) = state.saas.create_session(&session).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        return internal_store_failure(&e);
     }
     user.last_login_at = Some(now);
     user.updated_at = now;
-    let _ = state.saas.update_user(&user).await;
+    // Bookkeeping only: the session is already durable. A failed write is
+    // logged rather than silently discarded.
+    if let Err(e) = state.saas.update_user(&user).await {
+        tracing::warn!(error = %e, user = %user.id, "last_login_at could not be recorded");
+    }
     state
         .audit
         .success("saas", "saas.session.created", Some(&session.token_prefix))
@@ -723,6 +727,21 @@ pub async fn update_profile(
     .into_response()
 }
 
+/// Map an internal store failure to a generic 500. The raw error text (for
+/// example a database driver message naming tables or constraints) is logged
+/// server-side and never echoed to the caller.
+pub(crate) fn internal_store_failure(error: impl std::fmt::Display) -> Response {
+    tracing::error!(error = %error, "saas store operation failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "error": "internal_error",
+            "reason": "the request could not be completed",
+        })),
+    )
+        .into_response()
+}
+
 /// `POST /api/saas/users/me/logout` — revoke the presented session.
 pub async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     let ctx = match authorize_request(
@@ -837,5 +856,19 @@ mod tests {
         let short = build_user("a@b.co", "short", "x").unwrap_err();
         assert!(short.contains("at least"));
         assert!(build_user("a@b.co", &"x".repeat(MIN_PASSWORD_LEN), "x").is_ok());
+    }
+
+    #[tokio::test]
+    async fn store_failures_never_echo_driver_text() {
+        let raw = "database error: duplicate key value \"sessions_pkey\"";
+        let response = internal_store_failure(raw);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("sessions_pkey"), "driver text leaked: {text}");
+        assert!(!text.contains("database error"), "driver text leaked: {text}");
+        assert!(text.contains("internal_error"), "generic body expected: {text}");
     }
 }

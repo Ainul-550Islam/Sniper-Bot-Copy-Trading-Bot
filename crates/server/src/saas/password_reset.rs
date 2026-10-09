@@ -80,15 +80,25 @@ pub async fn request_reset(
     axum::extract::State(state): axum::extract::State<ApiState>,
     Json(body): Json<RequestBody>,
 ) -> Response {
+    let email = User::normalize_email(body.email.trim());
+    if email.is_empty() {
+        return request_accepted();
+    }
+    // Per-address throttle, applied BEFORE the account lookup. The router's
+    // per-IP budget alone let one victim address be mailed from many IPs.
+    // The 429 depends only on the requested address, so it reveals nothing
+    // about whether an account exists (same contract as login).
+    if let Some(response) =
+        crate::saas::rate_limit::reject_sensitive_attempt(&state, "password_reset_request", &email)
+            .await
+    {
+        return response;
+    }
     let Some(db) = state.db.as_deref() else {
         // Without a database there are no accounts to reset; still answer
         // the same shape so behaviour does not leak configuration.
         return request_accepted();
     };
-    let email = User::normalize_email(body.email.trim());
-    if email.is_empty() {
-        return request_accepted();
-    }
 
     // Look the user up quietly. Unknown email → same accepted response.
     let user = sqlx::query("SELECT id, status FROM users WHERE lower(email) = lower($1)")
@@ -145,7 +155,7 @@ pub async fn request_reset(
     }
     if let Err(e) = sqlx::query(
         "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
-         VALUES ($1, $2, now() + make_interval(mins => $3))",
+         VALUES ($1, $2, now() + make_interval(mins => $3::int))",
     )
     .bind(user_id)
     .bind(&token.hash)
@@ -301,6 +311,80 @@ pub fn routes() -> Router<ApiState> {
 mod tests {
     use super::*;
     use bot_core::session::token::{verify_password, verify_token};
+
+    #[test]
+    fn interval_binds_carry_an_explicit_int_cast() {
+        // Postgres has no implicit bigint -> int conversion, so an i64 bind
+        // passed to make_interval(mins => ...) is rejected at runtime and the
+        // token insert fails. Every such bind must cast explicitly. The marker
+        // is assembled with concat! so this test does not match its own source.
+        let marker = concat!("make_interval(mins => ", "$");
+        for (name, src) in [
+            ("password_reset.rs", include_str!("password_reset.rs")),
+            ("email_verification.rs", include_str!("email_verification.rs")),
+        ] {
+            let mut found = 0;
+            for (idx, _) in src.match_indices(marker) {
+                found += 1;
+                let rest = &src[idx + marker.len()..];
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                assert!(
+                    rest[digits.len()..].starts_with("::int)"),
+                    "{name}: unguarded make_interval bind at byte {idx}"
+                );
+            }
+            assert!(found >= 1, "{name}: expected at least one make_interval bind");
+        }
+    }
+
+    fn throttled_test_state(sensitive_rpm: u32) -> ApiState {
+        let shared = bot_core::state::AppState::new(bot_core::config::AppConfig::from_defaults());
+        ApiState {
+            audit: bot_core::audit::AuditTrail::new(None, shared.events.clone()),
+            shared,
+            api_key: None,
+            auth: None,
+            limiter: bot_core::auth::RateLimiter::new(0),
+            sensitive_limiter: bot_core::auth::RateLimiter::new(sensitive_rpm),
+            db: None,
+            journal: None,
+            serve_dashboard: false,
+            health: std::sync::Arc::new(bot_core::obs::health::HealthRegistry::new()),
+            metrics_enabled: false,
+            saas: crate::saas::SaasStore::shared(),
+            module_registry: std::sync::Arc::new(
+                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
+            ),
+            trading: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_reset_requests_for_one_address_are_throttled() {
+        let state = throttled_test_state(1);
+        let body = |email: &str| -> RequestBody {
+            serde_json::from_value(json!({ "email": email })).expect("request body")
+        };
+        let first = request_reset(
+            axum::extract::State(state.clone()),
+            Json(body("victim@example.com")),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+
+        // Same address after normalisation (case and whitespace) shares the bucket.
+        let second = request_reset(
+            axum::extract::State(state.clone()),
+            Json(body("  VICTIM@example.com ")),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different address has its own budget.
+        let other =
+            request_reset(axum::extract::State(state), Json(body("other@example.com"))).await;
+        assert_eq!(other.status(), StatusCode::ACCEPTED);
+    }
 
     #[test]
     fn denial_bodies_are_identical_and_never_leak_state() {
