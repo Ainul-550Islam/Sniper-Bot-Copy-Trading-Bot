@@ -431,9 +431,11 @@ pub async fn accept_invite(
     let existing_membership = match sqlx::query(
         "SELECT id FROM saas_runtime_records
           WHERE kind = 'membership' AND lookup_key = $1
+            AND organization_id = $2
           FOR UPDATE",
     )
     .bind(&membership_lookup)
+    .bind(organization_uuid)
     .fetch_optional(&mut *transaction)
     .await
     {
@@ -549,10 +551,11 @@ pub async fn accept_invite(
     let accepted = sqlx::query(
         "UPDATE invites
             SET status = 'accepted', accepted_at = now(), accepted_by = $1
-          WHERE id = $2 AND status = 'pending'",
+          WHERE id = $2 AND status = 'pending' AND organization_id = $3",
     )
     .bind(user.id.as_uuid())
     .bind(invitation_id)
+    .bind(organization_uuid)
     .execute(&mut *transaction)
     .await;
     match accepted {
