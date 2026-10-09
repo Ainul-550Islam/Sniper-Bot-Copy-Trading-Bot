@@ -4,8 +4,8 @@
 
 | Item | Description | Seller Provided? | Buyer Created? | Evidence / Path | Handover Action |
 |---|---|---|---|---|---|
-| **Source code** | 8 workspace crates + staking program | ✅ Seller | — | `Cargo.toml` 8 members, `crates/*`, `programs/staking-suite` | Transfer GitHub repo (see `docs/IP-OWNERSHIP-REGISTER.md`) |
-| **Documentation** | 70 → 101 `docs/*.md` + `README.md`, `AUDIT.md` | ✅ | — | `docs/DATA-ROOM-INDEX.md` | Repo transfer |
+| **Source code** | <!-- stat:crates -->8<!-- /stat --> workspace crates + staking program | ✅ Seller | — | `Cargo.toml` workspace members, `crates/*`, `programs/staking-suite` | Transfer GitHub repo (see `docs/IP-OWNERSHIP-REGISTER.md`) |
+| **Documentation** | 70 → 101 `docs/*.md` + `README.md`, `archive/AUDIT.md` | ✅ | — | `docs/DATA-ROOM-INDEX.md` | Repo transfer |
 | **Trademarks / names** | Project name “sniper-suite” | ❌ NOT INCLUDED | Buyer to register if desired | `docs/TRADEMARK-DOMAIN-REGISTER.md` says NOT INCLUDED | LEGAL_REVIEW_REQUIRED |
 | **Domains** | No domain included | ❌ NOT INCLUDED | Buyer to acquire | `TRADEMARK-DOMAIN-REGISTER` | — |
 | **Package registries** | Not published to crates.io / npm | ❌ NOT INCLUDED | Buyer to publish if desired | `Cargo.toml` `publish = false` (implied) | Buyer `cargo publish` |

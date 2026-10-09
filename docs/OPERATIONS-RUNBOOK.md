@@ -1,6 +1,6 @@
 # Operations Runbook — sniper-suite 0.1.0
 
-> **Current (2026-10-06):** 43 forward-only migrations through `0043`, 616 Rust files under `crates/`, 8 members, version 0.1.0, `rust-toolchain.toml` 1.98.1. Commands are real and correspond to `scripts/*` and `docs/*`.
+> **Current:** <!-- stat:migrations -->54<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`), <!-- stat:rust_files -->675<!-- /stat --> Rust files under `crates/`, <!-- stat:crates -->8<!-- /stat --> members, version 0.1.0, `rust-toolchain.toml` pinned. Commands are real and correspond to `scripts/*` and `docs/*`.
 
 ## 1. Startup
 
@@ -88,7 +88,7 @@ journalctl -u sniper-suite -f
 ## 10. Tenant Suspension / Closure
 
 - **Suspend:** `organizations::suspension` (PATCH) → `data_lifecycle.rs` marks, `readiness.rs` denies new keys
-- **Closure:** `tenant_lifecycle.rs` + `retention_worker.rs` (purge after retention, 7 tests)
+- **Closure:** `tenant_lifecycle.rs` + `retention_worker.rs` (purge after retention; tests exist in-tree)
 - **Verify:** `cargo test --test tenant_lifecycle_integration` (PG)
 
 ## 11. Backup
@@ -115,4 +115,4 @@ pg_restore --clean --if-exists --dbname=env:DATABASE_URL /tmp/sniper-*.dump
 - **App:** `git checkout <previous-tag>` + `cargo build --release` or `docker pull <prev>`
 - **Migrations:** forward-only, irreversible — do not `sqlx migrate revert`; check `docs/ROLLBACK-RUNBOOK.md` for compatibility matrix
 - **Frontend:** `apps/control-plane` `git checkout` + `npm ci && npm run build`
-- **Smoke:** `curl /health`, `curl /ready`, `bash scripts/verify-delivery.sh` (7/7), `bash scripts/verify-buyer-package.sh`
+- **Smoke:** `curl /health`, `curl /ready`, `bash scripts/verify-delivery.sh`, `bash scripts/verify-buyer-package.sh`

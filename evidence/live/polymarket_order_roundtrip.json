@@ -1,0 +1,11 @@
+{
+  "validation_id": "polymarket_order_roundtrip",
+  "provider": "polymarket_clob",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "LIVE_POLYMARKET=1 POLYMARKET_API_KEY=<redacted> cargo test -p sniper-suite --test live_polymarket_roundtrip -- --ignored",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"1-cent limit order place+cancel on CLOB; attestation = order id; requires funded Polygon wallet"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

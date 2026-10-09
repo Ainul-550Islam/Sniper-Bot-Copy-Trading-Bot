@@ -76,16 +76,24 @@ impl CredentialRef {
         })
     }
 
-    pub fn with_metadata(mut self, metadata: std::collections::BTreeMap<String, String>) -> Self {
-        // Ensure metadata values are not secret-like
+    /// Attach non-secret metadata. Secret-looking keys or values are a
+    /// programming error, but this is a library boundary: it refuses with
+    /// `Err` rather than panicking, so a bad caller cannot take the
+    /// process down.
+    pub fn with_metadata(
+        mut self,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> Result<Self, String> {
         for (k, v) in &metadata {
             if is_secret_like(k) || is_secret_like(v) {
-                // We don't store — caller should not pass secrets
-                panic!("metadata must not contain secret material: key={}", k);
+                return Err(format!(
+                    "metadata must not contain secret material (offending key: {})",
+                    k
+                ));
             }
         }
         self.metadata = metadata;
-        self
+        Ok(self)
     }
 
     /// Safe identifier for logs/audit — never the secret.
@@ -142,7 +150,16 @@ pub fn validate_reference(reference: &str) -> Result<(), String> {
     }
     // Reject values that look like raw private keys — must be checked before generic secret heuristic
     // so that the error message contains "private key" as expected by callers/tests.
-    if t.contains("BEGIN PRIVATE KEY") || t.contains("BEGIN SECRET") {
+    const PEM_SECRET_MARKERS: &[&str] = &[
+        "BEGIN PRIVATE KEY",
+        "BEGIN SECRET",
+        "BEGIN RSA PRIVATE KEY",
+        "BEGIN EC PRIVATE KEY",
+        "BEGIN DSA PRIVATE KEY",
+        "BEGIN OPENSSH PRIVATE KEY",
+        "BEGIN ENCRYPTED PRIVATE KEY",
+    ];
+    if PEM_SECRET_MARKERS.iter().any(|marker| t.contains(marker)) {
         return Err("reference must not be private key material".into());
     }
     // Heuristic: env var names like VAULT_TOKEN / API_KEY are allowed even though they contain
@@ -259,10 +276,34 @@ mod tests {
         // Even if someone tries to put secret in metadata, debug only shows keys
         let mut meta = std::collections::BTreeMap::new();
         meta.insert("region".into(), "us-east-1".into());
-        let c2 = c.with_metadata(meta);
+        let c2 = c.with_metadata(meta).expect("non-secret metadata attaches");
         let dbg2 = format!("{:?}", c2);
         assert!(dbg2.contains("region"));
         assert!(!dbg2.contains("us-east-1-value-secret"));
+    }
+
+    #[test]
+    fn secret_looking_metadata_is_refused_without_panicking() {
+        let c = CredentialRef::new(ProviderType::Vault, CredentialRefKind::EnvVar, "VAULT_ADDR")
+            .unwrap();
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("api_key".into(), "0123456789abcdef".into());
+        // A library boundary refuses; it must never take the process down.
+        assert!(c.with_metadata(meta).is_err());
+    }
+
+    #[test]
+    fn every_pem_private_key_flavour_is_rejected() {
+        for header in [
+            "-----BEGIN RSA PRIVATE KEY----- aaa",
+            "-----BEGIN EC PRIVATE KEY----- aaa",
+            "-----BEGIN OPENSSH PRIVATE KEY----- aaa",
+            "-----BEGIN ENCRYPTED PRIVATE KEY----- aaa",
+        ] {
+            let err = CredentialRef::new(ProviderType::Kms, CredentialRefKind::Handle, header)
+                .unwrap_err();
+            assert!(err.contains("private key"), "{header}: {err}");
+        }
     }
 
     #[test]

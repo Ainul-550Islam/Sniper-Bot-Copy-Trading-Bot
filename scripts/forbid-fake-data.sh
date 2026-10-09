@@ -8,6 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGETS=(
   "$ROOT/crates/server/src/saas"
+  "$ROOT/crates/server/src/trading_data_plane"
   "$ROOT/apps/control-plane/src/app"
   "$ROOT/apps/control-plane/src/components"
   "$ROOT/apps/control-plane/src/lib"

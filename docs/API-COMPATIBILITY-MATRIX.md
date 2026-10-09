@@ -1,12 +1,12 @@
 # API Compatibility Matrix — sniper-suite 0.1.0
 
-> No claim of semantic versioning unless enforced. Version 0.1.0, 43 forward-only migrations through `0043`, 8 members. Legacy path status accurate.
+> No claim of semantic versioning unless enforced. Version 0.1.0, <!-- stat:migrations -->54<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`), <!-- stat:crates -->8<!-- /stat --> members. Legacy path status accurate.
 
 ## Versioning
 
 - **App version:** `0.1.0` (`VERSION`, `Cargo.toml` workspace, `release-manifest.json`, `GET /health` `version`)
 - **No SemVer guarantee yet:** Pre-1.0, breaking changes allowed with minor bump + `CHANGELOG.md` entry (per `docs/RELEASE.md` §1). No automated semver check in CI.
-- **Schema:** DB forward-only 43 migrations through `0043`, additive.
+- **Schema:** DB forward-only <!-- stat:migrations -->54<!-- /stat --> migrations (high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`), additive.
 
 ## REST
 
@@ -27,7 +27,7 @@
 ## OpenAPI
 
 - Path: `GET /api/saas/openapi.json` (implemented `saas/openapi.rs`, `api/openapi_*.rs`)
-- Version: `0.1.0`, `crates/server/src/api/openapi_*.rs` 3+3 tests
+- Version: `0.1.0`, `crates/server/src/api/openapi_*.rs`
 - No breaking change since Batch3; additive.
 
 ## WebSocket
@@ -35,12 +35,12 @@
 | Path | Auth | Status | Note |
 |---|---|---|---|
 | `GET /api/events` | `x-api-key` / `Authorization: Bearer` OR first-frame token (`saas/websocket_auth.rs`) | **STABLE** | `security/websocket.rs` tenant-scoped |
-| `GET /api/events?key=` (legacy query) | `?key=` | **DEPRECATED** `LEGACY_ENABLED` only, `security/legacy_websocket_guard.rs` (disabled by default, compat mode with deprecation header), `security_headers.rs` | Do not use; prefer header. Test `websocket_auth` 7 tests |
+| `GET /api/events?key=` (legacy query) | `?key=` | **DEPRECATED** `LEGACY_ENABLED` only, `security/legacy_websocket_guard.rs` (disabled by default, compat mode with deprecation header), `security_headers.rs` | Do not use; prefer header. Test `websocket_auth` |
 
 ## SDK
 
 - **Crate:** `saas-sdk 0.1.0` (`crates/saas-sdk/src/{lib.rs,billing.rs,custody.rs,commercial.rs,error.rs,models.rs,client.rs}`)
-- **Compat:** Typed, `secret-free Debug`, no secrets in URLs (tests `client::client_debug_never_emits_secrets`), 32 tests
+- **Compat:** Typed, `secret-free Debug`, no secrets in URLs (tests `client::client_debug_never_emits_secrets`),
 - **Versioning:** Matches server `0.1.0`; breaking SDK change requires server bump.
 
 ## Authentication

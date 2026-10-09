@@ -25,6 +25,7 @@ import {
   type CurrentUserResponse,
   type LoginResponse,
   type MembershipSummary,
+  type RegisterConsent,
 } from "@/lib/api";
 
 /** Server-side session facts (no secret material). */
@@ -44,6 +45,8 @@ export interface AuthState {
   session: SessionInfo | null;
   /** The client-side tenant hint (an id from {@link AuthState.organizations}). */
   selectedOrganizationId: string | null;
+  /** True while the server permits only the dedicated MFA enrollment endpoints. */
+  mfaEnrollmentRequired: boolean;
 }
 
 type Listener = () => void;
@@ -54,6 +57,7 @@ let state: AuthState = {
   organizations: [],
   session: null,
   selectedOrganizationId: null,
+  mfaEnrollmentRequired: false,
 };
 
 const listeners = new Set<Listener>();
@@ -88,7 +92,12 @@ export function msUntilExpiry(): number {
 
 /** True when a session exists AND its 12-hour window has not passed. */
 export function hasLiveSession(): boolean {
-  return token !== null && msUntilExpiry() > 0;
+  return token !== null && msUntilExpiry() > 0 && !state.mfaEnrollmentRequired;
+}
+
+/** True only for an unexpired bearer token restricted to MFA enrollment. */
+export function needsMfaEnrollment(): boolean {
+  return token !== null && msUntilExpiry() > 0 && state.mfaEnrollmentRequired;
 }
 
 /** The selected tenant hint, or null. Only ids from `organizations` qualify. */
@@ -118,14 +127,25 @@ export function establishSession(response: LoginResponse): void {
       organizationId: response.session.organization_id,
     },
     selectedOrganizationId: null,
+    mfaEnrollmentRequired: response.mfa_enrollment_required === true,
   });
 }
 
 /** Establish a session. The token is held in memory only. */
-export async function login(email: string, password: string): Promise<void> {
+export async function login(
+  email: string,
+  password: string,
+  organization?: string,
+  mfaCode?: string,
+): Promise<boolean> {
   const { auth } = await import("@/lib/api");
-  const response = await auth.login(email, password);
+  const response = await auth.login(email, password, organization, mfaCode);
   establishSession(response);
+  if (response.mfa_enrollment_required) {
+    // An enrollment-only session cannot call /me; only the dedicated TOTP
+    // setup and verification routes accept it.
+    return true;
+  }
   // Immediately hydrate the membership list so the tenant switcher shows the
   // user's OWN organizations (never free-typed ids).
   await refresh();
@@ -136,16 +156,25 @@ export async function login(email: string, password: string): Promise<void> {
   } else if (state.organizations.length === 1) {
     selectOrganization(state.organizations[0]!.organization_id);
   }
+  return false;
 }
 
-/** Create an account, then sign in with the same credentials. */
+/**
+ * Create an account, then sign in with the same credentials.
+ *
+ * `consent` carries the legal-bundle version + timestamp the user accepted in
+ * the sign-up form (see `lib/consent.ts`). It is forwarded to the server,
+ * which records it in the durable audit trail; when omitted the server logs
+ * `captured: false` rather than implying consent.
+ */
 export async function register(
   email: string,
   password: string,
   displayName: string,
+  consent?: RegisterConsent,
 ): Promise<void> {
   const { auth } = await import("@/lib/api");
-  await auth.register(email, password, displayName);
+  await auth.register(email, password, displayName, consent);
   await login(email, password);
 }
 
@@ -162,6 +191,7 @@ export async function refresh(): Promise<boolean> {
     setState({
       user: me.user,
       organizations: me.organizations,
+      mfaEnrollmentRequired: false,
     });
     // The selected tenant must still be one of the CURRENT memberships.
     const selected = state.selectedOrganizationId;
@@ -199,6 +229,7 @@ export function clearSession(reason: "logout" | "expired"): void {
     organizations: [],
     session: null,
     selectedOrganizationId: null,
+    mfaEnrollmentRequired: false,
   });
 }
 

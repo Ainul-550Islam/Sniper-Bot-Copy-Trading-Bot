@@ -128,6 +128,17 @@ pub struct SessionRecord {
     pub revoked_at: Option<DateTime<Utc>>,
     /// Why it was revoked.
     pub revoke_reason: String,
+    /// The exact tenant MFA policy version proven by a TOTP challenge at
+    /// login. This is a database-issued version (`updated_at`), not a local
+    /// wall-clock timestamp, so clock skew cannot turn an unverified session
+    /// into a verified one. Missing on legacy serialized sessions.
+    #[serde(default)]
+    pub mfa_policy_updated_at: Option<DateTime<Utc>>,
+    /// Restricted invitation-onboarding session. It may access only the
+    /// dedicated TOTP setup/verification handlers and is promoted after a
+    /// successful code verification. Missing on legacy serialized sessions.
+    #[serde(default)]
+    pub mfa_enrollment_only: bool,
 }
 
 impl SessionRecord {
@@ -154,6 +165,8 @@ impl SessionRecord {
             expires_at: now + ttl,
             revoked_at: None,
             revoke_reason: String::new(),
+            mfa_policy_updated_at: None,
+            mfa_enrollment_only: false,
         }
     }
 

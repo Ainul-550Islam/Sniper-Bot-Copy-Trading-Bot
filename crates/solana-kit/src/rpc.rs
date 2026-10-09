@@ -23,7 +23,7 @@ use solana_client::rpc_config::{
 };
 use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
 use solana_client::rpc_request::RpcRequest;
-use solana_client::rpc_response::{Response, RpcSimulateTransactionResult};
+use solana_client::rpc_response::{Response, RpcSimulateTransactionResult, RpcTokenAccountBalance};
 use solana_sdk::account::Account;
 use solana_sdk::commitment_config::{CommitmentConfig, CommitmentLevel};
 use solana_sdk::hash::Hash;
@@ -473,17 +473,32 @@ impl Rpc {
         self.retry("getBalance", |c| c.get_balance(pubkey)).await
     }
 
+    /// The largest token accounts for `mint` (GAP-MAP P2, risk_intel input).
+    ///
+    /// Wraps `getTokenLargestAccounts`. Returns the RPC's own ordering and
+    /// truncation (typically top-20); callers that need an exact holder set
+    /// must page `get_program_accounts` separately. The mint itself is NOT in
+    /// this list — it is the sum of all these accounts.
+    pub async fn get_token_largest_accounts(
+        &self,
+        mint: &Pubkey,
+    ) -> BotResult<Vec<RpcTokenAccountBalance>> {
+        self.retry("getTokenLargestAccounts", |c| c.get_token_largest_accounts(mint))
+            .await
+    }
+
     pub async fn get_account(&self, pubkey: &Pubkey) -> BotResult<Option<Account>> {
-        match self.retry("getAccount", |c| c.get_account(pubkey)).await {
-            Ok(a) => Ok(Some(a)),
-            // `getAccount` errors when the account does not exist; that is a
-            // normal, expected condition for us, not a failure.
-            Err(e) if e.to_string().contains("getAccount") => {
-                debug!(%pubkey, "account not found");
-                Ok(None)
-            }
-            Err(e) => Err(e),
+        // `getAccountInfo` represents absence as `value: null`, unlike
+        // `get_account`, whose convenience wrapper turns absence into an error.
+        // Keeping that distinction here is important: transport/provider errors
+        // must never be mistaken for a missing account.
+        let response = self
+            .retry("getAccountInfo", |c| c.get_account_with_commitment(pubkey, self.commitment))
+            .await?;
+        if response.value.is_none() {
+            debug!(%pubkey, "account not found");
         }
+        Ok(response.value)
     }
 
     pub async fn account_exists(&self, pubkey: &Pubkey) -> BotResult<bool> {
@@ -911,46 +926,57 @@ impl Rpc {
         Ok(serde_json::from_value::<DasAsset>(v).ok())
     }
 
-    /// SPL token supply + decimals, via `getMint`-equivalent account read.
+    /// SPL token supply + decimals, via a validated mint-account read.
     pub async fn token_decimals(&self, mint: &Pubkey) -> BotResult<u8> {
-        let data = self.get_account_data(mint).await?;
-        // SPL Mint layout: mint_authority(36) supply(8) decimals(1) …
-        if data.len() < 45 {
-            return Err(BotError::solana(format!(
-                "mint account too short: {} bytes",
-                data.len()
-            )));
-        }
-        Ok(data[44])
+        let (owner, data) = self.mint_account(mint).await?;
+        validate_token_mint_account(mint, &owner, &data).map(|info| info.decimals)
     }
 
-    /// Which token program owns `mint` — SPL Token or Token-2022. Pump.fun now
-    /// creates Token-2022 mints, and the ATA address differs between them, so
-    /// this must be read rather than assumed.
+    /// Which token program owns `mint` — SPL Token or Token-2022. Ownership is
+    /// read from the account itself and validated with its mint layout. Unknown
+    /// owners, missing accounts and RPC failures are errors; never guess the
+    /// legacy SPL program for an unresolved mint.
     pub async fn token_program_of(&self, mint: &Pubkey) -> BotResult<Pubkey> {
-        // A mint's owner (token program) never changes, so this read is safe
-        // to warm-cache; brand-new mints still miss through to the network.
-        match self.get_account_cached(mint).await? {
-            Some(account) => Ok(account.owner),
-            None => {
-                // Brand-new mints may not be visible on `confirmed` yet; retry
-                // once at processed commitment before defaulting.
-                let data = self
-                    .send_raw(
-                        RpcRequest::GetAccountInfo,
-                        json!([mint.to_string(), {"encoding": "base64", "commitment": "processed"}]),
-                    )
-                    .await
-                    .ok()
-                    .and_then(|v| v.get("value").and_then(|x| x.get("owner")).and_then(|o| o.as_str()).map(String::from));
-                match data {
-                    Some(owner) if owner == TOKEN_2022_PROGRAM.to_string() => {
-                        Ok(*TOKEN_2022_PROGRAM)
-                    }
-                    _ => Ok(*TOKEN_PROGRAM),
-                }
-            }
+        let (owner, data) = self.mint_account(mint).await?;
+        validate_token_mint_account(mint, &owner, &data)?;
+        Ok(owner)
+    }
+
+    /// Load a mint from the warm cache/confirmed RPC, then retry at processed
+    /// commitment only when the confirmed account is genuinely absent. All
+    /// transport and decoding errors are propagated unchanged.
+    async fn mint_account(&self, mint: &Pubkey) -> BotResult<(Pubkey, Vec<u8>)> {
+        if let Some(account) = self.get_account_cached(mint).await? {
+            return Ok((account.owner, account.data));
         }
+
+        let value = self
+            .send_raw(
+                RpcRequest::GetAccountInfo,
+                json!([mint.to_string(), {"encoding": "base64", "commitment": "processed"}]),
+            )
+            .await?;
+        let account = value
+            .get("value")
+            .filter(|v| !v.is_null())
+            .ok_or_else(|| BotError::NotFound(format!("mint account {mint} does not exist")))?;
+        let owner_text = account
+            .get("owner")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| BotError::encoding(format!("mint {mint} response has no owner")))?;
+        let owner = owner_text
+            .parse::<Pubkey>()
+            .map_err(|e| BotError::encoding(format!("mint {mint} owner is invalid: {e}")))?;
+        let encoded = account
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|parts| parts.first())
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| BotError::encoding(format!("mint {mint} response has no base64 data")))?;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| BotError::encoding(format!("mint {mint} base64 data is invalid: {e}")))?;
+        Ok((owner, data))
     }
 
     /// Raw account read at `processed` commitment, used for freshly created
@@ -1067,6 +1093,23 @@ impl ConfirmOutcome {
 }
 
 /// Minimal DAS `getAsset` response: the fields Module 1 uses for screening.
+fn validate_token_mint_account(
+    mint: &Pubkey,
+    owner: &Pubkey,
+    data: &[u8],
+) -> BotResult<crate::tokens::MintInfo> {
+    if owner != &*TOKEN_PROGRAM && owner != &*TOKEN_2022_PROGRAM {
+        return Err(BotError::solana(format!(
+            "mint {mint} is owned by unsupported program {owner}"
+        )));
+    }
+    let info = crate::tokens::MintInfo::parse(data)?;
+    if !info.is_initialized {
+        return Err(BotError::solana(format!("mint {mint} is not initialized")));
+    }
+    Ok(info)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DasAsset {
     #[serde(default)]

@@ -122,7 +122,7 @@ async fn legacy_marker_exists(state: &ApiState, event_id: &str) -> bool {
     } else {
         memory_markers()
             .lock()
-            .expect("marker mutex")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains(event_id)
     }
 }
@@ -199,7 +199,7 @@ async fn claim_event(
         };
     }
 
-    let mut seen = memory_markers().lock().expect("marker mutex");
+    let mut seen = memory_markers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if seen.contains(&event.event_id) {
         return Ok(true);
     }
@@ -237,7 +237,7 @@ async fn release_event_claim(
     }
     memory_markers()
         .lock()
-        .expect("marker mutex")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(&event.event_id);
     Ok(())
 }
@@ -268,7 +268,7 @@ async fn record_processed(
     }
     memory_markers()
         .lock()
-        .expect("marker mutex")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(event.event_id.clone());
     Ok(())
 }
@@ -575,6 +575,7 @@ mod tests {
             api_key: None,
             auth: None,
             limiter: bot_core::auth::RateLimiter::new(0),
+            sensitive_limiter: bot_core::auth::RateLimiter::new(10),
             db: None,
             journal: None,
             serve_dashboard: false,

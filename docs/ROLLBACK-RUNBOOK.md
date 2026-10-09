@@ -18,7 +18,7 @@
   cat buyer-release/checksums/all-files.sha256 | sort
   sha256sum buyer-release/manifests/release-manifest.json  # compare to SHA256SUMS
   ```
-- **Previous release:** `git checkout 0.1.0` or `git checkout <sha>` from `AUDIT.md`
+- **Previous release:** `git checkout 0.1.0` or `git checkout <sha>` from `archive/AUDIT.md`
 
 ## 3. Application Rollback
 
@@ -84,7 +84,7 @@ curl -fsS http://localhost:8080/health          # 200, version == rollback
 curl -fsS http://localhost:8080/ready           # 200, or degraded if PG/Redis required
 curl -fsS http://localhost:8080/metrics | head
 curl -fsS http://localhost:8080/api/saas/openapi.json | jq .info.version
-bash scripts/verify-delivery.sh                 # 7/7 PASS (target/ INFO, not FAIL after 2026-09-24 fix)
+bash scripts/verify-delivery.sh                 # PASS (target/ INFO, not FAIL after 2026-09-24 fix)
 bash scripts/final-release-check.sh             # ALL PASS (hermetic, service-backed NOT_RUN)
 ```
 

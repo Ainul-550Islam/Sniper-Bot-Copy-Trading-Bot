@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Execution Journal & Sub-Second Latency Trace (PROMPT 5 §K, file 84 & Commercial Readiness).
+ * Execution Journal & Latency Trace (PROMPT 5 §K, file 84 & Commercial Readiness).
  *
  * Browses the tenant's execution records over a time window with Solana Explorer signature links,
  * failure categorization, venue identifiers, and recovery context.
@@ -47,7 +47,7 @@ export default function ExecutionsPage() {
           <div>
             <h1>Execution Journal &amp; Audit Trail</h1>
             <p className="muted">
-              Sub-second transaction signatures, order linkage, fill timestamps, and venue confirmations.
+              Transaction signatures, order linkage, fill timestamps, and venue confirmations.
             </p>
           </div>
         </div>

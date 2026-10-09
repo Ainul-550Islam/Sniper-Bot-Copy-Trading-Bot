@@ -66,6 +66,9 @@ pub struct ApiState {
     pub auth: Option<Arc<Authenticator>>,
     /// Per-principal / per-IP token buckets (`rpm = 0` disables).
     pub limiter: Arc<RateLimiter>,
+    /// Lower-volume, per-identity buckets for login, MFA, and enrollment
+    /// attempts. Production initializes this to ten requests per minute.
+    pub sensitive_limiter: Arc<RateLimiter>,
     /// Immutable audit trail (DB-chained when the database is attached).
     pub audit: Arc<AuditTrail>,
     /// Durable store for orders/keys/recovery reads (`None` = memory-only).
@@ -1682,6 +1685,7 @@ mod tests {
             api_key: None,
             auth: None,
             limiter: RateLimiter::new(0),
+            sensitive_limiter: RateLimiter::new(10),
             db: None,
             journal: None,
             serve_dashboard: false,

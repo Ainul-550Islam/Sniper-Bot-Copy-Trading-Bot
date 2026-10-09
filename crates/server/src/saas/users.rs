@@ -37,6 +37,12 @@ use crate::api::ApiState;
 /// Minimum password length. Deliberately a floor, not a complexity ritual:
 /// length is what resists guessing.
 pub const MIN_PASSWORD_LEN: usize = 12;
+/// Bound PBKDF2 input work and keep login, signup, and invitation policy aligned.
+pub const MAX_PASSWORD_LEN: usize = 512;
+/// Prevent unbounded user-controlled profile payloads from entering storage.
+pub const MAX_DISPLAY_NAME_LEN: usize = 256;
+const DUMMY_PASSWORD_HASH: &str =
+    "pbkdf2-sha256$600000$pcTXkx8rboBanELX4R9rgA$mrXKihu3Ze1lxX5c7tiPcM8oJKSx-t6QB222NARelhk";
 
 /// Validate an email well enough to reject obvious nonsense without
 /// pretending to implement RFC 5322.
@@ -66,6 +72,25 @@ pub struct RegisterBody {
     /// Display name.
     #[serde(default)]
     pub display_name: String,
+    /// Sign-up consent record (version + timestamp), captured by the
+    /// control-plane `ConsentCheckbox`. Optional for API compatibility:
+    /// SDK-driven signups may not carry it, and its absence is recorded as
+    /// such rather than treated as consent.
+    #[serde(default)]
+    pub consent: Option<SignupConsent>,
+}
+
+/// The consent a signing-up user gives to the legal documents.
+///
+/// Stored in the durable, hash-chained audit trail (NOT invented columns):
+/// the record is exactly what the UI captured — which document version was
+/// accepted, and when. See `saas.user.consent_recorded` in the audit log.
+#[derive(Debug, Deserialize)]
+pub struct SignupConsent {
+    /// Version string of the accepted legal bundle (e.g. "2026-10-07.1").
+    pub version: String,
+    /// ISO-8601 timestamp captured by the client when the box was ticked.
+    pub accepted_at: String,
 }
 
 /// Build a user record from a registration request.
@@ -73,9 +98,19 @@ pub fn build_user(email: &str, password: &str, display_name: &str) -> Result<Use
     if !valid_email(email) {
         return Err("invalid email address".into());
     }
+    if password.len() > MAX_PASSWORD_LEN * 4 || password.chars().count() > MAX_PASSWORD_LEN {
+        return Err(format!(
+            "password must be at most {MAX_PASSWORD_LEN} characters"
+        ));
+    }
     if password.chars().count() < MIN_PASSWORD_LEN {
         return Err(format!(
             "password must be at least {MIN_PASSWORD_LEN} characters"
+        ));
+    }
+    if display_name.chars().count() > MAX_DISPLAY_NAME_LEN {
+        return Err(format!(
+            "display name must be at most {MAX_DISPLAY_NAME_LEN} characters"
         ));
     }
     let now = Utc::now();
@@ -96,18 +131,69 @@ pub fn build_user(email: &str, password: &str, display_name: &str) -> Result<Use
 /// `POST /api/saas/users` — register. Public by design (it is how a
 /// customer signs up); provisioning turns the account into a tenant.
 pub async fn register(State(state): State<ApiState>, Json(body): Json<RegisterBody>) -> Response {
+    if !valid_email(&body.email) {
+        return (StatusCode::BAD_REQUEST, "invalid email address").into_response();
+    }
+    if let Some(response) = crate::saas::rate_limit::reject_sensitive_attempt(
+        &state,
+        "registration",
+        &User::normalize_email(&body.email),
+    )
+    .await
+    {
+        return response;
+    }
     let user = match build_user(&body.email, &body.password, &body.display_name) {
         Ok(u) => u,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
-    if let Err(e) = state.saas.create_user(&user).await {
-        // Do not distinguish "taken" from other failures in a way that
-        // enumerates accounts; the message is generic.
-        return (StatusCode::CONFLICT, e.to_string()).into_response();
+    if let Err(error) = state.saas.create_user(&user).await {
+        if matches!(&error, bot_core::error::BotError::InvalidArgument(_)) {
+            // Keep duplicate-account responses indistinguishable from other
+            // registration conflicts; never return the repository detail.
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "registration_conflict",
+                    "reason": "an account could not be created with these details",
+                })),
+            )
+                .into_response();
+        }
+        tracing::error!(error = %error, "user registration storage failed");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "identity_storage_unavailable",
+                "reason": "account records could not be saved",
+            })),
+        )
+            .into_response();
     }
     state
         .audit
         .success("saas", "saas.user.registered", Some(&user.id.to_string()))
+        .await;
+    // Record sign-up consent (version + timestamp) in the same durable,
+    // hash-chained audit trail. A missing consent field is logged as such so
+    // the absence is auditable too — consent is never implied.
+    let consent_detail = match &body.consent {
+        Some(consent) => json!({
+            "consent_version": consent.version,
+            "consent_accepted_at": consent.accepted_at,
+            "captured": true,
+        }),
+        None => json!({ "captured": false }),
+    };
+    state
+        .audit
+        .record(
+            "saas",
+            "saas.user.consent_recorded",
+            Some(&user.id.to_string()),
+            bot_core::audit::AuditOutcome::Success,
+            consent_detail,
+        )
         .await;
     (StatusCode::CREATED, Json(json!({ "user": user.profile() }))).into_response()
 }
@@ -136,12 +222,35 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
         )
             .into_response()
     };
+    if body.email.trim().is_empty()
+        || body.email.trim().len() > 320
+        || body.password.len() > MAX_PASSWORD_LEN * 4
+        || body.password.chars().count() > MAX_PASSWORD_LEN
+        || body.organization.as_deref().is_some_and(|value| {
+            value.trim().is_empty() || value.trim().len() > 128
+        })
+        || body
+            .mfa_code
+            .as_deref()
+            .is_some_and(|value| value.len() > 16)
+    {
+        return unauthorized();
+    }
+    if let Some(response) = crate::saas::rate_limit::reject_sensitive_attempt(
+        &state,
+        "login",
+        &User::normalize_email(&body.email),
+    )
+    .await
+    {
+        return response;
+    }
     let mut user = match state.saas.user_by_email(&body.email).await {
         Ok(Some(value)) => value,
         Ok(None) => {
             // Hash anyway so a missing account and a wrong password take a
             // similar amount of work.
-            let _ = verify_password(&body.password, "pbkdf2-sha256$600000$c2FsdA$aGFzaA");
+            let _ = verify_password(&body.password, DUMMY_PASSWORD_HASH);
             return unauthorized();
         }
         Err(error) => {
@@ -172,24 +281,31 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
     // must never become a bypass around an organization policy.
     if body.organization.is_none() {
         if let Some(db) = state.db.as_deref() {
+            // `saas_runtime_records` is the authoritative membership store.
+            // The normalized `organization_members` table is not written by
+            // the current SaaS repository and must not decide whether MFA is
+            // required for an unscoped login.
             let protected = sqlx::query(
-                "SELECT EXISTS (SELECT 1 FROM organization_members om JOIN tenant_security_policies tsp ON tsp.organization_id = om.organization_id WHERE om.user_id = $1 AND om.status = 'active' AND tsp.mfa_enforced = true) AS protected",
+                "SELECT EXISTS (SELECT 1 FROM saas_runtime_records m JOIN tenant_security_policies tsp ON tsp.organization_id = m.organization_id WHERE m.kind = 'membership' AND m.user_id = $1 AND m.record->>'status' IS DISTINCT FROM 'removed' AND tsp.mfa_enforced = true) AS protected",
             )
             .bind(user.id.as_uuid())
             .fetch_one(db.pool())
             .await;
-            match protected {
-                Ok(row) if row.try_get::<bool, _>("protected").unwrap_or(false) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "error": "organization_required_for_mfa",
-                            "mfa_required": true,
-                            "reason": "select the MFA-protected organization and provide mfa_code"
-                        })),
-                    )
-                        .into_response();
-                }
+            let protected = match protected {
+                Ok(row) => match row.try_get::<bool, _>("protected") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!(error = %error, user = %user.id, "MFA policy result during login could not be decoded");
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({
+                                "error": "identity_storage_unavailable",
+                                "reason": "MFA policy records could not be decoded"
+                            })),
+                        )
+                            .into_response();
+                    }
+                },
                 Err(error) => {
                     tracing::error!(error = %error, user = %user.id, "MFA policy lookup during login failed");
                     return (
@@ -201,14 +317,24 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
                     )
                         .into_response();
                 }
-                _ => {}
+            };
+            if protected {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "organization_required_for_mfa",
+                        "mfa_required": true,
+                        "reason": "select the MFA-protected organization and provide mfa_code"
+                    })),
+                )
+                    .into_response();
             }
         }
     }
 
-    // Optional immediate tenant scoping — only into an organization the
-    // user is actually a member of.
+    // Optional immediate tenant scoping — only into an active membership.
     let mut organization_id = None;
+    let mut mfa_policy_version = None;
     if let Some(slug) = body.organization.as_deref() {
         let org = match state.saas.organization_by_slug(slug).await {
             Ok(Some(value)) => value,
@@ -232,8 +358,8 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
             }
         };
         match state.saas.membership(org.id, user.id).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
+            Ok(Some(membership)) if membership.status.is_active() => {}
+            Ok(Some(_)) | Ok(None) => {
                 return (
                     StatusCode::FORBIDDEN,
                     Json(json!({ "error": "no_membership" })),
@@ -252,7 +378,17 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
                     .into_response();
             }
         }
-        if let Err(reason) = crate::saas::security::verify_login_mfa(
+        let mfa_subject = format!("{}:{}", user.id, org.id);
+        if let Some(response) = crate::saas::rate_limit::reject_sensitive_attempt(
+            &state,
+            "login_totp",
+            &mfa_subject,
+        )
+        .await
+        {
+            return response;
+        }
+        match crate::saas::security::verify_login_mfa(
             &state,
             user.id,
             org.id,
@@ -260,30 +396,92 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
         )
         .await
         {
-            let status = if matches!(
-                reason.as_str(),
-                "mfa_challenge_required" | "invalid_totp_code"
-            ) {
-                StatusCode::UNAUTHORIZED
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            };
-            return (
-                status,
-                Json(json!({
-                    "error": reason,
-                    "mfa_required": matches!(reason.as_str(), "mfa_challenge_required" | "invalid_totp_code"),
+            Ok(policy_version) => mfa_policy_version = policy_version,
+            Err(reason) if reason == "mfa_enrollment_required" => {
+                if let Err(key_reason) = crate::saas::security::mfa_enrollment_ready() {
+                    tracing::error!(organization = %org.id, %key_reason, "MFA enrollment key is unavailable for login onboarding");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "mfa_setup_unavailable",
+                            "reason": "the organization requires MFA but secure enrollment is not configured"
+                        })),
+                    )
+                        .into_response();
+                }
+                let enrollment_now = Utc::now();
+                let enrollment_token = generate_token("ses");
+                let mut enrollment_session = SessionRecord::new(
+                    user.id,
+                    Some(org.id),
+                    enrollment_token.hash.clone(),
+                    enrollment_token.prefix.clone(),
+                    Duration::minutes(15),
+                    enrollment_now,
+                );
+                enrollment_session.mfa_enrollment_only = true;
+                if let Err(error) = state.saas.create_session(&enrollment_session).await {
+                    tracing::error!(error = %error, user = %user.id, organization = %org.id, "MFA enrollment session could not be created");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({ "error": "identity_storage_unavailable", "reason": "an MFA enrollment session could not be created" })),
+                    )
+                        .into_response();
+                }
+                user.last_login_at = Some(enrollment_now);
+                user.updated_at = enrollment_now;
+                if let Err(error) = state.saas.update_user(&user).await {
+                    tracing::warn!(error = %error, user = %user.id, "MFA enrollment last-login timestamp could not be persisted");
+                }
+                state
+                    .audit
+                    .success(
+                        "saas",
+                        "saas.session.mfa_enrollment_started",
+                        Some(&enrollment_session.token_prefix),
+                    )
+                    .await;
+                return Json(json!({
+                    "user": user.profile(),
+                    "session": {
+                        "id": enrollment_session.id,
+                        "prefix": enrollment_session.token_prefix,
+                        "expires_at": enrollment_session.expires_at,
+                        "organization_id": enrollment_session.organization_id,
+                    },
+                    "token": enrollment_token.plaintext,
+                    "mfa_enrollment_required": true,
                     "organization_id": org.id,
-                })),
-            )
+                    "organization_slug": org.slug,
+                }))
                 .into_response();
+            }
+            Err(reason) => {
+                let status = if matches!(
+                    reason.as_str(),
+                    "mfa_challenge_required" | "invalid_totp_code"
+                ) {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                return (
+                    status,
+                    Json(json!({
+                        "error": reason,
+                        "mfa_required": matches!(reason.as_str(), "mfa_challenge_required" | "invalid_totp_code"),
+                        "organization_id": org.id,
+                    })),
+                )
+                    .into_response();
+            }
         }
         organization_id = Some(org.id);
     }
 
     let now = Utc::now();
     let token = generate_token("ses");
-    let session = SessionRecord::new(
+    let mut session = SessionRecord::new(
         user.id,
         organization_id,
         token.hash.clone(),
@@ -291,6 +489,7 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
         Duration::hours(DEFAULT_SESSION_TTL_HOURS),
         now,
     );
+    session.mfa_policy_updated_at = mfa_policy_version;
     if let Err(e) = state.saas.create_session(&session).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
@@ -438,6 +637,17 @@ pub async fn update_profile(
             )
                 .into_response();
         };
+        if current.len() > MAX_PASSWORD_LEN * 4
+            || current.chars().count() > MAX_PASSWORD_LEN
+            || new_password.len() > MAX_PASSWORD_LEN * 4
+            || new_password.chars().count() > MAX_PASSWORD_LEN
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("password must be at most {MAX_PASSWORD_LEN} characters"),
+            )
+                .into_response();
+        }
         if !verify_password(current, &user.password_hash) {
             return (StatusCode::FORBIDDEN, "current password is incorrect").into_response();
         }
@@ -452,28 +662,34 @@ pub async fn update_profile(
         password_changed = true;
     }
     if let Some(name) = body.display_name.as_deref() {
+        if name.chars().count() > MAX_DISPLAY_NAME_LEN {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("display name must be at most {MAX_DISPLAY_NAME_LEN} characters"),
+            )
+                .into_response();
+        }
         user.display_name = name.trim().to_string();
     }
     user.updated_at = now;
-    if let Err(e) = state.saas.update_user(&user).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
 
-    // A password change invalidates every existing session.
+    // Persist the password and revoke all existing sessions in one durable
+    // transaction. A failed revocation must never leave the new password
+    // committed while old credentials remain usable.
     let revoked = if password_changed {
-        let n = match state
+        let count = match state
             .saas
-            .revoke_user_sessions(user.id, "password changed", now)
+            .update_user_and_revoke_sessions(&user, "password changed", now)
             .await
         {
             Ok(value) => value,
             Err(error) => {
-                tracing::error!(error = %error, user = %user.id, "user sessions could not be revoked after password change");
+                tracing::error!(error = %error, user = %user.id, "password change and session revocation could not be committed");
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(json!({
-                        "error": "session_storage_unavailable",
-                        "reason": "authoritative session records could not be updated",
+                        "error": "password_change_unavailable",
+                        "reason": "the password change and session revocation could not be committed",
                     })),
                 )
                     .into_response();
@@ -487,8 +703,16 @@ pub async fn update_profile(
                 Some(&user.id.to_string()),
             )
             .await;
-        n
+        count
     } else {
+        if let Err(error) = state.saas.update_user(&user).await {
+            tracing::error!(error = %error, user = %user.id, "profile update could not be committed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "profile_storage_unavailable" })),
+            )
+                .into_response();
+        }
         0
     };
 

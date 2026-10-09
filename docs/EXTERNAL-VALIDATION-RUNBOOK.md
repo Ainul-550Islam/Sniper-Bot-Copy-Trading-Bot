@@ -190,7 +190,7 @@ harness refuses to substitute `localhost` for a real `DEPLOYMENT_BASE_URL` (guar
 |---|---|
 | **Compiled program (.so) requirement** | The E2E tests need the **compiled** program: `cargo build-sbf` (inside `programs/staking-suite`) produces `target/deploy/*.so`; deploying it (`solana program deploy`, or `solana-test-validator --bpf-program` for a local validator) is what makes the program id executable. A source tree without the `.so` cannot satisfy the validator step |
 | **Deployment check** | `RPC_URL=https://... STAKING_PROGRAM_ID=... cargo test --test staking_contract -- --nocapture` → `deployment_contract.rs` verifies program exists, executable, binary hash, slot |
-| **Validator E2E** | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` (3 tests, existing `validator_e2e.rs`) → requires validator available. `programs/staking-suite` is its own (excluded) workspace, so the `cd` is required; the placeholder program id `3vEEMM…` must never be read as a deployed program |
+| **Validator E2E** | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` (tests exist; existing `validator_e2e.rs`) → requires validator available. `programs/staking-suite` is its own (excluded) workspace, so the `cd` is required; the placeholder program id `3vEEMM…` must never be read as a deployed program |
 | **Via runner** | `STAKING_E2E=1 bash scripts/run-external-validation.sh staking` |
 | **Expected (no config)** | `EXTERNAL_REQUIRED`/`BLOCKED` (placeholder → BLOCKED) |
 | **Expected (with config, hermetic)** | `NOT_RUN` (not executed without real RPC/validator) |

@@ -190,6 +190,21 @@ impl Sniper {
         let positions = self.state.open_positions_for(BotModule::Sniper).await;
         let live: Vec<String> = positions.iter().map(|p| p.id.clone()).collect();
         self.exits.retain(&live);
+        // Advanced exit policy (GAP-MAP v2 P2): drain dev-sell signals into
+        // the engine, then drop ladder state for positions that closed.
+        // Draining is non-blocking: a lagged/empty channel is normal and
+        // must never stall the sweep.
+        if let Some(rx) = self.dev_sell_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok((mint, observed_at)) => {
+                        self.exit_policy.observe_dev_sell(&mint, observed_at);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        self.exit_policy.retain(&live, Utc::now());
         if positions.is_empty() {
             return Ok(());
         }
@@ -276,6 +291,29 @@ impl Sniper {
                         ),
                     );
                     count_action("stale_exit");
+                }
+            }
+            // 5. Advanced exit policy (GAP-MAP v2 P2). Evaluated ONLY when
+            //    the core price rules did not fire, so an unconfigured
+            //    deployment is byte-identical to classic behaviour.
+            //    Attribution: ExitRule::Manual with reason prefixes
+            //    ladder_tp:/break_even:/dev_sell: (see exit_policy.rs).
+            if !decision.should_exit {
+                let mint = Pubkey::try_from(position.symbol.as_str()).ok();
+                if let Some(advanced) = self.exit_policy.evaluate(
+                    &position.id,
+                    mint.as_ref(),
+                    position.avg_entry,
+                    position.last_mark,
+                    position.trailing_high_water.unwrap_or(position.avg_entry),
+                    now,
+                ) {
+                    count_action(&format!("advanced_{}", advanced.kind_label));
+                    decision = ExitDecision::with_fraction(
+                        ExitRule::Manual,
+                        advanced.fraction,
+                        advanced.full_reason(),
+                    );
                 }
             }
             if !decision.should_exit {
@@ -761,7 +799,17 @@ impl Sniper {
             let store = self.layouts.read().await;
             pump::build_sell_ix(ctx, &store, &opts, amount, min_sol_output)?
         };
-        let req = TxRequest::new(format!("exit-{}", ctx.mint)).with_instruction(sell_ix);
+        let mut req = TxRequest::new(format!("exit-{}", ctx.mint)).with_instruction(sell_ix);
+        // Atomic platform fee on the sale proceeds (GAP-MAP P1). The curve
+        // pays native SOL, so the transfer can ride with the swap itself.
+        if let Some((fee_ix, decision)) = solana_kit::fee_transfer::build_fee_transfer_ix(
+            &self.wallet.pubkey,
+            min_sol_output,
+            &cfg.platform_fee,
+        ) {
+            debug!(fee_lamports = decision.lamports, "platform fee appended to exit");
+            req = req.with_instruction(fee_ix);
+        }
         let result = self
             .run_exit_request(req, cfg, intent_id, &ctx.mint, sell_raw)
             .await?;
@@ -797,6 +845,16 @@ impl Sniper {
         }
         let mut req = req.with_instruction(sell_ix);
         req.unwrap_sol = true;
+        // Atomic platform fee on the sale proceeds (GAP-MAP P1): ordered
+        // after the wSOL sweep so it spends native SOL.
+        if let Some((fee_ix, decision)) = solana_kit::fee_transfer::build_fee_transfer_ix(
+            &self.wallet.pubkey,
+            min_quote_out,
+            &cfg.platform_fee,
+        ) {
+            debug!(fee_lamports = decision.lamports, "platform fee appended to pumpswap exit");
+            req = req.after_unwrap(fee_ix);
+        }
         let result = self
             .run_exit_request(req, cfg, intent_id, &ctx.base_mint, sell_raw)
             .await?;
@@ -840,6 +898,15 @@ impl Sniper {
         }
         let mut req = req.with_instruction(swap_ix);
         req.unwrap_sol = true;
+        // Atomic platform fee on the sale proceeds (GAP-MAP P1).
+        if let Some((fee_ix, decision)) = solana_kit::fee_transfer::build_fee_transfer_ix(
+            &self.wallet.pubkey,
+            min_out,
+            &cfg.platform_fee,
+        ) {
+            debug!(fee_lamports = decision.lamports, "platform fee appended to raydium exit");
+            req = req.after_unwrap(fee_ix);
+        }
         let result = self
             .run_exit_request(req, cfg, intent_id, mint, sell_raw)
             .await?;

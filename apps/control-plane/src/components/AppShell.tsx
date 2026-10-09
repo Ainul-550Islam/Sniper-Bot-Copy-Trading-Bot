@@ -67,6 +67,7 @@ const COMMERCIAL_NAV: NavGroup[] = [
     title: "Commercial & Platform",
     items: [
       { href: "/billing", label: "Billing & Invoices" },
+      { href: "/referrals", label: "Referrals" },
       { href: "/pricing", label: "Plan Catalog" },
       { href: "/custody", label: "Custody" },
       { href: "/integrations", label: "Integrations & Feeds" },

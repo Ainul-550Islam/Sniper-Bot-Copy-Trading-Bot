@@ -34,7 +34,7 @@ use tracing::warn;
 use bot_core::authorization::{
     authorize, AccessRequest, AuthorizationContext, Decision, Principal,
 };
-use bot_core::membership::{Membership, MembershipRole};
+use bot_core::membership::{Membership, MembershipRole, Permission};
 use bot_core::session::{self, hash_token};
 use bot_core::tenant::{Organization, OrganizationId, User};
 
@@ -135,6 +135,32 @@ pub async fn authorize_request(
     headers: &HeaderMap,
     request: AccessRequest<'_>,
 ) -> Result<SaasContext, Decision> {
+    authorize_request_mode(state, headers, request, false).await
+}
+
+/// Authorize the self-service TOTP setup/verification endpoints. The only
+/// additional credential accepted is an invitation session explicitly marked
+/// enrollment-only; ordinary handlers always use `authorize_request` and
+/// reject that credential.
+pub(crate) async fn authorize_mfa_enrollment_request(
+    state: &ApiState,
+    headers: &HeaderMap,
+) -> Result<SaasContext, Decision> {
+    authorize_request_mode(
+        state,
+        headers,
+        AccessRequest::manage(Permission::UsersManage),
+        true,
+    )
+    .await
+}
+
+async fn authorize_request_mode(
+    state: &ApiState,
+    headers: &HeaderMap,
+    request: AccessRequest<'_>,
+    allow_mfa_enrollment_session: bool,
+) -> Result<SaasContext, Decision> {
     let now = Utc::now();
     let Some(presented) = presented_credential(headers) else {
         return Err(Decision::unauthenticated("no credential presented"));
@@ -161,6 +187,9 @@ pub async fn authorize_request(
         if !bot_core::tenant::can_authenticate(org.status) {
             return Err(Decision::tenant("the organization is closed"));
         }
+        // Tenant IP allowlist — refuse origins outside the configured CIDRs
+        // (fail-closed; see `ip_allowlist`).
+        super::ip_allowlist::enforce(state, org.id, headers).await?;
         // A caller-supplied organization may only CONFIRM the key's tenant.
         if let Some(req) = requested_org {
             if req != org.id {
@@ -220,6 +249,9 @@ pub async fn authorize_request(
     if let Some(record) = session_record {
         let validated = session::validate(Some(&record), None, now)
             .map_err(|r| Decision::unauthenticated(r.as_str()))?;
+        if record.mfa_enrollment_only && !allow_mfa_enrollment_session {
+            return Err(Decision::unauthenticated("mfa_enrollment_required"));
+        }
         let user = match state.saas.user(validated.user_id).await {
             Ok(Some(value)) => value,
             Ok(None) => return Err(Decision::unauthenticated("session user no longer exists")),
@@ -233,13 +265,31 @@ pub async fn authorize_request(
             return Err(Decision::unauthenticated("the account is not active"));
         }
 
-        // The explicit header wins; otherwise a path/resource owner supplied
-        // by the handler wins; finally use the session's selected tenant.
-        // This order lets platform staff operate on a path-named tenant while
-        // ordinary users still have to prove membership in that exact tenant.
-        let target = requested_org
-            .or(request.resource_owner)
-            .or(validated.organization_id);
+        // An enrollment-only session is immutably bound to the invitation's
+        // tenant. It cannot use an organization header or resource owner to
+        // select a different tenant, even on the dedicated TOTP endpoints.
+        // Normal sessions keep the standard header/resource/session order.
+        let target = if record.mfa_enrollment_only {
+            let Some(scoped) = validated.organization_id else {
+                return Err(Decision::tenant(
+                    "invitation enrollment session has no organization scope",
+                ));
+            };
+            if requested_org.is_some_and(|requested| requested != scoped)
+                || request
+                    .resource_owner
+                    .is_some_and(|owner| owner != scoped)
+            {
+                return Err(Decision::resource(
+                    "invitation enrollment session is bound to another organization",
+                ));
+            }
+            Some(scoped)
+        } else {
+            requested_org
+                .or(request.resource_owner)
+                .or(validated.organization_id)
+        };
         let Some(target) = target else {
             return Err(Decision::tenant(
                 "no organization context: select an organization first",
@@ -264,14 +314,35 @@ pub async fn authorize_request(
         if !bot_core::tenant::can_authenticate(org.status) {
             return Err(Decision::tenant("the organization is closed"));
         }
-        let principal = Principal::UserSession {
-            session_id: validated.id.to_string(),
-        };
-        let ctx = if user.platform_admin {
-            AuthorizationContext::from_platform_admin(principal, &org, user.id, now)
+        // Tenant IP allowlist — refuse origins outside the configured CIDRs
+        // (fail-closed; see `ip_allowlist`). Applies to enrollment-only
+        // sessions exactly like full sessions.
+        super::ip_allowlist::enforce(state, org.id, headers).await?;
+        // A regular session whose MFA proof predates an enforcement change
+        // may enter only the dedicated TOTP setup/verification handlers. This
+        // supports enrolling existing members without granting any ordinary
+        // tenant permissions before a fresh code is verified.
+        let mut enrollment_only = record.mfa_enrollment_only;
+        if !enrollment_only {
+            match crate::saas::security::session_mfa_is_current(
+                state,
+                org.id,
+                record.mfa_policy_updated_at,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(reason) if allow_mfa_enrollment_session && reason == "mfa_reauthentication_required" => {
+                    enrollment_only = true;
+                }
+                Err(reason) => return Err(Decision::unauthenticated(reason)),
+            }
+        }
+        let membership = if user.platform_admin && !enrollment_only {
+            None
         } else {
-            let membership = match state.saas.membership(target, user.id).await {
-                Ok(Some(value)) => value,
+            match state.saas.membership(target, user.id).await {
+                Ok(Some(value)) => Some(value),
                 Ok(None) => {
                     // No membership: this is a cross-tenant attempt, and the
                     // answer must not reveal whether the organization exists.
@@ -284,20 +355,39 @@ pub async fn authorize_request(
                         "membership records are temporarily unavailable",
                     ))
                 }
-            };
-            build_context(principal, &org, &membership, &user, now)
+            }
         };
-        if let Err(reason) =
-            crate::saas::security::session_mfa_is_current(state, org.id, record.created_at).await
+        if enrollment_only
+            && !user.platform_admin
+            && !membership
+                .as_ref()
+                .is_some_and(|value| value.status.is_active())
         {
-            return Err(Decision::unauthenticated(reason));
+            return Err(Decision::permission(
+                "MFA enrollment requires an active organization membership",
+            ));
         }
-        let entitlements = state.saas.entitlements_of(org.id, now).await.map_err(|_| {
-            Decision::unavailable("tenant entitlements are temporarily unavailable")
-        })?;
-        let decision = authorize(Some(&ctx), &request, Some(&entitlements));
-        if !decision.is_allowed() {
-            return Err(decision);
+        let principal = Principal::UserSession {
+            session_id: validated.id.to_string(),
+        };
+        let ctx = if user.platform_admin {
+            AuthorizationContext::from_platform_admin(principal, &org, user.id, now)
+        } else {
+            let Some(membership) = membership.as_ref() else {
+                return Err(Decision::unavailable(
+                    "membership records are temporarily unavailable",
+                ));
+            };
+            build_context(principal, &org, membership, &user, now)
+        };
+        if !enrollment_only {
+            let entitlements = state.saas.entitlements_of(org.id, now).await.map_err(|_| {
+                Decision::unavailable("tenant entitlements are temporarily unavailable")
+            })?;
+            let decision = authorize(Some(&ctx), &request, Some(&entitlements));
+            if !decision.is_allowed() {
+                return Err(decision);
+            }
         }
         let mut touched = record.clone();
         touched.touch(now);
@@ -336,6 +426,9 @@ pub async fn authorize_request(
                     ));
                 }
             }
+            // Tenant IP allowlist — the deployment organization can carry
+            // the same policy as any tenant; enforce it identically.
+            super::ip_allowlist::enforce(state, org.id, headers).await?;
             let role = SaasStore::legacy_role(principal.role);
             let ctx = AuthorizationContext::from_api_key(
                 Principal::LegacyDeploymentKey {

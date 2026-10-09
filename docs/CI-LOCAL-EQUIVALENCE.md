@@ -27,7 +27,7 @@ No version drift: the local hardening pass ran the exact versions CI pins.
 | rustfmt | `cargo fmt --all --check` | same command (hardening pass + release-check gate) | exit 0 — `evidence/phase2-fmt.log`, release-check log |
 | clippy | `cargo clippy --workspace --all-targets -- -D warnings` | same + the STRICTER `--all-features -D warnings` | exit 0 both — release-check log; prebuild AF clippy log |
 | build | `cargo build --workspace --all-targets` | `cargo check --workspace --all-targets` (exit 0) + all test/bench binaries fully built and executed (stronger than check for test targets); the server bin target was built and RUN in the phase-8 startup evidence | `evidence/phase2-check.log`, `phase8b-*` |
-| test (PG16 + Redis7 services) | `cargo test --workspace -- --test-threads=1` with POSTGRES_URL/REDIS_URL | same command against real PostgreSQL **17.11** + Redis **8.0.2** (newer than CI's service images) | 537/537 exit 0 — `evidence/phase2-test-workspace.log`; also `--all-features` 537/537 (`phase2-test-workspace-allfeat.log`) |
+| test (PG16 + Redis7 services) | `cargo test --workspace -- --test-threads=1` with POSTGRES_URL/REDIS_URL | same command against real PostgreSQL **17.11** + Redis **8.0.2** (newer than CI's service images) | exit 0 (historical result; the cited log does not ship in this tree) — also `--all-features` same result (`phase2-test-workspace-allfeat.log`) |
 | compose config | `docker compose config -q` | **BLOCKED** (no docker CLI/daemon in sandbox) | compose file statically verified in prior passes; buyer action below |
 
 ## Job: program (staking fmt / clippy / test / build-sbf / validator e2e)
@@ -36,10 +36,10 @@ No version drift: the local hardening pass ran the exact versions CI pins.
 |---|---|---|---|
 | rustfmt | `cargo fmt --check` | same | exit 0 — hardening pass log |
 | clippy | `cargo clippy --all-targets -- -D warnings` | same | exit 0 — `evidence/phase2-staking-clippy.log` |
-| unit tests (host) | `cargo test` | same | 71/71 (+3 gated e2e compile) |
+| unit tests (host) | `cargo test` | same | pass (historical result; no run log ships) |
 | install Solana tools | `solana_version: '2.1.21'` | official agave v2.1.21 release tarball (SHA-256 `5da3359e…`) | `solana --version` = 2.1.21 |
 | build-sbf | `cargo build-sbf` | same (platform-tools v1.43) | 187,504-byte .so, SHA-256 `57a890fa…`; byte-identical rebuild |
-| validator e2e | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` | EXACT same command (CI job sets `working-directory: programs/staking-suite`) | **3/3 passed, 160.72 s** — `evidence/phase5-full-batch.log` |
+| validator e2e | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` | EXACT same command (CI job sets `working-directory: programs/staking-suite`) | passed (historical result; the cited log does not ship in this tree) |
 
 ## Job: security (cargo-audit ×2, cargo-deny ×2)
 

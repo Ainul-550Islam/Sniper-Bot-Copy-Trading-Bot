@@ -83,6 +83,9 @@ pub enum RejectReason {
     SymbolGated,
     /// Another replica owns this launch, or our lease was fenced.
     OwnershipLost,
+    /// The sell simulation (or token-authority state) says this token
+    /// cannot be sold back — a honeypot (GAP-MAP P1).
+    HoneypotRisk,
 }
 
 impl RejectReason {
@@ -107,6 +110,7 @@ impl RejectReason {
             RejectReason::ConcentrationLimit => "CONCENTRATION_LIMIT",
             RejectReason::SymbolGated => "SYMBOL_GATED",
             RejectReason::OwnershipLost => "OWNERSHIP_LOST",
+            RejectReason::HoneypotRisk => "HONEYPOT_RISK",
         }
     }
 
@@ -131,6 +135,7 @@ impl RejectReason {
         RejectReason::ConcentrationLimit,
         RejectReason::SymbolGated,
         RejectReason::OwnershipLost,
+        RejectReason::HoneypotRisk,
     ];
 
     /// Map the risk engine's code onto the pipeline vocabulary. The risk
@@ -787,7 +792,7 @@ mod tests {
             let back: RejectReason = serde_json::from_str(&format!("\"{s}\"")).unwrap();
             assert_eq!(back, *r);
         }
-        assert_eq!(RejectReason::ALL.len(), 19);
+        assert_eq!(RejectReason::ALL.len(), 20);
         assert_eq!(RejectReason::SlippageLimit.to_string(), "SLIPPAGE_LIMIT");
         assert_eq!(RejectReason::FeeLimit.to_string(), "FEE_LIMIT");
     }

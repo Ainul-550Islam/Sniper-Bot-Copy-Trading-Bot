@@ -9,14 +9,14 @@ comparisons, no projections.
 |---|---|---|
 | Product name | sniper-suite | root `Cargo.toml`, `release-manifest.json` |
 | Version | 0.1.0 | `VERSION`, `Cargo.toml`, `release-manifest.json` (gated consistent) |
-| License | MIT (copyright holder placeholder pending transfer) | `LICENSE` |
+| License | Proprietary (all rights reserved) | `LICENSE` |
 | Release history | `9c677cd` (release) → `0e139c3` (engineering freeze) | authoritative git history (seller repo) |
 
 ## Language & codebase
 
 | Fact | Value |
 |---|---|
-| Implementation language | Rust (100% of production code; 91 `.rs` files at freeze) |
+| Implementation language | Rust (all production code; historical file counts removed) |
 | Frozen software tree size | 146 files / 2,801,590 bytes (2.80 MB) / 77,980 lines |
 | Production Rust | 76 files / 1,826,288 B / 50,164 lines (incl. inline unit tests) |
 | Test-directory Rust | 15 files / 225,648 B / 6,476 lines |
@@ -54,14 +54,14 @@ comparisons, no projections.
 | Money-path pipeline | risk → ownership claim → idempotency → intent journal → authorization → execution → persistence → reconciliation → audit (maintenance invariant, `docs/HANDOVER.md` §6) |
 | Broadcast policy | simulate-first by default (`SIMULATE_FIRST`, `ABORT_ON_SIMULATION_FAILURE`); optional fan-out race across RPCs (`BROADCAST_FANOUT`) |
 | Venues | Solana (pump.fun bonding curve incl. v2, PumpSwap, Raydium AMM v1/v2, Jupiter routing) + Polymarket CLOB (EIP-712 v2 order signing) |
-| Signing | `TransactionSigner` + named `SignerRegistry`; multi-signer completeness enforced; `local` custody implemented, `vault`/`kms`/`hsm` fail startup |
+| Signing | `TransactionSigner` + named `SignerRegistry`; multi-signer completeness enforced; `local` custody implemented, `vault`/`kms` (and hardware-security variants) fail startup |
 
 ## Persistence
 
 | Fact | Value |
 |---|---|
-| Authoritative store | PostgreSQL ≥ 16 (verified 16.4); sqlx; 21 forward-only migrations 0001–0011 embedded in the binary |
-| Non-authoritative store | Redis 7 (verified 7.2.10): dedup L2, claims coordination, cache — may die without losing money-relevant truth |
+| Authoritative store | PostgreSQL ≥ 16; sqlx; <!-- stat:migrations -->54<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`) embedded in the binary |
+| Non-authoritative store | Redis 7 (checked against 7.2.10): dedup L2, claims coordination, cache — may die without losing money-relevant truth |
 | Local journal | JSONL intent journal with rotation + corrupt-line tolerance |
 | Dedup | 3 levels: memory / Redis / Postgres, deterministic idempotency keys |
 
@@ -79,7 +79,7 @@ comparisons, no projections.
 |---|---|
 | Invariant | one logical execution ⇒ ≤1 active owner ⇒ ≤1 money-moving submission |
 | Mechanisms | claim stores (PG authoritative / Redis / memory), leases + epochs + fencing tokens, handoff grace, cross-replica kill-switch + module-flag sync, position-book sync, tighten-only `GlobalRiskOracle`, append-only `execution_claim_events` lineage |
-| Tested | `distributed_integration` 4/4 + `two_replica_mirror` 1/1 (two real processes) VERIFIED; >2 replicas untested |
+| Tested | `distributed_integration` and `two_replica_mirror` harnesses exist (two real processes); no run logs ship in this repo; >2 replicas untested |
 
 ## Observability
 
@@ -87,7 +87,7 @@ comparisons, no projections.
 |---|---|
 | Logs | tracing; text or JSON; exactly one info line per HTTP request with `request_id` |
 | Probes | `/health` liveness (process-only, always 200 while serving); `/ready` readiness (503 + component report when degraded) |
-| Metrics | Prometheus text 0.0.4 at `/metrics`; stable `bot_*` names; bounded labels only (no symbols/wallets/signatures/secrets); full table in README §Observability, names verified against source |
+| Metrics | Prometheus text 0.0.4 at `/metrics`; stable `bot_*` names; bounded labels only (no symbols/wallets/signatures/secrets); full table in README §Observability, names checked against source |
 
 ## Staking program (on-chain)
 
@@ -99,15 +99,15 @@ comparisons, no projections.
 | Deployment status | NOT deployed; `declare_id!` is a pre-deploy placeholder |
 | Audit status | NO external audit; mainnet deployment documentation-blocked until one passes |
 
-## Test counts (final freeze gate on the frozen tree, 2026-09-18)
+## Test inventory (static)
 
-| Suite | Count |
-|---|---|
-| Workspace total | 521 passed / 0 failed (incl. 38 gated integration executed) |
-| db_integration / redis_integration / distributed_integration / two_replica_mirror | 23 / 10 / 4 / 1 — all passed |
-| Staking host / validator e2e | 48 passed / 2 gated-skipped in freeze sandbox (e2e 2/2 PREVIOUSLY VERIFIED); hardening pass 2026-09-18 on the audit-pass source: 71 host passed / **3 validator e2e EXECUTED + PASSED** (Agave 2.1.21, .so SHA-256 57a890fa…) |
-| Release gate | 20 PASS / 0 FAIL / 0 SKIP |
-| Whole-script test executions | 609 / 0 failures |
+Static test inventory: <!-- stat:test_attrs_plain -->2061<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->888<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+
+Previous freeze/hardening pass-count tables quoted run results without
+shipping run logs and have been removed. Harnesses exist for the workspace
+suite, `db_integration`, `redis_integration`, `distributed_integration`,
+`two_replica_mirror` and the staking host/validator-e2e suites; see
+`docs/TESTING.md` and `evidence/` for how to run them.
 
 ## CI
 

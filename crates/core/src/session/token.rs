@@ -36,6 +36,12 @@ pub const SALT_BYTES: usize = 16;
 
 /// PBKDF2 iteration count. OWASP's 2023 floor for PBKDF2-HMAC-SHA256.
 pub const PBKDF2_ITERATIONS: u32 = 600_000;
+/// Upper bound when verifying stored hashes, protecting login from a corrupted
+/// or maliciously imported record that requests billions of PBKDF2 rounds.
+pub const MAX_PBKDF2_ITERATIONS: u32 = 1_200_000;
+/// Encoded PBKDF2 strings are normally under 100 bytes; bound parser work
+/// before base64 decoding an untrusted database value.
+const MAX_ENCODED_PASSWORD_HASH_LEN: usize = 256;
 
 /// How many characters of a token form its public, non-secret prefix
 /// (`ses_ab12cd34`) — enough to correlate logs, far too little to guess.
@@ -43,7 +49,7 @@ pub const PUBLIC_PREFIX_CHARS: usize = 8;
 
 /// A freshly generated credential: the plaintext exists only in this value
 /// and is returned to the caller exactly once.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GeneratedToken {
     /// The full secret, e.g. `sk_9f3a…`. Show once, never store.
     pub plaintext: String,
@@ -51,6 +57,17 @@ pub struct GeneratedToken {
     pub hash: String,
     /// Public identifier (`sk_9f3a1b2c`), safe in listings and logs.
     pub prefix: String,
+}
+
+impl std::fmt::Debug for GeneratedToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GeneratedToken")
+            .field("plaintext", &"[REDACTED]")
+            .field("hash", &"[REDACTED]")
+            .field("prefix", &self.prefix)
+            .finish()
+    }
 }
 
 impl GeneratedToken {
@@ -117,10 +134,10 @@ pub fn hash_password(password: &str) -> String {
 
 /// Hash with an explicit salt and iteration count (tests, re-hashing).
 pub fn hash_password_with(password: &str, salt: &[u8], iterations: u32) -> String {
-    let dk = pbkdf2_sha256(password.as_bytes(), salt, iterations.max(1), 32);
+    let iterations = iterations.clamp(1, MAX_PBKDF2_ITERATIONS);
+    let dk = pbkdf2_sha256(password.as_bytes(), salt, iterations, 32);
     format!(
-        "pbkdf2-sha256${}${}${}",
-        iterations.max(1),
+        "pbkdf2-sha256${iterations}${}${}",
         URL_SAFE_NO_PAD.encode(salt),
         URL_SAFE_NO_PAD.encode(dk)
     )
@@ -150,17 +167,20 @@ struct ParsedPasswordHash {
 
 impl ParsedPasswordHash {
     fn parse(encoded: &str) -> Option<Self> {
+        if encoded.len() > MAX_ENCODED_PASSWORD_HASH_LEN {
+            return None;
+        }
         let mut parts = encoded.trim().split('$');
         if parts.next()? != "pbkdf2-sha256" {
             return None;
         }
         let iterations: u32 = parts.next()?.parse().ok()?;
-        if iterations == 0 {
+        if iterations == 0 || iterations > MAX_PBKDF2_ITERATIONS {
             return None;
         }
         let salt = URL_SAFE_NO_PAD.decode(parts.next()?).ok()?;
         let hash = URL_SAFE_NO_PAD.decode(parts.next()?).ok()?;
-        if parts.next().is_some() || salt.is_empty() || hash.is_empty() {
+        if parts.next().is_some() || salt.len() != SALT_BYTES || hash.len() != 32 {
             return None;
         }
         Some(ParsedPasswordHash {
@@ -238,6 +258,15 @@ mod tests {
     }
 
     #[test]
+    fn generated_token_debug_output_never_contains_credentials() {
+        let token = generate_token("ses");
+        let debug = format!("{token:?}");
+        assert!(!debug.contains(&token.plaintext));
+        assert!(!debug.contains(&token.hash));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
     fn token_verification_is_exact() {
         let t = generate_token("sk");
         assert!(verify_token(&t.plaintext, &t.hash));
@@ -280,6 +309,14 @@ mod tests {
         ] {
             assert!(!verify_password("anything", bad), "{bad:?} must not verify");
         }
+        let salt = URL_SAFE_NO_PAD.encode([7u8; SALT_BYTES]);
+        let digest = URL_SAFE_NO_PAD.encode([0u8; 32]);
+        let excessive_cost = format!(
+            "pbkdf2-sha256${}${salt}${digest}",
+            MAX_PBKDF2_ITERATIONS + 1
+        );
+        assert!(!verify_password("anything", &excessive_cost));
+        assert!(!verify_password("anything", &"x".repeat(MAX_ENCODED_PASSWORD_HASH_LEN + 1)));
     }
 
     #[test]

@@ -1,5 +1,14 @@
 //! Wallet handling: keypair loading from every common format, balances, ATA
 //! management and WSOL wrapping.
+//!
+//! # Secret hygiene (GAP-MAP P1)
+//!
+//! Every intermediate buffer on the key-loading path — file text, env-var
+//! strings, decoded base58/JSON bytes, seed expansions — is wrapped in
+//! `zeroize::Zeroizing` so it is overwritten on drop instead of lingering in
+//! freed heap memory. The constructed [`Keypair`] itself necessarily keeps
+//! the key in process memory; that is the documented trust boundary of
+//! operator mode (see [`crate::signer`]).
 
 use std::path::Path;
 use std::str::FromStr;
@@ -79,38 +88,50 @@ impl Wallet {
             return Err(BotError::config("keypair spec is empty"));
         }
 
+        // Every intermediate secret buffer is wrapped in `Zeroizing`
+        // (GAP-MAP P1): as soon as the keypair is constructed, the decoded
+        // bytes and file/env text are overwritten on drop instead of
+        // lingering in freed heap memory. The Keypair itself necessarily
+        // keeps the key in process memory — that is documented as the
+        // trust boundary of operator mode.
+
         // 1. Inline JSON array.
         if spec.starts_with('[') {
-            let bytes = parse_json_array(spec).map_err(|e| {
+            let bytes = zeroize::Zeroizing::new(parse_json_array(spec).map_err(|e| {
                 BotError::config(format!("keypair is not a valid JSON byte array: {e}"))
-            })?;
+            })?);
             return Self::from_bytes(&bytes, "inline json array");
         }
 
         // 2. A filesystem path.
         let path = Path::new(spec);
         if path.exists() {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| BotError::config(format!("cannot read keypair file {spec}: {e}")))?;
+            let text = zeroize::Zeroizing::new(
+                std::fs::read_to_string(path).map_err(|e| {
+                    BotError::config(format!("cannot read keypair file: {e}"))
+                })?,
+            );
             let text = text.trim();
             let source = format!("file {}", path.display());
             if text.starts_with('[') {
-                let bytes = parse_json_array(text).map_err(|e| {
-                    BotError::config(format!("keypair file is not a valid JSON byte array: {e}"))
-                })?;
+                let bytes = zeroize::Zeroizing::new(parse_json_array(text).map_err(|e| {
+                    BotError::config(format!(
+                        "keypair file is not a valid JSON byte array: {e}"
+                    ))
+                })?);
                 return Self::from_bytes(&bytes, &source);
             }
             // Otherwise treat the file contents as a base58 secret key.
-            let bytes = bs58::decode(text)
-                .into_vec()
-                .map_err(|e| BotError::config(format!("keypair file is not valid base58: {e}")))?;
+            let bytes = zeroize::Zeroizing::new(bs58::decode(text).into_vec().map_err(|e| {
+                BotError::config(format!("keypair file is not valid base58: {e}"))
+            })?);
             return Self::from_bytes(&bytes, &source);
         }
 
         // 3. Inline base58.
-        let bytes = bs58::decode(spec)
-            .into_vec()
-            .map_err(|e| BotError::config(format!("keypair is not valid base58: {e}")))?;
+        let bytes = zeroize::Zeroizing::new(bs58::decode(spec).into_vec().map_err(|e| {
+            BotError::config(format!("keypair is not valid base58: {e}"))
+        })?);
         Self::from_bytes(&bytes, "inline base58")
     }
 
@@ -121,24 +142,33 @@ impl Wallet {
             64 => Keypair::try_from(bytes)
                 .map_err(|e| BotError::config(format!("invalid 64-byte keypair: {e}")))?,
             32 => {
-                // A raw seed: expand it deterministically.
+                // A raw seed: expand it deterministically. Every stack copy
+                // of the seed is zeroized as soon as it is consumed.
+                use zeroize::Zeroize;
                 let mut full = [0u8; 64];
                 full[..32].copy_from_slice(bytes);
                 let kp = Keypair::try_from(full.as_slice()).ok();
                 match kp {
-                    Some(k) => k,
+                    Some(k) => {
+                        full.zeroize();
+                        k
+                    }
                     None => {
+                        full.zeroize();
                         // Fall back to deriving the public half from the seed.
                         use ed25519_dalek::SigningKey;
                         let mut seed = [0u8; 32];
                         seed.copy_from_slice(bytes);
                         let signing = SigningKey::from_bytes(&seed);
+                        seed.zeroize();
                         let mut full = [0u8; 64];
-                        full[..32].copy_from_slice(&seed);
+                        full[..32].copy_from_slice(bytes);
                         full[32..].copy_from_slice(signing.verifying_key().as_bytes());
-                        Keypair::try_from(full.as_slice()).map_err(|e| {
+                        let result = Keypair::try_from(full.as_slice()).map_err(|e| {
                             BotError::config(format!("invalid 32-byte keypair seed: {e}"))
-                        })?
+                        });
+                        full.zeroize();
+                        result?
                     }
                 }
             }
@@ -196,15 +226,30 @@ impl Wallet {
         rpc: &Rpc,
         mint: &Pubkey,
     ) -> BotResult<(Pubkey, Option<Instruction>)> {
-        let token_program = rpc.token_program_of(mint).await.unwrap_or(*TOKEN_PROGRAM);
+        let token_program = rpc.token_program_of(mint).await?;
         let ata = spl_associated_token_account::get_associated_token_address_with_program_id(
             &self.pubkey,
             mint,
             &token_program,
         );
-        if rpc.account_exists(&ata).await.unwrap_or(false) {
+        if let Some(account) = rpc.get_account_cached(&ata).await? {
+            if account.owner != token_program {
+                return Err(BotError::solana(format!(
+                    "associated token address {ata} is owned by {}, expected token program {token_program}",
+                    account.owner
+                )));
+            }
+            let info = TokenAccountInfo::parse(&account.data)?;
+            if info.mint != *mint || info.authority != self.pubkey || info.state != 1 {
+                return Err(BotError::solana(format!(
+                    "associated token address {ata} does not contain an initialized token account for mint {mint} and owner {}",
+                    self.pubkey
+                )));
+            }
             return Ok((ata, None));
         }
+        // The subsequent idempotent ATA instruction makes the absent→created
+        // race safe if another actor creates it after this read.
         debug!(%mint, %ata, "creating associated token account");
         let ix = create_associated_token_account_idempotent(
             &self.pubkey,
@@ -378,6 +423,51 @@ impl MintInfo {
     /// Nobody can freeze holder accounts (a classic honeypot lever).
     pub fn freeze_authority_revoked(&self) -> bool {
         self.freeze_authority.is_none()
+    }
+}
+
+/// The base fields shared by legacy SPL Token and Token-2022 accounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenAccountInfo {
+    pub mint: Pubkey,
+    pub authority: Pubkey,
+    pub amount: u64,
+    /// SPL account state: 0 = uninitialized, 1 = initialized, 2 = frozen.
+    pub state: u8,
+}
+
+impl TokenAccountInfo {
+    /// Parse the common 165-byte token-account base layout. Token-2022
+    /// extensions may follow it and are intentionally ignored here.
+    pub fn parse(data: &[u8]) -> BotResult<Self> {
+        const BASE_LEN: usize = 165;
+        if data.len() < BASE_LEN {
+            return Err(BotError::encoding(format!(
+                "token account is {} bytes; need at least {BASE_LEN}",
+                data.len()
+            )));
+        }
+        let mut mint = [0u8; 32];
+        mint.copy_from_slice(&data[0..32]);
+        let mut authority = [0u8; 32];
+        authority.copy_from_slice(&data[32..64]);
+        let amount = u64::from_le_bytes(
+            data[64..72]
+                .try_into()
+                .map_err(|_| BotError::encoding("token account amount field is malformed"))?,
+        );
+        let state = data[108];
+        if state > 2 {
+            return Err(BotError::encoding(format!(
+                "token account state {state} is invalid"
+            )));
+        }
+        Ok(Self {
+            mint: Pubkey::new_from_array(mint),
+            authority: Pubkey::new_from_array(authority),
+            amount,
+            state,
+        })
     }
 }
 
@@ -663,6 +753,28 @@ mod tests {
         assert_eq!(info.mint_authority, Some(minter));
         assert!(info.freeze_authority_revoked());
         assert_eq!(info.decimals, 9);
+    }
+
+    #[test]
+    fn token_account_info_parses_base_layout_and_extensions() {
+        let mint = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let mut data = vec![0u8; 165];
+        data[0..32].copy_from_slice(&mint.to_bytes());
+        data[32..64].copy_from_slice(&authority.to_bytes());
+        data[64..72].copy_from_slice(&1234u64.to_le_bytes());
+        data[108] = 1;
+        let info = TokenAccountInfo::parse(&data).expect("valid token account");
+        assert_eq!(info.mint, mint);
+        assert_eq!(info.authority, authority);
+        assert_eq!(info.amount, 1234);
+        assert_eq!(info.state, 1);
+
+        data.extend_from_slice(&[0u8; 32]);
+        assert_eq!(TokenAccountInfo::parse(&data).unwrap().amount, 1234);
+        assert!(TokenAccountInfo::parse(&data[..164]).is_err());
+        data[108] = 3;
+        assert!(TokenAccountInfo::parse(&data).is_err());
     }
 
     #[test]

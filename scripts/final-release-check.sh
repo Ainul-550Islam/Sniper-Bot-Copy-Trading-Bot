@@ -97,6 +97,23 @@ if bash "$ROOT/scripts/verify-migration-graph.sh"; then
 else
   fail "migration graph"
 fi
+if bash "$ROOT/tests/release/stats_current.sh"; then
+  pass "stats current (docs/STATS.md + markers)"
+else
+  fail "stats current (run scripts/generate-stats.sh)"
+fi
+# P0-C TASK 6: every tracked shell script must keep its exec bit.
+if bash "$ROOT/scripts/verify-script-modes.sh"; then
+  pass "script exec bits (tracked *.sh)"
+else
+  fail "script exec bits (see offenders above)"
+fi
+# P0-D TASK 1: high-confidence secret scan over the working tree.
+if bash "$ROOT/scripts/scan-secrets.sh"; then
+  pass "secret scan (working tree)"
+else
+  fail "secret scan (findings listed above; rotate anything real)"
+fi
 
 # 7. SBOM + license exist and have sha
 echo "[7/8] SBOM/license artifacts"

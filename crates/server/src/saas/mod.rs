@@ -41,23 +41,30 @@ pub mod custody_health;
 pub mod custody_rotation;
 pub mod custody_rotation_store;
 pub mod data_lifecycle;
+pub mod email_verification;
 pub mod export;
 pub mod feature_catalog;
 pub mod invoices;
+pub mod ip_allowlist;
 pub mod middleware;
 pub mod notifications;
 pub mod openapi;
 pub mod organizations;
+pub mod password_reset;
 pub mod payment_webhooks;
 pub mod portfolio;
 pub mod postgres;
 pub mod pricing;
 pub mod provider;
+pub mod rate_limit;
 pub mod readiness;
+pub mod referrals;
 pub mod reports;
 pub mod risk_dashboard;
 pub mod security;
 pub mod security_summary;
+pub mod sso;
+pub mod sso_state;
 pub mod status;
 pub mod store;
 pub mod support;
@@ -66,6 +73,8 @@ pub mod tenant_lifecycle;
 pub mod usage_limits;
 pub mod users;
 pub mod wallet_access;
+pub mod wallet_pools;
+pub mod webhook_delivery;
 pub mod webhooks;
 pub mod websocket_auth;
 pub mod websocket_replay_store;
@@ -94,6 +103,8 @@ pub fn routes() -> Router<ApiState> {
         .route("/api/saas/users", post(users::register))
         .route("/api/saas/sessions", post(users::login))
         .merge(auth_flows::routes())
+        .merge(password_reset::routes())
+        .merge(email_verification::routes())
         // --- authenticated user -----------------------------------------
         .route("/api/saas/users/me", get(users::current_user))
         .route("/api/saas/users/me", patch(users::update_profile))
@@ -167,6 +178,10 @@ pub fn routes() -> Router<ApiState> {
         .merge(pricing::routes())
         .merge(notifications::routes())
         .merge(activity::routes())
+        // --- GAP-MAP v2 P2: referrals, wallet pools, SSO (OIDC + PKCE) ---
+        .merge(referrals::routes())
+        .merge(wallet_pools::routes())
+        .merge(sso::routes())
 }
 
 /// Resolve the user behind a presented session token, without requiring a
@@ -206,6 +221,44 @@ pub async fn session_user(
     let Ok(validated) = bot_core::session::validate(Some(&record), None, now) else {
         return Ok(None);
     };
+    // This helper is intentionally outside tenant-scoped middleware because
+    // organization creation happens before a tenant exists. It must still
+    // reject the restricted onboarding credential and stale MFA proofs; an
+    // enrollment token is not a general account session.
+    if record.mfa_enrollment_only {
+        return Ok(None);
+    }
+    if let Some(organization_id) = validated.organization_id {
+        match security::session_mfa_is_current(state, organization_id, record.mfa_policy_updated_at)
+            .await
+        {
+            Ok(()) => {}
+            Err(reason) if reason == "mfa_reauthentication_required" => return Ok(None),
+            Err(reason) => {
+                return Err(bot_core::error::BotError::db(format!(
+                    "MFA policy could not be checked for the unscoped session endpoint: {reason}"
+                )))
+            }
+        }
+    } else if let Some(db) = state.db.as_deref() {
+        // A legacy unscoped session cannot prove which organization's MFA
+        // policy was satisfied. Refuse it when the user belongs to any
+        // actively protected tenant and require tenant-scoped login.
+        let protected = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM saas_runtime_records m JOIN tenant_security_policies p ON p.organization_id = m.organization_id WHERE m.kind = 'membership' AND m.user_id = $1 AND m.record->>'status' = 'active' AND p.mfa_enforced = true)",
+        )
+        .bind(validated.user_id.as_uuid())
+        .fetch_one(db.pool())
+        .await
+        .map_err(|error| {
+            bot_core::error::BotError::db(format!(
+                "check MFA policies for the unscoped session endpoint: {error}"
+            ))
+        })?;
+        if protected {
+            return Ok(None);
+        }
+    }
     let Some(user) = state.saas.user(validated.user_id).await? else {
         return Ok(None);
     };

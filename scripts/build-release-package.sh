@@ -1,170 +1,230 @@
 #!/usr/bin/env bash
+# build-release-package.sh — build the buyer delivery package (GAP-MAP v2 P0).
+#
+# WHY THIS EXISTS IN THIS FORM
+#   The previous package was built by copying the WORKING DIRECTORY with an
+#   exclude-list. Exclude-lists fail open: a 21 MB rustup toolchain
+#   (.cargo/bin/rustup), sandbox configs (.config/) and an installer
+#   (rustup-init.sh) shipped to buyers because nobody had listed them.
+#   This script builds from the GIT-TRACKED allow-list instead, so anything
+#   ignored or uncommitted can NEVER ship, then runs hard content guards:
+#
+#     GUARD 1  no ELF / Mach-O / PE binaries of any size
+#     GUARD 2  no single file larger than 5 MB
+#     GUARD 3  no secrets-shaped files (.env, *.pem, *.key, id_rsa*, wallet
+#              keypairs, credentials files)
+#     GUARD 4  no docs/archive content (internal history is not for buyers)
+#     GUARD 5  LICENSE must not be the MIT text and must contain no
+#              unfilled "[SELLER LEGAL ENTITY NAME]" placeholder
+#
+#   Any guard failure aborts the build with a non-zero exit and NO package.
+#
+# USAGE
+#   scripts/build-release-package.sh [OUTPUT_DIR]
+#   default OUTPUT_DIR = <repo>/buyer-release
+#
 set -euo pipefail
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/buyer-release}"
 VERSION="$(cat "$ROOT/VERSION" 2>/dev/null | tr -d ' \n' || echo "0.1.0")"
+MAX_FILE_BYTES=$((5 * 1024 * 1024))
+
 echo "[build-release-package] sniper-suite $VERSION -> $OUT"
+
+cd "$ROOT"
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "ERROR: must run inside a git checkout (the package is built from the tracked file list)." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1 — the allow-list: tracked files plus untracked-but-not-ignored
+# files (so a freshly added, not-yet-committed source file cannot silently
+# drop out), minus paths that must never ship.
+# ---------------------------------------------------------------------------
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+
+LIST="$STAGE/allowlist.txt"
+{ git ls-files --cached; git ls-files --others --exclude-standard; } \
+    | sort -u \
+    | grep -v -E '^(docs/archive/|buyer-release/|\.git/)' \
+    | grep -v -E '\.(dump|dump\.age)$' \
+    | grep -v -E '^(\.config/|\.cargo/bin/|data/)' \
+    | grep -v -E '^rustup-init\.sh$' \
+    > "$LIST"
+
+if [ ! -s "$LIST" ]; then
+    echo "ERROR: allow-list is empty — refusing to build." >&2
+    exit 1
+fi
+echo "[build-release-package] allow-list: $(wc -l < "$LIST") files"
+
+# ---------------------------------------------------------------------------
+# Step 2 — content guards run BEFORE anything is copied to the output.
+# ---------------------------------------------------------------------------
+fail=0
+
+# GUARD 3: secrets-shaped paths.
+#   - .env and .env.<suffix> are rejected UNLESS they are templates/examples
+#     (.env.template / .env.example / .env.sample) which contain no secrets.
+#   - "credentials" is rejected only for DATA files (.json/.yml/.yaml/.toml/.txt),
+#     never for source code (crates/core/src/custody/credentials.rs is code).
+SECRETS_RE='(^|/)(\.env|\.env\.[A-Za-z0-9._-]+|credentials\.(json|ya?ml|toml|txt)|\.netrc|id_rsa|id_ed25519|.*\.pem|.*\.key|.*keypair.*\.json|wallet\.json)'
+if grep -E "$SECRETS_RE" "$LIST" | grep -v -E '\.env\.(template|example|sample)$' | grep -q .; then
+    echo "ERROR: secrets-shaped files in the allow-list:" >&2
+    grep -E "$SECRETS_RE" "$LIST" | grep -v -E '\.env\.(template|example|sample)$' >&2
+    fail=1
+fi
+
+# Guard checks need the files on disk; validate each listed file.
+while IFS= read -r f; do
+    [ -f "$ROOT/$f" ] || continue   # deletions staged but not yet committed
+
+    # GUARD 2: size.
+    size=$(wc -c < "$ROOT/$f")
+    if [ "$size" -gt "$MAX_FILE_BYTES" ]; then
+        echo "ERROR: file larger than 5 MB: $f ($size bytes)" >&2
+        fail=1
+        continue
+    fi
+
+    # GUARD 1: ELF / Mach-O / PE binaries. Text-ish files are skipped fast.
+    case "$f" in
+        *.png|*.jpg|*.jpeg|*.gif|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.pdf|*.zip|*.gz|*.tar|*.xz|*.mp4|*.webp|*.avif)
+            # Media/fonts/PDF are acceptable; binary-scan them anyway below.
+            ;;
+    esac
+    magic=$(head -c 4 "$ROOT/$f" | od -A n -t x1 | tr -d ' \n' || true)
+    case "$magic" in
+        7f454c46*)   # \x7fELF
+            echo "ERROR: ELF binary in the allow-list: $f" >&2; fail=1 ;;
+        feedface*|cefaedfe*|cffaedfe*|cafebabe*)
+            echo "ERROR: Mach-O/Java-class binary in the allow-list: $f" >&2; fail=1 ;;
+        4d5a*)       # MZ
+            echo "ERROR: PE/DOS executable in the allow-list: $f" >&2; fail=1 ;;
+    esac
+done < "$LIST"
+
+# GUARD 4: docs/archive is excluded by construction; verify.
+if grep -q '^docs/archive/' "$LIST"; then
+    echo "ERROR: docs/archive content reached the allow-list" >&2
+    fail=1
+fi
+
+# GUARD 5: LICENSE sanity — the buyer package must carry the proprietary
+# licence, not the old MIT text, and with no unfilled entity placeholder.
+if [ -f "$ROOT/LICENSE" ]; then
+    if head -1 "$ROOT/LICENSE" | grep -qi '^MIT License'; then
+        echo "ERROR: LICENSE is still the MIT text — replace it before packaging." >&2
+        fail=1
+    fi
+    if grep -q '\[SELLER LEGAL ENTITY NAME\]' "$ROOT/LICENSE"; then
+        echo "ERROR: LICENSE still contains the '[SELLER LEGAL ENTITY NAME]' placeholder." >&2
+        fail=1
+    fi
+else
+    echo "ERROR: LICENSE missing — the package cannot ship without it." >&2
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "[build-release-package] ABORTED: fix the guard failures above. Nothing was written to $OUT." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3 — copy the allow-listed files into a clean staging tree, then zip.
+# ---------------------------------------------------------------------------
 rm -rf "$OUT"
-mkdir -p "$OUT"/{source,docs,evidence,sbom,licenses,checksums,manifests}
+mkdir -p "$OUT"
 
-# Copy source excluding target/node_modules/.git/.env/secrets/private keys/caches/build outputs
-# Use rsync if available; fallback to tar pipeline. Both must exclude identical patterns.
-if command -v rsync >/dev/null 2>&1; then
-  rsync -a --exclude='target/' --exclude='**/target/' --exclude='node_modules/' --exclude='**/node_modules/' --exclude='.git/' --exclude='.env' --exclude='secrets/' --exclude='*.pem' --exclude='*.key' --exclude='*.tsbuildinfo' --exclude='__pycache__/' --exclude='.turbo/' --exclude='.next/' --exclude='**/.next/' --exclude='out/' --exclude='**/out/' --exclude='dist/' --exclude='build/' --exclude='.vercel/' --exclude='buyer-release/' \
-    "$ROOT"/ "$OUT/source/"
-else
-  mkdir -p "$OUT/source"
-  # Fallback: use tar pipeline with same excludes
-  tar -C "$ROOT" --exclude='target' --exclude='node_modules' --exclude='.git' --exclude='.env' --exclude='secrets' --exclude='*.tsbuildinfo' --exclude='buyer-release' --exclude='.next' --exclude='out' --exclude='dist' --exclude='build' --exclude='.turbo' -cf - . | tar -C "$OUT/source" -xf -
-fi
-# Prune any accidentally copied excludes (defense in depth)
-rm -rf "$OUT/source/target" "$OUT/source/node_modules" "$OUT/source/.git" "$OUT/source/buyer-release" 2>/dev/null || true
-rm -rf "$OUT/source/apps/control-plane/.next" "$OUT/source/.next" "$OUT/source/out" "$OUT/source/dist" "$OUT/source/build" "$OUT/source/.turbo" "$OUT/source/.vercel" 2>/dev/null || true
-rm -rf "$OUT/source/programs/staking-suite/target" 2>/dev/null || true
-find "$OUT/source" -name "*.tsbuildinfo" -delete 2>/dev/null || true
-rm -rf "$OUT/source/.cargo/bin" 2>/dev/null || true
-find "$OUT/source" -name ".env" -delete 2>/dev/null || true
-find "$OUT/source" -name "*.pem" -o -name "*.key" | xargs rm -f 2>/dev/null || true
-chmod +x "$OUT/source/scripts/"*.sh "$OUT/source/tests/release/"*.sh "$OUT/source/tests/business/"*.sh "$OUT/source/tests/forensics/"*.sh 2>/dev/null || true
+while IFS= read -r f; do
+    [ -f "$ROOT/$f" ] || continue
+    mkdir -p "$OUT/$(dirname "$f")"
+    cp -p "$ROOT/$f" "$OUT/$f"
+done < "$LIST"
 
-# Copy the CONTENTS, never the directory itself: `cp -r "$ROOT/docs" "$OUT/docs"` nests the
-# tree one level deeper (buyer-release/docs/docs/...) when $OUT/docs already exists, which
-# hides every documented buyer path (`docs/BUYER-TRUTH-REGISTER.md`, `evidence/external/*`).
-cp -r "$ROOT/docs/." "$OUT/docs/" 2>/dev/null || true
-cp "$ROOT/VERSION" "$OUT/VERSION"
-cp "$ROOT/LICENSE" "$OUT/LICENSE" 2>/dev/null || cp "$ROOT/LICENSE.md" "$OUT/LICENSE" 2>/dev/null || echo "SEE LICENSE" > "$OUT/LICENSE"
-cp "$ROOT/CHANGELOG.md" "$OUT/CHANGELOG.md" 2>/dev/null || echo "# Changelog" > "$OUT/CHANGELOG.md"
-cp "$ROOT/release-manifest.json" "$OUT/manifests/release-manifest.json" 2>/dev/null || echo '{}' > "$OUT/manifests/release-manifest.json"
-# release.lock.json is optional: copy it only when the source tree really contains one.
-# No `{}` placeholder is shipped — an empty lock file would be a fabricated artifact.
-if [ -f "$ROOT/release.lock.json" ]; then
-  cp "$ROOT/release.lock.json" "$OUT/manifests/release.lock.json"
-else
-  echo "[build-release-package] NOTE: release.lock.json absent in source tree — omitted (no placeholder)"
-fi
-# Evidence + sbom + licenses if generated
-# Same rule as docs/: copy the contents so `evidence/external/*.json` lands where the runbook
-# and the evidence records say it does.
-cp -r "$ROOT/evidence/." "$OUT/evidence/" 2>/dev/null || mkdir -p "$OUT/evidence"
-cp "$ROOT/sbom.json" "$OUT/sbom/sbom.json" 2>/dev/null || echo '{"bomFormat":"CycloneDX"}' > "$OUT/sbom/sbom.json"
-cp "$ROOT/sbom.cyclonedx.json" "$OUT/sbom/sbom.cyclonedx.json" 2>/dev/null || true
-# Supply-chain artifacts live under licenses/ + sbom/ (they are excluded from source/ to avoid
-# duplication). The docs promise BOTH formats, so both are copied here and verified below.
-cp "$ROOT/licenses.json" "$OUT/licenses/licenses.json" 2>/dev/null || echo '[]' > "$OUT/licenses/licenses.json"
-cp "$ROOT/licenses.csv" "$OUT/licenses/licenses.csv" 2>/dev/null || true
+# ---------------------------------------------------------------------------
+# Step 4 — POST-BUILD gate over the WHOLE package output ($OUT), including
+# source/ and docs/ as copied. The pre-copy guards above check the
+# allow-list; this gate proves what actually landed on disk. It is a
+# separate defence: if the copy logic ever regresses, the package still
+# cannot ship. Exits non-zero with a clear message on ANY finding.
+# ---------------------------------------------------------------------------
+post_fail=0
 
-# Checksums — SHA256+size+timestamp per artifact independently
-CHECKSUM_FILE="$OUT/checksums/SHA256SUMS"
-: > "$CHECKSUM_FILE"
-echo "# SHA256 checksums for buyer-release artifacts — computed independently per file" >> "$CHECKSUM_FILE"
-echo "# generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$CHECKSUM_FILE"
-echo "# format: '<sha256>  <relpath>' — verify with: cd <PKG> && sha256sum -c checksums/SHA256SUMS" >> "$CHECKSUM_FILE"
-echo "# size/timestamp metadata is on the preceding '#' comment line (coreutils ignores comments)." >> "$CHECKSUM_FILE"
-# Enumerate key artifacts
-for f in "$OUT/VERSION" "$OUT/LICENSE" "$OUT/CHANGELOG.md" "$OUT/manifests/release-manifest.json" "$OUT/sbom/sbom.json" "$OUT/sbom/sbom.cyclonedx.json" "$OUT/licenses/licenses.json" "$OUT/licenses/licenses.csv"; do
-  if [ -f "$f" ]; then
-    sha=$(sha256sum "$f" | awk '{print $1}')
-    sz=$(wc -c < "$f" | tr -d ' ')
-    ts=$(date -u -r "$f" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-    rel=${f#"$OUT"/}
-    # `sha256sum -c` accepts only "<hash>  <path>" lines, so the size/timestamp metadata is
-    # written as a `#` comment line above each entry: the documented buyer command
-    # `cd <PKG> && sha256sum -c checksums/SHA256SUMS` must really pass (round-5 fix).
-    printf "# size=%s ts=%s  %s\n" "$sz" "$ts" "$rel" >> "$CHECKSUM_FILE"
-    printf "%s  %s\n" "$sha" "$rel" >> "$CHECKSUM_FILE"
-  fi
-done
-# Also hash every file in source/docs for completeness into checksums/all-files.sha256
-# Exclude the checksum file itself: a self-referential entry would record the hash of the empty
-# file (it is truncated by the redirection before `find` runs) and could never verify.
-# Deliverable source-tree hash: one digest over the shipped source/ tree, so the
-# documented buyer check (docs/BUYER-ACCEPTANCE-TEST.md A1, docs/BUYER-REPRODUCTION-GUIDE.md §1)
-# has a real value to compare against. The method line below is the exact command the
-# buyer runs; scripts/verify-buyer-package.sh recomputes it fail-closed.
-if command -v sha256sum >/dev/null 2>&1; then
-  TREE_HASH="$(cd "$OUT/source" && find . -type f | sort | xargs sha256sum | sha256sum | awk '{print $1}')"
-  TREE_FILES="$(cd "$OUT/source" && find . -type f | wc -l | tr -d ' ')"
-  {
-    echo "# source-tree digest of the delivered source/ directory"
-    echo "# method: cd <PKG>/source && find . -type f | sort | xargs sha256sum | sha256sum"
-    echo "# files: $TREE_FILES"
-    printf "%s  source/\n" "$TREE_HASH"
-  } > "$OUT/checksums/SOURCE-TREE.sha256"
-fi
-find "$OUT" -type f ! -path "$OUT/checksums/all-files.sha256" -exec sha256sum {} \; | sed "s|$OUT/||" | sort > "$OUT/checksums/all-files.sha256" 2>/dev/null || true
-
-
-# Verify forbidden not in package
-if grep -R "target/" "$OUT/checksums/all-files.sha256" 2>/dev/null | grep -q "target/"; then
-  echo "[build-release-package] FAIL: forbidden target/ found in package" >&2
-  exit 1
-fi
-if grep -R "tsbuildinfo" "$OUT/checksums/all-files.sha256" 2>/dev/null | grep -q "tsbuildinfo"; then
-  echo "[build-release-package] FAIL: generated TypeScript cache found in package" >&2
-  exit 1
-fi
-if find "$OUT" -path "*node_modules*" | grep -q .; then
-  echo "[build-release-package] FAIL: node_modules found" >&2
-  exit 1
-fi
-if find "$OUT" -path "*/.next/*" -o -path "*/.next" | grep -q .; then
-  echo "[build-release-package] FAIL: .next found" >&2
-  exit 1
-fi
-if find "$OUT" -name ".env" | grep -q .; then
-  echo "[build-release-package] FAIL: .env found" >&2
-  exit 1
+# 4a. Forbidden paths inside the package (root-anchored).
+forbidden=$(find "$OUT" -type f \
+    -path '*/.cargo/bin/*' -o -path '*/.config/*' -o -path '*/docs/archive/*' \
+    -o -name 'rustup-init.sh' 2>/dev/null || true)
+if [ -n "$forbidden" ]; then
+    echo "ERROR: post-build gate — forbidden paths present in package:" >&2
+    echo "$forbidden" >&2
+    post_fail=1
 fi
 
-# Required packaged artifacts: docs promise both license formats + both SBOM formats.
-for req in "sbom/sbom.json" "sbom/sbom.cyclonedx.json" "licenses/licenses.json" "licenses/licenses.csv"; do
-  if [ ! -f "$OUT/$req" ]; then
-    echo "[build-release-package] FAIL: missing packaged artifact $req" >&2
+# 4b. ELF / Mach-O / PE headers and >5 MiB files, over every shipped file.
+while IFS= read -r -d '' f; do
+    size=$(wc -c < "$f")
+    if [ "$size" -gt "$MAX_FILE_BYTES" ]; then
+        echo "ERROR: post-build gate — file larger than 5 MiB: ${f#"$OUT"/} ($size bytes)" >&2
+        post_fail=1
+    fi
+    magic=$(head -c 4 "$f" | od -A n -t x1 | tr -d ' \n' || true)
+    case "$magic" in
+        7f454c46*)   echo "ERROR: post-build gate — ELF binary: ${f#"$OUT"/}" >&2; post_fail=1 ;;
+        feedface*|cefaedfe*|cffaedfe*|cafebabe*)
+                     echo "ERROR: post-build gate — Mach-O binary: ${f#"$OUT"/}" >&2; post_fail=1 ;;
+        4d5a*)       echo "ERROR: post-build gate — PE executable: ${f#"$OUT"/}" >&2; post_fail=1 ;;
+    esac
+done < <(find "$OUT" -type f -print0)
+
+# 4c. *_PLACEHOLDER tokens: FAIL in root-level *.md, REPORT-only in docs/*.md.
+root_md=$(find "$OUT" -maxdepth 1 -name '*.md' -type f 2>/dev/null || true)
+if [ -n "$root_md" ]; then
+    # shellcheck disable=SC2086
+    if grep -nE '\b[A-Z][A-Z0-9_]*_PLACEHOLDER\b' $root_md; then
+        echo "ERROR: post-build gate — unfilled *_PLACEHOLDER token in a root-level .md (see matches above)" >&2
+        post_fail=1
+    fi
+fi
+docs_ph=$(find "$OUT/docs" -maxdepth 1 -name '*.md' -type f 2>/dev/null -exec grep -lnE '\b[A-Z][A-Z0-9_]*_PLACEHOLDER\b' {} + || true)
+if [ -n "$docs_ph" ]; then
+    echo "[build-release-package] NOTE: *_PLACEHOLDER tokens listed (docs/*.md, not failed):"
+    echo "$docs_ph"
+fi
+
+# 4d. Script exec bits over the staged package tree (P0-C TASK 6).
+if ! bash "$ROOT/scripts/verify-script-modes.sh" "$OUT"; then
+    echo "ERROR: post-build gate — non-executable *.sh in the package tree." >&2
+    post_fail=1
+fi
+
+# 4e. Secret scan over the staged package tree (P0-D TASK 1).
+if ! bash "$ROOT/scripts/scan-secrets.sh" "$OUT"; then
+    echo "ERROR: post-build gate — secret scanner findings in the package tree." >&2
+    post_fail=1
+fi
+
+if [ "$post_fail" -ne 0 ]; then
+    echo "[build-release-package] ABORTED by post-build gate. No zip produced." >&2
+    rm -rf "$OUT"
     exit 1
-  fi
-done
-# all-files.sha256 must never contain a self-referential (empty-file) entry.
-if grep -q "checksums/all-files.sha256$" "$OUT/checksums/all-files.sha256" 2>/dev/null; then
-  echo "[build-release-package] FAIL: all-files.sha256 contains a self-referential entry" >&2
-  exit 1
 fi
-# Packaged docs must match the manifest docs count (fail-closed when python3 is available).
-if command -v python3 >/dev/null 2>&1; then
-  PKG_DOCS="$(find "$OUT/docs" -name '*.md' | wc -l | tr -d ' ')"
-  MAN_DOCS="$(python3 -c "import json;print(json.load(open('$ROOT/release-manifest.json')).get('docs_files',''))" 2>/dev/null || echo "")"
-  if [ -n "$MAN_DOCS" ] && [ "$PKG_DOCS" != "$MAN_DOCS" ]; then
-    echo "[build-release-package] FAIL: packaged docs ($PKG_DOCS) != manifest docs_files ($MAN_DOCS)" >&2
-    exit 1
-  fi
-fi
+echo "[build-release-package] post-build gate: CLEAN"
 
-# --- documented package layout (fail-closed) ---------------------------------
-# Every path the buyer docs tell the reader to open must exist at package root.
-# A nested copy (docs/docs, evidence/evidence) means the builder re-introduced the
-# `cp -r <dir> <existing-dir>` nesting defect that hides all of them.
-for req in docs/BUYER-TRUTH-REGISTER.md docs/BUYER-EVIDENCE-PACK.md docs/BUYER-HANDOVER-CHECKLIST.md docs/HANDOVER.md docs/BACKUP-RESTORE.md docs/SECURITY.md docs/FINAL-BUYER-GAP-LEDGER.md manifests/release-manifest.json VERSION; do
-  if [ ! -f "$OUT/$req" ]; then
-    echo "[build-release-package] FAIL: documented package path missing: $req" >&2
-    exit 1
-  fi
-done
-if [ -d "$OUT/docs/docs" ] || [ -d "$OUT/evidence/evidence" ]; then
-  echo "[build-release-package] FAIL: nested docs/docs or evidence/evidence directory in package" >&2
-  exit 1
-fi
-for ev in billing_stripe custody_vault deployment_deployment funded-preflight_funded solana_solana_rpc staking_staking_validator; do
-  if [ ! -f "$OUT/evidence/external/$ev.json" ]; then
-    echo "[build-release-package] FAIL: missing evidence/external/$ev.json" >&2
-    exit 1
-  fi
-done
-if [ ! -f "$OUT/checksums/SOURCE-TREE.sha256" ]; then
-  echo "[build-release-package] FAIL: missing checksums/SOURCE-TREE.sha256" >&2
-  exit 1
-fi
+chmod +x "$OUT"/scripts/*.sh 2>/dev/null || true
 
-echo "[build-release-package] OK -> $OUT"
-# `head` closes the pipe early, so tolerate SIGPIPE instead of failing the gate
-# (`set -o pipefail` would otherwise report exit 141 on a successful build).
-ls -R "$OUT" 2>/dev/null | head -n 100 || true
-cat "$CHECKSUM_FILE"
+# Checksum manifest: every shipped file, sha256, reproducible order.
+( cd "$OUT" && find . -type f ! -name 'SHA256SUMS.txt' -print0 \
+    | sort -z \
+    | xargs -0 sha256sum ) > "$OUT/SHA256SUMS.txt"
+
+PKG="$ROOT/sniper-suite-$VERSION-src.zip"
+rm -f "$PKG"
+( cd "$OUT" && zip -qr "$PKG" . )
+pkg_size=$(wc -c < "$PKG")
+echo "[build-release-package] wrote $PKG ($((pkg_size / 1024 / 1024)) MB, $(wc -l < "$LIST") files)"
+echo "[build-release-package] verify with: scripts/verify-buyer-package.sh"

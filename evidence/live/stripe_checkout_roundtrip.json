@@ -1,0 +1,11 @@
+{
+  "validation_id": "stripe_checkout_roundtrip",
+  "provider": "stripe",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "LIVE_STRIPE=1 STRIPE_API_KEY=<redacted> cargo test -p sniper-suite --test live_stripe_contract -- --ignored",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"creates+expires a test-mode checkout session; attestation = checkout session id"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

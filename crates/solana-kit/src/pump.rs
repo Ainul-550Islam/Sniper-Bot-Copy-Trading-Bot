@@ -1,25 +1,34 @@
 //! Pump.fun bonding curve: accounts, PDAs, pricing and instruction builders.
 //!
-//! ## Account layout (verified against the post-cashback-upgrade program)
+//! ## Account layout (audited 2026-10-07; source of truth: the official IDL)
 //!
-//! `buy` takes **17** accounts:
+//! An earlier audit documented 17 accounts for `buy`; the official pump-fun
+//! IDL shipped with the program documents **16**. The in-repo resolution
+//! (GAP-MAP P1 VERIFY, `pump.rs`): the IDL form is authoritative for the
+//! default, the extra trailing shapes are kept as probed variants, and the
+//! module header previously disagreed with the tests — it now matches the
+//! IDL. `buy` defaults to **16** accounts:
 //!
 //! ```text
-//!  0 global                      ro     9 creator_vault            w
-//!  1 fee_recipient               w     10 event_authority          ro
-//!  2 mint                        ro    11 program                  ro
-//!  3 bonding_curve               w     12 global_volume_accumulator ro
-//!  4 associated_bonding_curve    w     13 user_volume_accumulator  w
-//!  5 associated_user             w     14 fee_config               ro
-//!  6 user                        w/s   15 fee_program              ro
-//!  7 system_program              ro    16 bonding_curve_v2         ro
-//!  8 token_program               ro
+//!  0 global                      ro     8 token_program            ro
+//!  1 fee_recipient               w      9 creator_vault            w
+//!  2 mint                        ro    10 event_authority          ro
+//!  3 bonding_curve               w     11 program                  ro
+//!  4 associated_bonding_curve    w     12 global_volume_accumulator ro
+//!  5 associated_user             w     13 user_volume_accumulator  w
+//!  6 user                        w/s   14 fee_config               ro
+//!  7 system_program              ro    15 fee_program              ro
 //! ```
 //!
-//! `sell` takes **15** accounts for non-cashback tokens and **16** for
-//! cashback-enabled tokens (the extra one is `user_volume_accumulator`,
-//! inserted before `bonding_curve_v2`). The cashback flag is byte 82 of the
-//! bonding-curve account — it is *not* implied by the token being Token-2022.
+//! Trailing-account shapes seen in the wild — 17 accounts with
+//! `bonding_curve_v2`, 18 with a trailing mutable fee recipient
+//! (2026-04-28 upgrade), 17 with the fee recipient only — are covered by
+//! [`buy_layout_variants`] / [`sell_layout_variants`]; `PumpLayoutDoctor`
+//! simulates each candidate and persists the winner, so a program upgrade
+//! converges at runtime. `sell` defaults to the 14-account IDL shape
+//! (note the asymmetric middle: `system_program`, `creator_vault`,
+//! `token_program`). The cashback flag is byte 82 of the bonding-curve
+//! account — it is *not* implied by the token being Token-2022.
 //!
 //! `buy` args: `amount: u64` (tokens out), `max_sol_cost: u64` (lamports),
 //! `track_volume: OptionBool` (1 byte).
@@ -153,133 +162,121 @@ pub struct GlobalState {
 }
 
 impl GlobalState {
-    /// Parse the `Global` account, verifying the Anchor discriminator first.
-    ///
-    /// If the layout has drifted we fall back to picking the first pubkey in
-    /// the account body that is neither the authority nor a program id; that is
-    /// flagged with `heuristic = true` so the caller can log a loud warning.
+    /// Parse the canonical Pump `Global` account. The discriminator and every
+    /// required fixed-layout field are mandatory: a layout mismatch is an
+    /// error, never a reason to guess a fee recipient or synthesize reserves.
     pub fn parse(data: &[u8]) -> BotResult<Self> {
-        if data.len() < 8 {
+        if data.len() < GLOBAL_OFF_FEE_RECIPIENTS {
             return Err(BotError::solana(format!(
-                "global account too short: {} bytes",
-                data.len()
+                "global account is {} bytes; canonical fixed layout requires at least {}",
+                data.len(),
+                GLOBAL_OFF_FEE_RECIPIENTS
             )));
         }
-        let disc_ok = data[..8] == PUMP_ACC_DISC_GLOBAL;
-        if !disc_ok {
-            warn!(
-                got = format!("{:02x?}", &data[..8]),
-                want = format!("{:02x?}", PUMP_ACC_DISC_GLOBAL),
-                "global account discriminator mismatch"
-            );
+        if data[..8] != PUMP_ACC_DISC_GLOBAL {
+            return Err(BotError::solana(format!(
+                "global account discriminator mismatch: got {:02x?} want {:02x?}",
+                &data[..8],
+                PUMP_ACC_DISC_GLOBAL
+            )));
         }
 
-        // Canonical layout: needs at least through fee_basis_points (105..113).
-        if data.len() >= GLOBAL_OFF_WITHDRAW_AUTHORITY {
-            let initial_virtual_token_reserves =
-                read_u64(data, GLOBAL_OFF_INITIAL_VIRTUAL_TOKEN_RESERVES);
-            let initial_virtual_sol_reserves =
-                read_u64(data, GLOBAL_OFF_INITIAL_VIRTUAL_SOL_RESERVES);
-            let initial_real_token_reserves =
-                read_u64(data, GLOBAL_OFF_INITIAL_REAL_TOKEN_RESERVES);
-            let token_total_supply = read_u64(data, GLOBAL_OFF_TOKEN_TOTAL_SUPPLY);
-            let fee_basis_points = read_u64(data, GLOBAL_OFF_FEE_BASIS_POINTS);
+        let initialized = data[GLOBAL_OFF_INITIALIZED];
+        let migrate = data[GLOBAL_OFF_ENABLE_MIGRATE];
+        if initialized != 1 || migrate > 1 {
+            return Err(BotError::solana(format!(
+                "global account has invalid initialization flags (initialized={initialized}, enable_migrate={migrate})"
+            )));
+        }
 
-            // Sanity: the documented defaults are 1.073e9 tokens (6dp) and
-            // 30 SOL. If they are wildly off, the layout moved and the fee
-            // recipient we read cannot be trusted either.
-            let sane = initial_virtual_sol_reserves > 0
-                && initial_virtual_sol_reserves < 10_000 * maths::LAMPORTS_PER_SOL
-                && initial_virtual_token_reserves > 0
-                && token_total_supply > 0
-                && fee_basis_points < maths::BPS_DENOM;
-            if sane && disc_ok {
-                let mut fee_recipients = Vec::with_capacity(GLOBAL_FEE_RECIPIENTS_LEN);
-                if data.len() >= GLOBAL_OFF_FEE_RECIPIENTS + 32 * GLOBAL_FEE_RECIPIENTS_LEN {
-                    for i in 0..GLOBAL_FEE_RECIPIENTS_LEN {
-                        fee_recipients.push(read_pubkey(data, GLOBAL_OFF_FEE_RECIPIENTS + 32 * i));
-                    }
-                }
-                return Ok(GlobalState {
-                    initialized: data[GLOBAL_OFF_INITIALIZED] != 0,
-                    authority: read_pubkey(data, GLOBAL_OFF_AUTHORITY),
-                    fee_recipient: read_pubkey(data, GLOBAL_OFF_FEE_RECIPIENT),
-                    initial_virtual_token_reserves,
-                    initial_virtual_sol_reserves,
-                    initial_real_token_reserves,
-                    token_total_supply,
-                    fee_basis_points,
-                    withdraw_authority: read_pubkey(data, GLOBAL_OFF_WITHDRAW_AUTHORITY),
-                    enable_migrate: data
-                        .get(GLOBAL_OFF_ENABLE_MIGRATE)
-                        .map(|b| *b != 0)
-                        .unwrap_or(false),
-                    pool_migration_fee: read_u64(data, GLOBAL_OFF_POOL_MIGRATION_FEE),
-                    creator_fee_basis_points: read_u64(data, GLOBAL_OFF_CREATOR_FEE_BASIS_POINTS),
-                    fee_recipients,
-                    create_v2_enabled: data.get(GLOBAL_OFF_CREATE_V2_ENABLED).map(|b| *b != 0),
-                    mayhem_mode_enabled: data.get(GLOBAL_OFF_MAYHEM_MODE_ENABLED).map(|b| *b != 0),
-                    is_cashback_enabled: data.get(GLOBAL_OFF_IS_CASHBACK_ENABLED).map(|b| *b != 0),
-                    buyback_basis_points: data
-                        .get(GLOBAL_OFF_BUYBACK_BASIS_POINTS..GLOBAL_OFF_BUYBACK_BASIS_POINTS + 8)
-                        .map(|_| read_u64(data, GLOBAL_OFF_BUYBACK_BASIS_POINTS)),
-                    initial_virtual_quote_reserves: data
-                        .get(
-                            GLOBAL_OFF_INITIAL_VIRTUAL_QUOTE_RESERVES
-                                ..GLOBAL_OFF_INITIAL_VIRTUAL_QUOTE_RESERVES + 8,
-                        )
-                        .map(|_| read_u64(data, GLOBAL_OFF_INITIAL_VIRTUAL_QUOTE_RESERVES)),
-                    is_holder_reward_enabled: data
-                        .get(GLOBAL_OFF_IS_HOLDER_REWARD_ENABLED)
-                        .map(|b| *b != 0),
-                    heuristic: false,
-                    raw_len: data.len(),
-                });
+        let authority = read_pubkey(data, GLOBAL_OFF_AUTHORITY);
+        let fee_recipient = read_pubkey(data, GLOBAL_OFF_FEE_RECIPIENT);
+        let initial_virtual_token_reserves =
+            read_u64(data, GLOBAL_OFF_INITIAL_VIRTUAL_TOKEN_RESERVES);
+        let initial_virtual_sol_reserves =
+            read_u64(data, GLOBAL_OFF_INITIAL_VIRTUAL_SOL_RESERVES);
+        let initial_real_token_reserves = read_u64(data, GLOBAL_OFF_INITIAL_REAL_TOKEN_RESERVES);
+        let token_total_supply = read_u64(data, GLOBAL_OFF_TOKEN_TOTAL_SUPPLY);
+        let fee_basis_points = read_u64(data, GLOBAL_OFF_FEE_BASIS_POINTS);
+        let pool_migration_fee = read_u64(data, GLOBAL_OFF_POOL_MIGRATION_FEE);
+        let creator_fee_basis_points = read_u64(data, GLOBAL_OFF_CREATOR_FEE_BASIS_POINTS);
+
+        if authority == Pubkey::default() || fee_recipient == Pubkey::default() {
+            return Err(BotError::solana(
+                "global account has a zero authority or protocol fee recipient",
+            ));
+        }
+        let sane = initial_virtual_sol_reserves > 0
+            && initial_virtual_sol_reserves < 10_000 * maths::LAMPORTS_PER_SOL
+            && initial_virtual_token_reserves > 0
+            && initial_real_token_reserves > 0
+            && token_total_supply > 0
+            && fee_basis_points < maths::BPS_DENOM
+            && creator_fee_basis_points < maths::BPS_DENOM;
+        if !sane {
+            return Err(BotError::solana(
+                "global account contains implausible reserves, supply, or fee basis points",
+            ));
+        }
+
+        let recipients_end = GLOBAL_OFF_FEE_RECIPIENTS + 32 * GLOBAL_FEE_RECIPIENTS_LEN;
+        let fee_recipients = if data.len() >= recipients_end {
+            (0..GLOBAL_FEE_RECIPIENTS_LEN)
+                .map(|i| read_pubkey(data, GLOBAL_OFF_FEE_RECIPIENTS + 32 * i))
+                .collect()
+        } else if data.len() == GLOBAL_OFF_FEE_RECIPIENTS {
+            // Historical canonical Global accounts before the fee-recipient
+            // array was added remain usable for the original single recipient.
+            Vec::new()
+        } else {
+            return Err(BotError::solana(format!(
+                "global account ends at byte {}, inside the fixed fee-recipient array",
+                data.len()
+            )));
+        };
+
+        let optional_bool = |offset: usize, name: &str| -> BotResult<Option<bool>> {
+            match data.get(offset).copied() {
+                None => Ok(None),
+                Some(0) => Ok(Some(false)),
+                Some(1) => Ok(Some(true)),
+                Some(other) => Err(BotError::solana(format!(
+                    "global account {name} flag has invalid value {other} at offset {offset}"
+                ))),
             }
-        }
+        };
+        let optional_u64 = |offset: usize| -> Option<u64> {
+            data.get(offset..offset + 8).map(|_| read_u64(data, offset))
+        };
 
-        // Heuristic fallback: scan the account body for the fee recipient.
-        let authority = read_pubkey(
-            data,
-            GLOBAL_OFF_AUTHORITY.min(data.len().saturating_sub(32)),
-        );
-        for off in 9..data.len().saturating_sub(31) {
-            let candidate = read_pubkey(data, off);
-            if candidate == authority
-                || candidate == Pubkey::default()
-                || candidate == *PUMP_PROGRAM_ID
-                || candidate == *SYSTEM_PROGRAM
-            {
-                continue;
-            }
-            return Ok(GlobalState {
-                initialized: false,
-                authority,
-                fee_recipient: candidate,
-                initial_virtual_token_reserves: maths::PUMP_INITIAL_VIRTUAL_TOKEN_RESERVES,
-                initial_virtual_sol_reserves: maths::PUMP_INITIAL_VIRTUAL_SOL_RESERVES,
-                initial_real_token_reserves: maths::PUMP_INITIAL_REAL_TOKEN_RESERVES,
-                token_total_supply: maths::PUMP_TOKEN_TOTAL_SUPPLY,
-                fee_basis_points: 100,
-                withdraw_authority: Pubkey::default(),
-                enable_migrate: true,
-                pool_migration_fee: 0,
-                creator_fee_basis_points: 0,
-                fee_recipients: Vec::new(),
-                create_v2_enabled: None,
-                mayhem_mode_enabled: None,
-                is_cashback_enabled: None,
-                buyback_basis_points: None,
-                initial_virtual_quote_reserves: None,
-                is_holder_reward_enabled: None,
-                heuristic: true,
-                raw_len: data.len(),
-            });
-        }
-
-        Err(BotError::solana(
-            "could not parse the pump Global account (layout changed?) — set an explicit fee_recipient override",
-        ))
+        Ok(GlobalState {
+            initialized: true,
+            authority,
+            fee_recipient,
+            initial_virtual_token_reserves,
+            initial_virtual_sol_reserves,
+            initial_real_token_reserves,
+            token_total_supply,
+            fee_basis_points,
+            withdraw_authority: read_pubkey(data, GLOBAL_OFF_WITHDRAW_AUTHORITY),
+            enable_migrate: migrate == 1,
+            pool_migration_fee,
+            creator_fee_basis_points,
+            fee_recipients,
+            create_v2_enabled: optional_bool(GLOBAL_OFF_CREATE_V2_ENABLED, "create_v2_enabled")?,
+            mayhem_mode_enabled: optional_bool(GLOBAL_OFF_MAYHEM_MODE_ENABLED, "mayhem_mode_enabled")?,
+            is_cashback_enabled: optional_bool(GLOBAL_OFF_IS_CASHBACK_ENABLED, "is_cashback_enabled")?,
+            buyback_basis_points: optional_u64(GLOBAL_OFF_BUYBACK_BASIS_POINTS),
+            initial_virtual_quote_reserves: optional_u64(GLOBAL_OFF_INITIAL_VIRTUAL_QUOTE_RESERVES),
+            is_holder_reward_enabled: optional_bool(
+                GLOBAL_OFF_IS_HOLDER_REWARD_ENABLED,
+                "is_holder_reward_enabled",
+            )?,
+            // Retained in the serialized/public shape for compatibility. The
+            // strict parser never accepts heuristic data.
+            heuristic: false,
+            raw_len: data.len(),
+        })
     }
 }
 
@@ -625,40 +622,55 @@ impl PumpContext {
             }
         };
 
-        let global_data = accounts
+        let global_account = accounts
             .first()
-            .and_then(|a| a.as_ref())
-            .map(|a| a.data.clone())
-            .ok_or_else(|| BotError::solana("global account not found"))?;
-        let curve_data = accounts
+            .and_then(|account| account.as_ref())
+            .ok_or_else(|| BotError::NotFound(format!("Pump global account {global} not found")))?;
+        if global_account.owner != *PUMP_PROGRAM_ID {
+            return Err(BotError::solana(format!(
+                "Pump global account {global} is owned by {}, expected {}",
+                global_account.owner, *PUMP_PROGRAM_ID
+            )));
+        }
+        let curve_account = accounts
             .get(1)
-            .and_then(|a| a.as_ref())
+            .and_then(|account| account.as_ref())
             .ok_or_else(|| {
-                BotError::solana(format!(
+                BotError::NotFound(format!(
                     "bonding curve {bonding_curve} not found — token may have graduated to PumpSwap"
                 ))
-            })?
-            .data
-            .clone();
-
-        let global_state = GlobalState::parse(&global_data)?;
-        if global_state.heuristic {
-            tracing::warn!(
-                "pump Global account did not match the canonical layout; fee_recipient was \
-                 recovered heuristically as {}. Verify it, or set an explicit override.",
-                global_state.fee_recipient
-            );
+            })?;
+        if curve_account.owner != *PUMP_PROGRAM_ID {
+            return Err(BotError::solana(format!(
+                "bonding curve {bonding_curve} is owned by {}, expected {}",
+                curve_account.owner, *PUMP_PROGRAM_ID
+            )));
         }
-        let curve = BondingCurveState::parse(&curve_data)?;
 
-        // Token-2022 mints use a different token program; ask the chain rather
-        // than guessing, because the ATA address depends on it.
-        let token_program = rpc.token_program_of(mint).await.unwrap_or(*TOKEN_PROGRAM);
+        let global_state = GlobalState::parse(&global_account.data)?;
+        let curve = BondingCurveState::parse(&curve_account.data)?;
+        if curve.creator == Pubkey::default() || curve.token_total_supply == 0 {
+            return Err(BotError::solana(format!(
+                "bonding curve {bonding_curve} has an invalid creator or zero token supply"
+            )));
+        }
+        if curve.is_graduated()
+            || curve.virtual_token_reserves == 0
+            || curve.virtual_sol_reserves == 0
+        {
+            return Err(BotError::solana(format!(
+                "bonding curve {bonding_curve} is graduated or has empty virtual reserves; use PumpSwap"
+            )));
+        }
+
+        // Token-2022 mints use a different token program; ask the chain and
+        // fail closed on missing, malformed, or unsupported mint accounts.
+        let token_program = rpc.token_program_of(mint).await?;
 
         let user_ata = associated_user(mint, user, &token_program);
-        // Cached: an ATA flips false→true at most once (our own buy creates
-        // it), and only positive answers are ever cached.
-        let user_ata_exists = rpc.account_exists_cached(&user_ata).await.unwrap_or(false);
+        // `account_exists_cached` caches only positive results. RPC errors are
+        // propagated; only a genuine absence triggers ATA creation.
+        let user_ata_exists = rpc.account_exists_cached(&user_ata).await?;
 
         // Quote side. A v1 bonding curve has no quote_mint field and is always
         // SOL-quoted; a v2 curve can be quoted in a whitelisted stablecoin.
@@ -666,18 +678,27 @@ impl PumpContext {
         let quote_token_program = if quote_mint == *WSOL_MINT {
             *TOKEN_PROGRAM
         } else {
-            rpc.token_program_of(&quote_mint)
-                .await
-                .unwrap_or(*TOKEN_PROGRAM)
+            rpc.token_program_of(&quote_mint).await?
         };
+        if quote_mint == *mint {
+            return Err(BotError::solana(
+                "Pump bonding-curve base mint and quote mint must differ",
+            ));
+        }
 
         let fee_recipient = fee_recipient_override.unwrap_or(global_state.fee_recipient);
-        // The buyback recipient defaults to the protocol fee recipient when
-        // Global does not carry a buyback list yet.
+        if fee_recipient == Pubkey::default() {
+            return Err(BotError::solana(
+                "Pump protocol fee recipient is zero; refuse to build a trade",
+            ));
+        }
+        // Some historical Global accounts predate the recipient array. For
+        // those accounts only the canonical primary fee recipient is valid.
         let buyback_fee_recipient = global_state
             .fee_recipients
-            .first()
+            .iter()
             .copied()
+            .find(|recipient| *recipient != Pubkey::default())
             .unwrap_or(fee_recipient);
         let creator_vault = creator_vault_pda(&curve.creator);
         let user_volume_accumulator = user_volume_accumulator_pda(user);
@@ -1198,7 +1219,7 @@ mod tests {
     #[test]
     fn global_parses_canonical_layout() {
         // Build a canonical Global account: disc + initialized + authority + fee_recipient + reserves.
-        let mut d = vec![0u8; 160];
+        let mut d = vec![0u8; GLOBAL_OFF_FEE_RECIPIENTS];
         d[..8].copy_from_slice(&PUMP_ACC_DISC_GLOBAL);
         d[GLOBAL_OFF_INITIALIZED] = 1;
         d[GLOBAL_OFF_AUTHORITY..GLOBAL_OFF_AUTHORITY + 32].copy_from_slice(&[1u8; 32]);
@@ -1215,6 +1236,22 @@ mod tests {
         assert_eq!(g.fee_recipient, Pubkey::new_from_array([2u8; 32]));
         assert_eq!(g.fee_basis_points, 100);
         assert_eq!(g.initial_virtual_sol_reserves, 30 * 1_000_000_000);
+    }
+
+    #[test]
+    fn global_parser_rejects_discriminator_and_layout_mismatches() {
+        let mut wrong_disc = vec![0u8; GLOBAL_OFF_FEE_RECIPIENTS];
+        wrong_disc[..8].copy_from_slice(&PUMP_ACC_DISC_GLOBAL);
+        wrong_disc[0] ^= 0xff;
+        assert!(GlobalState::parse(&wrong_disc)
+            .unwrap_err()
+            .to_string()
+            .contains("discriminator mismatch"));
+
+        let mut truncated = vec![0u8; GLOBAL_OFF_FEE_RECIPIENTS];
+        truncated[..8].copy_from_slice(&PUMP_ACC_DISC_GLOBAL);
+        truncated.truncate(GLOBAL_OFF_FEE_RECIPIENTS - 1);
+        assert!(GlobalState::parse(&truncated).is_err());
     }
 
     #[test]

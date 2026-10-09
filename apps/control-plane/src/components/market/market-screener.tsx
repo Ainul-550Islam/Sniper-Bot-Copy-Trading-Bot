@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { MarketTicker } from "@/lib/api/market-api";
+import { MarketTicker, changePct, priceUsd, venueLabel } from "@/lib/api/market-api";
+import { formatUsdCents } from "@/lib/formatters/financial";
 
 interface MarketScreenerProps {
   markets: MarketTicker[];
@@ -25,6 +26,10 @@ export default function MarketScreener({ markets, loading, onRefresh }: MarketSc
     }
     return true;
   });
+
+  // Distinct venues present in the live feed drive the filter — the UI never
+  // offers a venue the server did not report.
+  const venues = Array.from(new Set(markets.map((m) => m.venue))).sort();
 
   return (
     <div className="card" style={{ padding: 0, overflow: "hidden" }}>
@@ -52,12 +57,14 @@ export default function MarketScreener({ markets, loading, onRefresh }: MarketSc
             value={filterVenue}
             onChange={(e) => setFilterVenue(e.target.value)}
             className="select"
-            style={{ minWidth: "140px" }}
+            style={{ minWidth: "160px" }}
           >
             <option value="all">All Venues</option>
-            <option value="raydium">Raydium</option>
-            <option value="pumpfun">Pump.fun</option>
-            <option value="polymarket">Polymarket</option>
+            {venues.map((venue) => (
+              <option key={venue} value={venue}>
+                {venueLabel(venue)}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -68,6 +75,10 @@ export default function MarketScreener({ markets, loading, onRefresh }: MarketSc
 
       {loading ? (
         <div style={{ padding: "2rem", textAlign: "center" }}>Scanning market feeds...</div>
+      ) : markets.length === 0 ? (
+        <div style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>
+          No market data is available from the live feeds right now.
+        </div>
       ) : filtered.length === 0 ? (
         <div style={{ padding: "2rem", textAlign: "center", color: "var(--muted)" }}>
           No market pairs matching the active screener filters.
@@ -88,7 +99,9 @@ export default function MarketScreener({ markets, loading, onRefresh }: MarketSc
             </thead>
             <tbody>
               {filtered.map((m) => {
-                const isUp = m.change_24h_pct >= 0;
+                const pct = changePct(m);
+                const isUp = pct >= 0;
+                const price = priceUsd(m);
                 return (
                   <tr key={m.id} style={{ borderTop: "1px solid var(--line)" }}>
                     <td style={{ padding: "0.75rem 1rem" }}>
@@ -97,22 +110,22 @@ export default function MarketScreener({ markets, loading, onRefresh }: MarketSc
                     </td>
                     <td style={{ padding: "0.75rem 1rem" }}>
                       <span className="badge" style={{ background: "rgba(255,255,255,0.06)" }}>
-                        {m.venue.toUpperCase()}
+                        {venueLabel(m.venue)}
                       </span>
                     </td>
                     <td style={{ padding: "0.75rem 1rem", fontFamily: "var(--mono)" }}>
-                      ${m.price_usd < 0.01 ? m.price_usd.toFixed(6) : m.price_usd.toFixed(2)}
+                      ${price < 0.01 ? price.toFixed(6) : price.toFixed(2)}
                     </td>
                     <td style={{ padding: "0.75rem 1rem" }}>
                       <span style={{ color: isUp ? "var(--ok)" : "var(--bad)", fontWeight: 600 }}>
-                        {isUp ? "+" : ""}{m.change_24h_pct.toFixed(2)}%
+                        {isUp ? "+" : ""}{pct.toFixed(2)}%
                       </span>
                     </td>
                     <td style={{ padding: "0.75rem 1rem", fontSize: "0.85rem" }}>
-                      ${m.volume_24h_usd.toLocaleString()}
+                      {formatUsdCents(m.volume_24h_usd_cents)}
                     </td>
                     <td style={{ padding: "0.75rem 1rem", fontSize: "0.85rem" }}>
-                      ${m.liquidity_usd.toLocaleString()}
+                      {formatUsdCents(m.liquidity_usd_cents)}
                     </td>
                     <td style={{ padding: "0.75rem 1rem" }}>
                       <div style={{ display: "flex", gap: "0.25rem", flexWrap: "wrap" }}>

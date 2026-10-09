@@ -65,9 +65,16 @@ async function parseError(response: Response): Promise<ApiError> {
   let kind = `http_${response.status}`;
   let reason = response.statusText || "request refused";
   try {
-    const body = (await response.json()) as { error?: unknown; reason?: unknown };
+    const body = (await response.json()) as {
+      error?: unknown;
+      reason?: unknown;
+      message?: unknown;
+      detail?: unknown;
+    };
     if (typeof body.error === "string") kind = body.error;
     if (typeof body.reason === "string") reason = body.reason;
+    else if (typeof body.message === "string") reason = body.message;
+    else if (typeof body.detail === "string") reason = body.detail;
   } catch {
     // A non-JSON refusal (proxy, HTML error page) keeps the generic kind.
   }
@@ -143,10 +150,17 @@ export interface LoginResponse {
     expires_at: string;
     organization_id: string | null;
   };
+  /** Present only when the password was valid but this tenant requires TOTP enrollment. */
+  mfa_enrollment_required?: boolean;
+  organization_id?: string;
+  organization_slug?: string;
 }
 
 export interface AcceptedInviteResponse extends LoginResponse {
   organization_id: string;
+  organization_slug: string;
+  /** True when `token` is restricted to TOTP enrollment until verification. */
+  mfa_enrollment_required: boolean;
   membership: {
     id: string;
     role: string;
@@ -194,17 +208,40 @@ export interface ExportEnvelope {
 // (see docs/SAAS-PRODUCT.md); nothing here invents a URL.
 // ---------------------------------------------------------------------------
 
+/** Sign-up consent record sent with registration (see lib/consent.ts). */
+export interface RegisterConsent {
+  version: string;
+  accepted_at: string;
+}
+
 export const auth = {
-  register: (email: string, password: string, displayName?: string) =>
+  register: (
+    email: string,
+    password: string,
+    displayName?: string,
+    consent?: RegisterConsent,
+  ) =>
     request<Json>("/api/saas/users", {
       method: "POST",
-      body: { email, password, display_name: displayName },
+      body: {
+        email,
+        password,
+        display_name: displayName,
+        // Omitted entirely when absent: the server records `captured: false`
+        // rather than implying consent that was never given.
+        ...(consent ? { consent } : {}),
+      },
       anonymous: true,
     }),
-  login: (email: string, password: string) =>
+  login: (email: string, password: string, organization?: string, mfaCode?: string) =>
     request<LoginResponse>("/api/saas/sessions", {
       method: "POST",
-      body: { email, password },
+      body: {
+        email,
+        password,
+        ...(organization === undefined ? {} : { organization }),
+        ...(mfaCode === undefined ? {} : { mfa_code: mfaCode }),
+      },
       anonymous: true,
     }),
   acceptInvite: (token: string, password?: string, displayName?: string) =>

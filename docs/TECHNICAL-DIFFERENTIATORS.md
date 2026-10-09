@@ -2,7 +2,7 @@
 
 Concrete engineering characteristics that exist in sniper-suite 0.1.0, each
 with its location in the tree. This document does **not** rank the project,
-compare it to competitors, call it "best"/"enterprise"/"production-proven",
+compare it to competitors, call it "best"/"enterprise"/"proven in production",
 or make performance-superiority claims. Whether these characteristics matter
 is the buyer's judgment; that they exist is verifiable.
 
@@ -115,7 +115,7 @@ is the buyer's judgment; that they exist is verifiable.
     11-field v2 `Order`, correct domain separator, type-3 signature wrapping,
     L1/L2 CLOB auth headers, CTF ERC-1155 balance reads
     (`crates/module-polymarket/src/eip712.rs` et al.) — wire format
-    mock-verified.
+    covered by mock tests.
 27. **Three Solana exit venues behind one executor** — PumpSwap, Raydium,
     Jupiter routing for sniper exits (`crates/module-sniper/src/exit.rs`).
 
@@ -127,9 +127,9 @@ is the buyer's judgment; that they exist is verifiable.
     validator e2e, and a VERIFIED / PREVIOUSLY VERIFIED /
     GATED / NOT-EXECUTED taxonomy applied consistently across
     `release-manifest.json`, `docs/HANDOVER.md`, `docs/TESTING.md`,
-    `AUDIT.md` — unexecuted things are never labeled as passing.
+    `archive/AUDIT.md` — unexecuted things are never labeled as passing.
 29. **One-command reproducible release gate** —
-    `scripts/release-check.sh`: 20 gates (files, version identity, toolchain
+    `scripts/release-check.sh`: scripted gates (files, version identity, toolchain
     pin, migration monotonicity, TODO/stub marker scan, secret scan, fmt,
     check, clippy, full test matrix against real PG/Redis, staking suite,
     cargo-audit ×2, cargo-deny), exit-code honest, gated suites announce

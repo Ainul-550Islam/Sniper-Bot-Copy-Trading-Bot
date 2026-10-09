@@ -1,0 +1,29 @@
+sniper-suite {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}".
+
+Service:
+  {{ include "sniper-suite.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Check readiness from inside the cluster:
+  curl -fsS http://{{ include "sniper-suite.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/api/health
+
+{{- if .Values.ingress.enabled }}
+
+Ingress host(s):
+{{- range .Values.ingress.hosts }}
+  http(s)://{{ .host }}
+{{- end }}
+{{- else }}
+
+Ingress is disabled. Port-forward to reach the API locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sniper-suite.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+Next steps:
+  1. Ensure POSTGRES_URL / REDIS_URL point at reachable instances.
+  2. Confirm the deployment API key is set (non-loopback binds refuse to
+     serve mutating routes without one).
+  3. Migrations: the server auto-applies crates/core/migrations/ at
+     startup. With migrationJob.enabled=true they run in a pre-upgrade
+     Job instead (MIGRATE_ONLY=1), blocking the rollout on failure.
+  4. Watch rollout:
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "sniper-suite.fullname" . }}

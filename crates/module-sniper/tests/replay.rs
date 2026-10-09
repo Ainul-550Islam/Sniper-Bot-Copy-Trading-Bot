@@ -90,7 +90,12 @@ fn curve_snapshot() -> MarketSnapshot {
         pool_open_time: None,
         mint_authority_revoked: Some(true),
         freeze_authority_revoked: Some(true),
+        // Replay predates the sell probe: serde(default) keeps this None,
+        // the gate skips it, and non-strict replay is unaffected.
+        sell_probe: None,
         creator_initial_buy_sol: Some(0.5),
+        top_holders: None,
+        bundling: None,
         spot_price_sol: 2.9e-8,
         fetched_at: t0(),
     }

@@ -2672,6 +2672,7 @@ dependencies = [
  "futures",
  "futures-util",
  "rand 0.8.8",
+ "reqwest",
  "serde",
  "serde_json",
  "solana-kit",
@@ -2688,15 +2689,20 @@ name = "module-telegram"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bot-core",
  "chrono",
  "futures",
+ "hex",
+ "hmac 0.12.1",
  "module-copy",
  "module-polymarket",
  "module-sniper",
+ "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "solana-kit",
  "tokio",
  "tracing",
@@ -3596,6 +3602,7 @@ version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4068,6 +4075,7 @@ dependencies = [
  "redis",
  "reqwest",
  "ring",
+ "rustls 0.23.45",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4077,6 +4085,7 @@ dependencies = [
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls 0.26.5",
  "tower",
  "tower-http",
  "tracing",
@@ -4793,6 +4802,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

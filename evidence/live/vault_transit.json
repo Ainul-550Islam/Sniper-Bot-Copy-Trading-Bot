@@ -1,0 +1,11 @@
+{
+  "validation_id": "vault_transit",
+  "provider": "vault",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "LIVE_VAULT=1 VAULT_ADDR=<redacted> VAULT_TOKEN=<redacted> cargo test -p sniper-suite --test live_vault_transit -- --ignored",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"transit encrypt+decrypt round-trip; attestation = ciphertext version prefix"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

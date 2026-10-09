@@ -23,6 +23,53 @@
       }
     },
     "schemas": {
+      "AlertItem": {
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_acknowledged": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "warning",
+              "critical",
+              "emergency"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "severity",
+          "category",
+          "title",
+          "message",
+          "is_acknowledged",
+          "created_at"
+        ],
+        "type": "object"
+      },
       "ApiKeyMetadata": {
         "description": "Metadata view. The secret material exists only in the create response, once.",
         "properties": {
@@ -74,6 +121,94 @@
           "role",
           "created_at",
           "usable"
+        ],
+        "type": "object"
+      },
+      "BacktestRecord": {
+        "properties": {
+          "completed_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "final_balance_usd": {
+            "type": "number"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "initial_balance_usd": {
+            "type": "number"
+          },
+          "max_drawdown_pct": {
+            "type": "number"
+          },
+          "net_pnl_usd": {
+            "type": "number"
+          },
+          "net_roi_pct": {
+            "type": "number"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "period_end": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "period_start": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "sharpe_ratio": {
+            "type": "number"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "strategy_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "strategy_name": {
+            "type": "string"
+          },
+          "total_trades": {
+            "type": "integer"
+          },
+          "venue": {
+            "type": "string"
+          },
+          "win_rate_pct": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "strategy_id",
+          "strategy_name",
+          "venue",
+          "period_start",
+          "period_end",
+          "initial_balance_usd",
+          "status",
+          "created_at"
         ],
         "type": "object"
       },
@@ -539,6 +674,51 @@
         ],
         "type": "object"
       },
+      "ComplianceReport": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "download_url": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "record_count": {
+            "type": "integer"
+          },
+          "size_bytes": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "name",
+          "type",
+          "format",
+          "size_bytes",
+          "record_count",
+          "created_at",
+          "download_url"
+        ],
+        "type": "object"
+      },
       "CredentialRefView": {
         "properties": {
           "kind": {
@@ -834,6 +1014,64 @@
         ],
         "type": "object"
       },
+      "MarketTicker": {
+        "properties": {
+          "base_asset": {
+            "type": "string"
+          },
+          "change_24h_pct": {
+            "type": "number"
+          },
+          "compatible_modules": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "liquidity_usd": {
+            "type": "number"
+          },
+          "name": {
+            "type": "string"
+          },
+          "price_usd": {
+            "type": "number"
+          },
+          "quote_asset": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "venue": {
+            "type": "string"
+          },
+          "volume_24h_usd": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "symbol",
+          "name",
+          "venue",
+          "base_asset",
+          "quote_asset",
+          "price_usd",
+          "change_24h_pct",
+          "volume_24h_usd",
+          "liquidity_usd",
+          "is_active",
+          "compatible_modules"
+        ],
+        "type": "object"
+      },
       "Membership": {
         "properties": {
           "created_at": {
@@ -995,6 +1233,58 @@
         ],
         "type": "object"
       },
+      "PortfolioSummary": {
+        "properties": {
+          "allocated_margin_usd_cents": {
+            "type": "integer"
+          },
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "available_cash_usd_cents": {
+            "type": "integer"
+          },
+          "exposures": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "is_stale": {
+            "type": "boolean"
+          },
+          "max_drawdown_bps": {
+            "type": "integer"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "realized_pnl_30d_usd_cents": {
+            "type": "integer"
+          },
+          "total_equity_usd_cents": {
+            "type": "integer"
+          },
+          "unrealized_pnl_usd_cents": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "organization_id",
+          "total_equity_usd_cents",
+          "available_cash_usd_cents",
+          "allocated_margin_usd_cents",
+          "unrealized_pnl_usd_cents",
+          "realized_pnl_30d_usd_cents",
+          "max_drawdown_bps",
+          "exposures",
+          "as_of",
+          "is_stale"
+        ],
+        "type": "object"
+      },
       "ReadinessOperator": {
         "properties": {
           "as_of": {
@@ -1127,6 +1417,93 @@
         ],
         "type": "object"
       },
+      "RiskDashboardState": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "current_daily_loss_ref": {
+            "description": "Reference-unit limit or null; see rules."
+          },
+          "current_drawdown_ref": {
+            "description": "Reference-unit limit or null; see rules."
+          },
+          "daily_loss_limit_ref": {
+            "description": "Reference-unit limit or null; see rules."
+          },
+          "durable": {
+            "type": "boolean"
+          },
+          "kill_switch_active": {
+            "type": "boolean"
+          },
+          "max_drawdown_limit_ref": {
+            "description": "Reference-unit limit or null; see rules."
+          },
+          "modules": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "reference_asset": {
+            "type": "string"
+          },
+          "rules": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "organization_id",
+          "kill_switch_active",
+          "modules",
+          "durable",
+          "reference_asset",
+          "max_drawdown_limit_ref",
+          "current_drawdown_ref",
+          "daily_loss_limit_ref",
+          "current_daily_loss_ref",
+          "rules",
+          "as_of"
+        ],
+        "type": "object"
+      },
+      "SecurityPosture": {
+        "properties": {
+          "active_signers": {
+            "type": "integer"
+          },
+          "ip_allowlist_count": {
+            "type": "integer"
+          },
+          "kms_type": {
+            "type": "string"
+          },
+          "mfa_enforced": {
+            "type": "boolean"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "organization_id",
+          "mfa_enforced",
+          "ip_allowlist_count",
+          "active_signers",
+          "kms_type"
+        ],
+        "type": "object"
+      },
       "SecuritySummary": {
         "description": "Every field is derived from this deployment's configuration or from the credential that made the request. None of them is a constant.",
         "properties": {
@@ -1247,6 +1624,154 @@
           "public_address",
           "provider_type",
           "status"
+        ],
+        "type": "object"
+      },
+      "StrategyRecord": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "module_family": {
+            "enum": [
+              "sniper",
+              "copy",
+              "polymarket"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "parameters": {
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "active",
+              "paused",
+              "archived"
+            ],
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "module_family",
+          "name",
+          "status",
+          "version",
+          "parameters",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "TeamInvite": {
+        "properties": {
+          "email": {
+            "format": "email",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "operator",
+              "analyst",
+              "viewer"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "role"
+        ],
+        "type": "object"
+      },
+      "TotpEnrollment": {
+        "properties": {
+          "backup_codes": {
+            "items": {
+              "type": "string",
+              "writeOnly": true
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "backup_codes_status": {
+            "type": "string"
+          },
+          "device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "otpauth_url": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "secret": {
+            "description": "Shown once during enrollment; never returned by status or device-list endpoints.",
+            "type": "string",
+            "writeOnly": true
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "device_id",
+          "secret",
+          "otpauth_url",
+          "verified"
+        ],
+        "type": "object"
+      },
+      "TotpVerification": {
+        "properties": {
+          "device_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "session_promoted": {
+            "type": "boolean"
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "device_id",
+          "verified",
+          "session_promoted"
         ],
         "type": "object"
       },
@@ -1442,6 +1967,49 @@
           "status"
         ],
         "type": "object"
+      },
+      "WebhookEndpoint": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          },
+          "url": {
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "url",
+          "events",
+          "is_active",
+          "created_at"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -1455,10 +2023,82 @@
   "info": {
     "description": "Multi-tenant SaaS contract over the TASK 7A control plane. Trading truth (orders, fills, positions, risk, ledger, HA) remains owned by the TASK 1–6 engines and is exposed read-only to tenants. Billing/usage reads are served through the deterministic exports (`/api/saas/exports?kind=subscription|usage|...`); there are no separate plan-catalogue or usage endpoints.",
     "title": "Sniper Suite SaaS Control Plane",
-    "version": "2.0.0"
+    "version": "2.2.0"
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/accounting/findings": {
+      "get": {
+        "description": "Read-only accounting reconciliation findings.",
+        "operationId": "operator.accountingFindings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Findings."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/accounting/portfolio": {
+      "get": {
+        "description": "Read-only accounting view of the portfolio.",
+        "operationId": "operator.accountingPortfolio",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Portfolio accounting."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/ha": {
+      "get": {
+        "description": "High-availability state: leader, replicas, failover readiness.",
+        "operationId": "operator.ha",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "HA state."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "operator"
+        ]
+      }
+    },
     "/api/ops/migration-health": {
       "get": {
         "description": "Platform administrators only: the answer describes the deployment, not a tenant, and it exposes the shape of the schema. Production runs with DATABASE_AUTO_MIGRATE=false, so a binary can start, pass /health and /ready, and still be missing the columns its queries use — this endpoint is the only external way to see that. A database AHEAD of the binary is reported as healthy because that is the expected state during a rollback.",
@@ -1499,6 +2139,184 @@
         "summary": "Does the database schema match this build? 200 for in_sync or ahead, 503 for pending, dirty or checksum_mismatch.",
         "tags": [
           "ops"
+        ]
+      }
+    },
+    "/api/orders": {
+      "get": {
+        "description": "Read-only operator view of all orders.",
+        "operationId": "operator.listOrders",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Orders."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/positions": {
+      "get": {
+        "description": "Read-only operator view of all positions.",
+        "operationId": "operator.listPositions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Positions."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/risk/global": {
+      "get": {
+        "description": "Read-only global risk state (limits, gates, kill-switch position).",
+        "operationId": "operator.globalRisk",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Global risk state."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/saas/activity": {
+      "get": {
+        "description": "Tenant activity feed (audit-derived events for the caller's organization).",
+        "operationId": "saas.activity",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The organization's recent activity page."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/saas/alerts": {
+      "get": {
+        "description": "Recent tenant alerts (newest first, at most 200) and the unacknowledged count for the caller's organization.",
+        "operationId": "saas.listAlerts",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "$ref": "#/components/schemas/AlertItem"
+                      },
+                      "type": "array"
+                    },
+                    "organization_id": {
+                      "format": "uuid",
+                      "type": "string"
+                    },
+                    "unacknowledged_count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "organization_id",
+                    "items",
+                    "unacknowledged_count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Recent tenant alerts and the unacknowledged count."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/saas/alerts/{id}/ack": {
+      "post": {
+        "description": "Acknowledge one alert by id. Idempotent: re-acknowledging an acknowledged alert is a no-op success.",
+        "operationId": "saas.acknowledgeAlert",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The alert is acknowledged."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "events"
         ]
       }
     },
@@ -1673,6 +2491,30 @@
         }
       ]
     },
+    "/api/saas/audit/export": {
+      "get": {
+        "description": "Download the caller organization's audit trail export. Redacted: secrets and token material never appear in exports.",
+        "operationId": "saas.auditExport",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The export payload."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "exports"
+        ]
+      }
+    },
     "/api/saas/backup/status": {
       "get": {
         "operationId": "saas.backupStatus",
@@ -1819,6 +2661,44 @@
         ]
       }
     },
+    "/api/saas/billing/reconcile/{id}": {
+      "get": {
+        "description": "Platform-admin read of one organization's billing reconciliation state. The id-less variant (`/api/saas/billing/reconcile`) serves the caller's own organization.",
+        "operationId": "saas.billingReconcileFor",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Reconciliation state."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "billing"
+        ]
+      }
+    },
     "/api/saas/billing/status": {
       "get": {
         "operationId": "saas.billingStatus",
@@ -1848,6 +2728,44 @@
             "bearerAuth": []
           }
         ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/saas/billing/status/{id}": {
+      "get": {
+        "description": "Platform-admin read of one organization's billing status. The id-less variant serves the caller's own organization.",
+        "operationId": "saas.billingStatusFor",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Billing status."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
         "tags": [
           "billing"
         ]
@@ -2005,6 +2923,44 @@
         ]
       }
     },
+    "/api/saas/commercial/state/{id}": {
+      "get": {
+        "description": "Platform-admin read of one organization's commercial state (plan, entitlements, kill-switch flags). The id-less variant serves the caller's own organization.",
+        "operationId": "saas.commercialStateFor",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Commercial state."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "billing"
+        ]
+      }
+    },
     "/api/saas/custody/health": {
       "get": {
         "operationId": "saas.custodyHealth",
@@ -2028,6 +2984,44 @@
             "bearerAuth": []
           }
         ],
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/health/{id}": {
+      "get": {
+        "description": "Platform-admin read of one organization's custody health. The id-less variant serves the caller's own organization.",
+        "operationId": "saas.custodyHealthFor",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Custody health."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
         "tags": [
           "custody"
         ]
@@ -2168,6 +3162,246 @@
           }
         ],
         "summary": "Activate a custody profile (pending -> active). Closed tenants cannot activate.",
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/profiles/{id}/revoke": {
+      "post": {
+        "description": "Revoke one custody profile. Irreversible for the revoked profile; audited.",
+        "operationId": "saas.revokeCustodyProfile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The profile is revoked."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/profiles/{id}/signers": {
+      "get": {
+        "description": "List the signers attached to one custody profile. Public key material is returned; private material never is.",
+        "operationId": "saas.listCustodyProfileSigners",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The profile's signers."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/rotations": {
+      "post": {
+        "description": "Open a signer rotation for a custody profile (old signer -> new signer). The rotation stays pending until activated.",
+        "operationId": "saas.createCustodyRotation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "new_signer_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "old_signer_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "profile_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "profile_id",
+                  "old_signer_id",
+                  "new_signer_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The rotation was created."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/rotations/{id}": {
+      "get": {
+        "description": "Read one rotation's state machine (pending / activated / revoked).",
+        "operationId": "saas.getCustodyRotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The rotation."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/rotations/{id}/activate": {
+      "post": {
+        "description": "Activate a pending rotation: the new signer becomes the profile's signer.",
+        "operationId": "saas.activateCustodyRotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The rotation is active."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/custody/rotations/{id}/revoke": {
+      "post": {
+        "description": "Revoke a pending rotation before it activates.",
+        "operationId": "saas.revokeCustodyRotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The rotation is revoked."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
         "tags": [
           "custody"
         ]
@@ -2333,6 +3567,54 @@
         ]
       }
     },
+    "/api/saas/custody/signers/{id}/capabilities": {
+      "post": {
+        "description": "Update what a signer is allowed to do (per-capability flags).",
+        "operationId": "saas.setSignerCapabilities",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Capabilities updated."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
     "/api/saas/custody/signers/{id}/resolve": {
       "get": {
         "operationId": "saas.resolveSigner",
@@ -2384,6 +3666,196 @@
         ]
       }
     },
+    "/api/saas/custody/signers/{id}/revoke": {
+      "post": {
+        "description": "Revoke one signer. The signer stops signing immediately; audited.",
+        "operationId": "saas.revokeSigner",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The signer is revoked."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/data-lifecycle/{id}/disconnect": {
+      "post": {
+        "description": "Disconnect one integration for the caller's organization and stop any jobs that use it.",
+        "operationId": "saas.disconnectIntegration",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The integration is disconnected."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/data-lifecycle/{id}/revoke-credentials": {
+      "post": {
+        "description": "Revoke the stored credentials of one integration without deleting its history.",
+        "operationId": "saas.revokeIntegrationCredentials",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Credentials revoked."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/data-lifecycle/{id}/revoke-sessions": {
+      "post": {
+        "description": "Revoke live sessions that were established through one integration.",
+        "operationId": "saas.revokeIntegrationSessions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Sessions revoked."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/data-lifecycle/{id}/schedule-retention": {
+      "post": {
+        "description": "Schedule data-retention processing for one integration's stored data.",
+        "operationId": "saas.scheduleRetention",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Retention scheduled."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
     "/api/saas/data-lifecycle/{id}/status": {
       "get": {
         "operationId": "saas.lifecycleStatus",
@@ -2413,6 +3885,127 @@
         ],
         "tags": [
           "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/email-verification/confirm": {
+      "post": {
+        "operationId": "saas.confirmEmailVerification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "token": {
+                    "description": "The one-time token from the verification link.",
+                    "type": "string",
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "verified"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Email address verified."
+          },
+          "422": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "503": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "summary": "Consume a single-use verification token and mark the account's email address as verified.",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/saas/email-verification/request": {
+      "post": {
+        "operationId": "saas.requestEmailVerification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "email": {
+                    "format": "email",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "expires_minutes": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "accepted"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Accepted; identical body in every case."
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "503": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "summary": "Request an email-verification link. The response is identical whether or not the address belongs to an unverified account (no account enumeration).",
+        "tags": [
+          "auth"
         ]
       }
     },
@@ -2609,6 +4202,52 @@
         "summary": "Advance deprovisioning job phase. Restart-safe and idempotent.",
         "tags": [
           "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/notifications/preferences": {
+      "get": {
+        "description": "The caller's notification preferences.",
+        "operationId": "saas.notificationPreferences",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Preferences."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/saas/openapi.json": {
+      "get": {
+        "description": "The OpenAPI document itself, served unauthenticated: a contract is only useful if a buyer can read it before buying. The committed artifact at openapi/openapi.json is byte-identical (enforced by crates/server/tests/openapi_artifact.rs).",
+        "operationId": "saas.openapiDocument",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The OpenAPI 3.1 document."
+          }
+        },
+        "security": [],
+        "tags": [
+          "contract"
         ]
       }
     },
@@ -2913,6 +4552,82 @@
         }
       ]
     },
+    "/api/saas/organizations/{id}/resume": {
+      "post": {
+        "description": "Platform-admin only: resume a suspended organization.",
+        "operationId": "saas.resumeOrganization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The organization is active again."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
+    "/api/saas/organizations/{id}/suspend": {
+      "post": {
+        "description": "Platform-admin only: suspend an organization. Authenticated traffic is refused while suspended; the kill-switch test suite covers the flow.",
+        "operationId": "saas.suspendOrganization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The organization is suspended."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "lifecycle"
+        ]
+      }
+    },
     "/api/saas/organizations/{id}/suspension": {
       "parameters": [
         {
@@ -2926,7 +4641,7 @@
         }
       ],
       "post": {
-        "operationId": "saas.suspendOrganization",
+        "operationId": "saas.setOrganizationSuspension",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2977,6 +4692,178 @@
         "summary": "Suspend or restore the organization (platform staff).",
         "tags": [
           "organizations"
+        ]
+      }
+    },
+    "/api/saas/password-reset/confirm": {
+      "post": {
+        "operationId": "saas.confirmPasswordReset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "new_password": {
+                    "minLength": 12,
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "token": {
+                    "description": "The one-time token from the reset link.",
+                    "type": "string",
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "token",
+                  "new_password"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "reset_complete"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Password changed; all sessions revoked."
+          },
+          "422": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "503": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "summary": "Consume a single-use reset token, set the new password and revoke every live session for the user.",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/saas/password-reset/request": {
+      "post": {
+        "operationId": "saas.requestPasswordReset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "email": {
+                    "format": "email",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "expires_minutes": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "accepted"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Accepted; identical body for known and unknown addresses."
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "503": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "summary": "Request a password-reset email. The response is identical whether or not the address exists (no account enumeration); 202 means the request was accepted for processing.",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/saas/portfolio": {
+      "get": {
+        "description": "Read-only portfolio roll-up for the caller's organization, assembled from the trading data plane.",
+        "operationId": "saas.portfolio",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortfolioSummary"
+                }
+              }
+            },
+            "description": "The portfolio roll-up."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "reports"
+        ]
+      }
+    },
+    "/api/saas/pricing": {
+      "get": {
+        "description": "The public plan/pricing catalogue rendered on the pricing page. Read-only; contains no tenant data.",
+        "operationId": "saas.pricing",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Plan catalogue."
+          }
+        },
+        "tags": [
+          "billing"
         ]
       }
     },
@@ -3031,6 +4918,331 @@
         ]
       }
     },
+    "/api/saas/referrals/attribution": {
+      "get": {
+        "description": "Inbound attribution (who referred this organization) and outbound list (organizations this organization referred).",
+        "operationId": "saas.referralAttribution",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Attribution view."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "referrals"
+        ]
+      }
+    },
+    "/api/saas/referrals/codes": {
+      "get": {
+        "description": "List this organization's referral codes with redemption counts (migration 0049).",
+        "operationId": "saas.listReferralCodes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The organization's referral codes."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "referrals"
+        ]
+      },
+      "post": {
+        "description": "Mint a referral code for this organization. Codes are generated server-side from the OS RNG; clients never choose codes.",
+        "operationId": "saas.mintReferralCode",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The minted code (shown once)."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "referrals"
+        ]
+      }
+    },
+    "/api/saas/referrals/codes/{code}/disable": {
+      "post": {
+        "description": "Retire one of this organization's referral codes. Existing attributions are untouched (they are facts, not permissions).",
+        "operationId": "saas.disableReferralCode",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The code is disabled."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "No active code with that value belongs to this organization."
+          }
+        },
+        "tags": [
+          "referrals"
+        ]
+      }
+    },
+    "/api/saas/referrals/redeem": {
+      "post": {
+        "description": "Attribute this organization to a referral code. Once per organization, forever (anti-churn); an organization cannot redeem its own code.",
+        "operationId": "saas.redeemReferralCode",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Attribution recorded."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "No active referral code with that value."
+          },
+          "409": {
+            "description": "Already attributed, or self-referral."
+          }
+        },
+        "tags": [
+          "referrals"
+        ]
+      }
+    },
+    "/api/saas/reports": {
+      "get": {
+        "operationId": "saas.listReports",
+        "responses": {
+          "200": {
+            "description": "Reports list returned"
+          }
+        },
+        "summary": "List audit and compliance reports",
+        "tags": [
+          "Reports"
+        ]
+      }
+    },
+    "/api/saas/reports/export": {
+      "post": {
+        "operationId": "saas.exportReport",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComplianceReport"
+                }
+              }
+            },
+            "description": "Report export created"
+          }
+        },
+        "summary": "Generate and persist a tenant report export",
+        "tags": [
+          "Reports"
+        ]
+      }
+    },
+    "/api/saas/reports/{id}/download": {
+      "get": {
+        "operationId": "saas.downloadReport",
+        "responses": {
+          "200": {
+            "description": "Report bytes returned"
+          },
+          "404": {
+            "description": "Report not found"
+          }
+        },
+        "summary": "Download a tenant report export",
+        "tags": [
+          "Reports"
+        ]
+      }
+    },
+    "/api/saas/risk-dashboard": {
+      "get": {
+        "description": "Organization risk dashboard: gate states, kill-switch position and recent risk events.",
+        "operationId": "saas.riskDashboard",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RiskDashboardState"
+                }
+              }
+            },
+            "description": "Risk dashboard payload."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "reports"
+        ]
+      }
+    },
+    "/api/saas/risk-dashboard/kill-switch": {
+      "post": {
+        "description": "Arm or disarm the organization kill switch. Refusal kinds are stable (see kill_switch_flow.rs); the response field is `outcome`.",
+        "operationId": "saas.killSwitch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The new kill-switch state."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "reports"
+        ]
+      }
+    },
+    "/api/saas/security/ip-allowlist": {
+      "post": {
+        "operationId": "saas.setIpAllowlist",
+        "responses": {
+          "200": {
+            "description": "IP allowlist updated"
+          }
+        },
+        "summary": "Replace the tenant IP CIDR allowlist",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/api/saas/security/mfa-enforce": {
+      "post": {
+        "operationId": "saas.setMfaEnforcement",
+        "responses": {
+          "200": {
+            "description": "MFA policy updated"
+          },
+          "409": {
+            "description": "A verified TOTP device is required"
+          }
+        },
+        "summary": "Enable or disable tenant MFA enforcement",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/api/saas/security/rotate-tokens": {
+      "post": {
+        "operationId": "saas.rotateTokens",
+        "responses": {
+          "200": {
+            "description": "Tokens rotated successfully"
+          }
+        },
+        "summary": "Rotate all organization credentials and sessions",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/api/saas/security/status": {
+      "get": {
+        "operationId": "saas.getSecurityStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityPosture"
+                }
+              }
+            },
+            "description": "Security posture returned"
+          }
+        },
+        "summary": "Read tenant security posture",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
     "/api/saas/security/summary": {
       "get": {
         "operationId": "saas.securitySummary",
@@ -3066,6 +5278,90 @@
         ]
       }
     },
+    "/api/saas/security/totp/setup": {
+      "post": {
+        "operationId": "saas.setupTotp",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrollment"
+                }
+              }
+            },
+            "description": "One-time TOTP enrollment secret returned; secret is write-only and must be stored by the authenticator app"
+          },
+          "429": {
+            "description": "TOTP setup is rate limited"
+          },
+          "503": {
+            "description": "MFA encryption or storage unavailable"
+          }
+        },
+        "summary": "Create an encrypted TOTP enrollment",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/api/saas/security/totp/verify": {
+      "post": {
+        "operationId": "saas.verifyTotp",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "code": {
+                    "pattern": "^[0-9]{6}$",
+                    "type": "string"
+                  },
+                  "device_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "device_id",
+                  "code"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpVerification"
+                }
+              }
+            },
+            "description": "TOTP device verified; session_promoted is true for onboarding sessions"
+          },
+          "401": {
+            "description": "Invalid code"
+          },
+          "409": {
+            "description": "TOTP counter already used"
+          },
+          "429": {
+            "description": "TOTP verification is rate limited"
+          },
+          "503": {
+            "description": "TOTP state or session activation unavailable"
+          }
+        },
+        "summary": "Verify a TOTP enrollment code and promote a restricted session",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
     "/api/saas/sessions": {
       "post": {
         "operationId": "saas.login",
@@ -3076,6 +5372,15 @@
                 "properties": {
                   "email": {
                     "format": "email",
+                    "type": "string"
+                  },
+                  "mfa_code": {
+                    "description": "Current TOTP code when the selected organization enforces MFA.",
+                    "pattern": "^[0-9]{6}$",
+                    "type": "string"
+                  },
+                  "organization": {
+                    "description": "Organization slug used to scope login and apply its MFA policy.",
                     "type": "string"
                   },
                   "password": {
@@ -3099,6 +5404,17 @@
               "application/json": {
                 "schema": {
                   "properties": {
+                    "mfa_enrollment_required": {
+                      "description": "True only for a restricted session that may complete TOTP enrollment.",
+                      "type": "boolean"
+                    },
+                    "organization_id": {
+                      "format": "uuid",
+                      "type": "string"
+                    },
+                    "organization_slug": {
+                      "type": "string"
+                    },
                     "session": {
                       "properties": {
                         "expires_at": {
@@ -3108,6 +5424,13 @@
                         "id": {
                           "format": "uuid",
                           "type": "string"
+                        },
+                        "organization_id": {
+                          "format": "uuid",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
                         },
                         "prefix": {
                           "type": "string"
@@ -3131,6 +5454,12 @@
           },
           "401": {
             "$ref": "#/components/schemas/Error"
+          },
+          "409": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
           }
         },
         "summary": "Create a session. The token is returned exactly once and never stored server-side in plaintext.",
@@ -3139,12 +5468,360 @@
         ]
       }
     },
+    "/api/saas/sso/authorize": {
+      "get": {
+        "description": "Begin the OIDC authorization-code + PKCE flow for a tenant slug. Returns the IdP authorization URL and the opaque state; the front-end owns the redirect.",
+        "operationId": "saas.ssoAuthorize",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "organization",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The authorize URL and state."
+          },
+          "404": {
+            "description": "No active SSO configuration for that organization."
+          }
+        },
+        "security": [],
+        "tags": [
+          "security"
+        ]
+      }
+    },
+    "/api/saas/sso/callback": {
+      "post": {
+        "description": "Finish the OIDC flow: one-shot state, PKCE verifier, RS256 id_token signature vs issuer JWKS, iss/aud/exp, allowed_domains, JIT provisioning, session token returned exactly once.",
+        "operationId": "saas.ssoCallback",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "User, organization, session and the one-time session token."
+          },
+          "400": {
+            "description": "Invalid state, missing email, or domain not allowed."
+          },
+          "502": {
+            "description": "IdP discovery, token exchange, or signature verification failed."
+          }
+        },
+        "security": [],
+        "tags": [
+          "security"
+        ]
+      }
+    },
+    "/api/saas/sso/config": {
+      "delete": {
+        "description": "Remove SSO for this organization.",
+        "operationId": "saas.deleteSsoConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Removed."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "security"
+        ]
+      },
+      "get": {
+        "description": "This organization's SSO configuration, without secrets (client_secret_set is a boolean).",
+        "operationId": "saas.getSsoConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The SSO configuration."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "SSO is not configured for this organization."
+          }
+        },
+        "tags": [
+          "security"
+        ]
+      },
+      "put": {
+        "description": "Create or replace the organization's OIDC SSO configuration (migration 0053). The client secret is encrypted at rest and never returned. role_mapping can never grant platform_admin.",
+        "operationId": "saas.putSsoConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The stored configuration (no secrets)."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "security"
+        ]
+      }
+    },
+    "/api/saas/status": {
+      "get": {
+        "description": "Control-plane status: version, feature flags and dependency health, with secret-free redaction.",
+        "operationId": "saas.status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Status payload."
+          }
+        },
+        "tags": [
+          "contract"
+        ]
+      }
+    },
+    "/api/saas/support/tickets": {
+      "get": {
+        "description": "List the caller organization's support tickets.",
+        "operationId": "saas.listSupportTickets",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The ticket list."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      },
+      "post": {
+        "description": "Open a support ticket for the caller's organization.",
+        "operationId": "saas.createSupportTicket",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The ticket was created."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/api/saas/team/invites": {
+      "post": {
+        "operationId": "saas.createInvite",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamInvite"
+                }
+              }
+            },
+            "description": "Invitation dispatched"
+          },
+          "400": {
+            "description": "Invalid email"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Invite member to tenant organization",
+        "tags": [
+          "Team & Access"
+        ]
+      }
+    },
     "/api/saas/team/invites/accept": {
       "post": {
         "operationId": "saas.acceptInvite",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "display_name": {
+                    "maxLength": 160,
+                    "type": "string"
+                  },
+                  "password": {
+                    "minLength": 12,
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "token": {
+                    "type": "string",
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
-            "description": "Invitation accepted and session issued"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "membership": {
+                      "properties": {
+                        "id": {
+                          "format": "uuid",
+                          "type": "string"
+                        },
+                        "role": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "mfa_enrollment_required": {
+                      "type": "boolean"
+                    },
+                    "organization_id": {
+                      "format": "uuid",
+                      "type": "string"
+                    },
+                    "organization_slug": {
+                      "type": "string"
+                    },
+                    "session": {
+                      "properties": {
+                        "expires_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "id": {
+                          "format": "uuid",
+                          "type": "string"
+                        },
+                        "organization_id": {
+                          "format": "uuid",
+                          "type": "string"
+                        },
+                        "prefix": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "token": {
+                      "type": "string",
+                      "writeOnly": true
+                    },
+                    "user": {
+                      "$ref": "#/components/schemas/UserProfile"
+                    }
+                  },
+                  "required": [
+                    "user",
+                    "token",
+                    "session",
+                    "organization_id",
+                    "organization_slug",
+                    "mfa_enrollment_required",
+                    "membership"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Invitation accepted; returned token is restricted to MFA enrollment when required"
           },
           "400": {
             "description": "Invalid password or invitation token"
@@ -3155,14 +5832,143 @@
           "409": {
             "description": "Invitation already used or membership already exists"
           },
+          "429": {
+            "description": "Invitation acceptance is rate limited"
+          },
           "503": {
-            "description": "Identity storage unavailable"
+            "description": "Identity storage or mandatory MFA enrollment unavailable"
           }
         },
         "security": [],
-        "summary": "Accept a one-time tenant invitation",
+        "summary": "Accept a one-time tenant invitation; MFA-protected tenants receive an enrollment-only session",
         "tags": [
           "Team & Access"
+        ]
+      }
+    },
+    "/api/saas/team/invites/{id}": {
+      "delete": {
+        "operationId": "saas.revokeInvite",
+        "responses": {
+          "200": {
+            "description": "Invitation revoked"
+          },
+          "404": {
+            "description": "Invitation not found"
+          }
+        },
+        "summary": "Revoke a pending tenant invitation",
+        "tags": [
+          "Team & Access"
+        ]
+      }
+    },
+    "/api/saas/team/invites/{id}/resend": {
+      "post": {
+        "operationId": "saas.resendInvite",
+        "responses": {
+          "200": {
+            "description": "Invitation token returned once"
+          },
+          "404": {
+            "description": "Invitation not found"
+          }
+        },
+        "summary": "Rotate and resend a tenant invitation token",
+        "tags": [
+          "Team & Access"
+        ]
+      }
+    },
+    "/api/saas/team/members/{id}": {
+      "delete": {
+        "description": "Remove one member from the caller's organization. Scoped to the caller's tenant; naming another tenant's member is refused without revealing existence.",
+        "operationId": "saas.removeTeamMember",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The member is removed."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "organizations"
+        ]
+      },
+      "patch": {
+        "description": "Change one member's role. Role-assignment limits are enforced server-side (a role above the caller's own is `role_not_assignable_by_tenant`).",
+        "operationId": "saas.updateTeamMemberRole",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "role"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The member's new role."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "organizations"
         ]
       }
     },
@@ -3189,6 +5995,44 @@
             "bearerAuth": []
           }
         ],
+        "tags": [
+          "billing"
+        ]
+      }
+    },
+    "/api/saas/usage/limits/{id}": {
+      "get": {
+        "description": "Platform-admin read of one organization's usage limits. The id-less variant serves the caller's own organization.",
+        "operationId": "saas.usageLimitsFor",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Usage limits."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
         "tags": [
           "billing"
         ]
@@ -3634,6 +6478,2469 @@
           "wallet-access"
         ]
       }
+    },
+    "/api/saas/wallet-pools": {
+      "get": {
+        "description": "List this organization's wallet pools (migration 0050) with active member counts.",
+        "operationId": "saas.listWalletPools",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The organization's wallet pools."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      },
+      "post": {
+        "description": "Create a named pool of this organization's custody signers. allocation is round_robin or weighted_split.",
+        "operationId": "saas.createWalletPool",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The created pool."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "A pool with that name already exists for this organization."
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/wallet-pools/{id}": {
+      "get": {
+        "description": "One wallet pool with its active members, resolved to same-org custody signers.",
+        "operationId": "saas.getWalletPool",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The pool and its members."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "No pool with that id belongs to this organization."
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      },
+      "patch": {
+        "description": "Partial update of a pool: name, allocation, or status (active/disabled).",
+        "operationId": "saas.updateWalletPool",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The updated pool."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "No pool with that id belongs to this organization."
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/wallet-pools/{id}/members": {
+      "post": {
+        "description": "Add one of this organization's active custody signers to the pool. Cross-tenant membership is refused in Rust and by a Postgres trigger.",
+        "operationId": "saas.addWalletPoolMember",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The new membership."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "No pool with that id belongs to this organization."
+          },
+          "409": {
+            "description": "That signer is already a member."
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/wallet-pools/{id}/members/{member_id}": {
+      "delete": {
+        "description": "Remove a member (status=removed). Immediate for NEW orders; open positions stay with their original wallet.",
+        "operationId": "saas.removeWalletPoolMember",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "member_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The member is removed."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "No such membership in this organization."
+          }
+        },
+        "tags": [
+          "custody"
+        ]
+      }
+    },
+    "/api/saas/webhooks": {
+      "get": {
+        "operationId": "saas.listWebhooks",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WebhookEndpoint"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Webhooks list returned"
+          }
+        },
+        "summary": "List configured outbound webhooks",
+        "tags": [
+          "Webhooks"
+        ]
+      },
+      "post": {
+        "operationId": "saas.createWebhook",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpoint"
+                }
+              }
+            },
+            "description": "Webhook registered"
+          }
+        },
+        "summary": "Register webhook endpoint",
+        "tags": [
+          "Webhooks"
+        ]
+      }
+    },
+    "/api/saas/webhooks/{id}": {
+      "delete": {
+        "operationId": "saas.deleteWebhook",
+        "responses": {
+          "200": {
+            "description": "Webhook deleted"
+          }
+        },
+        "summary": "Delete a tenant webhook endpoint",
+        "tags": [
+          "Webhooks"
+        ]
+      }
+    },
+    "/api/saas/webhooks/{id}/rotate": {
+      "post": {
+        "operationId": "saas.rotateWebhookSecret",
+        "responses": {
+          "200": {
+            "description": "One-time webhook secret returned"
+          }
+        },
+        "summary": "Rotate a tenant webhook secret",
+        "tags": [
+          "Webhooks"
+        ]
+      }
+    },
+    "/api/saas/webhooks/{id}/test": {
+      "post": {
+        "operationId": "saas.testWebhook",
+        "responses": {
+          "200": {
+            "description": "Webhook test delivered"
+          },
+          "502": {
+            "description": "Delivery failed"
+          }
+        },
+        "summary": "Send a signed webhook test event",
+        "tags": [
+          "Webhooks"
+        ]
+      }
+    },
+    "/api/status": {
+      "get": {
+        "description": "Operator service status (engines, feeds, storage).",
+        "operationId": "operator.status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Status."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/tenant/analytics": {
+      "get": {
+        "description": "Aggregated analytics for the tenant's trading activity (supports a `timeframe` query parameter).",
+        "operationId": "tenant.analytics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Analytics summary."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/backtests": {
+      "get": {
+        "operationId": "tenant.listBacktests",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BacktestRecord"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Backtest list returned"
+          }
+        },
+        "summary": "List backtests",
+        "tags": [
+          "Backtesting"
+        ]
+      },
+      "post": {
+        "operationId": "tenant.createBacktest",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BacktestRecord"
+                }
+              }
+            },
+            "description": "Backtest queued"
+          }
+        },
+        "summary": "Queue backtest execution",
+        "tags": [
+          "Backtesting"
+        ]
+      }
+    },
+    "/api/tenant/backtests/{id}": {
+      "get": {
+        "description": "One backtest run including `result_json`. Synthetic-price runs are labelled `synthetic` in the stored result; the API never presents them as live performance.",
+        "operationId": "tenant.getBacktest",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The backtest run."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/balances": {
+      "get": {
+        "description": "Wallet balances visible to the tenant.",
+        "operationId": "tenant.balances",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Balances."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/bots": {
+      "get": {
+        "description": "Runtime state of every module family for the tenant.",
+        "operationId": "tenant.listBots",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Module family runtimes."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/bots/{module}": {
+      "get": {
+        "description": "One module family's runtime state.",
+        "operationId": "tenant.getBot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "module",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The module runtime."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/copy/config": {
+      "get": {
+        "description": "Current copy-trading configuration for the tenant.",
+        "operationId": "tenant.getCopyConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Copy config."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      },
+      "put": {
+        "description": "Replace the copy-trading configuration. Writes are versioned and audited; a fenced paper mode applies when the tenant is not funded for live.",
+        "operationId": "tenant.putCopyConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The stored configuration."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/copy/controls": {
+      "post": {
+        "description": "Copy-trading control actions (start/stop/pause). Refusals use stable error kinds.",
+        "operationId": "tenant.copyControls",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The action outcome."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/copy/leaders": {
+      "get": {
+        "description": "Discoverable copy-trading leader wallets.",
+        "operationId": "tenant.listCopyLeaders",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Leader list."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/copy/leaders/{address}": {
+      "get": {
+        "description": "One leader wallet's copyable profile.",
+        "operationId": "tenant.getCopyLeader",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The leader profile."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/copy/links": {
+      "get": {
+        "description": "Open copy links (leader -> tenant follower relationships).",
+        "operationId": "tenant.copyLinks",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Open links."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/copy/status": {
+      "get": {
+        "description": "Copy-trading module status.",
+        "operationId": "tenant.copyStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Module status."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/dca-schedules": {
+      "get": {
+        "description": "This organization's DCA schedules, newest first. Filter with `status`; `limit` 1-200.",
+        "operationId": "tenant.listDcaSchedules",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "enum": [
+                "active",
+                "completed",
+                "paused",
+                "cancelled"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Invalid filter."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      },
+      "post": {
+        "description": "Create a DCA schedule with a hard SOL budget. Unlimited schedules are refused. Records intent per interval slot; never a fill.",
+        "operationId": "tenant.createDcaSchedule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Validation failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/dca-schedules/{id}/cancel": {
+      "post": {
+        "description": "Cancel an ACTIVE or PAUSED schedule. Refused with 409 while a worker is recording a run.",
+        "operationId": "tenant.cancelDcaSchedule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Not found in this organization."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Invalid transition, or a worker is recording a run."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/dca-schedules/{id}/pause": {
+      "post": {
+        "description": "Pause an ACTIVE schedule. No runs are recorded while paused.",
+        "operationId": "tenant.pauseDcaSchedule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Not found in this organization."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Invalid transition, or a worker is recording a run."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/dca-schedules/{id}/resume": {
+      "post": {
+        "description": "Resume a PAUSED schedule. The clock is re-anchored to now + interval, so missed slots are never replayed.",
+        "operationId": "tenant.resumeDcaSchedule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Not found in this organization."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Invalid transition, or a worker is recording a run."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/dca-schedules/{id}/runs": {
+      "get": {
+        "description": "Run ledger for one schedule (intent rows, newest first). Foreign ids return 404.",
+        "operationId": "tenant.listDcaRuns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Not found in this organization."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/executions": {
+      "get": {
+        "description": "Execution history (supports `since`, `until`, `order_id` query parameters).",
+        "operationId": "tenant.listExecutions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Executions page."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/executions/{id}": {
+      "get": {
+        "description": "One execution by id.",
+        "operationId": "tenant.getExecution",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The execution."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/integrations": {
+      "get": {
+        "description": "Integration states for the tenant (Telegram, Polymarket, exchanges).",
+        "operationId": "tenant.listIntegrations",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Integration list."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/limit-orders": {
+      "get": {
+        "description": "This organization's limit orders, newest first. Filter with `status`; page with `limit` (1-200) and `before` (RFC 3339 created_at, exclusive).",
+        "operationId": "tenant.listLimitOrders",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "enum": [
+                "active",
+                "triggered",
+                "cancelled",
+                "expired"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "A page of orders."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Invalid filter."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable. Never returns fabricated orders."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      },
+      "post": {
+        "description": "Create an ACTIVE limit order. Records intent only; execution is performed by the limit-order worker when the trigger is met.",
+        "operationId": "tenant.createLimitOrder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Order created."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Validation failed (side, trigger, mint, price, amount or expiry)."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/limit-orders/{id}/cancel": {
+      "post": {
+        "description": "Cancel an ACTIVE order that no worker is currently executing. Refusals are explicit: 409 when already terminal or being triggered, 404 when not found in this organization.",
+        "operationId": "tenant.cancelLimitOrder",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Cancelled."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Not found in this organization."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Not active, or being triggered."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Storage unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/markets": {
+      "get": {
+        "operationId": "tenant.listMarkets",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MarketTicker"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Markets list returned"
+          }
+        },
+        "summary": "List discovered markets",
+        "tags": [
+          "Market Data"
+        ]
+      }
+    },
+    "/api/tenant/markets/{id}": {
+      "get": {
+        "description": "One discovered market by id. Returns 503 `market_data_unavailable` (never fabricated rows) when the live feeds are dark.",
+        "operationId": "tenant.getMarket",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The market."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/onboarding": {
+      "get": {
+        "description": "Tenant onboarding checklist state.",
+        "operationId": "tenant.onboardingState",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Onboarding state."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/onboarding/complete": {
+      "post": {
+        "description": "Mark one onboarding step complete. Idempotent per step.",
+        "operationId": "tenant.completeOnboardingStep",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated onboarding state."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/orders": {
+      "get": {
+        "description": "Order history (supports `limit` and `cursor` query parameters).",
+        "operationId": "tenant.listOrders",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Orders page."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/orders/{id}": {
+      "get": {
+        "description": "One order by id.",
+        "operationId": "tenant.getOrder",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The order."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/orders/{id}/cancel": {
+      "post": {
+        "description": "Request cancellation of one order. Refusal kinds are stable; a cancel of an already-terminal order is refused, not faked.",
+        "operationId": "tenant.cancelOrder",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The cancellation outcome."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/polymarket/config": {
+      "get": {
+        "description": "Polymarket module configuration for the tenant.",
+        "operationId": "tenant.getPolymarketConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Configuration."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      },
+      "put": {
+        "description": "Replace the Polymarket module configuration. Versioned and audited.",
+        "operationId": "tenant.putPolymarketConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The stored configuration."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/polymarket/controls": {
+      "post": {
+        "description": "Polymarket module control actions.",
+        "operationId": "tenant.polymarketControls",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The action outcome."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/polymarket/fills": {
+      "get": {
+        "description": "Polymarket fills history (supports `since` and `until` query parameters).",
+        "operationId": "tenant.listPolymarketFills",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Fills page."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/polymarket/orders": {
+      "get": {
+        "description": "Polymarket orders (supports `limit` and `cursor` query parameters).",
+        "operationId": "tenant.listPolymarketOrders",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Orders page."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/polymarket/orders/{venue_order_id}": {
+      "get": {
+        "description": "One Polymarket order by venue order id.",
+        "operationId": "tenant.getPolymarketOrder",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "venue_order_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The order."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/polymarket/reconciliation": {
+      "get": {
+        "description": "Venue-vs-local reconciliation report for Polymarket positions.",
+        "operationId": "tenant.polymarketReconciliation",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Reconciliation report."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/polymarket/status": {
+      "get": {
+        "description": "Polymarket module status.",
+        "operationId": "tenant.polymarketStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Module status."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/positions": {
+      "get": {
+        "description": "Positions (supports `limit` and `cursor` query parameters).",
+        "operationId": "tenant.listPositions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Positions page."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/positions/{id}": {
+      "get": {
+        "description": "One position by id.",
+        "operationId": "tenant.getPosition",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The position."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/recovery/intents": {
+      "get": {
+        "description": "Stuck-intent recovery queue state.",
+        "operationId": "tenant.recoveryIntents",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Recovery intents."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/recovery/sweep": {
+      "get": {
+        "description": "Dust/sweep recovery status for tenant wallets.",
+        "operationId": "tenant.recoverySweep",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Sweep status."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/reports/pnl": {
+      "get": {
+        "description": "Realized/unrealized PnL report assembled from execution history. No projections, no synthetic rows.",
+        "operationId": "tenant.pnlReport",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "PnL report."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/reports/summary": {
+      "get": {
+        "description": "Tenant activity summary report.",
+        "operationId": "tenant.summaryReport",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Summary report."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/sniper/config": {
+      "get": {
+        "description": "Sniper module configuration for the tenant.",
+        "operationId": "tenant.getSniperConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Configuration."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      },
+      "put": {
+        "description": "Replace the sniper module configuration. Versioned and audited.",
+        "operationId": "tenant.putSniperConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The stored configuration."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/sniper/controls": {
+      "post": {
+        "description": "Sniper module control actions.",
+        "operationId": "tenant.sniperControls",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The action outcome."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/sniper/status": {
+      "get": {
+        "description": "Sniper module status.",
+        "operationId": "tenant.sniperStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Module status."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/strategies": {
+      "get": {
+        "operationId": "tenant.listStrategies",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "module",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/StrategyRecord"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Strategy list returned"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "List tenant strategies",
+        "tags": [
+          "Strategies"
+        ]
+      },
+      "post": {
+        "operationId": "tenant.createStrategy",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyRecord"
+                }
+              }
+            },
+            "description": "Strategy created"
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "summary": "Create strategy",
+        "tags": [
+          "Strategies"
+        ]
+      }
+    },
+    "/api/tenant/strategies/{id}": {
+      "delete": {
+        "description": "Archive one strategy (soft delete). Archived strategies cannot be re-activated or backtested.",
+        "operationId": "tenant.archiveStrategy",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The archived strategy."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      },
+      "get": {
+        "description": "One strategy record by id.",
+        "operationId": "tenant.getStrategy",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The strategy."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      },
+      "put": {
+        "description": "Update name/description/status/config of one strategy. Re-activating goes through the versioned-config activation gate (strategy_lifecycle.rs); refusals return 409 `strategy_activation_denied`.",
+        "operationId": "tenant.updateStrategy",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The updated strategy."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/telegram/binding": {
+      "delete": {
+        "description": "Remove the tenant's Telegram binding.",
+        "operationId": "tenant.unbindTelegram",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The binding is removed."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      },
+      "put": {
+        "description": "Bind the tenant's Telegram chat to the trading bridge.",
+        "operationId": "tenant.bindTelegram",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The binding."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/telegram/status": {
+      "get": {
+        "description": "Telegram bridge status for the tenant.",
+        "operationId": "tenant.telegramStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Bridge status."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/trades": {
+      "get": {
+        "description": "Trade history across positions.",
+        "operationId": "tenant.listTrades",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Trades page."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/trades/{position_id}": {
+      "get": {
+        "description": "Trades belonging to one position.",
+        "operationId": "tenant.listPositionTrades",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "position_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The position's trades."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/transactions/{signature}": {
+      "get": {
+        "description": "One on-chain transaction by signature, as observed by the tenant's execution path.",
+        "operationId": "tenant.getTransaction",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "signature",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The transaction record."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
     }
   },
   "security": [
@@ -3686,6 +8993,15 @@
     },
     {
       "name": "contract"
+    },
+    {
+      "name": "reports"
+    },
+    {
+      "name": "tenant"
+    },
+    {
+      "name": "operator"
     }
   ]
 }

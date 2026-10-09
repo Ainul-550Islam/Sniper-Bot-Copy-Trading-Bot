@@ -364,7 +364,7 @@ duplication in `db_integration.rs`).
 - **Startup recovery / reconciliation after data loss:** automated tests
   (`startup_reconcile` semantics, PnL replay from persisted fills, OMS
   restart recovery, intent-journal abandonment) run against real Postgres
-  in `db_integration` — 23/23 green in the release-pass gate (fresh run,
+  in `db_integration` — was green in the release-pass gate (fresh run,
   rerun, and against the restored database).
 - **Full crash→restart→chain-truth convergence:** `recon_crash_e2e`
   (solana-kit) — PREVIOUSLY VERIFIED against a local validator; gated, not

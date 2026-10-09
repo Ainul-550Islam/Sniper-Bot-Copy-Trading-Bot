@@ -51,7 +51,7 @@ use serde_json::{json, Value};
 /// honest value to put in them. A conforming 1.x client breaks on this,
 /// which is exactly what a MAJOR bump is for. See
 /// `docs/API-VERSIONING.md` and the CHANGELOG entry for the migration.
-pub const API_VERSION: &str = "2.0.0";
+pub const API_VERSION: &str = "2.2.0";
 
 /// One reusable non-success response.
 fn error_ref() -> Value {
@@ -136,7 +136,8 @@ pub fn base_document() -> Value {
             { "name": "checkout" }, { "name": "invoices" },
             { "name": "custody" }, { "name": "lifecycle" },
             { "name": "wallet-access" }, { "name": "exports" }, { "name": "events" },
-            { "name": "contract" },
+            { "name": "contract" }, { "name": "reports" },
+            { "name": "tenant" }, { "name": "operator" },
         ],
         "components": {
             // Reusable responses. The surface fragments in `crate::api`
@@ -281,6 +282,8 @@ pub fn base_document() -> Value {
                     json!({ "type": "object", "required": ["email", "password"], "properties": {
                         "email": { "type": "string", "format": "email" },
                         "password": { "type": "string", "writeOnly": true },
+                        "organization": { "type": "string", "description": "Organization slug used to scope login and apply its MFA policy." },
+                        "mfa_code": { "type": "string", "pattern": "^[0-9]{6}$", "description": "Current TOTP code when the selected organization enforces MFA." },
                     } }),
                     json!({
                         "200": json_response("Session created; `token` is the one-time secret.", json!({
@@ -291,10 +294,16 @@ pub fn base_document() -> Value {
                                     "id": { "type": "string", "format": "uuid" },
                                     "prefix": { "type": "string" },
                                     "expires_at": { "type": "string", "format": "date-time" },
+                                    "organization_id": { "type": ["string", "null"], "format": "uuid" },
                                 } },
+                                "mfa_enrollment_required": { "type": "boolean", "description": "True only for a restricted session that may complete TOTP enrollment." },
+                                "organization_id": { "type": "string", "format": "uuid" },
+                                "organization_slug": { "type": "string" },
                             },
                         })),
                         "401": error_ref(),
+                        "409": error_ref(),
+                        "429": error_ref(),
                     }),
                 ),
             },
@@ -331,6 +340,91 @@ pub fn base_document() -> Value {
                     guarded_responses("Session revoked.", json!({ "type": "object", "properties": { "ok": { "type": "boolean" } } })),
                 ),
             },
+            "/api/saas/password-reset/request": {
+                "post": operation(
+                    "saas.requestPasswordReset",
+                    "Request a password-reset email. The response is identical whether or not the address exists (no account enumeration); 202 means the request was accepted for processing.",
+                    &["auth"], false,
+                    json!({ "type": "object", "required": ["email"], "properties": {
+                        "email": { "type": "string", "format": "email" },
+                    } }),
+                    json!({
+                        "202": json_response("Accepted; identical body for known and unknown addresses.", json!({
+                            "type": "object", "properties": {
+                                "status": { "type": "string", "enum": ["accepted"] },
+                                "message": { "type": "string" },
+                                "expires_minutes": { "type": "integer" },
+                            },
+                        })),
+                        "429": error_ref(),
+                        "503": error_ref(),
+                    }),
+                ),
+            },
+            "/api/saas/password-reset/confirm": {
+                "post": operation(
+                    "saas.confirmPasswordReset",
+                    "Consume a single-use reset token, set the new password and revoke every live session for the user.",
+                    &["auth"], false,
+                    json!({ "type": "object", "required": ["token", "new_password"], "properties": {
+                        "token": { "type": "string", "writeOnly": true, "description": "The one-time token from the reset link." },
+                        "new_password": { "type": "string", "writeOnly": true, "minLength": 12 },
+                    } }),
+                    json!({
+                        "200": json_response("Password changed; all sessions revoked.", json!({
+                            "type": "object", "properties": {
+                                "status": { "type": "string", "enum": ["reset_complete"] },
+                                "message": { "type": "string" },
+                            },
+                        })),
+                        "422": error_ref(),
+                        "429": error_ref(),
+                        "503": error_ref(),
+                    }),
+                ),
+            },
+            "/api/saas/email-verification/request": {
+                "post": operation(
+                    "saas.requestEmailVerification",
+                    "Request an email-verification link. The response is identical whether or not the address belongs to an unverified account (no account enumeration).",
+                    &["auth"], false,
+                    json!({ "type": "object", "required": ["email"], "properties": {
+                        "email": { "type": "string", "format": "email" },
+                    } }),
+                    json!({
+                        "202": json_response("Accepted; identical body in every case.", json!({
+                            "type": "object", "properties": {
+                                "status": { "type": "string", "enum": ["accepted"] },
+                                "message": { "type": "string" },
+                                "expires_minutes": { "type": "integer" },
+                            },
+                        })),
+                        "429": error_ref(),
+                        "503": error_ref(),
+                    }),
+                ),
+            },
+            "/api/saas/email-verification/confirm": {
+                "post": operation(
+                    "saas.confirmEmailVerification",
+                    "Consume a single-use verification token and mark the account's email address as verified.",
+                    &["auth"], false,
+                    json!({ "type": "object", "required": ["token"], "properties": {
+                        "token": { "type": "string", "writeOnly": true, "description": "The one-time token from the verification link." },
+                    } }),
+                    json!({
+                        "200": json_response("Email address verified.", json!({
+                            "type": "object", "properties": {
+                                "status": { "type": "string", "enum": ["verified"] },
+                                "message": { "type": "string" },
+                            },
+                        })),
+                        "422": error_ref(),
+                        "429": error_ref(),
+                        "503": error_ref(),
+                    }),
+                ),
+            },
             "/api/saas/organizations": {
                 "post": operation(
                     "saas.createOrganization",
@@ -365,7 +459,7 @@ pub fn base_document() -> Value {
             "/api/saas/organizations/{id}/suspension": {
                 "parameters": tenant_path("id"),
                 "post": operation(
-                    "saas.suspendOrganization", "Suspend or restore the organization (platform staff).", &["organizations"], true,
+                    "saas.setOrganizationSuspension", "Suspend or restore the organization (platform staff).", &["organizations"], true,
                     json!({ "type": "object", "required": ["suspended"], "properties": {
                         "suspended": { "type": "boolean" }, "reason": { "type": "string" },
                     } }),
@@ -610,9 +704,9 @@ fn merge_api_fragments(doc: &mut Value) {
     use crate::api::{
         openapi_billing, openapi_commercial, openapi_custody, openapi_ops, openapi_product,
     };
-    use crate::{openapi_team_security, openapi_trading_data_plane};
+    use crate::{openapi_control_plane_surface, openapi_team_security, openapi_trading_data_plane};
 
-    let fragments: [(&str, Value, Value); 7] = [
+    let fragments: [(&str, Value, Value); 8] = [
         (
             "billing",
             openapi_billing::billing_paths(),
@@ -643,6 +737,11 @@ fn merge_api_fragments(doc: &mut Value) {
             "product",
             openapi_product::product_paths(),
             openapi_product::product_schemas(),
+        ),
+        (
+            "control_plane_surface",
+            openapi_control_plane_surface::control_plane_surface_paths(),
+            openapi_control_plane_surface::control_plane_surface_schemas(),
         ),
     ];
 

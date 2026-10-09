@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use bot_core::db::Database;
 use bot_core::tenant::OrganizationId;
+
+use super::market_service::MarketService;
 use bot_core::trading_repository::copy::{TenantCopyEventRepo, TenantCopyRead, TenantCopyWrite};
 use bot_core::trading_repository::executions::{
     TenantClaimRepo, TenantExecutionRead, TenantExecutionWrite, TenantIdempotencyRepo,
@@ -35,6 +37,9 @@ use bot_core::trading_repository::write_scope::{TenantWriteScope, WriteOrigin};
 /// Shared as `Arc<TenantTradingDataPlane>` — every accessor borrows.
 pub struct TenantTradingDataPlane {
     db: Arc<Database>,
+    /// Live market-data aggregator (GAP-MAP P1): real provider feeds with
+    /// a TTL cache; replaces the old static fake catalog.
+    markets: Arc<MarketService>,
     orders_read: TenantOrderRead,
     orders_write: TenantOrderWrite,
     executions_read: TenantExecutionRead,
@@ -61,8 +66,9 @@ pub struct TenantTradingDataPlane {
 
 impl TenantTradingDataPlane {
     /// Build the data plane over an attached database.
-    pub fn new(db: Arc<Database>) -> Self {
+    pub fn new(db: Arc<Database>, cfg: &bot_core::config::Config) -> Self {
         TenantTradingDataPlane {
+            markets: MarketService::from_config(cfg),
             orders_read: TenantOrderRead::new(db.clone()),
             orders_write: TenantOrderWrite::new(db.clone()),
             executions_read: TenantExecutionRead::new(db.clone()),
@@ -106,6 +112,11 @@ impl TenantTradingDataPlane {
 
     pub fn db(&self) -> &Arc<Database> {
         &self.db
+    }
+
+    /// The live market-data aggregator (GAP-MAP P1).
+    pub fn markets(&self) -> &Arc<MarketService> {
+        &self.markets
     }
 
     pub fn orders_read(&self) -> &TenantOrderRead {

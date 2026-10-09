@@ -1,0 +1,11 @@
+{
+  "validation_id": "staking_devnet_e2e",
+  "provider": "staking_validator",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"devnet validator boot + stake/claim/withdraw; attestation = e2e tx signature; requires solana-test-validator"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

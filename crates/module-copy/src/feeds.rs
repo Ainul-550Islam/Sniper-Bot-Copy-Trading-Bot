@@ -62,19 +62,122 @@ use solana_kit::pumpportal::{
     PumpPortalFeed, PumpPortalMessage, PumpPortalSubscription, TradeMessage,
 };
 use solana_kit::rpc::{Rpc, SignatureInfo};
-use solana_kit::ws::{SolanaWs, TransactionFilter, WsMessage, WsPolicy};
+use solana_kit::ws::{redact_ws_url, SolanaWs, TransactionFilter, WsMessage, WsPolicy};
 
 /// Buffer for the merged output channel.
 const OUT_BUFFER: usize = 512;
 /// Buffer for the PumpPortal websocket reader.
 const PP_BUFFER: usize = 512;
 
+const FEED_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+const FEED_TASK_ABORT_GRACE: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Default)]
+struct FeedTasks {
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl FeedTasks {
+    fn push(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.handles.push(handle);
+    }
+
+    async fn join_all(&mut self) {
+        let join_deadline = tokio::time::Instant::now() + FEED_TASK_JOIN_TIMEOUT;
+        let abort_deadline = join_deadline + FEED_TASK_ABORT_GRACE;
+        let mut aborting = false;
+
+        // Keep handles in the owner while awaiting. If this shutdown future is
+        // cancelled, Drop still has access to every worker and can abort them.
+        for task in &mut self.handles {
+            if aborting {
+                abort_copy_task(task, abort_deadline).await;
+                continue;
+            }
+            let remaining = join_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                aborting = true;
+                abort_copy_task(task, abort_deadline).await;
+                continue;
+            }
+            match tokio::time::timeout(remaining, &mut *task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!(error = %error, "copy feed task failed while joining");
+                }
+                Err(_) => {
+                    warn!("copy feed task did not stop before deadline; aborting it");
+                    aborting = true;
+                    abort_copy_task(task, abort_deadline).await;
+                }
+            }
+        }
+        self.handles.clear();
+    }
+}
+
+async fn abort_copy_task(
+    task: &mut tokio::task::JoinHandle<()>,
+    deadline: tokio::time::Instant,
+) {
+    task.abort();
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        warn!("copy feed abort join grace elapsed; cancellation was requested");
+        return;
+    }
+    match tokio::time::timeout(remaining, &mut *task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if !error.is_cancelled() => {
+            warn!(error = %error, "aborted copy feed task failed while joining");
+        }
+        Ok(Err(_)) => {}
+        Err(_) => warn!("copy feed task did not finish during abort join grace"),
+    }
+}
+
+impl Drop for FeedTasks {
+    fn drop(&mut self) {
+        // Dropping the owning feed handle (e.g. parent future cancellation)
+        // must not detach a network/RPC task.
+        for task in &self.handles {
+            task.abort();
+        }
+    }
+}
+
+/// Owns the merged copy stream and every task feeding it.
+#[derive(Debug)]
+pub struct CopyFeedHandle {
+    receiver: mpsc::Receiver<WalletTrade>,
+    tasks: FeedTasks,
+    /// Keeps an empty-wallet feed idle without a detached keepalive task.
+    keepalive: Option<mpsc::Sender<WalletTrade>>,
+}
+
+impl CopyFeedHandle {
+    pub async fn recv(&mut self) -> Option<WalletTrade> {
+        self.receiver.recv().await
+    }
+
+    pub fn len(&self) -> usize {
+        self.receiver.len()
+    }
+
+    /// Close the stream and join every feed task within one bounded deadline.
+    pub async fn shutdown(&mut self) {
+        self.receiver.close();
+        self.keepalive.take();
+        self.tasks.join_all().await;
+    }
+}
+
 /// Spawns the configured copy feed(s).
 pub struct CopyFeed;
 
 impl CopyFeed {
-    /// Start the feed tasks and return the merged receiver.
-    pub async fn spawn(state: Shared, rpc: Rpc) -> BotResult<mpsc::Receiver<WalletTrade>> {
+    /// Start the feed tasks and return their joined receiver owner.
+    pub async fn spawn(state: Shared, rpc: Rpc) -> BotResult<CopyFeedHandle> {
         let cfg = state.config_snapshot().await;
         let wallets: Vec<String> = cfg
             .copy
@@ -88,17 +191,17 @@ impl CopyFeed {
 
         if wallets.is_empty() {
             // Nothing tracked yet. Keep the channel open (so `run` stays alive
-            // and picks up wallets added via hot reload) but emit nothing.
+            // and picks up wallets added via hot reload) using the returned
+            // handle itself rather than a detached keepalive task.
             warn!("copy feed: no wallets configured — idling");
-            tokio::spawn(async move {
-                let _keep = tx;
-                loop {
-                    tokio::time::sleep(Duration::from_secs(3600)).await;
-                }
+            return Ok(CopyFeedHandle {
+                receiver: rx,
+                tasks: FeedTasks::default(),
+                keepalive: Some(tx),
             });
-            return Ok(rx);
         }
 
+        let mut tasks = FeedTasks::default();
         let feed = cfg.copy.feed.trim().to_ascii_lowercase();
         let poll_ms = cfg.copy.poll_interval_ms.clamp(500, 60_000);
         let sig_limit = cfg.copy.poll_signature_limit.clamp(1, 100);
@@ -116,7 +219,9 @@ impl CopyFeed {
                 let state = state.clone();
                 let wallets = wallets.clone();
                 let url = url.clone();
-                tokio::spawn(async move { run_pumpportal(url, wallets, tx, state).await });
+                tasks.push(tokio::spawn(async move {
+                    run_pumpportal(url, wallets, tx, state).await
+                }));
                 started += 1;
                 info!(
                     wallets = wallet_count,
@@ -141,12 +246,12 @@ impl CopyFeed {
                 let rpc = rpc.clone();
                 match geyser {
                     Some(url) => {
-                        tokio::spawn(async move {
+                        tasks.push(tokio::spawn(async move {
                             run_transaction_subscribe(
                                 rpc, url, wallets, tx, state, poll_ms, sig_limit,
                             )
                             .await
-                        });
+                        }));
                         info!(
                             wallets = wallet_count,
                             "copy feed: transaction_subscribe (geyser push)"
@@ -154,9 +259,9 @@ impl CopyFeed {
                     }
                     None => {
                         warn!("copy feed: transaction_subscribe requires network.geyser_ws_url — using logs_poll");
-                        tokio::spawn(async move {
+                        tasks.push(tokio::spawn(async move {
                             run_poll(rpc, wallets, tx, state, poll_ms, sig_limit).await
-                        });
+                        }));
                     }
                 }
                 started += 1;
@@ -167,9 +272,9 @@ impl CopyFeed {
                 let state = state.clone();
                 let wallets = wallets.clone();
                 let rpc = rpc.clone();
-                tokio::spawn(
-                    async move { run_poll(rpc, wallets, tx, state, poll_ms, sig_limit).await },
-                );
+                tasks.push(tokio::spawn(async move {
+                    run_poll(rpc, wallets, tx, state, poll_ms, sig_limit).await
+                }));
                 started += 1;
                 info!(wallets = wallet_count, poll_ms, "copy feed: logs_poll");
             }
@@ -180,7 +285,11 @@ impl CopyFeed {
         }
 
         drop(tx);
-        Ok(rx)
+        Ok(CopyFeedHandle {
+            receiver: rx,
+            tasks,
+            keepalive: None,
+        })
     }
 }
 
@@ -204,12 +313,22 @@ async fn run_pumpportal(
         Some(rx) => rx,
         None => {
             warn!("copy pumpportal receiver already taken");
+            feed.stop().await;
             return;
         }
     };
     // Keep the feed alive for the lifetime of this task.
-    let _feed = feed;
-    while let Some(message) = rx.recv().await {
+    let feed = feed;
+    loop {
+        let message = tokio::select! {
+            _ = out.closed() => {
+                debug!("copy consumer gone; stopping pumpportal forwarder");
+                break;
+            }
+            _ = state.wait_shutdown() => break,
+            message = rx.recv() => message,
+        };
+        let Some(message) = message else { break };
         let trade = match message {
             PumpPortalMessage::AccountTrade(t) | PumpPortalMessage::Trade(t) => {
                 wallet_trade_from_pumpportal(&t)
@@ -222,6 +341,7 @@ async fn run_pumpportal(
             break;
         }
     }
+    feed.stop().await;
 }
 
 /// RPC polling forwarder: signatures → transactions → decoded swaps.
@@ -279,7 +399,11 @@ async fn run_poll(
     let mut ticker = tokio::time::interval(Duration::from_millis(poll_ms));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {},
+            _ = out.closed() => return,
+            _ = state.wait_shutdown() => return,
+        }
         let cfg = state.config_snapshot().await;
         if !cfg.copy.enabled {
             continue;
@@ -497,7 +621,8 @@ async fn run_transaction_subscribe(
         Ok(sub) => sub,
         Err(e) => {
             warn!(
-                error = %e, url = %url,
+                error = %e,
+                endpoint = %redact_ws_url(&url),
                 "copy geyser: transactionSubscribe rejected (not a Geyser endpoint?) — falling back to logs_poll"
             );
             conn.shutdown().await;
@@ -506,9 +631,30 @@ async fn run_transaction_subscribe(
         }
     };
 
-    let mut rx = sub.receiver();
+    let mut rx = match sub.receiver() {
+        Ok(receiver) => receiver,
+        Err(e) => {
+            warn!(error = %e, "copy geyser: subscription receiver unavailable");
+            sub.cancel().await;
+            conn.shutdown().await;
+            run_poll(rpc, wallets, out, state, poll_ms, sig_limit).await;
+            return;
+        }
+    };
     let mut consumer_gone = false;
-    while let Some(msg) = rx.recv().await {
+    loop {
+        let msg = tokio::select! {
+            _ = out.closed() => {
+                consumer_gone = true;
+                break;
+            }
+            _ = state.wait_shutdown() => {
+                consumer_gone = true;
+                break;
+            }
+            msg = rx.recv() => msg,
+        };
+        let Some(msg) = msg else { break };
         match msg {
             WsMessage::Transaction { signature, raw, .. } => {
                 let cfg = state.config_snapshot().await;
@@ -561,10 +707,23 @@ async fn run_transaction_subscribe(
             // Missed-event recovery: the socket was down for `outage_ms`;
             // pull what the tracked wallets did meanwhile through the poll
             // pipeline (bounded by the outage window, deduped by signature).
-            WsMessage::Gap { outage_ms, .. } => {
+            WsMessage::Gap {
+                outage_ms,
+                dropped_messages,
+                last_slot,
+                ..
+            } => {
                 let cfg = state.config_snapshot().await;
                 if !cfg.copy.enabled {
                     continue;
+                }
+                if dropped_messages > 0 {
+                    warn!(
+                        ?last_slot,
+                        outage_ms,
+                        dropped_messages,
+                        "copy Geyser consumer queue overflow; backfilling tracked-wallet signatures"
+                    );
                 }
                 if !backfill_after_gap(
                     &rpc,

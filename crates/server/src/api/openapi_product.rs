@@ -26,18 +26,18 @@ pub fn product_schemas() -> Value {
         },
         "RiskDashboardState": {
             "type": "object",
-            "required": ["organization_id", "kill_switch_active", "max_drawdown_limit_bps", "current_drawdown_bps", "daily_loss_limit_usd_cents", "current_daily_loss_cents", "rules", "as_of"],
+            "required": ["organization_id", "kill_switch_active", "modules", "durable", "reference_asset", "max_drawdown_limit_ref", "current_drawdown_ref", "daily_loss_limit_ref", "current_daily_loss_ref", "rules", "as_of"],
             "properties": {
                 "organization_id": { "type": "string", "format": "uuid" },
                 "kill_switch_active": { "type": "boolean" },
-                "max_drawdown_limit_bps": { "type": "integer" },
-                "current_drawdown_bps": { "type": "integer" },
-                "daily_loss_limit_usd_cents": { "type": "integer" },
-                "current_daily_loss_cents": { "type": "integer" },
-                "rules": {
-                    "type": "array",
-                    "items": { "type": "object" }
-                },
+                "modules": { "type": "array", "items": { "type": "object" } },
+                "durable": { "type": "boolean" },
+                "reference_asset": { "type": "string" },
+                "max_drawdown_limit_ref": { "description": "Reference-unit limit or null; see rules." },
+                "current_drawdown_ref": { "description": "Reference-unit limit or null; see rules." },
+                "daily_loss_limit_ref": { "description": "Reference-unit limit or null; see rules." },
+                "current_daily_loss_ref": { "description": "Reference-unit limit or null; see rules." },
+                "rules": { "type": "array", "items": { "type": "object" } },
                 "as_of": { "type": "string", "format": "date-time" }
             }
         },
@@ -61,100 +61,5 @@ pub fn product_schemas() -> Value {
 /// Generates OpenAPI v3 paths documentation for product endpoints.
 pub fn product_paths() -> Value {
     json!({
-        "/api/saas/portfolio": {
-            "get": {
-                "summary": "Get authoritative tenant portfolio summary and exposures",
-                "tags": ["Portfolio"],
-                "responses": {
-                    "200": { "description": "Portfolio summary returned" }
-                }
-            }
-        },
-        "/api/saas/risk-dashboard": {
-            "get": {
-                "summary": "Get risk limits and utilization dashboard",
-                "tags": ["Risk Management"],
-                "responses": {
-                    "200": { "description": "Risk posture returned" }
-                }
-            }
-        },
-        "/api/saas/risk-dashboard/kill-switch": {
-            "post": {
-                "summary": "Toggle tenant emergency kill switch",
-                "tags": ["Risk Management"],
-                "responses": {
-                    "200": { "description": "Kill switch state toggled" }
-                }
-            }
-        },
-        "/api/saas/alerts": {
-            "get": {
-                "summary": "List tenant alerts and notifications",
-                "tags": ["Alerts"],
-                "responses": {
-                    "200": { "description": "Alerts list returned" }
-                }
-            }
-        },
-        "/api/saas/status": {
-            "get": {
-                "summary": "Get customer-safe infrastructure status",
-                "tags": ["Status"],
-                "responses": {
-                    "200": { "description": "Platform status returned" }
-                }
-            }
-        },
-        "/api/saas/pricing": {
-            "get": {
-                "summary": "Get product plan catalog",
-                "tags": ["Commercial"],
-                "responses": {
-                    "200": { "description": "Pricing catalog returned" }
-                }
-            }
-        },
-        "/api/saas/activity": {
-            "get": {
-                "summary": "Get unified tenant activity timeline",
-                "tags": ["Activity"],
-                "responses": {
-                    "200": { "description": "Activity timeline returned" }
-                }
-            }
-        },
-        "/api/saas/support/tickets": {
-            "get": {
-                "summary": "List tenant support tickets",
-                "tags": ["Support"],
-                "responses": {
-                    "200": { "description": "Support tickets returned" }
-                }
-            },
-            "post": {
-                "summary": "Create a tenant support ticket",
-                "tags": ["Support"],
-                "responses": {
-                    "201": { "description": "Support ticket created" }
-                }
-            }
-        },
-        "/api/saas/notifications/preferences": {
-            "get": {
-                "summary": "Read tenant notification preferences",
-                "tags": ["Notifications"],
-                "responses": {
-                    "200": { "description": "Notification preferences returned" }
-                }
-            },
-            "put": {
-                "summary": "Update tenant notification preferences",
-                "tags": ["Notifications"],
-                "responses": {
-                    "200": { "description": "Notification preferences updated" }
-                }
-            }
-        }
     })
 }

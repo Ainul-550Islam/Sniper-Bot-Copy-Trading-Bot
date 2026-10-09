@@ -1,19 +1,25 @@
 "use client";
 
 /**
- * Market Discovery & Live Screener Page (SECOND.md §53).
+ * Market Discovery & Live Screener Page (GAP MAP v2, Part 5 wiring).
  *
- * Real-time discovery feed for Solana DEX pairs (Raydium v4, CLMM),
- * Pump.fun bonding curves, and Polymarket prediction event order books.
+ * Live discovery feed for Solana DEX pairs (Raydium, Pump.fun/PumpSwap) and
+ * Polymarket CLOB markets, served by the tenant trading data plane. The page
+ * renders exactly what the feed reports: rows from `items`, plus feed health
+ * and cache-staleness from the same response. A refused or empty feed is an
+ * error banner — never a fabricated table.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 import MarketScreener from "@/components/market/market-screener";
-import { MarketTicker, listMarkets } from "@/lib/api/market-api";
+import { FeedStatus, MarketTicker, listMarkets } from "@/lib/api/market-api";
 
 export default function MarketsPage() {
   const [markets, setMarkets] = useState<MarketTicker[]>([]);
+  const [feeds, setFeeds] = useState<FeedStatus[]>([]);
+  const [fromCache, setFromCache] = useState(false);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,8 +28,15 @@ export default function MarketsPage() {
     setError(null);
     try {
       const data = await listMarkets();
-      setMarkets(data);
+      setMarkets(data.items);
+      setFeeds(data.feeds);
+      setFromCache(data.from_cache);
+      setFetchedAt(data.fetched_at);
     } catch (err: unknown) {
+      // Honest empty state: the backend answered with a refusal (503
+      // market_data_unavailable, plane unavailable, or an auth denial).
+      setMarkets([]);
+      setFeeds([]);
       setError(err instanceof Error ? err.message : "Failed to load market screener feed");
     } finally {
       setLoading(false);
@@ -33,6 +46,8 @@ export default function MarketsPage() {
   useEffect(() => {
     void Promise.resolve().then(() => loadData());
   }, [loadData]);
+
+  const degradedFeeds = feeds.filter((feed) => !feed.ok);
 
   return (
     <AppShell title="Market Screener">
@@ -46,6 +61,20 @@ export default function MarketsPage() {
       {error && (
         <div className="card" style={{ color: "var(--bad)", background: "var(--bad-glow)", marginBottom: "1.5rem" }}>
           {error}
+        </div>
+      )}
+
+      {!loading && !error && (degradedFeeds.length > 0 || fromCache) && (
+        <div
+          className="card"
+          style={{ borderColor: "var(--warn)", background: "var(--warn-glow)", marginBottom: "1.5rem", fontSize: "0.85rem" }}
+        >
+          {fromCache && <p style={{ margin: "0 0 0.25rem" }}>Showing a cached snapshot (fetched {fetchedAt ?? "recently"}); the live feed did not answer in time.</p>}
+          {degradedFeeds.map((feed) => (
+            <p key={feed.name} style={{ margin: "0 0 0.25rem" }}>
+              Feed <strong>{feed.name}</strong> is not returning data{feed.detail ? `: ${feed.detail}` : ""}.
+            </p>
+          ))}
         </div>
       )}
 

@@ -205,6 +205,13 @@ pub static RAYDIUM_CPMM: Lazy<Pubkey> =
     Lazy::new(|| pk("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"));
 pub static RAYDIUM_LAUNCHLAB: Lazy<Pubkey> =
     Lazy::new(|| pk("LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"));
+/// Meteora DLMM (verified against multiple 2026 sources; see venues/mod.rs).
+pub static METEORA_DLMM: Lazy<Pubkey> =
+    Lazy::new(|| pk("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"));
+/// Meteora DAMM v1 (dynamic AMM pools). Single-source at pin time — re-verify
+/// against Meteora's current docs before relying on it in production paths.
+pub static METEORA_DAMM_V1: Lazy<Pubkey> =
+    Lazy::new(|| pk("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB"));
 /// Raydium's AMM authority PDA, derived from the seed `b"amm authority"` with
 /// bump 255 (the `nonce` stored in the pool account).
 pub const RAYDIUM_AMM_AUTHORITY_SEED: &[u8] = b"amm authority";
@@ -472,6 +479,11 @@ pub static JITO_TIP_ACCOUNTS: Lazy<Vec<Pubkey>> = Lazy::new(|| {
     ]
 });
 pub const JITO_BUNDLE_PATH: &str = "/api/v1/bundles";
+/// Jito tip-floor percentile endpoint (dynamic tips, GAP-MAP P1).
+pub const JITO_TIP_FLOOR_PATH: &str = "/api/v1/bundles/tip_floor";
+/// Public Jito tip-floor host. Operators behind a proxy override it via
+/// `DynamicTipPolicy::tip_floor_url`.
+pub const JITO_TIP_FLOOR_HOST: &str = "https://bundles.jito.wtf";
 
 // --------------------------------------------------------------------------
 // Feeds

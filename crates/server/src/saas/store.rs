@@ -166,12 +166,13 @@ impl SaasStore {
                     "an account with that email already exists",
                 ));
             }
-        } else if self.inner.read().await.users_by_email.contains_key(&email) {
+        }
+        let mut inner = self.inner.write().await;
+        if self.repo.is_none() && inner.users_by_email.contains_key(&email) {
             return Err(BotError::invalid(
                 "an account with that email already exists",
             ));
         }
-        let mut inner = self.inner.write().await;
         inner.users_by_email.insert(email, user.id);
         inner.users.insert(user.id, user.clone());
         Ok(())
@@ -225,6 +226,45 @@ impl SaasStore {
         inner.users_by_email.insert(email, user.id);
         inner.users.insert(user.id, user.clone());
         Ok(())
+    }
+
+    /// Change a password and revoke all of that user's sessions atomically
+    /// when PostgreSQL is authoritative. The in-memory path applies both
+    /// mutations under one write lock.
+    pub async fn update_user_and_revoke_sessions(
+        &self,
+        user: &User,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> BotResult<usize> {
+        let email = User::normalize_email(&user.email);
+        let revoked = if let Some(repo) = &self.repo {
+            repo.update_user_and_revoke_sessions(user, reason, now).await?
+        } else {
+            let mut inner = self.inner.write().await;
+            if !inner.users.contains_key(&user.id) {
+                return Err(BotError::NotFound(format!("user {}", user.id)));
+            }
+            let mut revoked = 0usize;
+            for session in inner
+                .sessions
+                .values_mut()
+                .filter(|session| session.user_id == user.id)
+            {
+                if session.revoke(reason, now) {
+                    revoked += 1;
+                }
+            }
+            inner.users_by_email.retain(|_, id| *id != user.id);
+            inner.users_by_email.insert(email.clone(), user.id);
+            inner.users.insert(user.id, user.clone());
+            return Ok(revoked);
+        };
+        let mut inner = self.inner.write().await;
+        inner.users_by_email.retain(|_, id| *id != user.id);
+        inner.users_by_email.insert(email, user.id);
+        inner.users.insert(user.id, user.clone());
+        Ok(revoked)
     }
 
     // ----------------------------------------------------- organizations --
@@ -456,6 +496,15 @@ impl SaasStore {
         inner.sessions_by_hash.insert(s.token_hash.clone(), s.id);
         inner.sessions.insert(s.id, s.clone());
         Ok(())
+    }
+
+    /// One session by id. Durable read failures are returned as errors, never
+    /// converted into `None`.
+    pub async fn session(&self, id: SessionId) -> BotResult<Option<SessionRecord>> {
+        if let Some(repo) = &self.repo {
+            return repo.by_id(SESSION, &id.to_string()).await;
+        }
+        Ok(self.inner.read().await.sessions.get(&id).cloned())
     }
 
     /// Look a session up by token hash (the plaintext never reaches here).

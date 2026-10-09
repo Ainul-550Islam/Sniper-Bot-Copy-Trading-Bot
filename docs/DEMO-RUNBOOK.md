@@ -16,6 +16,31 @@ applied (automatic at startup with `auto_migrate`), release build:
 `cargo build --release`. Config: `cp config.toml.example config.toml`
 (defaults are paper mode, modules disabled).
 
+## Demo 0 — One-command Docker demo stack (buyer-evaluation environment)
+
+- **Prerequisites:** Docker with the compose plugin. No Rust toolchain, no
+  Postgres/Redis install, no secrets of any kind required.
+- **Commands:**
+  ```bash
+  docker compose -f deploy/demo/docker-compose.demo.yml up -d --build
+  ./deploy/demo/seed-demo-tenant.sh
+  ```
+- **Expected:** the compose stack runs postgres + redis + bot + control-plane
+  bound to `127.0.0.1` only. The seed script registers `demo@example.com`,
+  creates the `demo` organization through the SAME public API a real signup
+  uses, flags it `organizations.is_demo = true` (migration 0051), and prints
+  the credentials. Signing into the control plane with those credentials and
+  selecting the `demo` organization gives a paper-mode, devnet tenant.
+- **Proves:** containerised deployment, migration-on-startup, and the full
+  tenant-provisioning state machine — with zero secrets and zero live-trading
+  capability (the demo config hard-codes `mode = "paper"` AND
+  `allow_live_trading = false`, and no wallet keypair is mounted).
+- **Status:** compose file and seed script delivered; the underlying
+  provisioning path is covered by `fresh_tenant_contract` / tenant lifecycle
+  tests (VERIFIED in the freeze gate). The Docker build itself must run on
+  the demo machine — this workspace has no Docker daemon, so the stack
+  definition is statically reviewed, not executed here.
+
 ## Demo 1 — Paper mode end-to-end
 
 - **Prerequisites:** global; a module enabled in `config.toml`
@@ -168,7 +193,7 @@ applied (automatic at startup with `auto_migrate`), release build:
   sync across replicas.
 - **Proves:** the invariant one execution ⇒ ≤1 owner ⇒ ≤1 money-moving
   submission under real contention.
-- **Status:** VERIFIED (4/4 + 1/1 against real PG/Redis in the freeze gate).
+- **Status:** VERIFIED against real PG/Redis in the freeze gate (no run logs ship in this tree — re-run on your own infra).
 
 ## Demo 9 — Staking tests / documented historical validator evidence
 
@@ -179,7 +204,7 @@ applied (automatic at startup with `auto_migrate`), release build:
   # full on-chain lifecycle (requires Solana CLI/agave 2.1.21 toolchain):
   (cd programs/staking-suite && cargo build-sbf && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1)
   ```
-- **Expected:** 71/71 host tests pass anywhere (validation layer, caps,
+- **Expected:** all host tests pass anywhere (validation layer, caps,
   pause, timelock queue/apply/cancel, two-step admin, genesis latch +
   max-supply cap math, reward clamping, metadata guards/layout, state
   math, instruction (de)serialization). With the Solana toolchain present:
@@ -187,8 +212,8 @@ applied (automatic at startup with `auto_migrate`), release build:
   local `solana-test-validator`, including funded stake → reward → unstake.
 - **Proves:** program logic on host; on-chain behavior where the toolchain
   exists.
-- **Status:** host 48/48 VERIFIED (freeze gate); build-sbf + validator e2e
-  2/2 PREVIOUSLY VERIFIED (agave 2.1.21, identical source; CI `program` job
+- **Status:** host suite VERIFIED (freeze gate); build-sbf + validator e2e
+  PREVIOUSLY VERIFIED (agave 2.1.21, identical source; CI `program` job
   re-runs both on every push once CI is active). **Reminder for the demo
   audience: no external audit exists; mainnet deployment is blocked until
   one passes.**

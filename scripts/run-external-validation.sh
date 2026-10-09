@@ -256,6 +256,74 @@ check_evidence_files() {
   done
 }
 
+verify_no_unbacked_passed() {
+  # HONESTY GATE (GAP MAP v2, Part 5): a PASSED evidence record is a claim that
+  # a real external system performed a real operation. Every such record MUST
+  # carry a verifiable attestation — a transaction signature or provider
+  # reference id (attestation_ref / tx_signature / provider_reference /
+  # checkout_session_id / order_id / signature fields). A PASSED record without
+  # one is fabricated evidence, and this script fails closed on it.
+  EVIDENCE_TREE_ROOT="$ROOT" python3 - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["EVIDENCE_TREE_ROOT"])
+ATT_KEYS = (
+    "attestation_ref", "tx_signature", "signature", "provider_reference",
+    "provider_reference_id", "checkout_session_id", "order_id",
+    "external_id", "receipt_id", "payment_intent", "e2e_tx",
+)
+violations = []
+for d in ("evidence/external", "evidence/live"):
+    p = root / d
+    if not p.is_dir():
+        continue
+    for f in sorted(p.glob("*.json")):
+        try:
+            data = json.loads(f.read_text())
+        except Exception as exc:
+            violations.append(f"{f}: unparseable evidence JSON ({exc})")
+            continue
+        status = str(data.get("status", "")).upper()
+        result = data.get("result")
+        if isinstance(result, dict) and result.get("status"):
+            status = str(result.get("status")).upper()
+        if status not in ("PASSED", "PASS"):
+            continue
+        # Probe-based validations (e.g. protocol drift) self-verify through
+        # substantive probe data in metadata instead of a single external id.
+        # They may opt in explicitly; the gate stays strict for everything else.
+        if data.get("self_attesting") is True:
+            continue
+        meta = data.get("redacted_metadata") or data.get("metadata") or {}
+        if isinstance(result, dict):
+            meta = result.get("metadata") or meta
+        attested = False
+        for key in ATT_KEYS:
+            if data.get(key) not in (None, ""):
+                attested = True
+                break
+        if not attested and isinstance(meta, dict):
+            for key in ATT_KEYS:
+                if meta.get(key) not in (None, ""):
+                    attested = True
+                    break
+        if not attested:
+            violations.append(
+                f"{f}: status PASSED but no attestation "
+                "(tx signature / provider reference id) — refusing fabricated evidence"
+            )
+if violations:
+    print("verify_no_unbacked_passed: FAIL", file=sys.stderr)
+    for v in violations:
+        print("  " + v, file=sys.stderr)
+    sys.exit(1)
+print("verify_no_unbacked_passed: OK — every PASSED record carries an attestation (or none is PASSED).")
+PY
+}
+
 run_all_safe() {
   echo "[run-external-validation] MODE=all-safe — never place funded trade, never expose private keys, never silently enable live payment/remote signing"
   echo "Evidence dir: $EVIDENCE_DIR (redacted, no secrets)"
@@ -266,6 +334,7 @@ run_all_safe() {
   run_staking
   run_funded_preflight
   check_evidence_files
+  verify_no_unbacked_passed
   echo "=== summary ==="
   echo "all-safe complete — all checks resulted in NOT_RUN or EXTERNAL_REQUIRED (no live credentials in this env)"
   echo "Evidence saved under $EVIDENCE_DIR — verify hashes + schema with: cargo test --test provider_contracts"

@@ -242,9 +242,18 @@ impl RateLimiter {
         let now = Instant::now();
 
         let mut buckets = self.buckets.write().await;
-        // Opportunistic sweep: keep the map bounded even under churn.
-        if buckets.len() > self.max_buckets {
-            buckets.retain(|_, b| now.duration_since(b.last_seen) < Duration::from_secs(600));
+        // Sweep before admitting a new key. If active churn still fills the
+        // hard cap, fail closed for unknown keys rather than growing the map
+        // without bound. Existing keys continue to refill normally.
+        if !buckets.contains_key(key) && buckets.len() >= self.max_buckets {
+            buckets.retain(|_, bucket| {
+                now.duration_since(bucket.last_seen) < Duration::from_secs(600)
+            });
+            if buckets.len() >= self.max_buckets {
+                return RateVerdict::Limited {
+                    retry_after_secs: 60,
+                };
+            }
         }
         let bucket = buckets.entry(key.to_string()).or_insert(Bucket {
             tokens: capacity,
@@ -399,6 +408,26 @@ mod tests {
         assert!(matches!(verdict, RateVerdict::Limited { .. }));
         tokio::time::sleep(Duration::from_millis(60)).await; // ~6 tokens
         assert_eq!(rl.check("x").await, RateVerdict::Allowed);
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_refuses_new_keys_when_hard_cap_is_full() {
+        let mut limiter = RateLimiter::new(60);
+        if let Some(inner) = std::sync::Arc::get_mut(&mut limiter) {
+            inner.max_buckets = 2;
+        } else {
+            panic!("new limiter must have a unique owner in this test");
+        }
+        assert_eq!(limiter.check("one").await, RateVerdict::Allowed);
+        assert_eq!(limiter.check("two").await, RateVerdict::Allowed);
+        assert_eq!(
+            limiter.check("three").await,
+            RateVerdict::Limited {
+                retry_after_secs: 60
+            }
+        );
+        assert_eq!(limiter.tracked().await, 2);
+        assert_eq!(limiter.check("one").await, RateVerdict::Allowed);
     }
 
     #[tokio::test]

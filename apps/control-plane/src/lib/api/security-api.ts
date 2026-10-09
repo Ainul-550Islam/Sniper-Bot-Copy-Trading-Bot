@@ -52,8 +52,11 @@ export async function setupTotp(): Promise<{
   }>("/api/saas/security/totp/setup", { method: "POST" });
 }
 
-export async function verifyTotp(deviceId: string, code: string): Promise<{ success: boolean; device_id: string; verified: boolean }> {
-  return request<{ success: boolean; device_id: string; verified: boolean }>("/api/saas/security/totp/verify", {
+export async function verifyTotp(
+  deviceId: string,
+  code: string,
+): Promise<{ success: boolean; device_id: string; verified: boolean; session_promoted: boolean }> {
+  return request<{ success: boolean; device_id: string; verified: boolean; session_promoted: boolean }>("/api/saas/security/totp/verify", {
     method: "POST",
     body: { device_id: deviceId, code },
   });

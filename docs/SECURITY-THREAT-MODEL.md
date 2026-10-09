@@ -6,7 +6,7 @@
 
 | Threat | Control | Remaining Exposure | Evidence |
 |---|---|---|---|
-| Cross-tenant read (list tenants/orders) | `saas/middleware.rs` `authorize_request` → org→membership→permission→lifecycle at app+query (`store.rs` tenant-scoped queries) | If middleware skipped on new route, isolation breaks | `crates/core/tests/saas_control_plane.rs` 19 tests, `crates/server/tests/tenant_lifecycle_integration.rs` |
+| Cross-tenant read (list tenants/orders) | `saas/middleware.rs` `authorize_request` → org→membership→permission→lifecycle at app+query (`store.rs` tenant-scoped queries) | If middleware skipped on new route, isolation breaks | `crates/core/tests/saas_control_plane.rs`, `crates/server/tests/tenant_lifecycle_integration.rs` |
 | Cross-tenant write (update other org) | Same middleware + `organizations.rs` membership check | Deployment org bootstrap must not be callable by non-admin | `organizations::create_organization` provisioning state machine |
 | Data export leaks other org | `saas/export.rs` deterministic tenant-scoped, audit logged | Export must not bypass `authorize_request` | `export.rs` tests 4 |
 
@@ -22,7 +22,7 @@
 
 | Threat | Control | Exposure | Evidence |
 |---|---|---|---|
-| Plaintext leakage in logs/URLs/JSON | `is_secret_like` / secret_scan, API key secret shown once at create (`api_keys.rs`), stored as hash via `hash_token`, `saas-sdk` `secret-free Debug`, `cargo test` asserts `!dbg.contains("sk_live_secret")` | If new handler logs `x-api-key` header, leak | `saas/api_keys.rs` (3 tests), `saas-sdk/src/client.rs` (4 tests), `ops/security_evidence.rs` |
+| Plaintext leakage in logs/URLs/JSON | `is_secret_like` / secret_scan, API key secret shown once at create (`api_keys.rs`), stored as hash via `hash_token`, `saas-sdk` `secret-free Debug`, `cargo test` asserts `!dbg.contains("sk_live_secret")` | If new handler logs `x-api-key` header, leak | `saas/api_keys.rs`  `saas-sdk/src/client.rs`  `ops/security_evidence.rs` |
 | Replay of revoked key | `store.rs` revocation + `hash_token` lookup on each request, `api_keys::revoke` | Revocation must propagate to all replicas via Postgres | `store.rs` `test_api_key_restart_revocation_expiry` (real Postgres) |
 | Permission escalation via key | `middleware.rs` permission-subset validation (no size-only compare) | If new permission added without subset check, escalation | `middleware.rs` `deny_response` |
 
@@ -30,7 +30,7 @@
 
 | Threat | Control | Exposure | Evidence |
 |---|---|---|---|
-| Unauthenticated event stream | `security/websocket.rs` authenticated tenant-scoped stream; `security/legacy_websocket_guard.rs` (disabled/compat/legacy-enabled) + deprecation headers | Legacy `?key=` path if enabled without guard | `saas/websocket_auth.rs` (7 tests), `websocket_auth.rs` header/first-frame |
+| Unauthenticated event stream | `security/websocket.rs` authenticated tenant-scoped stream; `security/legacy_websocket_guard.rs` (disabled/compat/legacy-enabled) + deprecation headers | Legacy `?key=` path if enabled without guard | `saas/websocket_auth.rs`  `websocket_auth.rs` header/first-frame |
 | Cross-tenant events | WS `SaasContext` checked per connection, `events` filtered by org | If event bus not filtered, leak | `api.rs` `events_ws` |
 | Replay of old events | `audit_export.rs` deterministic, not replayed via WS | — | `ws.rs` `event_to_json` |
 
@@ -38,32 +38,32 @@
 
 | Threat | Control | Exposure | Evidence |
 |---|---|---|---|
-| Price/plan tampering by client | Server-authoritative: `core/billing/pricing.rs` immutable snapshot, `checkout.rs` has no amount field (`checkout_request_has_no_amount` test), `provider_config.rs` no secrets | If SDK allowed price field, client could invent price | `billing/pricing.rs` 7 tests, `saas-sdk` 2 tests |
-| Webhook spoofing | `billing_webhook.rs` HMAC-SHA256 verify, `provider_events.rs` idempotency + secret stripping | Endpoint must not be public without signature | `billing_webhook.rs` (3 tests), `provider_events.rs` 7 tests |
-| Double billing / replay | `reconciliation.rs` never invents success, `billing_status.rs` + `dunning.rs` 7-state machine, `usage_policy.rs` 80/100% thresholds | Requires `EXTERNAL_REQUIRED` live Stripe/Paddle to verify | `reconciliation.rs` 11 tests |
+| Price/plan tampering by client | Server-authoritative: `core/billing/pricing.rs` immutable snapshot, `checkout.rs` has no amount field (`checkout_request_has_no_amount` test), `provider_config.rs` no secrets | If SDK allowed price field, client could invent price | `billing/pricing.rs`, `saas-sdk` |
+| Webhook spoofing | `billing_webhook.rs` HMAC-SHA256 verify, `provider_events.rs` idempotency + secret stripping | Endpoint must not be public without signature | `billing_webhook.rs`  `provider_events.rs` |
+| Double billing / replay | `reconciliation.rs` never invents success, `billing_status.rs` + `dunning.rs` 7-state machine, `usage_policy.rs` 80/100% thresholds | Requires `EXTERNAL_REQUIRED` live Stripe/Paddle to verify | `reconciliation.rs` |
 
 ## 6. Custody / Signing
 
 | Threat | Control | Exposure | Evidence |
 |---|---|---|---|
-| Remote signing bypass → local fallback | `core/custody/provider_config.rs` `local_fallback_allowed=false`, `custody/resolve.rs` fail-closed, `build_signer_registry` fails startup if provider unsupported | If new signer added without fallback check, bypass | `custody/provider_config` 7 tests, `crates/server/src/ops/external_validation.rs` `vault/kms/hsm` NOT_EXECUTED |
-| Private key exfiltration | `custody/credentials.rs` indirect refs only (`VaultRef`/`KmsRef`), never plaintext; `secrets` env injection via `seed_secret_env` without clobber; `AuditTrail` never logs secret | If handler logs `solana_keypair`, leak | `credentials.rs` 7 tests, `health.rs` 5 tests |
-| Rotation race | `custody/rotation.rs` Pending→Active→Draining→Revoked, old not revoked before replacement | If force-revoked incorrectly, funds stuck | `rotation.rs` 7 tests, `saas/custody_rotation.rs` 4 tests |
+| Remote signing bypass → local fallback | `core/custody/provider_config.rs` `local_fallback_allowed=false`, `custody/resolve.rs` fail-closed, `build_signer_registry` fails startup if provider unsupported | If new signer added without fallback check, bypass | `custody/provider_config`, `crates/server/src/ops/external_validation.rs` `vault/kms/hsm` NOT_EXECUTED |
+| Private key exfiltration | `custody/credentials.rs` indirect refs only (`VaultRef`/`KmsRef`), never plaintext; `secrets` env injection via `seed_secret_env` without clobber; `AuditTrail` never logs secret | If handler logs `solana_keypair`, leak | `credentials.rs`, `health.rs` |
+| Rotation race | `custody/rotation.rs` Pending→Active→Draining→Revoked, old not revoked before replacement | If force-revoked incorrectly, funds stuck | `rotation.rs`, `saas/custody_rotation.rs` |
 
 ## 7. Replay / Idempotency / Race
 
 | Threat | Control | Exposure | Evidence |
 |---|---|---|---|
 | Order replay | `DedupStore` L1 memory + L2 Redis/Postgres, `dedup_ttl_secs`, `max_dedup_entries` | If Redis off + Memory, multi-replica replay possible (warn in `main.rs`) | `redis_integration.rs` dedup |
-| Copy leader race | `provisioning/job_claim.rs` `SELECT ... SKIP LOCKED` leasing, bounded backoff | If SKIP LOCKED not used, duplicate claim | `job_claim.rs` 5 tests |
-| Ha lease split-brain | `OwnershipRegistry` fencing generations, `PostgresClaimStore` atomic, `MemoryClaimStore` warn single-replica | Live trading on Memory store double-executes (warn) | `ha_distributed` 17 tests |
+| Copy leader race | `provisioning/job_claim.rs` `SELECT ... SKIP LOCKED` leasing, bounded backoff | If SKIP LOCKED not used, duplicate claim | `job_claim.rs` |
+| Ha lease split-brain | `OwnershipRegistry` fencing generations, `PostgresClaimStore` atomic, `MemoryClaimStore` warn single-replica | Live trading on Memory store double-executes (warn) | `ha_distributed` |
 
 ## 8. Secret Leakage
 
 | Threat | Control | Exposure | Evidence |
 |---|---|---|---|
 | URL/JSON/audit/logs contain secret | `secret_scan` (`grep -R BEGIN PRIVATE KEY` etc. filtered), `security/headers.rs` not rewriting bodies, `ops/health_report.rs` redacts `postgres://`, `redis://`, `sk_live` | New code must use `is_secret_like`/`redacted` helpers | `scripts/verify-buyer-package.sh` + `final-release-check.sh` secret scan PASS, `saas-sdk` secret-free tests |
-| .env committed | `.gitignore` `/ .env`, `verify-delivery.sh` hygiene FAIL on `.env` | If `.env` added before gitignore, committed | `verify-delivery.sh` 7/7 PASS |
+| .env committed | `.gitignore` `/ .env`, `verify-delivery.sh` hygiene FAIL on `.env` | If `.env` added before gitignore, committed | `verify-delivery.sh` hygiene gate |
 
 ## 9. CORS / SSRF / Webhook
 
@@ -78,7 +78,7 @@
 | Threat | Control | Exposure | Evidence |
 |---|---|---|---|
 | Tenant suspension bypass | `tenant_lifecycle.rs` + `data_lifecycle.rs` orchestration, `readiness.rs` checks lifecycle | If new route skips `authorize_request`, suspension ignored | `tenant_lifecycle_integration.rs` |
-| Purge before retention | `data_lifecycle.rs` retention policy, `retention_worker.rs` (7 tests), only after `lifecycle_worker.rs` | Manual DB delete could bypass | `retention_worker` 7 tests |
+| Purge before retention | `data_lifecycle.rs` retention policy, `retention_worker.rs`  only after `lifecycle_worker.rs` | Manual DB delete could bypass | `retention_worker` |
 
 ## 11. Operator / Privilege Abuse
 
@@ -89,4 +89,4 @@
 
 > **Untested / External:** live Stripe/Paddle, live Vault/KMS/HSM, production deployment, funded trading, staking `STAKING_E2E=1`, external audit — all `EXTERNAL_REQUIRED`/`NOT_EXECUTED` (see `docs/FINAL-BUYER-GAP-LEDGER.md`).
 
-*Verification:* `cargo test --workspace -- --test-threads=1` (hermetic test suites; current source inventory 1783 `#[test]` attributes), `bash scripts/verify-delivery.sh` (7/7), `bash scripts/final-release-check.sh` (secret scan).
+*Verification:* `cargo test --workspace -- --test-threads=1` (hermetic test suites exist in tree — static inventory <!-- stat:test_attrs_plain -->2061<!-- /stat --> `#[test]` attributes per docs/STATS.md; no run log ships), `bash scripts/verify-delivery.sh`, `bash scripts/final-release-check.sh` (secret scan).

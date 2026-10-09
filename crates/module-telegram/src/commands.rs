@@ -44,6 +44,18 @@ pub enum Command {
     Mode(Option<String>),
     /// `/config` — redacted effective configuration.
     Config,
+    /// `/buy <mint> <sol>` — request a buy (confirm via inline keyboard;
+    /// never executed on the first tap).
+    Buy { mint: String, sol: String },
+    /// `/sell <mint> <percent>` — request selling a fraction of the open
+    /// position (confirm via inline keyboard).
+    Sell { mint: String, pct: String },
+    /// `/snipe on|off` — shortcut for enabling/disabling the sniper module.
+    Snipe(bool),
+    /// `/wallets` — configured trading wallets (public addresses) + balances.
+    Wallets,
+    /// `/limit` — this chat's trade limits and current usage.
+    Limit,
     /// Unrecognized command text (empty string = not addressed to us).
     Unknown(String),
 }
@@ -125,7 +137,12 @@ pub fn command_requires(cmd: &Command) -> TgRole {
         | Command::Trades
         | Command::Pnl
         | Command::Balance
-        | Command::Config => TgRole::Readonly,
+        | Command::Config
+        | Command::Wallets
+        | Command::Limit => TgRole::Readonly,
+        // Money-moving commands: operator or owner only, and even then the
+        // trade still requires the inline-keyboard confirmation tap.
+        Command::Buy { .. } | Command::Sell { .. } => TgRole::Operator,
         // Switching TO live is the one telegram action reserved for owners.
         Command::Mode(Some(m)) if m.eq_ignore_ascii_case("live") => TgRole::Owner,
         Command::Mode(_)
@@ -133,6 +150,7 @@ pub fn command_requires(cmd: &Command) -> TgRole {
         | Command::Off(_)
         | Command::Kill
         | Command::Resume
+        | Command::Snipe(_)
         | Command::Unknown(_) => TgRole::Operator,
     }
 }
@@ -174,6 +192,26 @@ pub fn parse_command(text: &str, prefix: &str) -> Command {
             Some(rest.to_ascii_lowercase())
         }),
         "config" | "cfg" => Command::Config,
+        "buy" | "b" => {
+            let mut args = rest.split_whitespace();
+            Command::Buy {
+                mint: args.next().unwrap_or("").to_string(),
+                sol: args.next().unwrap_or("").to_string(),
+            }
+        }
+        "sell" => {
+            let mut args = rest.split_whitespace();
+            Command::Sell {
+                mint: args.next().unwrap_or("").to_string(),
+                pct: args.next().unwrap_or("").to_string(),
+            }
+        }
+        "snipe" => Command::Snipe(matches!(
+            rest.trim().to_ascii_lowercase().as_str(),
+            "on" | "1" | "true" | "yes"
+        )),
+        "wallets" | "wallet" => Command::Wallets,
+        "limit" | "limits" => Command::Limit,
         other => Command::Unknown(other.to_string()),
     }
 }
@@ -222,6 +260,26 @@ pub async fn handle(state: &Shared, command: Command, role: TgRole) -> String {
         Command::Balance => balance_text(state).await,
         Command::Mode(arg) => mode_text(state, arg).await,
         Command::Config => config_text(state).await,
+        Command::Snipe(on) => {
+            state.set_enabled(BotModule::Sniper, on).await;
+            format!(
+                "{} Sniper module {} (sniping {}).",
+                if on { "✅" } else { "⛔" },
+                if on { "enabled" } else { "disabled" },
+                if on { "ON" } else { "OFF" }
+            )
+        }
+        // Trade commands are handled by the TradeDesk (they need the
+        // session + confirmation keyboard); handle_trade_command() is the
+        // entry point. Reaching them here means a caller used handle()
+        // directly — refuse loudly instead of silently dropping.
+        Command::Buy { .. } | Command::Sell { .. } => {
+            "⚠️ Trade commands need the trade desk (handle_trade_command).".to_string()
+        }
+        Command::Wallets => wallets_text(state).await,
+        Command::Limit => {
+            "Use /limit through the trade desk to see this chat's live usage.".to_string()
+        }
         Command::Unknown(u) if u.is_empty() => String::new(),
         Command::Unknown(u) => format!("Unknown command '{u}'. Try /help."),
     }
@@ -242,6 +300,11 @@ fn help_text() -> String {
         "/balance — wallet balances",
         "/mode [paper|simulate|live] — show or set execution mode",
         "/config — key configuration",
+        "/buy <mint> <sol> — buy (confirm on the keyboard)",
+        "/sell <mint> <percent> — sell a % of the position (confirm on the keyboard)",
+        "/snipe on|off — toggle the sniper module",
+        "/wallets — configured wallets + balances",
+        "/limit — this chat's trade limits and usage",
     ]
     .join("\n")
 }
@@ -454,11 +517,281 @@ async fn set_enabled_text(state: &Shared, target: &Target, enabled: bool) -> Str
     }
 }
 
+async fn wallets_text(state: &Shared) -> String {
+    let cfg = state.config_snapshot().await;
+    let b = state.balances().await;
+    let mut out = String::from("👛 Wallets\n");
+    if cfg.copy.wallets.is_empty() {
+        out.push_str("No copy-trade wallets configured.\n");
+    } else {
+        for w in &cfg.copy.wallets {
+            out.push_str(&format!(
+                "• {}{}\n",
+                &w.address,
+                w.label
+                    .as_ref()
+                    .map(|l| format!(" ({l})"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    out.push_str(&format!("SOL balance: {:.4}\n", b.sol));
+    out
+}
+
 fn yn(b: bool) -> &'static str {
     if b {
         "y"
     } else {
         "n"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trade desk (GAP-MAP v2 P2): /buy and /sell behind confirmation keyboards
+// ---------------------------------------------------------------------------
+
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use tokio::sync::Mutex;
+
+use crate::callbacks::{CallbackAction, CallbackSecret};
+use crate::trade_session::{
+    ChatBinding, ChatLimits, TradeDeny, TradeExecutor, TradeIntent, TradeSession, TradeSide,
+    UnconfiguredTradeExecutor,
+};
+
+/// A reply to a trade command: text plus an optional inline keyboard.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeReply {
+    /// Message text (always present).
+    pub text: String,
+    /// reply_markup JSON when the reply needs Confirm/Cancel buttons.
+    pub keyboard: Option<String>,
+}
+
+impl TradeReply {
+    fn plain(text: impl Into<String>) -> Self {
+        Self { text: text.into(), keyboard: None }
+    }
+}
+
+/// The trade desk: binds the trade session, the callback secret and the
+/// executor into one dispatch surface. One per bot process.
+pub struct TradeDesk {
+    state: Shared,
+    session: Mutex<TradeSession>,
+    secret: CallbackSecret,
+    executor: Arc<dyn TradeExecutor>,
+}
+
+impl TradeDesk {
+    /// Build a desk. With no executor wired, confirmations fail closed via
+    /// [`UnconfiguredTradeExecutor`].
+    pub fn new(state: Shared, limits: ChatLimits, secret: CallbackSecret) -> bot_core::error::BotResult<Self> {
+        Ok(Self {
+            state,
+            session: Mutex::new(TradeSession::new(limits)?),
+            secret,
+            executor: Arc::new(UnconfiguredTradeExecutor),
+        })
+    }
+
+    /// Attach the executor that runs confirmed trades (server wires the
+    /// tenant-bound implementation).
+    pub fn set_executor(&mut self, executor: Arc<dyn TradeExecutor>) {
+        self.executor = executor;
+    }
+
+    /// Bind a chat to a tenant (server calls from the Telegram-link flow).
+    pub async fn bind_chat(&self, chat_id: i64, binding: ChatBinding) {
+        self.session.lock().await.bind(chat_id, binding);
+    }
+
+    /// Drop expired pending confirmations (poll-tick housekeeping).
+    pub async fn prune(&self, now: DateTime<Utc>) {
+        self.session.lock().await.prune_expired(now);
+    }
+
+    /// `/buy <mint> <sol>` — validate, and either reply with the
+    /// confirmation keyboard or refuse with the explicit reason.
+    pub async fn request_buy(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        mint: &str,
+        sol_raw: &str,
+        now: DateTime<Utc>,
+    ) -> TradeReply {
+        if mint.trim().is_empty() || sol_raw.trim().is_empty() {
+            return TradeReply::plain("Usage: /buy <mint> <sol> — e.g. /buy So11…112 0.25");
+        }
+        let amount_sol: f64 = match sol_raw.trim().parse() {
+            Ok(v) => v,
+            Err(_) => return TradeReply::plain("⛔ SOL amount must be a number, e.g. 0.25"),
+        };
+        let intent = TradeIntent {
+            chat_id,
+            user_id,
+            organization_id: String::new(),
+            side: TradeSide::Buy,
+            mint: mint.trim().to_string(),
+            amount_sol,
+            sell_fraction: 0.0,
+        };
+        self.prepare(chat_id, intent, now).await
+    }
+
+    /// `/sell <mint> <percent>` — same flow for sells.
+    pub async fn request_sell(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        mint: &str,
+        pct_raw: &str,
+        now: DateTime<Utc>,
+    ) -> TradeReply {
+        if mint.trim().is_empty() || pct_raw.trim().is_empty() {
+            return TradeReply::plain("Usage: /sell <mint> <percent> — e.g. /sell So11…112 50");
+        }
+        let pct: f64 = match pct_raw.trim().parse() {
+            Ok(v) => v,
+            Err(_) => return TradeReply::plain("⛔ Percent must be a number between 1 and 100"),
+        };
+        let intent = TradeIntent {
+            chat_id,
+            user_id,
+            organization_id: String::new(),
+            side: TradeSide::Sell,
+            mint: mint.trim().to_string(),
+            amount_sol: 0.0,
+            sell_fraction: pct / 100.0,
+        };
+        self.prepare(chat_id, intent, now).await
+    }
+
+    async fn prepare(&self, chat_id: i64, intent: TradeIntent, now: DateTime<Utc>) -> TradeReply {
+        // Kill switch first: never even DRAW a money keyboard while it's on.
+        if self.state.kill_switch() {
+            return TradeReply::plain("🛑 Kill switch is ENGAGED — trading commands are refused until /resume.");
+        }
+        let mut session = self.session.lock().await;
+        match session.prepare_confirmation(intent.clone(), now) {
+            Ok(pending) => {
+                let summary = match intent.side {
+                    TradeSide::Buy => format!(
+                        "BUY {:.4} SOL of {}\nTap to confirm — this expires in {}s.",
+                        intent.amount_sol,
+                        intent.mint,
+                        session.limits().confirm_ttl_secs
+                    ),
+                    TradeSide::Sell => format!(
+                        "SELL {:.0}% of the {} position\nTap to confirm — this expires in {}s.",
+                        intent.sell_fraction * 100.0,
+                        intent.mint,
+                        session.limits().confirm_ttl_secs
+                    ),
+                };
+                let _ = chat_id; // keyboard attaches to the calling chat
+                TradeReply {
+                    text: summary,
+                    keyboard: Some(self.secret.confirm_keyboard(&pending.nonce)),
+                }
+            }
+            Err(deny) => TradeReply::plain(deny.reply_text()),
+        }
+    }
+
+    /// Resolve an inline-keyboard tap: verify the signature, enforce the
+    /// requester/TTL/limit walls, then run the executor on confirm.
+    /// Returns `(toast, follow-up reply)`.
+    pub async fn resolve_callback(
+        &self,
+        data: &str,
+        user_id: i64,
+        now: DateTime<Utc>,
+    ) -> (String, Option<TradeReply>) {
+        let action = match self.secret.verify(data) {
+            Ok(a) => a,
+            Err(deny) => return (deny.toast().to_string(), None),
+        };
+        let nonce = action.nonce().to_string();
+        let mut session = self.session.lock().await;
+        match action {
+            CallbackAction::Cancel { .. } => match session.cancel(&nonce, user_id) {
+                Ok(()) => ("Trade cancelled.".to_string(), None),
+                Err(deny) => (deny.reply_text().to_string(), None),
+            },
+            CallbackAction::Confirm { .. } => match session.confirm(&nonce, user_id, now) {
+                Ok(intent) => {
+                    // Drop the lock across the executor call (it may await
+                    // the pipeline); the nonce is already resolved, so a
+                    // concurrent tap cannot double-execute.
+                    drop(session);
+                    if self.state.kill_switch() {
+                        return (
+                            "Kill switch engaged".to_string(),
+                            Some(TradeReply::plain(
+                                "🛑 Kill switch engaged AFTER confirmation — the trade was NOT sent.",
+                            )),
+                        );
+                    }
+                    match self.executor.execute(&intent).await {
+                        Ok(summary) => ("Confirmed".to_string(), Some(TradeReply::plain(format!("✅ {summary}")))),
+                        Err(e) => ("Rejected".to_string(), Some(TradeReply::plain(format!("⛔ Trade rejected: {e}")))),
+                    }
+                }
+                Err(deny) => (deny.reply_text().to_string(), None),
+            },
+        }
+    }
+
+    /// `/limit` — this chat's limits and live usage.
+    pub async fn limits_text(&self, chat_id: i64, now: DateTime<Utc>) -> TradeReply {
+        let session = self.session.lock().await;
+        let l = session.limits();
+        TradeReply::plain(format!(
+            "🧮 Trade limits for this chat\n             • {} trades per {}s (used: {})\n             • max {:.4} SOL per trade\n             • max {:.4} SOL per day (used today: {:.4})\n             • confirmations expire after {}s",
+            l.max_trades_per_window,
+            l.window_secs,
+            session.trades_in_window(chat_id, now),
+            l.max_sol_per_trade,
+            l.max_daily_sol,
+            session.sol_today(chat_id, now),
+            l.confirm_ttl_secs,
+        ))
+    }
+}
+
+/// Dispatch a trade-related command through the desk. Returns `None` when
+/// the command is not trade-related (the caller falls back to [`handle`]).
+pub async fn handle_trade_command(
+    desk: &TradeDesk,
+    state: &Shared,
+    command: Command,
+    role: TgRole,
+    chat_id: i64,
+    user_id: i64,
+    now: DateTime<Utc>,
+) -> Option<TradeReply> {
+    let required = command_requires(&command);
+    if !role.satisfies(required) {
+        return Some(TradeReply::plain(format!(
+            "⛔ Your role '{}' cannot run this command (needs '{}').",
+            role.as_str(),
+            required.as_str()
+        )));
+    }
+    match command {
+        Command::Buy { mint, sol } => Some(desk.request_buy(chat_id, user_id, &mint, &sol, now).await),
+        Command::Sell { mint, pct } => Some(desk.request_sell(chat_id, user_id, &mint, &pct, now).await),
+        Command::Limit => Some(desk.limits_text(chat_id, now).await),
+        Command::Wallets => Some(TradeReply::plain(wallets_text(state).await)),
+        Command::Snipe(on) => Some(TradeReply::plain(
+            handle(state, Command::Snipe(on), role).await,
+        )),
+        _ => None,
     }
 }
 

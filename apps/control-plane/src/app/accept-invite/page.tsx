@@ -5,15 +5,17 @@
  *
  * The invitation token comes from the invitation URL and is submitted only
  * over the same-origin API request. It is never written to localStorage,
- * sessionStorage, cookies, analytics, or the URL after acceptance. A newly
- * accepted invitation returns a normal in-memory session and redirects to
- * the authenticated control plane.
+ * sessionStorage, cookies, analytics, or the URL after acceptance. MFA-protected
+ * tenants receive a restricted enrollment session that becomes a normal
+ * session only after successful TOTP verification.
  */
 
 import { type FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, auth } from "@/lib/api";
-import { establishSession } from "@/lib/auth";
+import { setupTotp, verifyTotp } from "@/lib/api/security-api";
+import { establishSession, refresh } from "@/lib/auth";
+import TotpQrCode from "@/components/settings/TotpQrCode";
 
 const MIN_PASSWORD_LENGTH = 12;
 
@@ -35,6 +37,17 @@ export default function AcceptInvitePage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [accepted, setAccepted] = useState(false);
+  const [organizationSlug, setOrganizationSlug] = useState("");
+  const [mfaEnrollmentRequired, setMfaEnrollmentRequired] = useState(false);
+  const [mfaVerified, setMfaVerified] = useState(false);
+  const [mfaBusy, setMfaBusy] = useState(false);
+  const [mfaCode, setMfaCode] = useState("");
+  const [totpSetup, setTotpSetup] = useState<{
+    deviceId: string;
+    secret: string;
+    otpauthUrl: string;
+  } | null>(null);
+  const [mfaError, setMfaError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -42,6 +55,49 @@ export default function AcceptInvitePage() {
     window.history.replaceState({}, document.title, window.location.pathname);
     void Promise.resolve().then(() => setToken(queryToken.trim()));
   }, []);
+
+  async function createTotpSetup() {
+    setMfaBusy(true);
+    setMfaError(null);
+    try {
+      const setup = await setupTotp();
+      setTotpSetup({
+        deviceId: setup.device_id,
+        secret: setup.secret,
+        otpauthUrl: setup.otpauth_url,
+      });
+    } catch (caught: unknown) {
+      setMfaError(errorMessage(caught));
+    } finally {
+      setMfaBusy(false);
+    }
+  }
+
+  async function verifyAuthenticator() {
+    if (!totpSetup || !/^\d{6}$/.test(mfaCode)) {
+      setMfaError("Enter the current six-digit code from your authenticator app.");
+      return;
+    }
+    setMfaBusy(true);
+    setMfaError(null);
+    try {
+      const result = await verifyTotp(totpSetup.deviceId, mfaCode);
+      if (!result.session_promoted) {
+        throw new Error("TOTP was verified, but the restricted onboarding session was not promoted.");
+      }
+      if (!(await refresh())) {
+        throw new Error("TOTP was verified, but the session could not be refreshed. Sign in again with your authenticator code.");
+      }
+      setMfaVerified(true);
+      setMfaEnrollmentRequired(false);
+      setMfaCode("");
+      window.setTimeout(() => router.replace("/"), 500);
+    } catch (caught: unknown) {
+      setMfaError(errorMessage(caught));
+    } finally {
+      setMfaBusy(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -64,7 +120,16 @@ export default function AcceptInvitePage() {
       const response = await auth.acceptInvite(token, password, displayName.trim() || undefined);
       establishSession(response);
       setAccepted(true);
-      window.setTimeout(() => router.replace("/"), 400);
+      setOrganizationSlug(response.organization_slug);
+      setToken("");
+      setPassword("");
+      setConfirmPassword("");
+      setMfaEnrollmentRequired(response.mfa_enrollment_required);
+      if (response.mfa_enrollment_required) {
+        await createTotpSetup();
+      } else {
+        window.setTimeout(() => router.replace("/"), 400);
+      }
     } catch (caught: unknown) {
       setError(errorMessage(caught));
     } finally {
@@ -113,7 +178,67 @@ export default function AcceptInvitePage() {
               lineHeight: 1.5,
             }}
           >
-            Invitation accepted. Your secure session is active; redirecting to the control plane.
+            {!mfaEnrollmentRequired ? (
+              <>Invitation accepted. Your secure session is active; redirecting to the control plane.</>
+            ) : mfaVerified ? (
+              <>Authenticator verified. Your full session is active; redirecting to the control plane.</>
+            ) : (
+              <div style={{ display: "grid", gap: "1rem" }}>
+                <p style={{ margin: 0 }}>
+                  Invitation accepted. This organization requires multi-factor authentication. Set up and verify an authenticator to activate your session.
+                </p>
+                {!totpSetup ? (
+                  <button
+                    type="button"
+                    onClick={() => void createTotpSetup()}
+                    disabled={mfaBusy}
+                    style={buttonStyle}
+                  >
+                    {mfaBusy ? "Preparing authenticator..." : "Start authenticator setup"}
+                  </button>
+                ) : (
+                  <div style={{ display: "grid", gap: "0.75rem", padding: "0.9rem", borderRadius: "10px", background: "rgb(0 0 0 / 15%)" }}>
+                    <p style={{ margin: 0 }}>Scan the code, or add the secret manually, in your authenticator app:</p>
+                    <div style={{ justifySelf: "start" }}>
+                      <TotpQrCode value={totpSetup.otpauthUrl} size={160} label="Scan to enroll in your authenticator app" />
+                    </div>
+                    <code style={{ overflowWrap: "anywhere", userSelect: "all" }}>{totpSetup.secret}</code>
+                    <label style={{ display: "grid", gap: "0.4rem" }}>
+                      <span>Current six-digit authenticator code</span>
+                      <input
+                        value={mfaCode}
+                        onChange={(event) => setMfaCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        pattern="[0-9]{6}"
+                        style={inputStyle}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => void verifyAuthenticator()}
+                      disabled={mfaBusy || !/^\d{6}$/.test(mfaCode)}
+                      style={buttonStyle}
+                    >
+                      {mfaBusy ? "Verifying..." : "Verify authenticator and activate session"}
+                    </button>
+                  </div>
+                )}
+                {mfaError ? (
+                  <div role="alert" style={{ padding: "0.8rem", borderRadius: "10px", background: "rgb(231 76 60 / 14%)", color: "#ffaaa0" }}>
+                    {mfaError}
+                    {organizationSlug ? (
+                      <p style={{ margin: "0.6rem 0 0" }}>
+                        <a href={`/?organization=${encodeURIComponent(organizationSlug)}`} style={{ color: "inherit", textDecoration: "underline" }}>
+                          Continue to sign in with your authenticator
+                        </a>
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            )}
           </div>
         ) : (
           <form onSubmit={submit}>

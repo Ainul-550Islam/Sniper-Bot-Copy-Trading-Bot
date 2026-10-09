@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 bot-core.workspace = true
@@ -23,6 +24,7 @@ rand.workspace = true
 solana-sdk.workspace = true
 bs58.workspace = true
 async-trait.workspace = true
+reqwest.workspace = true
 
 [lib]
 name = "module_sniper"

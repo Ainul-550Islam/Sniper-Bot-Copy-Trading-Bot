@@ -10,7 +10,9 @@ edition = "2021"
 # 1.85+; Agave 4.x platform-tools breaks solana-zk-token-sdk on BPF).
 rust-version = "1.79"
 description = "Module 4 — native Solana staking + token + fee program (no Anchor)"
-license = "MIT"
+license = "LicenseRef-Proprietary"
+# Proprietary: see ../../LICENSE. Never publish to crates.io.
+publish = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
@@ -37,6 +39,10 @@ bincode = "1.3"
 # `solana-test-validator` with a normal signing client.
 solana-sdk = "2.1"
 solana-client = "2.1"
+# Property tests for the reward/fee/cap arithmetic
+# (`tests/property_rewards.rs`, audit/INVARIANTS.md §D/E): randomized
+# boundaries, monotonicity, and conservation properties.
+proptest = "1.5"
 
 [features]
 # Lets other crates import the instruction builders / state types without

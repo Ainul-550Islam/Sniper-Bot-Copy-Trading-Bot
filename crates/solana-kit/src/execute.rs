@@ -128,10 +128,8 @@ impl ExecutionResult {
     /// policy veto / duplicate refusal — those results may still carry a
     /// signature for audit, but it never reached a node).
     pub fn broadcast_signature(&self) -> Option<String> {
-        let left_the_process = !matches!(
-            self.status,
-            ExecStatus::SimulationFailed | ExecStatus::Skipped
-        );
+        let left_the_process = self.attempts > 0
+            && !matches!(self.status, ExecStatus::SimulationFailed | ExecStatus::Skipped);
         (!self.paper && left_the_process && !self.signature.is_empty())
             .then(|| self.signature.clone())
     }
@@ -370,6 +368,14 @@ pub enum BroadcastMode {
     Jito,
     /// Try Jito first, fall back to plain RPC if the bundle is rejected.
     JitoThenRpc,
+    /// Race (GAP-MAP P1): broadcast the SAME signed transaction through
+    /// Jito and the staked RPC in parallel. Both paths carry an identical
+    /// signature, so the leader dedupes them — whichever route lands first
+    /// wins and the outcome is confirmed from the chain exactly once. This
+    /// is the mode for latency-critical entries: it costs one extra send
+    /// but removes the sequential-fallback round trip from the critical
+    /// path. Degrades to plain RPC when no `jito_url` is configured.
+    Race,
 }
 
 /// Execution policy.
@@ -414,6 +420,177 @@ impl Default for ExecPolicy {
     }
 }
 
+/// Which tip-floor percentile a dynamic tip targets.
+///
+/// The Jito tip-floor API reports five buckets (25th/50th/75th/95th/99th).
+/// Any requested percentile maps UP to the nearest bucket, so a target of
+/// 60 pays the 75th-percentile floor — never less than asked for.
+pub fn tip_floor_bucket(percentile: u8) -> &'static str {
+    match percentile {
+        0..=25 => "landed_tips_25th_percentile",
+        26..=50 => "landed_tips_50th_percentile",
+        51..=75 => "landed_tips_75th_percentile",
+        76..=95 => "landed_tips_95th_percentile",
+        _ => "landed_tips_99th_percentile",
+    }
+}
+
+/// Extract the tip (lamports) for one bucket from a tip-floor response,
+/// clamped into `[min_tip, max_tip]`. Pure and total: malformed payloads
+/// yield `None`, never a panic, and an out-of-band value is clamped rather
+/// than trusted (a corrupted feed must not be able to order a 50 SOL tip).
+pub fn extract_tip_floor_value(
+    body: &serde_json::Value,
+    bucket: &str,
+    min_tip: u64,
+    max_tip: u64,
+) -> Option<u64> {
+    // The API wraps the sample in `data: [ { ... } ]`; accept a bare object
+    // too so a proxy that unwraps it still works.
+    let sample = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.first())
+        .unwrap_or(body);
+    let value = sample.get(bucket)?.as_f64()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let lamports = value.round() as u64;
+    Some(lamports.clamp(min_tip, max_tip))
+}
+
+/// Dynamic Jito tip policy (GAP-MAP P1).
+///
+/// Instead of a fixed `jito_tip_lamports` burned into every transaction,
+/// the executor samples the Jito tip floor and pays the configured
+/// percentile — enough to land in congestion, not a constant overpay in
+/// quiet periods. A caller-set tip (`TxRequest::jito_tip_lamports > 0`)
+/// ALWAYS wins; the dynamic tip only fills in zero-tip requests.
+#[derive(Debug, Clone)]
+pub struct DynamicTipPolicy {
+    /// Tip-floor endpoint (host + path). Defaults to the public Jito API.
+    pub tip_floor_url: String,
+    /// Target percentile (0-100); mapped UP to the nearest bucket.
+    pub percentile: u8,
+    /// Never pay less than this — also the fallback when the tip floor
+    /// cannot be fetched.
+    pub min_tip_lamports: u64,
+    /// Never pay more than this, whatever the feed claims.
+    pub max_tip_lamports: u64,
+    /// How long a fetched floor stays fresh.
+    pub cache_ttl: Duration,
+}
+
+impl DynamicTipPolicy {
+    /// Sensible defaults against the public Jito endpoint.
+    pub fn jito_default(percentile: u8) -> Self {
+        Self {
+            tip_floor_url: format!(
+                "{}{}",
+                crate::consts::JITO_TIP_FLOOR_HOST,
+                crate::consts::JITO_TIP_FLOOR_PATH
+            ),
+            percentile,
+            min_tip_lamports: 1_000,
+            max_tip_lamports: 10_000_000,
+            cache_ttl: Duration::from_secs(15),
+        }
+    }
+}
+
+/// Cached tip-floor sampler shared by executors.
+pub struct TipFloorSampler {
+    http: reqwest::Client,
+    policy: DynamicTipPolicy,
+    cache: std::sync::Mutex<Option<(Instant, u64)>>,
+}
+
+impl TipFloorSampler {
+    pub fn new(policy: DynamicTipPolicy) -> Arc<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+        Arc::new(Self {
+            http,
+            policy,
+            cache: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// The current dynamic tip, or `None` when the floor is unreachable
+    /// and stale data has expired (callers fall back to the policy floor).
+    pub async fn tip(&self) -> Option<u64> {
+        // Fresh cache: no network round trip on the hot path.
+        if let Some(entry) = self.cache.lock().ok().and_then(|guard| *guard) {
+            if entry.0.elapsed() < self.policy.cache_ttl {
+                return Some(entry.1);
+            }
+        }
+        let body = json!({});
+        let response = self.http.post(&self.policy.tip_floor_url).json(&body).send().await;
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "tip floor fetch failed");
+                return self.stale_or_none();
+            }
+        };
+        let text = match response.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(error = %e, "tip floor body read failed");
+                return self.stale_or_none();
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, body = %truncate(&text, 200), "tip floor payload invalid");
+                return self.stale_or_none();
+            }
+        };
+        let bucket = tip_floor_bucket(self.policy.percentile);
+        let tip = extract_tip_floor_value(
+            &value,
+            bucket,
+            self.policy.min_tip_lamports,
+            self.policy.max_tip_lamports,
+        );
+        match tip {
+            Some(tip) => {
+                if let Ok(mut guard) = self.cache.lock() {
+                    *guard = Some((Instant::now(), tip));
+                }
+                Some(tip)
+            }
+            None => {
+                warn!(bucket, "tip floor payload missing bucket");
+                self.stale_or_none()
+            }
+        }
+    }
+
+    /// The policy floor — the fallback when the feed is dark.
+    pub fn min_tip(&self) -> u64 {
+        self.policy.min_tip_lamports
+    }
+
+    /// Serve data past its TTL rather than fail: a slightly stale floor is
+    /// still a better estimate than blind minimum, and the policy floor
+    /// clamps the downside anyway. Nothing is served once it is older than
+    /// 10x the TTL.
+    fn stale_or_none(&self) -> Option<u64> {
+        self.cache
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .filter(|(at, _)| at.elapsed() < self.policy.cache_ttl * 10)
+            .map(|(_, tip)| tip)
+    }
+}
+
 /// Builds, simulates and broadcasts transactions for one wallet.
 pub struct Executor {
     rpc: Rpc,
@@ -437,6 +614,9 @@ pub struct Executor {
     /// must carry tenant metadata matching the bound context exactly or
     /// the transaction is refused before signing (fail-closed).
     tenant_guard: Option<Arc<crate::tenant_broadcast_guard::TenantBroadcastGuard>>,
+    /// Dynamic Jito tip sampler (GAP-MAP P1). `None` keeps the legacy
+    /// behaviour: tips come only from `TxRequest::jito_tip_lamports`.
+    dynamic_tip: Option<Arc<TipFloorSampler>>,
 }
 
 impl Executor {
@@ -455,6 +635,7 @@ impl Executor {
             fee_policy,
             ledger: execution::ledger(),
             tenant_guard: None,
+            dynamic_tip: None,
         }
     }
 
@@ -525,6 +706,30 @@ impl Executor {
 
     pub fn ledger(&self) -> &Arc<ExecutionLedger> {
         &self.ledger
+    }
+
+    /// Attach a dynamic Jito tip sampler (GAP-MAP P1). When present, a
+    /// Jito broadcast with a zero requested tip is priced from the live tip
+    /// floor instead of being rejected. Caller-set tips always win.
+    pub fn with_dynamic_tip(mut self, sampler: Arc<TipFloorSampler>) -> Self {
+        self.dynamic_tip = Some(sampler);
+        self
+    }
+
+    /// Resolve the tip to bake into a Jito transaction.
+    ///
+    /// * an explicit request tip is never overridden;
+    /// * without a sampler the request tip stands (legacy behaviour);
+    /// * with a sampler, a zero tip becomes the live tip-floor percentile,
+    ///   falling back to the sampler's policy floor when the feed is dark.
+    async fn resolve_jito_tip(&self, requested: u64) -> u64 {
+        if requested > 0 {
+            return requested;
+        }
+        match &self.dynamic_tip {
+            Some(sampler) => sampler.tip().await.unwrap_or_else(|| sampler.min_tip()),
+            None => requested,
+        }
     }
 
     /// Build a `TxBuilder` wired with this executor's wallet and (when
@@ -835,6 +1040,23 @@ impl Executor {
         let fee = decision.fee;
         self.ledger.set_priority_fee(intent_id, fee).await;
 
+        // ---- dynamic Jito tip (GAP-MAP P1) --------------------------------
+        // Jito paths bake the tip INTO the transaction, so it must be
+        // resolved before the build. A zero requested tip becomes the live
+        // tip-floor percentile when a sampler is attached; an explicit tip
+        // is never touched.
+        if matches!(
+            self.policy.broadcast,
+            BroadcastMode::Jito | BroadcastMode::JitoThenRpc | BroadcastMode::Race
+        ) && req.jito_tip_lamports == 0
+        {
+            let tip = self.resolve_jito_tip(0).await;
+            if tip > 0 {
+                debug!(label = %req.label, tip, "dynamic jito tip resolved");
+                req.jito_tip_lamports = tip;
+            }
+        }
+
         // ---- blockhash freshness -----------------------------------------
         // A retry never reuses a caller-pinned blockhash: the previous
         // attempt proved it dead. Otherwise the cached hash is used only
@@ -982,6 +1204,7 @@ impl Executor {
                     }
                 }
             }
+            BroadcastMode::Race => self.broadcast_race(&built, req.jito_tip_lamports).await,
         };
         let send_ms = t.elapsed().as_millis() as u64;
         observe_stage("send", t.elapsed());
@@ -1371,6 +1594,44 @@ impl Executor {
         Ok(built.signature())
     }
 
+    /// Race broadcast (GAP-MAP P1): send the SAME signed transaction via
+    /// Jito and the staked RPC in parallel and take the first acceptance.
+    ///
+    /// Both sends carry an identical signature, so a leader that sees the
+    /// transaction twice processes it exactly once — racing cannot
+    /// double-execute. We await BOTH sends (they are short, and cancelling
+    /// one mid-flight could still leave its bytes in flight anyway), prefer
+    /// the Jito acceptance for its MEV protection, and report an error only
+    /// when every route refused. A missing `jito_url` simply leaves the RPC
+    /// result standing, so Race degrades gracefully to plain broadcast.
+    async fn broadcast_race(
+        &self,
+        built: &BuiltTx,
+        tip_lamports: u64,
+    ) -> Result<Signature, SendError> {
+        let (jito, rpc) = tokio::join!(
+            self.broadcast_jito(built, tip_lamports),
+            self.broadcast_rpc(built),
+        );
+        match (jito, rpc) {
+            (Ok(sig), _) => Ok(sig),
+            (Err(jito_err), Ok(sig)) => {
+                warn!(error = %jito_err.message, "race: jito refused, rpc accepted");
+                Ok(sig)
+            }
+            (Err(jito_err), Err(rpc_err)) => {
+                // Report the RPC error class (the route every deployment
+                // has); the Jito failure is already logged above.
+                warn!(
+                    jito = %jito_err.message,
+                    rpc = %rpc_err.message,
+                    "race: every broadcast route refused"
+                );
+                Err(rpc_err)
+            }
+        }
+    }
+
     /// Refresh the blockhash and re-sign, keeping the instruction set.
     pub async fn rebuild_with_fresh_blockhash(&self, req: &TxRequest) -> BotResult<BuiltTx> {
         let bh = self.rpc.latest_blockhash(true).await?;
@@ -1460,11 +1721,31 @@ impl Executor {
         .await;
 
         // A pre-signed transaction can go stale while it sits in the queue.
-        let valid = self
-            .rpc
-            .is_blockhash_valid(&built.blockhash)
-            .await
-            .unwrap_or(true);
+        let valid = match self.rpc.is_blockhash_valid(&built.blockhash).await {
+            Ok(valid) => valid,
+            Err(error) => {
+                // The transaction has not been submitted yet. An RPC outage is
+                // not evidence that the signed blockhash is valid, so fail
+                // closed and let the caller rebuild/retry after connectivity
+                // recovers. Keep the signature for audit, but never expose it
+                // as a broadcast signature when attempts == 0.
+                let message = format!(
+                    "prebuilt transaction blockhash validity check failed; transaction not broadcast: {error}"
+                );
+                self.mark_failed(&intent_id, FailureClass::Internal, &message)
+                    .await;
+                let mut r = ExecutionResult::empty(&built.label, &intent_id, false);
+                r.signature = signature.to_string();
+                r.status = ExecStatus::SendFailed;
+                r.total_ms = started.elapsed().as_millis() as u64;
+                r.tx_size = built.size;
+                r.error = Some(message);
+                r.state = ExecutionState::Failed;
+                r.failure = Some(FailureClass::Internal);
+                meter_attempt(ExecStatus::SendFailed);
+                return Ok(r);
+            }
+        };
         if !valid {
             let msg = "prebuilt transaction blockhash expired before it was sent";
             self.mark_failed(&intent_id, FailureClass::BlockhashExpired, msg)
@@ -1475,7 +1756,6 @@ impl Executor {
             r.total_ms = started.elapsed().as_millis() as u64;
             r.tx_size = built.size;
             r.error = Some(msg.into());
-            r.attempts = 1;
             r.state = ExecutionState::Expired;
             r.failure = Some(FailureClass::BlockhashExpired);
             meter_attempt(ExecStatus::SendFailed);
@@ -1494,9 +1774,14 @@ impl Executor {
             // A transaction signed elsewhere (`BuiltTx::from_signed`) carries
             // no instruction list, so no tip can be found and it cannot be
             // bundled: RPC is the only route that can land it.
-            BroadcastMode::Jito | BroadcastMode::JitoThenRpc if built.instructions.is_empty() => {
+            BroadcastMode::Jito | BroadcastMode::JitoThenRpc | BroadcastMode::Race
+                if built.instructions.is_empty() => {
                 debug!(label = %built.label, "externally signed transaction: broadcasting via rpc");
                 self.broadcast_rpc(built).await
+            }
+            BroadcastMode::Race => {
+                let tip = self.jito_tip_for(built);
+                self.broadcast_race(built, tip).await
             }
             BroadcastMode::Jito | BroadcastMode::JitoThenRpc => {
                 match self.broadcast_jito(built, self.jito_tip_for(built)).await {
@@ -1644,7 +1929,13 @@ impl Executor {
 /// writable account).
 fn writable_accounts(req: &TxRequest) -> Vec<Pubkey> {
     let mut out: Vec<Pubkey> = Vec::new();
-    for ix in &req.instructions {
+    // Post-unwrap instructions (platform fee, GAP-MAP P1) count too: the
+    // fee vault is a writable account the fee market will price.
+    for ix in req
+        .instructions
+        .iter()
+        .chain(req.post_unwrap_instructions.iter())
+    {
         for meta in &ix.accounts {
             if meta.is_writable && !out.contains(&meta.pubkey) {
                 out.push(meta.pubkey);
@@ -1797,7 +2088,14 @@ pub fn exec_policy_from_config(cfg: &bot_core::config::Config) -> ExecPolicy {
         ex.mode
     };
     let broadcast = if ex.use_jito {
-        BroadcastMode::JitoThenRpc
+        if ex.jito_race {
+            // Race (GAP-MAP P1): Jito + staked RPC in parallel, first
+            // landing wins. Same signed bytes on both routes, so the chain
+            // dedupes.
+            BroadcastMode::Race
+        } else {
+            BroadcastMode::JitoThenRpc
+        }
     } else {
         BroadcastMode::Rpc
     };
@@ -1823,6 +2121,20 @@ pub fn exec_policy_from_config(cfg: &bot_core::config::Config) -> ExecPolicy {
 /// Build the [`FeePolicy`] that belongs next to [`exec_policy_from_config`].
 pub fn fee_policy_from_config(cfg: &bot_core::config::Config) -> FeePolicy {
     FeePolicy::from_config(&cfg.execution)
+}
+
+/// Build the dynamic Jito tip sampler (GAP-MAP P1) for this config, or
+/// `None` when dynamic tips are disabled (`jito_dynamic_tip_percentile = 0`
+/// or Jito itself off). Wire the result into the executor with
+/// `Executor::with_dynamic_tip`.
+pub fn dynamic_tip_from_config(cfg: &bot_core::config::Config) -> Option<Arc<TipFloorSampler>> {
+    let ex = &cfg.execution;
+    if !ex.use_jito || ex.jito_dynamic_tip_percentile == 0 {
+        return None;
+    }
+    Some(TipFloorSampler::new(DynamicTipPolicy::jito_default(
+        ex.jito_dynamic_tip_percentile,
+    )))
 }
 
 #[cfg(test)]
@@ -2440,6 +2752,52 @@ mod tests {
         assert_eq!(rec.state, ExecutionState::Confirmed);
     }
 
+    #[tokio::test]
+    async fn prebuilt_blockhash_rpc_error_fails_closed_without_broadcast() {
+        let url = spawn_jsonrpc_error_server("provider unavailable").await;
+        let wallet = Arc::new(Wallet::generate());
+        let executor = Executor::new(
+            mock_rpc(&url),
+            Arc::clone(&wallet),
+            live_policy(Duration::from_secs(1)),
+        )
+        .with_ledger(ExecutionLedger::new(64));
+        let tx = dummy_tx();
+        let bytes = bincode::serialize(&tx).expect("dummy transaction serializes");
+        let built = BuiltTx {
+            tx,
+            size: bytes.len(),
+            bytes,
+            account_count: 0,
+            blockhash: Hash::new_unique(),
+            last_valid_block_height: None,
+            label: "prebuilt-blockhash-rpc-error".into(),
+            instructions: Vec::new(),
+            intent_id: "int_prebuilt_blockhash_rpc_error".into(),
+            module: "test".into(),
+            symbol: "TEST".into(),
+            tenant: None,
+        };
+
+        let result = executor.send_prebuilt(&built).await.expect("returns result");
+        assert_eq!(result.status, ExecStatus::SendFailed);
+        assert_eq!(result.state, ExecutionState::Failed);
+        assert_eq!(result.failure, Some(FailureClass::Internal));
+        assert_eq!(result.attempts, 0, "no broadcast attempt occurred");
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("transaction not broadcast")));
+        assert!(result.broadcast_signature().is_none());
+        let record = executor
+            .ledger()
+            .get(&result.intent_id)
+            .await
+            .expect("prebuilt intent recorded");
+        assert_eq!(record.state, ExecutionState::Failed);
+        assert_eq!(record.failure, Some(FailureClass::Internal));
+    }
+
     // ------------------------------------------------------------------
     // Scripted mock node: answers per JSON-RPC method so a whole lifecycle
     // (blockhash → send → confirm / expire) can be driven offline.
@@ -2758,5 +3116,163 @@ mod tests {
             executor.resolve_intent(&pinned).await.intent_id,
             "int_pinned"
         );
+    }
+
+
+    // ------------------------------------------------- Race + dynamic tip --
+
+    #[test]
+    fn broadcast_mode_race_serialises_stably() {
+        let s = serde_json::to_string(&BroadcastMode::Race).unwrap();
+        assert_eq!(s, "\"race\"");
+        let back: BroadcastMode = serde_json::from_str("\"race\"").unwrap();
+        assert_eq!(back, BroadcastMode::Race);
+        // The legacy spellings keep working.
+        let legacy: BroadcastMode = serde_json::from_str("\"jito_then_rpc\"").unwrap();
+        assert_eq!(legacy, BroadcastMode::JitoThenRpc);
+    }
+
+    #[test]
+    fn tip_floor_bucket_maps_up_to_the_nearest_bucket() {
+        assert_eq!(tip_floor_bucket(0), "landed_tips_25th_percentile");
+        assert_eq!(tip_floor_bucket(25), "landed_tips_25th_percentile");
+        assert_eq!(tip_floor_bucket(26), "landed_tips_50th_percentile");
+        assert_eq!(tip_floor_bucket(50), "landed_tips_50th_percentile");
+        assert_eq!(tip_floor_bucket(60), "landed_tips_75th_percentile");
+        assert_eq!(tip_floor_bucket(75), "landed_tips_75th_percentile");
+        assert_eq!(tip_floor_bucket(90), "landed_tips_95th_percentile");
+        assert_eq!(tip_floor_bucket(96), "landed_tips_99th_percentile");
+        assert_eq!(tip_floor_bucket(100), "landed_tips_99th_percentile");
+        assert_eq!(tip_floor_bucket(255), "landed_tips_99th_percentile");
+    }
+
+    fn tip_floor_body() -> serde_json::Value {
+        json!({
+            "data": [{
+                "time_stamp": "2026-10-07T00:00:00Z",
+                "landed_tips_25th_percentile": 1000.0,
+                "landed_tips_50th_percentile": 2500.0,
+                "landed_tips_75th_percentile": 999999.5,
+                "landed_tips_95th_percentile": 50000000.0,
+                "landed_tips_99th_percentile": 900000000.0
+            }]
+        })
+    }
+
+    #[test]
+    fn tip_floor_extraction_reads_buckets_and_rounds() {
+        let body = tip_floor_body();
+        assert_eq!(
+            extract_tip_floor_value(&body, "landed_tips_50th_percentile", 1, 1_000_000_000),
+            Some(2500)
+        );
+        // .5 rounds up.
+        assert_eq!(
+            extract_tip_floor_value(&body, "landed_tips_75th_percentile", 1, 1_000_000_000),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn tip_floor_extraction_clamps_out_of_band_values() {
+        let body = tip_floor_body();
+        // 95th bucket is 50 SOL — the cap must win over the feed.
+        assert_eq!(
+            extract_tip_floor_value(&body, "landed_tips_95th_percentile", 1_000, 10_000_000),
+            Some(10_000_000)
+        );
+        // The floor lifts dust tips.
+        assert_eq!(
+            extract_tip_floor_value(&body, "landed_tips_25th_percentile", 5_000, 10_000_000),
+            Some(5_000)
+        );
+    }
+
+    #[test]
+    fn tip_floor_extraction_is_total_on_garbage() {
+        for garbage in [
+            json!(null),
+            json!({}),
+            json!({"data": []}),
+            json!({"data": [{"landed_tips_50th_percentile": "soon"}]}),
+            json!({"data": [{"landed_tips_50th_percentile": -5.0}]}),
+            json!({"data": [{"landed_tips_50th_percentile": null}]}),
+        ] {
+            assert_eq!(
+                extract_tip_floor_value(&garbage, "landed_tips_50th_percentile", 1, 1_000_000),
+                None,
+                "payload {garbage}"
+            );
+        }
+    }
+
+    #[test]
+    fn tip_floor_accepts_a_bare_sample_object() {
+        // A proxy that unwraps `data` still works.
+        let bare = json!({"landed_tips_75th_percentile": 4242.0});
+        assert_eq!(
+            extract_tip_floor_value(&bare, "landed_tips_75th_percentile", 1, 1_000_000),
+            Some(4242)
+        );
+    }
+
+    #[test]
+    fn dynamic_tip_policy_defaults_are_sane() {
+        let p = DynamicTipPolicy::jito_default(75);
+        assert_eq!(p.percentile, 75);
+        assert!(p.tip_floor_url.contains("tip_floor"));
+        assert!(p.min_tip_lamports > 0);
+        assert!(p.max_tip_lamports > p.min_tip_lamports);
+        assert_eq!(p.cache_ttl, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn config_maps_race_and_dynamic_tip() {
+        let mut cfg = bot_core::config::Config::default();
+        // Jito off: everything stays plain RPC, no sampler.
+        cfg.execution.use_jito = false;
+        cfg.execution.jito_race = true;
+        cfg.execution.jito_dynamic_tip_percentile = 75;
+        assert_eq!(exec_policy_from_config(&cfg).broadcast, BroadcastMode::Rpc);
+        assert!(dynamic_tip_from_config(&cfg).is_none());
+
+        // Jito on, race off: sequential fallback, no sampler without a
+        // percentile.
+        cfg.execution.use_jito = true;
+        cfg.execution.jito_race = false;
+        cfg.execution.jito_dynamic_tip_percentile = 0;
+        assert_eq!(
+            exec_policy_from_config(&cfg).broadcast,
+            BroadcastMode::JitoThenRpc
+        );
+        assert!(dynamic_tip_from_config(&cfg).is_none());
+
+        // Race on: parallel broadcast.
+        cfg.execution.jito_race = true;
+        assert_eq!(exec_policy_from_config(&cfg).broadcast, BroadcastMode::Race);
+
+        // Percentile > 0 builds a sampler.
+        cfg.execution.jito_dynamic_tip_percentile = 75;
+        assert!(dynamic_tip_from_config(&cfg).is_some());
+    }
+
+    #[tokio::test]
+    async fn sampler_falls_back_to_the_floor_when_the_feed_is_dark() {
+        // Point the sampler at a port nothing listens on: fetch fails, no
+        // cache exists, so the policy floor is the honest answer.
+        let policy = DynamicTipPolicy {
+            tip_floor_url: "http://127.0.0.1:9/api/v1/bundles/tip_floor".into(),
+            percentile: 75,
+            min_tip_lamports: 4_321,
+            max_tip_lamports: 10_000_000,
+            cache_ttl: Duration::from_secs(15),
+        };
+        let sampler = TipFloorSampler::new(policy);
+        // The sampler itself reports "no data" ...
+        assert_eq!(sampler.tip().await, None);
+        // ... and exposes the floor so the executor can substitute it
+        // (see `resolve_jito_tip` — a dark feed must never block a trade
+        // nor order an unbounded tip).
+        assert_eq!(sampler.min_tip(), 4_321);
     }
 }

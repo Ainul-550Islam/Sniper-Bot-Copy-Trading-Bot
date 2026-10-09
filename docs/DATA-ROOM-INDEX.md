@@ -48,7 +48,7 @@ This index is the single entry point to the complete transaction evidence set. E
 - `docs/SAAS-*.md`, `docs/BUYER-DEPLOYMENT.md`, `docs/BACKUP-RESTORE.md`
 
 ## 7. Backup / Restore
-- `crates/server/src/backup/{export_manifest.rs,restore_manifest.rs,preflight.rs,commands.rs}` — strict `DOCUMENTED→EXECUTED→VERIFIED`
+- `crates/server/src/backup/{export_manifest.rs,restore_manifest.rs,preflight.rs,commands.rs}` — strict `DOCUMENTED→EXECUTED→PROVEN`
 - `docs/BACKUP-RESTORE.md` + scripts `scripts/build-release-package.sh`
 
 ## 8. SBOM / License / IP
@@ -67,4 +67,4 @@ This index is the single entry point to the complete transaction evidence set. E
 ## 11. Crosswalk & Release Notes
 - `docs/FINAL-EVIDENCE-CROSSWALK.md` *(new)*, `docs/RELEASE-NOTES-CURRENT.md` *(new)*, `docs/EVIDENCE-INDEX.md`, `release-manifest.json`
 
-> **How to verify this index:** `ls docs/*.md | wc -l` (70 → 101), `cat release-manifest.json | grep docs_files`, `bash scripts/verify-delivery.sh` (7/7 PASS after hygiene fix), `bash scripts/verify-buyer-package.sh`.
+> **How to verify this index:** `ls docs/*.md | wc -l` (live value = `docs_canonical` in `docs/STATS.md`), `cat release-manifest.json | grep docs_files`, `bash scripts/verify-delivery.sh` (PASS after hygiene fix), `bash scripts/verify-buyer-package.sh`.

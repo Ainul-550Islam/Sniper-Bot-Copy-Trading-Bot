@@ -32,6 +32,7 @@ use bot_core::maths;
 use crate::consts::*;
 use crate::layout::{AccountLayout, LayoutStore};
 use crate::rpc::Rpc;
+use crate::tokens::TokenAccountInfo;
 
 // --------------------------------------------------------------------------
 // PDA derivation
@@ -240,11 +241,13 @@ pub struct AmmGlobalConfig {
 
 impl AmmGlobalConfig {
     pub fn parse(data: &[u8]) -> BotResult<Self> {
-        if data.len() < AGC_OFF_PROTOCOL_FEE_RECIPIENTS + 32 * AGC_PROTOCOL_FEE_RECIPIENTS_LEN {
+        let required_len = (AGC_OFF_PROTOCOL_FEE_RECIPIENTS
+            + 32 * AGC_PROTOCOL_FEE_RECIPIENTS_LEN)
+            .max(AGC_OFF_COIN_CREATOR_FEE_BASIS_POINTS + 8);
+        if data.len() < required_len {
             return Err(BotError::encoding(format!(
-                "global_config is {} bytes; need at least {}",
-                data.len(),
-                AGC_OFF_PROTOCOL_FEE_RECIPIENTS + 32 * AGC_PROTOCOL_FEE_RECIPIENTS_LEN
+                "global_config is {} bytes; need at least {required_len}",
+                data.len()
             )));
         }
         if data[..8] != PUMPSWAP_ACC_DISC_GLOBAL_CONFIG {
@@ -267,19 +270,44 @@ impl AmmGlobalConfig {
         let mut admin_bytes = [0u8; 32];
         admin_bytes.copy_from_slice(&data[AGC_OFF_ADMIN..AGC_OFF_ADMIN + 32]);
 
-        let recipients = (0..AGC_PROTOCOL_FEE_RECIPIENTS_LEN)
+        let recipients: Vec<Pubkey> = (0..AGC_PROTOCOL_FEE_RECIPIENTS_LEN)
             .map(|i| pk_at(AGC_OFF_PROTOCOL_FEE_RECIPIENTS + 32 * i))
             .collect();
+        let admin = Pubkey::new_from_array(admin_bytes);
+        let lp_fee_basis_points = u64_at(AGC_OFF_LP_FEE_BASIS_POINTS);
+        let protocol_fee_basis_points = u64_at(AGC_OFF_PROTOCOL_FEE_BASIS_POINTS);
+        let coin_creator_fee_basis_points = u64_at(AGC_OFF_COIN_CREATOR_FEE_BASIS_POINTS);
+        let total_fee = lp_fee_basis_points
+            .checked_add(protocol_fee_basis_points)
+            .and_then(|fee| fee.checked_add(coin_creator_fee_basis_points));
+        if admin == Pubkey::default()
+            || !recipients.iter().any(|recipient| *recipient != Pubkey::default())
+            || total_fee.is_none_or(|fee| fee >= maths::BPS_DENOM)
+        {
+            return Err(BotError::solana(
+                "global_config has invalid admin, no protocol fee recipient, or invalid total fees",
+            ));
+        }
+        let optional_bool = |offset: usize, name: &str| -> BotResult<Option<bool>> {
+            match data.get(offset).copied() {
+                None => Ok(None),
+                Some(0) => Ok(Some(false)),
+                Some(1) => Ok(Some(true)),
+                Some(other) => Err(BotError::solana(format!(
+                    "global_config {name} flag has invalid value {other} at offset {offset}"
+                ))),
+            }
+        };
 
         Ok(AmmGlobalConfig {
-            admin: Pubkey::new_from_array(admin_bytes),
-            lp_fee_basis_points: u64_at(AGC_OFF_LP_FEE_BASIS_POINTS),
-            protocol_fee_basis_points: u64_at(AGC_OFF_PROTOCOL_FEE_BASIS_POINTS),
+            admin,
+            lp_fee_basis_points,
+            protocol_fee_basis_points,
             disable_flags: data[AGC_OFF_DISABLE_FLAGS],
             protocol_fee_recipients: recipients,
-            coin_creator_fee_basis_points: u64_at(AGC_OFF_COIN_CREATOR_FEE_BASIS_POINTS),
-            mayhem_mode_enabled: data.get(AGC_OFF_MAYHEM_MODE_ENABLED).map(|b| *b != 0),
-            is_cashback_enabled: data.get(AGC_OFF_IS_CASHBACK_ENABLED).map(|b| *b != 0),
+            coin_creator_fee_basis_points,
+            mayhem_mode_enabled: optional_bool(AGC_OFF_MAYHEM_MODE_ENABLED, "mayhem_mode_enabled")?,
+            is_cashback_enabled: optional_bool(AGC_OFF_IS_CASHBACK_ENABLED, "is_cashback_enabled")?,
             buyback_basis_points: data
                 .get(AGC_OFF_BUYBACK_BASIS_POINTS..AGC_OFF_BUYBACK_BASIS_POINTS + 8)
                 .map(|_| u64_at(AGC_OFF_BUYBACK_BASIS_POINTS)),
@@ -422,25 +450,65 @@ impl PumpSwapContext {
         let accounts = rpc
             .get_multiple_accounts(&[pool, *PUMPSWAP_GLOBAL_CONFIG])
             .await?;
-        let pool_data = accounts
+        let pool_account = accounts
             .first()
-            .and_then(|a| a.as_ref())
+            .and_then(|account| account.as_ref())
             .ok_or_else(|| {
                 BotError::NotFound(format!(
                     "pumpswap pool {pool} for mint {base_mint} does not exist (the token may \
                      still be on its bonding curve, or the pool index is not 0)"
                 ))
-            })?
-            .data
-            .clone();
-        let config_data = accounts
+            })?;
+        if pool_account.owner != *PUMPSWAP_PROGRAM_ID {
+            return Err(BotError::solana(format!(
+                "pumpswap pool {pool} is owned by {}, expected {}",
+                pool_account.owner, *PUMPSWAP_PROGRAM_ID
+            )));
+        }
+        let config_account = accounts
             .get(1)
-            .and_then(|a| a.as_ref())
-            .map(|a| a.data.clone())
-            .ok_or_else(|| BotError::solana("pumpswap global_config not found"))?;
+            .and_then(|account| account.as_ref())
+            .ok_or_else(|| BotError::NotFound("pumpswap global_config not found".into()))?;
+        if config_account.owner != *PUMPSWAP_PROGRAM_ID {
+            return Err(BotError::solana(format!(
+                "pumpswap global_config is owned by {}, expected {}",
+                config_account.owner, *PUMPSWAP_PROGRAM_ID
+            )));
+        }
 
-        let pool_state = PoolState::parse(&pool_data)?;
-        let config = AmmGlobalConfig::parse(&config_data)?;
+        let pool_state = PoolState::parse(&pool_account.data)?;
+        let config = AmmGlobalConfig::parse(&config_account.data)?;
+
+        if pool_state.base_mint == Pubkey::default()
+            || pool_state.quote_mint == Pubkey::default()
+            || pool_state.base_mint == pool_state.quote_mint
+        {
+            return Err(BotError::solana(format!(
+                "pumpswap pool {pool} has invalid base/quote mints"
+            )));
+        }
+        let (derived_pool, expected_bump) = Pubkey::find_program_address(
+            &[
+                PUMPSWAP_SEED_POOL,
+                &pool_state.index.to_le_bytes(),
+                pool_state.creator.as_ref(),
+                pool_state.base_mint.as_ref(),
+                pool_state.quote_mint.as_ref(),
+            ],
+            &PUMPSWAP_PROGRAM_ID,
+        );
+        if derived_pool != pool || expected_bump != pool_state.pool_bump {
+            return Err(BotError::solana(format!(
+                "pumpswap pool {pool} does not match the stored pool seeds/bump"
+            )));
+        }
+        if pool_state.pool_base_token_account == Pubkey::default()
+            || pool_state.pool_quote_token_account == Pubkey::default()
+        {
+            return Err(BotError::solana(format!(
+                "pumpswap pool {pool} has a zero reserve-account address"
+            )));
+        }
 
         if pool_state.base_mint != *base_mint {
             return Err(BotError::solana(format!(
@@ -455,43 +523,80 @@ impl PumpSwapContext {
             );
         }
 
-        let base_token_program = rpc
-            .token_program_of(base_mint)
-            .await
-            .unwrap_or(*TOKEN_PROGRAM);
-        let quote_token_program = *TOKEN_PROGRAM;
+        let base_token_program = rpc.token_program_of(base_mint).await?;
+        let quote_token_program = rpc.token_program_of(&pool_state.quote_mint).await?;
+        let expected_pool_base = ata(&pool, &base_token_program, base_mint);
+        let expected_pool_quote = ata(&pool, &quote_token_program, &pool_state.quote_mint);
+        if pool_state.pool_base_token_account != expected_pool_base
+            || pool_state.pool_quote_token_account != expected_pool_quote
+        {
+            return Err(BotError::solana(format!(
+                "pumpswap pool {pool} reserve addresses do not match the canonical ATAs"
+            )));
+        }
 
-        // Reserves come from the pool's own token accounts, not the Pool
-        // struct: the struct has no base reserve field at all.
+        // Reserves come from the pool's own token accounts; validate their
+        // token-program owner, mint, pool authority and initialized state before
+        // using balances for quotes.
         let reserve_accounts = rpc
             .get_multiple_accounts(&[
                 pool_state.pool_base_token_account,
                 pool_state.pool_quote_token_account,
             ])
             .await?;
-        let amount_of = |a: &Option<solana_sdk::account::Account>| {
-            a.as_ref()
-                .and_then(|acc| acc.data.get(64..72))
-                .map(|b| {
-                    let mut x = [0u8; 8];
-                    x.copy_from_slice(b);
-                    u64::from_le_bytes(x)
-                })
-                .unwrap_or(0)
+        let parse_reserve = |account: Option<&solana_sdk::account::Account>,
+                             expected_program: &Pubkey,
+                             expected_mint: &Pubkey,
+                             label: &str|
+         -> BotResult<u64> {
+            let account = account.ok_or_else(|| {
+                BotError::NotFound(format!("pumpswap {label} token account is missing"))
+            })?;
+            if account.owner != *expected_program {
+                return Err(BotError::solana(format!(
+                    "pumpswap {label} account is owned by {}, expected token program {expected_program}",
+                    account.owner
+                )));
+            }
+            let info = TokenAccountInfo::parse(&account.data)?;
+            if info.mint != *expected_mint || info.authority != pool || info.state != 1 {
+                return Err(BotError::solana(format!(
+                    "pumpswap {label} account has an invalid mint, authority, or state"
+                )));
+            }
+            Ok(info.amount)
         };
-        let base_reserve = reserve_accounts.first().map(&amount_of).unwrap_or(0);
-        let quote_reserve = reserve_accounts.get(1).map(amount_of).unwrap_or(0);
+        let base_reserve = parse_reserve(
+            reserve_accounts.first().and_then(|account| account.as_ref()),
+            &base_token_program,
+            base_mint,
+            "base reserve",
+        )?;
+        let quote_reserve = parse_reserve(
+            reserve_accounts.get(1).and_then(|account| account.as_ref()),
+            &quote_token_program,
+            &pool_state.quote_mint,
+            "quote reserve",
+        )?;
+        if base_reserve == 0 || quote_reserve == 0 {
+            return Err(BotError::solana(format!(
+                "pumpswap pool {pool} has empty reserves (base={base_reserve}, quote={quote_reserve})"
+            )));
+        }
 
-        let base_decimals = rpc.token_decimals(base_mint).await.unwrap_or(6);
-        let quote_decimals = rpc.token_decimals(&quote_mint).await.unwrap_or(9);
+        let base_decimals = rpc.token_decimals(base_mint).await?;
+        let quote_decimals = rpc.token_decimals(&pool_state.quote_mint).await?;
 
-        // The protocol fee recipient rotates; any of the eight is accepted.
+        // The protocol fee recipient rotates; any nonzero member of the
+        // canonical eight-recipient list is accepted. Never synthesize one.
         let protocol_fee_recipient = config
             .protocol_fee_recipients
-            .first()
+            .iter()
             .copied()
-            .filter(|p| *p != Pubkey::default())
-            .unwrap_or(*PUMP_FEE_RECIPIENT_FALLBACK);
+            .find(|recipient| *recipient != Pubkey::default())
+            .ok_or_else(|| {
+                BotError::solana("pumpswap global_config has no usable protocol fee recipient")
+            })?;
 
         let trailing_fee_recipient = pick_breaking_fee_recipient();
         let creator_vault_authority = coin_creator_vault_authority_pda(&pool_state.coin_creator);
@@ -531,7 +636,7 @@ impl PumpSwapContext {
             trailing_fee_recipient,
             trailing_fee_recipient_ata: ata(
                 &trailing_fee_recipient,
-                &TOKEN_PROGRAM,
+                &quote_token_program,
                 &pool_state.quote_mint,
             ),
             base_reserve,
@@ -742,6 +847,12 @@ pub fn build_buy_ix(
     limit: u64,
     track_volume: bool,
 ) -> BotResult<Instruction> {
+    if ctx.config.buys_disabled() {
+        return Err(BotError::solana("pumpswap global_config has buys disabled"));
+    }
+    if amount == 0 || limit == 0 {
+        return Err(BotError::invalid("pumpswap buy amount and limit must be > 0"));
+    }
     let (discriminator, instruction) = match kind {
         BuyKind::ExactBaseOut => (PUMPSWAP_DISC_BUY, "buy"),
         BuyKind::ExactQuoteIn => (PUMPSWAP_DISC_BUY_EXACT_QUOTE_IN, "buy_exact_quote_in"),
@@ -785,6 +896,12 @@ pub fn build_sell_ix(
     base_amount_in: u64,
     min_quote_amount_out: u64,
 ) -> BotResult<Instruction> {
+    if ctx.config.sells_disabled() {
+        return Err(BotError::solana("pumpswap global_config has sells disabled"));
+    }
+    if base_amount_in == 0 || min_quote_amount_out == 0 {
+        return Err(BotError::invalid("pumpswap sell amount and minimum output must be > 0"));
+    }
     let mut data = Vec::with_capacity(24);
     data.extend_from_slice(&PUMPSWAP_DISC_SELL);
     data.extend_from_slice(&base_amount_in.to_le_bytes());
@@ -823,6 +940,11 @@ pub fn plan_buy(
 ) -> BotResult<(u64, u64, u64)> {
     if sol_budget == 0 {
         return Err(BotError::invalid("sol_budget must be > 0"));
+    }
+    if ctx.quote_mint != *WSOL_MINT {
+        return Err(BotError::invalid(
+            "plan_buy accepts a SOL budget only for WSOL-quoted PumpSwap pools",
+        ));
     }
     let expected_out = ctx.quote_buy(sol_budget)?;
     let max_quote_in = maths::apply_pct_u64(sol_budget, slippage_pct);
@@ -1113,6 +1235,8 @@ mod tests {
     fn global_config_data(lp_bps: u64, proto_bps: u64, creator_bps: u64, flags: u8) -> Vec<u8> {
         let mut d = vec![0u8; AMM_GLOBAL_CONFIG_LEN];
         d[..8].copy_from_slice(&PUMPSWAP_ACC_DISC_GLOBAL_CONFIG);
+        d[AGC_OFF_ADMIN..AGC_OFF_ADMIN + 32]
+            .copy_from_slice(&Pubkey::new_unique().to_bytes());
         d[AGC_OFF_LP_FEE_BASIS_POINTS..AGC_OFF_LP_FEE_BASIS_POINTS + 8]
             .copy_from_slice(&lp_bps.to_le_bytes());
         d[AGC_OFF_PROTOCOL_FEE_BASIS_POINTS..AGC_OFF_PROTOCOL_FEE_BASIS_POINTS + 8]

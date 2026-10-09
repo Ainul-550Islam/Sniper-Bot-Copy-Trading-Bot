@@ -15,7 +15,9 @@
 
 pub mod alerts;
 pub mod api;
+pub mod callbacks;
 pub mod commands;
+pub mod trade_session;
 
 use std::sync::Arc;
 
@@ -32,6 +34,11 @@ pub struct TelegramBot {
     state: Shared,
     api: TelegramApi,
     alert_chat_id: Option<i64>,
+    /// Optional trade desk (GAP-MAP v2 P2): when attached, /buy and /sell
+    /// become available behind inline-keyboard confirmations; when absent
+    /// those commands reply with a "trading not configured" notice and the
+    /// bot stays read-only exactly like before.
+    trade_desk: Option<Arc<commands::TradeDesk>>,
 }
 
 impl TelegramBot {
@@ -61,7 +68,16 @@ impl TelegramBot {
             state,
             api,
             alert_chat_id,
+            trade_desk: None,
         }))
+    }
+
+    /// Attach the trade desk (server wiring supplies the executor and the
+    /// tenant chat bindings).
+    #[must_use]
+    pub fn with_trade_desk(mut self, desk: Arc<commands::TradeDesk>) -> Self {
+        self.trade_desk = Some(desk);
+        self
     }
 
     /// Run the control bot: register commands, start alerting, then poll.
@@ -118,6 +134,12 @@ impl TelegramBot {
 
             for update in updates {
                 offset = update.update_id + 1;
+                // Inline-keyboard taps (trade confirmations) first — they
+                // carry no message text and must never fall through.
+                if let Some(query) = update.callback_query.clone() {
+                    self.handle_callback_query(&query).await;
+                    continue;
+                }
                 let Some(message) = update.message else {
                     continue;
                 };
@@ -134,20 +156,7 @@ impl TelegramBot {
                 }
 
                 // Echo the command into the event log.
-                let role = telegram_role(chat_id, user_id, &tg);
-                let authorized = role.is_some();
-                self.state
-                    .events
-                    .publish(bot_core::events::AppEvent::Command {
-                        ts: chrono::Utc::now(),
-                        chat_id,
-                        user_id,
-                        text: text.clone(),
-                        accepted: authorized,
-                        response: None,
-                    });
-
-                if !authorized {
+                let Some(role) = telegram_role(chat_id, user_id, &tg) else {
                     warn!(chat_id, user_id = ?user_id, "unauthorized telegram command attempt");
                     let _ = self
                         .api
@@ -157,11 +166,71 @@ impl TelegramBot {
                             Some(&tg.parse_mode),
                         )
                         .await;
+                    self.state
+                        .events
+                        .publish(bot_core::events::AppEvent::Command {
+                            ts: chrono::Utc::now(),
+                            chat_id,
+                            user_id,
+                            text: text.clone(),
+                            accepted: false,
+                            response: None,
+                        });
                     continue;
-                }
+                };
+                self.state
+                    .events
+                    .publish(bot_core::events::AppEvent::Command {
+                        ts: chrono::Utc::now(),
+                        chat_id,
+                        user_id,
+                        text: text.clone(),
+                        accepted: true,
+                        response: None,
+                    });
 
                 let command = parse_command(&text, &tg.prefix);
-                let reply = handle(&self.state, command, role.expect("checked above")).await;
+                // Trade commands go through the desk when one is attached
+                // (they need the session + confirmation keyboard).
+                if matches!(
+                    command,
+                    commands::Command::Buy { .. }
+                        | commands::Command::Sell { .. }
+                        | commands::Command::Limit
+                ) {
+                    match &self.trade_desk {
+                        Some(desk) => {
+                            let now = chrono::Utc::now();
+                            desk.prune(now).await;
+                            let reply = commands::handle_trade_command(
+                                desk,
+                                &self.state,
+                                command,
+                                role,
+                                chat_id,
+                                user_id.unwrap_or(0),
+                                now,
+                            )
+                            .await;
+                            if let Some(tr) = reply {
+                                self.send_trade_reply(chat_id, &tr, &tg.parse_mode).await;
+                            }
+                            continue;
+                        }
+                        None => {
+                            let _ = self
+                                .api
+                                .send_message(
+                                    chat_id,
+                                    "⚠️ Telegram trading is not configured on this deployment.",
+                                    Some(&tg.parse_mode),
+                                )
+                                .await;
+                            continue;
+                        }
+                    }
+                }
+                let reply = handle(&self.state, command, role).await;
                 if reply.is_empty() {
                     continue;
                 }
@@ -173,6 +242,49 @@ impl TelegramBot {
                     warn!(error = %e, "failed to send command reply");
                 }
             }
+        }
+    }
+}
+
+impl TelegramBot {
+    /// Resolve one inline-keyboard tap through the trade desk.
+    async fn handle_callback_query(&self, query: &api::CallbackQuery) {
+        let Some(data) = query.data.clone() else { return };
+        let user_id = query.from.as_ref().map(|u| u.id).unwrap_or(0);
+        let Some(desk) = &self.trade_desk else {
+            // Keyboard from a desk that no longer exists (restart): ack it
+            // so the client spinner stops.
+            let _ = self
+                .api
+                .answer_callback_query(&query.id, "This confirmation is no longer valid.")
+                .await;
+            return;
+        };
+        let (toast, follow_up) = desk.resolve_callback(&data, user_id, chrono::Utc::now()).await;
+        if let Err(e) = self.api.answer_callback_query(&query.id, &toast).await {
+            warn!(error = %e, "answerCallbackQuery failed");
+        }
+        if let Some(reply) = follow_up {
+            let chat_id = query.message.as_ref().map(|m| m.chat.id);
+            if let Some(chat_id) = chat_id {
+                let cfg = self.state.config_snapshot().await;
+                self.send_trade_reply(chat_id, &reply, &cfg.telegram.parse_mode).await;
+            }
+        }
+    }
+
+    /// Send a trade reply, attaching the confirmation keyboard when present.
+    async fn send_trade_reply(&self, chat_id: i64, reply: &commands::TradeReply, parse_mode: &str) {
+        let result = match &reply.keyboard {
+            Some(kb) => {
+                self.api
+                    .send_message_with_keyboard(chat_id, &reply.text, Some(parse_mode), kb)
+                    .await
+            }
+            None => self.api.send_message(chat_id, &reply.text, Some(parse_mode)).await,
+        };
+        if let Err(e) = result {
+            warn!(error = %e, "failed to send trade reply");
         }
     }
 }
@@ -225,6 +337,26 @@ pub fn menu() -> Vec<BotCommand> {
             description: "Key configuration".into(),
         },
         BotCommand {
+            command: "buy".into(),
+            description: "Buy: /buy <mint> <sol> (keyboard confirm)".into(),
+        },
+        BotCommand {
+            command: "sell".into(),
+            description: "Sell: /sell <mint> <percent> (keyboard confirm)".into(),
+        },
+        BotCommand {
+            command: "snipe".into(),
+            description: "Toggle the sniper module on|off".into(),
+        },
+        BotCommand {
+            command: "wallets".into(),
+            description: "Configured wallets + balances".into(),
+        },
+        BotCommand {
+            command: "limit".into(),
+            description: "This chat's trade limits and usage".into(),
+        },
+        BotCommand {
             command: "help".into(),
             description: "Show this help".into(),
         },
@@ -255,7 +387,10 @@ mod tests {
     fn menu_has_the_core_commands() {
         let cmds = menu();
         let names: Vec<&str> = cmds.iter().map(|c| c.command.as_str()).collect();
-        for expected in ["status", "on", "off", "kill", "resume", "mode", "help"] {
+        for expected in [
+            "status", "on", "off", "kill", "resume", "mode", "help", "buy", "sell",
+            "snipe", "wallets", "limit",
+        ] {
             assert!(names.contains(&expected), "menu missing {expected}");
         }
     }

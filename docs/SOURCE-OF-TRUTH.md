@@ -18,14 +18,14 @@
   `evidence/source-inventory.{csv,json}` (regenerated on every tree
   change) — never a number quoted in prose.
 * There is **no `.git`** in this environment; history is the append-only
-  `AUDIT.md`, `CHANGELOG.md`, `evidence/ledger.csv` and the dated pass
+  `archive/AUDIT.md`, `CHANGELOG.md`, `evidence/ledger.csv` and the dated pass
   reports. No git-based claim is made anywhere.
 
 ## 2. Directories that are NEVER source (do not edit, do not ship as source)
 
 | Path | What it is | Rule |
 |---|---|---|
-| `buyer-release-final/` | Frozen, checksum-verified **v0.1 buyer package** (328 files; `sha256sum -c` 326/326; its `source-tree/` mirrors the 183-file baseline above) | Read-only history. Editing it invalidates its SHA256SUMS. Re-packaging at the end of this cycle produces a NEW package; this one stays as the labeled v0.1 snapshot. |
+| `buyer-release-final/` | Frozen, checksum-verified **v0.1 buyer package** (files listed in its manifest; `sha256sum -c` clean; its `source-tree/` mirrors the 183-file baseline above) | Read-only history. Editing it invalidates its SHA256SUMS. Re-packaging at the end of this cycle produces a NEW package; this one stays as the labeled v0.1 snapshot. |
 | `buyer-release/` | Superseded hardening-pass package (297 files) | Read-only labeled history. |
 | `delivery/` | Freeze-era 170-file convenience snapshot (own `ARTIFACTS-NOTE.txt`) | Read-only labeled history. |
 | `evidence/` | Vendor-side originals of logs, dumps, inventories, ledger, provenance, SBOM, scans | Evidence only — append/preserve, never treat as product source. |

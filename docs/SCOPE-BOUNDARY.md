@@ -21,14 +21,14 @@ guess where the software ends.
   `rust-toolchain.toml`, `deny.toml`, `.gitignore`.
 - **CI** — `.github/workflows/ci.yml` (4 jobs; requires the buyer's runner to
   execute).
-- **Release tooling** — `scripts/release-check.sh` (20-gate local release
+- **Release tooling** — `scripts/release-check.sh` (scripted local release
   validation), `release-manifest.json`.
 - **Documentation** — 13 engineering docs (`docs/`: ARCHITECTURE, API,
   SECURITY, DEPLOYMENT, OPERATIONS, MODULES, STAKING, TESTING,
   RECONCILIATION, DISTRIBUTED, RELEASE, HANDOVER, BACKUP-RESTORE) + 14
   buyer-package docs (this set; index in `docs/DELIVERY-MANIFEST.md`) +
-  README, CHANGELOG, AUDIT.md (historical evidence trail), root SECURITY.md,
-  LICENSE (MIT, holder placeholder), VERSION.
+  README, CHANGELOG, archive/AUDIT.md (historical evidence trail), root SECURITY.md,
+  LICENSE (proprietary), VERSION.
 
 **Not delivered inside this category:** no compiled binaries, no Docker
 images, no deployed on-chain program, no populated databases — the buyer

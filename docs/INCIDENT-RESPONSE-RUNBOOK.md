@@ -74,7 +74,7 @@
 ### 6. Validate
 
 ```bash
-bash scripts/verify-delivery.sh   # 7/7 PASS (hygiene ignores target/)
+bash scripts/verify-delivery.sh   # PASS (hygiene ignores target/)
 bash scripts/verify-buyer-package.sh
 cargo check --workspace
 curl -s http://localhost:8080/ready | jq  # must be ready
@@ -83,7 +83,7 @@ curl -s http://localhost:8080/ready | jq  # must be ready
 ### 7. Document
 
 - Update `docs/FINAL-KNOWN-LIMITATIONS.md` if new limitation found.
-- Update `AUDIT.md` with timeline.
+- Update `archive/AUDIT.md` with timeline.
 - If legal impact, mark `LEGAL_REVIEW_REQUIRED` in `docs/IP-OWNERSHIP-REGISTER.md`.
 
 ## Operator Decision Points

@@ -6,8 +6,8 @@
 
 | Provider | Endpoint | Signature Method | Replay / Idempotency | Event Types | Retry Behavior | Status | Test |
 |---|---|---|---|---|---|---|---|
-| **Stripe (test)** | `POST /api/saas/billing_webhook` | HMAC-SHA256 `Stripe-Signature` (t=`timestamp`,v1=`hmac`) via `saas/billing_webhook.rs` | `provider_events.rs` normalized + idempotency key (provider `event_id`), secret stripping | `invoice.payment_succeeded`, `invoice.payment_failed`, `customer.subscription.updated`, `checkout.session.completed` (normalized to `ProviderEventKind`) | Provider retries with same `event_id` → idempotent (200, no double-apply) | **FIXTURE-TESTED** (HMAC verify + idempotency 7 tests, no live Stripe) | `billing_webhook` 3, `provider_events` 7, `billing_integration` fixture |
-| **Paddle (test)** | Same endpoint (provider-neutral boundary `saas/provider.rs`) | HMAC-SHA256 `Paddle-Signature` (similar) | Same idempotency | `subscription_created`, `subscription_updated`, `transaction_completed` | Same | **FIXTURE-TESTED** | `provider.rs` boundary 8 tests |
+| **Stripe (test)** | `POST /api/saas/billing_webhook` | HMAC-SHA256 `Stripe-Signature` (t=`timestamp`,v1=`hmac`) via `saas/billing_webhook.rs` | `provider_events.rs` normalized + idempotency key (provider `event_id`), secret stripping | `invoice.payment_succeeded`, `invoice.payment_failed`, `customer.subscription.updated`, `checkout.session.completed` (normalized to `ProviderEventKind`) | Provider retries with same `event_id` → idempotent (200, no double-apply) | **FIXTURE-TESTED** (HMAC verify + idempotency tests exist, no live Stripe) | `billing_webhook` 3, `provider_events` 7, `billing_integration` fixture |
+| **Paddle (test)** | Same endpoint (provider-neutral boundary `saas/provider.rs`) | HMAC-SHA256 `Paddle-Signature` (similar) | Same idempotency | `subscription_created`, `subscription_updated`, `transaction_completed` | Same | **FIXTURE-TESTED** | `provider.rs` boundary tests exist |
 | **Generic** | Same | `provider_events.rs` `ProviderNormalizedEvent` + `hmac` verify | Same | `ProviderEventKind` enum | — | — | — |
 
 **Live vs fixture:**

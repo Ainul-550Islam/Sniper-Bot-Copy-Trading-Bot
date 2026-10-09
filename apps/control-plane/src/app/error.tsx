@@ -18,8 +18,10 @@ export default function ErrorPage({
   reset: () => void;
 }) {
   useEffect(() => {
-    console.error(error);
-  }, [error]);
+    // Log only Next's opaque digest. Raw error messages/stacks can contain
+    // request details or user-controlled text and are not support identifiers.
+    console.error("Control-plane render boundary", error.digest ?? "digest unavailable");
+  }, [error.digest]);
 
   return (
     <main
@@ -38,7 +40,7 @@ export default function ErrorPage({
         <h1>Something went wrong while rendering this page.</h1>
         <p style={{ color: "var(--muted, #9fb0c5)", lineHeight: 1.6 }}>
           No transaction or account state was assumed. Retry the page, and if the problem continues,
-          provide the support team with the correlation details from the server response.
+          share the reference code below with support. Never include session tokens or authenticator codes.
         </p>
         {error.digest ? (
           <p style={{ color: "var(--muted, #9fb0c5)", fontFamily: "monospace" }}>

@@ -3,6 +3,16 @@
 //! Respects the operator's `alert_on_*` flags and applies two layers of
 //! rate-limiting: a per-kind cooldown and a global per-minute cap, so a noisy
 //! market cannot flood the chat (or trip Telegram's limits).
+//!
+//! ## Notification preferences (GAP-MAP v2, P2)
+//! Delivery decisions are made through the [`AlertGate`] trait instead of
+//! reading config flags inline:
+//! * operator mode wires [`ConfigAlertGate`] (the classic `alert_on_*`
+//!   flags, behaviour unchanged);
+//! * the SaaS server wires a gate over the tenant's
+//!   `notification_preferences` row — `telegram_instant_fills` maps to
+//!   fill + exit alerts, `telegram_circuit_breaker` maps to risk/breach
+//!   alerts — so each tenant's preferences are honoured per message.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,10 +27,57 @@ use bot_core::state::Shared;
 
 use crate::api::TelegramApi;
 
+/// Alert categories used by the preference gate. One category per
+/// DELIVERY decision (not per event variant) so both the operator flags
+/// and the SaaS `notification_preferences` columns map cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AlertKind {
+    /// An order filled.
+    Fill,
+    /// A position closed (the "exit" alert).
+    Exit,
+    /// The risk engine rejected an order.
+    RiskRejected,
+    /// A module lost its feed connection.
+    Disconnect,
+    /// A fatal error surfaced.
+    FatalError,
+    /// The daily loss limit tripped.
+    LossLimit,
+    /// The hourly summary.
+    HourlySummary,
+}
+
+/// Per-recipient delivery gate. The server implements this over the SaaS
+/// `notification_preferences` table; operator mode uses [`ConfigAlertGate`].
+pub trait AlertGate: Send + Sync {
+    /// True when this category may be delivered right now.
+    fn allow(&self, kind: AlertKind) -> bool;
+}
+
+/// Operator-mode gate: the classic `alert_on_*` config flags. Exit alerts
+/// ride the `alert_on_fill` flag (their historical behaviour); fatal
+/// errors are ALWAYS delivered — a dead bot must not be silenable by
+/// preference.
+pub struct ConfigAlertGate<'a>(pub &'a bot_core::config::TelegramConfig);
+
+impl AlertGate for ConfigAlertGate<'_> {
+    fn allow(&self, kind: AlertKind) -> bool {
+        match kind {
+            AlertKind::Fill | AlertKind::Exit => self.0.alert_on_fill,
+            AlertKind::RiskRejected => self.0.alert_on_risk_reject,
+            AlertKind::Disconnect => self.0.alert_on_disconnect,
+            AlertKind::FatalError => true,
+            AlertKind::LossLimit => self.0.alert_on_loss_limit,
+            AlertKind::HourlySummary => self.0.hourly_summary,
+        }
+    }
+}
+
 /// Run the alert forwarder until the event bus closes.
 pub async fn run_alert_forwarder(state: Shared, api: TelegramApi, chat_id: i64) {
     let mut rx = state.events.subscribe();
-    let mut last_by_kind: HashMap<&'static str, Instant> = HashMap::new();
+    let mut last_by_kind: HashMap<AlertKind, Instant> = HashMap::new();
     let mut minute_start = Instant::now();
     let mut minute_count: u32 = 0;
     let mut loss_alerted = false;
@@ -51,9 +108,14 @@ pub async fn run_alert_forwarder(state: Shared, api: TelegramApi, chat_id: i64) 
                             continue;
                         }
                         let Some((kind, text)) = classify(&event, tg) else { continue };
+                        // Notification-preference gate (operator mode: the
+                        // alert_on_* flags; SaaS mode: the server's gate).
+                        if !ConfigAlertGate(tg).allow(kind) {
+                            continue;
+                        }
                         // Per-kind cooldown.
                         let cooldown = Duration::from_secs(tg.alert_cooldown_secs.max(0) as u64);
-                        if let Some(prev) = last_by_kind.get(kind) {
+                        if let Some(prev) = last_by_kind.get(&kind) {
                             if prev.elapsed() < cooldown {
                                 continue;
                             }
@@ -73,7 +135,9 @@ pub async fn run_alert_forwarder(state: Shared, api: TelegramApi, chat_id: i64) 
             }
             _ = check_tick.tick() => {
                 let cfg = state.config_snapshot().await;
-                if !cfg.telegram.enabled || !cfg.telegram.alert_on_loss_limit {
+                if !cfg.telegram.enabled
+                    || !ConfigAlertGate(&cfg.telegram).allow(AlertKind::LossLimit)
+                {
                     continue;
                 }
                 let tripped = state.daily_stats().await.loss_limit_tripped;
@@ -86,7 +150,9 @@ pub async fn run_alert_forwarder(state: Shared, api: TelegramApi, chat_id: i64) 
             }
             _ = hour_tick.tick() => {
                 let cfg = state.config_snapshot().await;
-                if !cfg.telegram.enabled || !cfg.telegram.hourly_summary {
+                if !cfg.telegram.enabled
+                    || !ConfigAlertGate(&cfg.telegram).allow(AlertKind::HourlySummary)
+                {
                     continue;
                 }
                 let s = state.summary().await;
@@ -109,19 +175,21 @@ pub async fn run_alert_forwarder(state: Shared, api: TelegramApi, chat_id: i64) 
     }
 }
 
-/// Map an event to `(rate-limit-kind, message)` when it should alert.
+/// Map an event to `(rate-limit-key, message)` when it is ALERTABLE.
+/// Delivery preferences are applied by the caller through [`AlertGate`] —
+/// classification itself is preference-free.
 fn classify(
     event: &Arc<AppEvent>,
-    tg: &bot_core::config::TelegramConfig,
-) -> Option<(&'static str, String)> {
+    _tg: &bot_core::config::TelegramConfig,
+) -> Option<(AlertKind, String)> {
     match event.as_ref() {
-        AppEvent::Fill { trade, .. } if tg.alert_on_fill => {
+        AppEvent::Fill { trade, .. } => {
             let side = match trade.side {
                 PositionSide::Long => "BUY",
                 PositionSide::Short => "SELL",
             };
             Some((
-                "fill",
+                AlertKind::Fill,
                 format!(
                     "💱 {} {} {}\n{:.4} → {:.4} @ {:.6} {}\n{}",
                     side,
@@ -141,8 +209,8 @@ fn classify(
             pnl_pct,
             reason,
             ..
-        } if tg.alert_on_fill => Some((
-            "close",
+        } => Some((
+            AlertKind::Exit,
             format!(
                 "🏁 closed {} {}\nPnL {:.4} ({:.1}%)\n{}",
                 position.source,
@@ -157,8 +225,8 @@ fn classify(
             symbol,
             reason,
             ..
-        } if tg.alert_on_risk_reject => Some((
-            "risk",
+        } => Some((
+            AlertKind::RiskRejected,
             format!("🚫 {} rejected {} — {}", module.as_str(), symbol, reason),
         )),
         AppEvent::ModuleStatus {
@@ -166,8 +234,8 @@ fn classify(
             connected,
             running,
             ..
-        } if tg.alert_on_disconnect && *running && !*connected => Some((
-            "disconnect",
+        } if *running && !*connected => Some((
+            AlertKind::Disconnect,
             format!("📡 {} lost its feed connection", module.as_str()),
         )),
         AppEvent::Error {
@@ -176,7 +244,7 @@ fn classify(
             fatal,
             ..
         } if *fatal => Some((
-            "error",
+            AlertKind::FatalError,
             format!(
                 "❌ fatal error{}: {}",
                 module
@@ -186,5 +254,43 @@ fn classify(
             ),
         )),
         _ => None,
+    }
+}
+
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use bot_core::config::TelegramConfig;
+
+    #[test]
+    fn config_gate_maps_flags_to_categories() {
+        let mut tg = TelegramConfig::default();
+        tg.alert_on_fill = true;
+        tg.alert_on_risk_reject = false;
+        tg.alert_on_disconnect = true;
+        tg.alert_on_loss_limit = false;
+        tg.hourly_summary = false;
+        let gate = ConfigAlertGate(&tg);
+        assert!(gate.allow(AlertKind::Fill));
+        assert!(gate.allow(AlertKind::Exit), "exit rides the fill flag (historical)");
+        assert!(!gate.allow(AlertKind::RiskRejected));
+        assert!(gate.allow(AlertKind::Disconnect));
+        assert!(!gate.allow(AlertKind::LossLimit));
+        assert!(!gate.allow(AlertKind::HourlySummary));
+        assert!(gate.allow(AlertKind::FatalError), "fatal errors are never silenable");
+    }
+
+    #[test]
+    fn everything_off_still_delivers_fatal_errors() {
+        let mut tg = TelegramConfig::default();
+        tg.alert_on_fill = false;
+        tg.alert_on_risk_reject = false;
+        tg.alert_on_disconnect = false;
+        tg.alert_on_loss_limit = false;
+        tg.hourly_summary = false;
+        let gate = ConfigAlertGate(&tg);
+        assert!(gate.allow(AlertKind::FatalError));
+        assert!(!gate.allow(AlertKind::Fill));
     }
 }

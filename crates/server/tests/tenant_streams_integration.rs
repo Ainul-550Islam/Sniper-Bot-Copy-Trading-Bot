@@ -64,6 +64,7 @@ async fn publishing_with_no_subscribers_is_a_no_op() {
     let hub = TenantStreamHub::new();
     let org = OrganizationId::new();
     assert_eq!(hub.publish(decision(org, "copy")).await, 0);
-    assert_eq!(hub.reap_empty().await, 1);
+    // Publishing self-reaps: nothing is left behind for reap_empty.
+    assert_eq!(hub.reap_empty().await, 0);
     assert_eq!(hub.channel_count().await, 0);
 }

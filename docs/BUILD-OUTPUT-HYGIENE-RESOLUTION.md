@@ -1,6 +1,6 @@
 # Build-Output Hygiene Resolution — 2026-09-24
 
-> Root cause, fix, verification for `verify-delivery.sh` hygiene WARNING (6/7) → 7/7 PASS. No weakening.
+> Root cause, fix, verification for `verify-delivery.sh` hygiene WARNING → PASS. No weakening.
 
 ## 1. Root Cause
 
@@ -47,11 +47,11 @@
 mkdir -p target/debug && touch target/debug/dummy
 bash scripts/verify-delivery.sh
 # → hygiene: no .env / logs / dumps / keypairs / pem files (build output present but correctly excluded: target/(generated, .gitignore'd, excluded from package))
-# → PASS 7/7, exit 0
+# → PASS, exit 0
 
 # Without build output
 rm -rf target && bash scripts/verify-delivery.sh
-# → PASS 7/7
+# → PASS
 
 # Buyer package excludes target
 bash scripts/build-release-package.sh
@@ -59,7 +59,7 @@ ls buyer-release/source/target 2>&1 | grep "No such file" && echo "PASS: target 
 cat .gitignore | grep -E "^\s*/target|\*\*/target"  # .gitignore covers
 ```
 
-**Result:** `scripts/verify-delivery.sh` now `7/7 PASS` in both cases; `buyer-release` never contains `target/`; hygiene still catches real secrets.
+**Result:** `scripts/verify-delivery.sh` now PASS in both cases; `buyer-release` never contains `target/`; hygiene still catches real secrets.
 
 ## 5. References
 

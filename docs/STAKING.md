@@ -126,8 +126,8 @@ Then, as admin (payer of initialize becomes admin):
   guards and the pinned `CreateMetadataAccountV3` (discriminant 33) byte
   layout.
   `cargo test` in `programs/staking-suite`.
-* **Validator e2e (3 tests, gated behind `STAKING_E2E=1`) — ALL 3 EXECUTED
-  AND PASSED (hardening pass 2026-09-18)** against a real
+* **Validator e2e (gated behind `STAKING_E2E=1`) — executed and passed
+  (hardening pass 2026-09-18; no run log ships)** against a real
   `solana-test-validator` (Agave 2.1.21, platform-tools v1.43) running the
   audit-pass BPF binary (`staking_suite.so`, 187,504 bytes, SHA-256
   `57a890fae273f2c569fc814c43f0645311b6983dd30782126a9844ee193b5564`):
@@ -148,7 +148,7 @@ Then, as admin (payer of initialize becomes admin):
   and the on-chain CPI discriminant for `CreateMetadataAccountV3` was
   corrected 19 → **33** (verified against the mpl source deployed to
   mainnet-beta, tag `token-metadata@v1.14.0`, and then against the real
-  cloned program). The earlier freeze-pass run (2/2, 84 s) remains valid
+  cloned program). The earlier freeze-pass run remains valid (no run log ships)
   as historical evidence for the two tests it covered.
   Run: `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` (excluded workspace — the `cd` is required).
 * **NOT done:** third-party audit, mainnet deployment, fuzzing. Reward math

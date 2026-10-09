@@ -12,7 +12,7 @@
 //! plaintext.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
@@ -140,6 +140,7 @@ async fn update_runtime_record<T: serde::Serialize>(
 /// from the locked invitation row and all writes use that tenant id.
 pub async fn accept_invite(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Json(body): Json<AcceptInviteBody>,
 ) -> Response {
     let token = body.token.trim();
@@ -204,6 +205,16 @@ pub async fn accept_invite(
         Ok(value) => value,
         Err(error) => return internal_reason(error),
     };
+    if let Some(response) = crate::saas::rate_limit::reject_sensitive_attempt(
+        &state,
+        "invite_accept",
+        &invitation_id.to_string(),
+    )
+    .await
+    {
+        let _ = transaction.rollback().await;
+        return response;
+    }
     let organization_uuid: uuid::Uuid = match sqlx::Row::try_get(&invitation, "organization_id") {
         Ok(value) => value,
         Err(error) => return internal_reason(error),
@@ -225,6 +236,58 @@ pub async fn accept_invite(
         None => return internal_reason(format!("unknown invitation role {role_text}")),
     };
     let organization_id = OrganizationId::from(organization_uuid);
+    // Tenant IP allowlist — accepting an invitation acts ON the invited
+    // tenant, so the same origin restriction applies. Checked before the
+    // per-invitation rate budget so a refused origin cannot consume it.
+    if let Err(decision) =
+        crate::saas::ip_allowlist::enforce(&state, organization_id, &headers).await
+    {
+        let _ = transaction.rollback().await;
+        return crate::saas::middleware::deny_response(&state, &decision).await;
+    }
+    let organization_slug_row = match sqlx::query(
+        "SELECT record->>'slug' AS slug FROM saas_runtime_records WHERE kind = 'organization' AND id = $1",
+    )
+    .bind(organization_id.to_string())
+    .fetch_optional(&mut *transaction)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return internal_reason("invited organization record is missing"),
+        Err(error) => return internal_reason(error),
+    };
+    let organization_slug: String = match sqlx::Row::try_get::<String, _>(&organization_slug_row, "slug") {
+        Ok(value) if !value.trim().is_empty() => value,
+        Ok(_) => return internal_reason("invited organization has no valid slug"),
+        Err(error) => return internal_reason(error),
+    };
+    let mfa_policy = match sqlx::query(
+        "SELECT mfa_enforced FROM tenant_security_policies WHERE organization_id = $1",
+    )
+    .bind(organization_uuid)
+    .fetch_optional(&mut *transaction)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return internal_reason(error),
+    };
+    let mfa_enrollment_required = match mfa_policy {
+        Some(row) => match sqlx::Row::try_get::<bool, _>(&row, "mfa_enforced") {
+            Ok(value) => value,
+            Err(error) => return internal_reason(error),
+        },
+        None => false,
+    };
+    if mfa_enrollment_required {
+        if let Err(reason) = crate::saas::security::mfa_enrollment_ready() {
+            let _ = transaction.rollback().await;
+            return response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "mfa_setup_unavailable",
+                format!("mandatory TOTP enrollment is not available: {reason}"),
+            );
+        }
+    }
     let normalized_email = User::normalize_email(&email);
 
     let existing_user = match sqlx::query(
@@ -333,6 +396,37 @@ pub async fn accept_invite(
         }
     }
 
+    if let Err(error) = sqlx::query(
+        r#"INSERT INTO users
+               (id, email, email_verified, display_name, password_hash, status,
+                platform_admin, created_at, updated_at, last_login_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT (id) DO UPDATE SET
+               email=EXCLUDED.email,
+               email_verified=EXCLUDED.email_verified,
+               display_name=EXCLUDED.display_name,
+               password_hash=EXCLUDED.password_hash,
+               status=EXCLUDED.status,
+               platform_admin=EXCLUDED.platform_admin,
+               updated_at=EXCLUDED.updated_at,
+               last_login_at=EXCLUDED.last_login_at"#,
+    )
+    .bind(user.id.as_uuid())
+    .bind(&user.email)
+    .bind(user.email_verified)
+    .bind(&user.display_name)
+    .bind(&user.password_hash)
+    .bind(user.status.as_str())
+    .bind(user.platform_admin)
+    .bind(user.created_at)
+    .bind(user.updated_at)
+    .bind(user.last_login_at)
+    .execute(&mut *transaction)
+    .await
+    {
+        return internal_reason(error);
+    }
+
     let membership_lookup = format!("{}:{}", organization_id, user.id);
     let existing_membership = match sqlx::query(
         "SELECT id FROM saas_runtime_records
@@ -375,16 +469,49 @@ pub async fn accept_invite(
     {
         return internal_reason(error);
     }
+    if let Err(error) = sqlx::query(
+        r#"INSERT INTO organization_members
+               (id, organization_id, user_id, role, status, invited_by, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (organization_id, user_id) DO UPDATE SET
+               id=EXCLUDED.id,
+               role=EXCLUDED.role,
+               status=EXCLUDED.status,
+               invited_by=EXCLUDED.invited_by,
+               updated_at=EXCLUDED.updated_at"#,
+    )
+    .bind(membership.id.as_uuid())
+    .bind(organization_uuid)
+    .bind(user.id.as_uuid())
+    .bind(membership.role.as_str())
+    .bind(membership.status.as_str())
+    .bind(membership.invited_by.map(|value| value.as_uuid()))
+    .bind(membership.created_at)
+    .bind(membership.updated_at)
+    .execute(&mut *transaction)
+    .await
+    {
+        return internal_reason(error);
+    }
 
     let generated_session = generate_token("ses");
-    let session = SessionRecord::new(
+    let session_ttl = if mfa_enrollment_required {
+        Duration::minutes(15)
+    } else {
+        Duration::hours(DEFAULT_SESSION_TTL_HOURS)
+    };
+    let mut session = SessionRecord::new(
         user.id,
         Some(organization_id),
         generated_session.hash.clone(),
         generated_session.prefix.clone(),
-        Duration::hours(DEFAULT_SESSION_TTL_HOURS),
+        session_ttl,
         now,
     );
+    // MFA-protected tenants receive a short-lived, tenant-bound session that
+    // can call only the TOTP setup/verification handlers. It is never treated
+    // as proof of MFA by ordinary authorization paths.
+    session.mfa_enrollment_only = mfa_enrollment_required;
     if let Err(error) = insert_runtime_record(
         &mut transaction,
         "session",
@@ -394,6 +521,26 @@ pub async fn accept_invite(
         Some(&session.token_hash),
         &session,
     )
+    .await
+    {
+        return internal_reason(error);
+    }
+    if let Err(error) = sqlx::query(
+        "INSERT INTO sessions (id, user_id, organization_id, token_hash, token_prefix, user_agent, ip, created_at, last_seen_at, expires_at, revoked_at, revoke_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+    )
+    .bind(session.id.as_uuid())
+    .bind(session.user_id.as_uuid())
+    .bind(session.organization_id.map(|value| value.as_uuid()))
+    .bind(&session.token_hash)
+    .bind(&session.token_prefix)
+    .bind(&session.user_agent)
+    .bind(&session.ip)
+    .bind(session.created_at)
+    .bind(session.last_seen_at)
+    .bind(session.expires_at)
+    .bind(session.revoked_at)
+    .bind(&session.revoke_reason)
+    .execute(&mut *transaction)
     .await
     {
         return internal_reason(error);
@@ -439,6 +586,8 @@ pub async fn accept_invite(
         Json(json!({
             "user": user.profile(),
             "organization_id": organization_id.to_string(),
+            "organization_slug": organization_slug,
+            "mfa_enrollment_required": mfa_enrollment_required,
             "membership": {
                 "id": membership.id.to_string(),
                 "role": role.as_str(),

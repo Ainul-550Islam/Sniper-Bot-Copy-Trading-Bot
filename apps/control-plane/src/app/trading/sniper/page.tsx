@@ -64,7 +64,7 @@ export default function SniperPage() {
           <div>
             <h1>Solana AMM &amp; Pump.fun Sniper Bot</h1>
             <p className="muted">
-              Sub-second launch detection, Yellowstone Geyser gRPC feed, and MEV-protected execution.
+              Launch detection via PumpPortal WS + Geyser polling, MEV-aware execution paths. No latency figures are claimed (see docs/LATENCY-AND-LANDING-REPORT.md).
             </p>
           </div>
           <div className="row">

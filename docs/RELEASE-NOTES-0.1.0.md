@@ -1,7 +1,7 @@
 # Release notes — sniper-suite 0.1.0 (buyer edition)
 
 Factual release summary for the receiving party. The full engineering history
-is in `CHANGELOG.md`; the evidence trail is in `AUDIT.md`; this document does
+is in `CHANGELOG.md`; the evidence trail is in `archive/AUDIT.md`; this document does
 not duplicate either — it states what the release *is*, what was proven, and
 what remains open.
 
@@ -11,25 +11,29 @@ what remains open.
 |---|---|
 | Product | sniper-suite — modular crypto trading system (5 modules + control plane) |
 | Version | `0.1.0` (initial handover release; `VERSION`, root `Cargo.toml`, `release-manifest.json` agree — gated by `scripts/release-check.sh`) |
-| License | MIT (`LICENSE`; copyright holder is a documented handover placeholder) |
+| License | Proprietary (`LICENSE`; all rights reserved — earlier MIT wording withdrawn) |
 | Release commit | `9c677cd` |
 | Engineering-freeze commit | `0e139c3` (the frozen tree this package describes) |
 | Tree at freeze | 146 tracked files, 2,801,590 bytes (2.80 MB), 77,980 lines |
 | Toolchain | Rust 1.98.1 pinned (`rust-toolchain.toml`, Dockerfile, CI); MSRV 1.82 (app) / 1.79 (staking program); agave 2.1.21 for `build-sbf` |
 
-## Test results (final freeze gate, executed on commit `0e139c3`)
+## Test suites (harnesses present in this tree)
 
-| Suite | Result |
+The table that used to live here quoted per-suite pass counts from the
+freeze gate. Those run logs do not ship in this tree, so the numbers were
+removed. The harnesses exist and anyone can re-run them (`docs/TESTING.md`).
+
+| Suite (harness exists) | How to run |
 |---|---|
-| `scripts/release-check.sh` | **20 PASS / 0 FAIL / 0 SKIP**, exit 0 |
-| Workspace tests (`--test-threads=1`) | **521 / 521** passed (incl. 38 gated integration tests executed against real services) |
-| `db_integration` (PostgreSQL 16.4) | 23 / 23 (fresh + rerun + pg_dump→restore→suite-green round-trip) |
-| `redis_integration` (Redis 7.2.10) | 10 / 10 |
-| `distributed_integration` | 4 / 4 |
-| `two_replica_mirror` (two real processes) | 1 / 1 |
-| Staking host tests | 48 / 48 (+2 validator e2e gated-skipped in the freeze sandbox) |
-| fmt / `clippy -D warnings` (both projects) | clean |
-| `cargo audit` (both lockfiles) | 0 findings |
+| Release gates | `scripts/release-check.sh` |
+| Workspace tests | `cargo test --workspace -- --test-threads=1` |
+| `db_integration` | `POSTGRES_URL=… cargo test -p bot-core --test db_integration` |
+| `redis_integration` | `REDIS_URL=… cargo test -p bot-core --test redis_integration` |
+| `distributed_integration` / `two_replica_mirror` | `docs/TESTING.md` |
+| Staking host + validator e2e | `cd programs/staking-suite && cargo test` (+ `STAKING_E2E=1`) |
+| fmt / `clippy -D warnings` / `cargo audit` | standard toolchain commands |
+
+Static test inventory: <!-- stat:test_attrs_plain -->2061<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->888<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
 | `cargo deny` (advisories/bans/licenses/sources) | ok |
 | Total test executions across the gate script | 609, 0 failures |
 
@@ -41,7 +45,7 @@ Machine-readable copy: `release-manifest.json` → `test_counts`.
   exits), copy trading, Polymarket (Gamma/CLOB, EIP-712 v2 signing), native
   Solana staking program (timelock, caps, two-step admin, latched genesis
   mint), Telegram control (deny-by-default RBAC).
-- **Control plane:** Axum REST (23 endpoints over 21 `/api` routes) +
+- **Control plane:** Axum REST (documented endpoints over `/api` routes; see `docs/API.md` and the OpenAPI spec) +
   WebSocket feed + 4 infra routes (28 documented in `docs/API.md`), embedded
   dashboard, liveness/readiness probes, bounded-label Prometheus metrics,
   request-ID correlation, rate limits, non-loopback-bind refusal without auth.
@@ -49,7 +53,7 @@ Machine-readable copy: `release-manifest.json` → `test_counts`.
   three-level restart-safe dedup, intent journal + startup reconciliation,
   hash-chained append-only audit trail, distributed execution ownership
   (claims/leases/epochs/fencing, tighten-only `GlobalRiskOracle`), PostgreSQL
-  as durable truth with 21 forward-only migrations, Redis strictly
+  as durable truth with <!-- stat:migrations -->54<!-- /stat --> forward-only migrations, Redis strictly
   non-authoritative.
 - **Packaging:** Dockerfile (multi-stage, non-root, healthchecked) +
   compose stack, CI workflow (4 jobs), `deny.toml`, `release-check.sh`,
@@ -81,7 +85,7 @@ Machine-readable copy: `release-manifest.json` → `test_counts`.
   and wired into the gate.
 - Full source-freeze audit (21 items) passed: no debug hacks, no dead code
   beyond one justified `allow(dead_code)`, no production `unwrap()`, no
-  secret leakage paths, docs matched to source (details: `AUDIT.md` §26–27).
+  secret leakage paths, docs matched to source (details: `archive/AUDIT.md` §26–27).
 
 ## Known limitations & external blockers at release
 
@@ -93,13 +97,11 @@ Machine-readable copy: `release-manifest.json` → `test_counts`.
   resources):** Docker image build + container smoke (no daemon in the build
   sandbox), GitHub Actions CI run (no runner), funded live-trading /
   mainnet landing-rate validation.
-- **Executed in the buyer-hardening pass (2026-09-18, this tree — after the
-  freeze numbers above):** `build-sbf` (187,504-byte .so, SHA-256
-  `57a890fa…`, byte-identical rebuild), all 3 validator e2e (160.72 s),
-  workspace 537/537 (incl. `--all-features`), db backup→restore round-trip
-  (PostgreSQL 17.11) + app startup against the restored DB, `latency_bench`
-  read-only + simulate legs, SBOM evidence (cargo metadata/tree + lockfile
-  hashes). See CHANGELOG [Unreleased] + `AUDIT.md` §29.
+- **Claimed in the buyer-hardening pass (2026-09-18) — logs absent:** the
+  bullet that used to sit here quoted a `build-sbf` digest, validator-e2e
+  timing, workspace pass counts and a backup→restore round-trip. Those run
+  logs do not ship in this tree, so the figures were removed. Re-run per
+  `docs/TESTING.md`; the seller's own record is `archive/AUDIT.md` §29.
 - Legal/identity fill-ins: LICENSE copyright holder, repository URL, security
   contact (`docs/HANDOVER.md` §5, `docs/ACCEPTANCE-CHECKLIST.md`).
 

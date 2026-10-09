@@ -10,10 +10,10 @@ sniper-suite/
 │
 │  ── root metadata & release identity ──────────────────────────────
 ├─ VERSION                        release identity: 0.1.0 (gated vs Cargo.toml + manifest)
-├─ LICENSE                        MIT (copyright holder = documented transfer placeholder)
+├─ LICENSE                        proprietary (all rights reserved)
 ├─ SECURITY.md                    vulnerability-reporting policy + explicit "no external audit"
 ├─ CHANGELOG.md                   Keep-a-Changelog history (0.1.0 + Unreleased doc passes)
-├─ AUDIT.md                       historical audit/build evidence trail (27 dated sections)
+├─ archive/AUDIT.md                       historical audit/build evidence trail (27 dated sections)
 ├─ README.md                      product overview, quick start, config/API/observability reference
 ├─ release-manifest.json          machine-readable delivery manifest (versions, counts, statuses)
 ├─ Cargo.toml                     workspace root: 8 members, [workspace.dependencies] pins
@@ -33,7 +33,7 @@ sniper-suite/
 │
 │  ── release tooling & CI ──────────────────────────────────────────
 ├─ scripts/
-│  ├─ release-check.sh            20-gate local release validation (fmt→tests→staking→audit/deny)
+│  ├─ release-check.sh            scripted local release validation (fmt→tests→staking→audit/deny)
 │  ├─ verify-delivery.sh          delivery-bundle integrity check (docs, versions, counts, hygiene)
 │  └─ staking-identity.sh         program-id identity tooling (show/verify/set-id/deploy; refuses
 │                                 keypair≠declare_id and placeholder ids on public clusters)
@@ -41,7 +41,7 @@ sniper-suite/
 │  └─ workflows/
 │     └─ ci.yml                   4 jobs: app workspace / staking program / security / docker
 │
-│  ── application workspace (8 crates) ─────────────────────────────
+│  ── application workspace (<!-- stat:crates -->8<!-- /stat --> crates) ─────────────────────────────
 ├─ crates/
 │  ├─ core/                       bot-core — shared kernel
 │  │  ├─ Cargo.toml
@@ -121,8 +121,8 @@ sniper-suite/
 │  │  │     ├─ health.rs          health/ready registries
 │  │  │     └─ metrics.rs         bot_* metrics registry (bounded labels)
 │  │  └─ tests/
-│  │     ├─ global_risk_accounting.rs  19 offline TASK 5 tests (limits, kill switches, idempotency, aggregation, order/ledger/position reconciliation, recovery)
-│  │     ├─ ha_distributed.rs         17 offline TASK 6 tests (worker identity, leases, fencing, two-worker race, cursors/gaps/replay, crash boundaries, restart, failover, readiness, shutdown)
+│  │     ├─ global_risk_accounting.rs  offline TASK 5 tests (limits, kill switches, idempotency, aggregation, order/ledger/position reconciliation, recovery)
+│  │     ├─ ha_distributed.rs         offline TASK 6 tests (worker identity, leases, fencing, two-worker race, cursors/gaps/replay, crash boundaries, restart, failover, readiness, shutdown)
 │  │     ├─ db_integration.rs          26 gated tests vs real PostgreSQL (incl. migrations 0012–0015)
 │  │     ├─ redis_integration.rs       10 gated tests vs real Redis
 │  │     ├─ distributed_integration.rs 4 gated multi-context tests
@@ -232,7 +232,7 @@ sniper-suite/
 │     │  ├─ instruction.rs        borsh instruction (de)serialization + client builders
 │     │  └─ error.rs              custom errors 6000+ (incl. GenesisAlreadyDone 6026)
 │     └─ tests/
-│        └─ validator_e2e.rs      STAKING_E2E-gated on-chain lifecycle (3 tests; all 3 executed + passed in the hardening pass)
+│        └─ validator_e2e.rs      STAKING_E2E-gated on-chain lifecycle (tests exist; execution recorded only in the seller log — no run logs ship)
 │
 │  ── documentation (149 files under docs/) ─────────────────────────
 └─ docs/
@@ -246,14 +246,17 @@ sniper-suite/
    ├─ ARCHITECTURE.md  API.md  SECURITY.md  DEPLOYMENT.md  OPERATIONS.md
    ├─ MODULES.md  STAKING.md  TESTING.md  RECONCILIATION.md  DISTRIBUTED.md
    ├─ RELEASE.md  HANDOVER.md  BACKUP-RESTORE.md
-   │  # buyer package (14, first documentation pass):
-   ├─ BUYER-OVERVIEW.md  CAPABILITY-MATRIX.md  BUYER-DUE-DILIGENCE.md
-   ├─ IP-COMPONENTS.md  THIRD-PARTY.md  BUYER-DEPLOYMENT.md
-   ├─ ACCEPTANCE-CHECKLIST.md  RELEASE-NOTES-0.1.0.md  BUYER-FAQ.md
-   ├─ SCOPE-BOUNDARY.md  SUPPORT-HANDOVER.md  BUYER-RISK-REGISTER.md
+   │  # buyer package (first documentation pass; 2026-10-07 consolidation moved
+   │  # BUYER-OVERVIEW/BUYER-DUE-DILIGENCE/BUYER-DEPLOYMENT/BUYER-FAQ/
+   │  # BUYER-RISK-REGISTER to archive/, purpose consolidated into BUYER-HANDOVER.md):
+   ├─ BUYER-HANDOVER.md  CAPABILITY-MATRIX.md
+   ├─ IP-COMPONENTS.md  THIRD-PARTY.md
+   ├─ ACCEPTANCE-CHECKLIST.md  RELEASE-NOTES-0.1.0.md
+   ├─ SCOPE-BOUNDARY.md  SUPPORT-HANDOVER.md
    ├─ TECHNICAL-DIFFERENTIATORS.md  DELIVERY-MANIFEST.md
-   │  # final delivery package (9, this pass):
-   ├─ FINAL-DELIVERY.md  BUYER-QUICKSTART.md  TECHNICAL-FACT-SHEET.md
+   │  # final delivery package (FINAL-DELIVERY.md + BUYER-QUICKSTART.md archived
+   │  # 2026-10-07 into BUYER-HANDOVER.md; the rest remain current):
+   ├─ TECHNICAL-FACT-SHEET.md
    ├─ SELLER-FACT-SHEET.md  SELLING-LISTING-SOURCE.md  DEMO-RUNBOOK.md
    ├─ EVIDENCE-INDEX.md  REPOSITORY-MAP.md  ARCHIVE-CHECKLIST.md
    │  # buyer-hardening pass (3):
@@ -263,7 +266,9 @@ sniper-suite/
    ├─ FEATURE-TRACEABILITY.md  SECURITY-BOUNDARY-MAP.md
    ├─ FINAL-IP-AND-THIRD-PARTY-INVENTORY.md  BUYER-REPRODUCTION-GUIDE.md
    ├─ FINAL-KNOWN-LIMITATIONS.md  FINAL-OPERATIONS-HANDOVER.md
-   ├─ FINAL-INCIDENT-RUNBOOK.md  FINAL-RELEASE-AUDIT.md
+   ├─ FINAL-INCIDENT-RUNBOOK.md            # FINAL-RELEASE-AUDIT.md archived 2026-10-07 (superseded self-report)
+   │  # archive/ (2026-10-07): 56 superseded files preserved for internal history,
+   │  # NOT part of the buyer package — see docs/ARCHIVE-CHECKLIST.md + BUYER-HANDOVER.md
 ```
 
 ## Counts (exact current canonical tree — 2026-10-06)
@@ -293,7 +298,7 @@ and session artifacts are excluded from the canonical product measurement.
 | Deployment assets (Dockerfile, compose, templates, ignores) | 6 |
 | Scripts (`release-check.sh`, `verify-delivery.sh`, `staking-identity.sh`) | 3 |
 | CI workflow | 1 |
-| App workspace `crates/` — Rust (72 src + 14 tests) + 7 crate Cargo.tomls + 11 SQL migrations | 104 |
+| App workspace `crates/` — Rust (src + tests) + crate Cargo.tomls + SQL migrations | see `docs/STATS.md` |
 | Staking program `programs/staking-suite/` (5 src + 1 test + Cargo.toml + Cargo.lock + 2 `.cargo/` files) | 10 |
 | Docs (`docs/`) | 49 |
 | **Total tracked files** | **185** |
@@ -302,8 +307,8 @@ Note: the frozen software tree (146 files) plus 14 buyer docs plus 9 final
 delivery docs plus `scripts/verify-delivery.sh` = 170, plus
 `crates/module-polymarket/src/collateral.rs` added by the post-delivery
 audit pass = 171; the buyer-hardening pass added `scripts/staking-identity.sh`
-plus 3 docs (LIVE-VALIDATION, BUYER-ACCEPTANCE-TEST, CI-LOCAL-EQUIVALENCE)
-= 175; the final buyer-handover pass added 8 docs (feature traceability,
+plus docs (LIVE-VALIDATION, BUYER-ACCEPTANCE-TEST, CI-LOCAL-EQUIVALENCE)
+The final buyer-handover pass added docs (feature traceability,
 security boundary map, IP/third-party inventory, reproduction guide,
 known-limitations register, operations handover, incident runbook, release
 audit) = 183; the forensic-engineering cycle then added
@@ -314,13 +319,13 @@ delivery-time record). The audit pass also MODIFIED existing sources (live/paper
 balance separation in modules 1+3, staking max-supply cap + token metadata
 in module 4), so the frozen-tree byte identity applies to commit `0e139c3`
 only; the current tree differs as described in CHANGELOG.md [Unreleased].
-Re-check with the commands in `docs/BUYER-DUE-DILIGENCE.md` §A.
+Re-check with the commands in `docs/archive/BUYER-DUE-DILIGENCE.md` §A (archived 2026-10-07; current verification table: `docs/BUYER-HANDOVER.md`).
 
 ## Where to look first
 
-- Understand: `docs/FINAL-DELIVERY.md` → `docs/BUYER-OVERVIEW.md`
-- Verify: `docs/EVIDENCE-INDEX.md` → `AUDIT.md` → run the scripts
-- Deploy: `docs/BUYER-QUICKSTART.md` → `docs/BUYER-DEPLOYMENT.md`
+- Understand: `docs/BUYER-HANDOVER.md` → `docs/ARCHITECTURE.md`
+- Verify: `docs/EVIDENCE-INDEX.md` → `archive/AUDIT.md` → run the scripts
+- Deploy: `docs/DEMO-RUNBOOK.md` → `docs/DEPLOYMENT.md`
 - Accept: `docs/ACCEPTANCE-CHECKLIST.md`
 - Transfer: `docs/IP-COMPONENTS.md` §Ownership transfer checklist →
   `docs/SUPPORT-HANDOVER.md` → `docs/ARCHIVE-CHECKLIST.md`

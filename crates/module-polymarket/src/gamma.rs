@@ -87,7 +87,7 @@ impl MarketQuery {
 
 /// A market as returned by Gamma. Fields are optional because Gamma's schema
 /// evolves and different endpoints omit different keys.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GammaMarket {
     /// On-chain condition id (`0x…` hex).
@@ -152,6 +152,25 @@ fn parse_string_array(raw: &Option<String>) -> Vec<String> {
             Err(_) => Vec::new(),
         },
     }
+}
+
+/// The first (YES-share) outcome price as a probability in [0, 1],
+/// when Gamma reported one. Used by the server market-data aggregator
+/// (GAP-MAP P1).
+pub fn first_outcome_price(market: &GammaMarket) -> Option<f64> {
+    parse_string_array(&market.outcome_prices)
+        .first()
+        .and_then(|raw| raw.parse::<f64>().ok())
+}
+
+/// Reported 24h volume in USDC (0.0 when absent/unparseable).
+pub fn volume_usd(market: &GammaMarket) -> f64 {
+    to_f64(&market.volume)
+}
+
+/// Reported order-book liquidity in USDC (0.0 when absent/unparseable).
+pub fn liquidity_usd(market: &GammaMarket) -> f64 {
+    to_f64(&market.liquidity)
 }
 
 /// Coerce a Gamma numeric-or-string value to f64.

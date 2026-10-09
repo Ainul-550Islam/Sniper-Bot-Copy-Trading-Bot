@@ -1,6 +1,6 @@
 # Architecture Overview — sniper-suite 0.1.0 (2026-10-06)
 
-> **Current values:** Version 0.1.0 · 43 forward-only migrations through `0043` · 616 Rust files under `crates/` · 8 workspace members · 149 docs · 1783 `#[test]` attributes
+> **Current values:** Version 0.1.0 · <!-- stat:migrations -->54<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`) · <!-- stat:rust_files -->675<!-- /stat --> Rust files under `crates/` · <!-- stat:crates -->8<!-- /stat --> workspace members · <!-- stat:docs_canonical -->101<!-- /stat --> docs · <!-- stat:test_attrs_plain -->2061<!-- /stat --> `#[test]` attributes
 
 ## 1. Workspace & Crates
 
@@ -69,7 +69,7 @@ All default to `EXECUTION_MODE=dry_run`; live requires `execution.mode=live` + `
 ## 7. OpenAPI & SDK
 
 - `GET /api/saas/openapi.json` — tenant-scoped, redacted
-- `saas-sdk 0.1.0` — `billing_status`, `usage_limits`, `commercial_state`, `readiness`, `lifecycle`, `backup_status`, typed errors (`SdkErrorKind`), `cargo test -p saas-sdk` 32/32
+- `saas-sdk 0.1.0` — `billing_status`, `usage_limits`, `commercial_state`, `readiness`, `lifecycle`, `backup_status`, typed errors (`SdkErrorKind`), `cargo test -p saas-sdk` (harness exists; no run log ships)
 
 ## 8. Frontend
 
@@ -85,7 +85,7 @@ All default to `EXECUTION_MODE=dry_run`; live requires `execution.mode=live` + `
 | Custody | Vault/KMS/HSM refs, rotation, health, fail-closed fallback | live Vault/KMS/HSM cluster → `EXTERNAL_REQUIRED` |
 | Observability | `ObservabilityConfig`, `MetricsSnapshot`, `TraceContext` (real counters only) | buyer OTLP endpoint (secret-free ref) |
 | Trading | dry_run default, risk, HA | funded keys + live RPC/Geyser → `EXTERNAL_REQUIRED` |
-| Staking | program `.so` 187KB, host tests 71/71 | `solana-test-validator` E2E → `EXTERNAL_REQUIRED` |
+| Staking | program `.so` (not committed); host tests exist in-tree (no run log ships) | `solana-test-validator` E2E → `EXTERNAL_REQUIRED` |
 
 Every external row is `EXTERNAL_REQUIRED` / `NOT_EXECUTED` in `crates/server/src/ops/external_validation.rs` and `docs/FINAL-BUYER-GAP-LEDGER.md` — never claimed VERIFIED without execution.
 

@@ -46,7 +46,7 @@ EXCLUDED_DIRS = {
 }
 # Toolchain binaries installed under <root>/.cargo/bin are local toolchain
 # state, never product (a cargo-deny audit.toml in .cargo/ IS product).
-EXCLUDED_PREFIXES = [Path(".cargo") / "bin"]
+EXCLUDED_PREFIXES = [Path(".cargo") / "bin", Path("docs") / "archive"]
 EXCLUDED_FILES = {
     "PROMPT-4-PHASE0-MATRIX.md", "PROMPT-4-POLYMARKET-RESEARCH.md",
     "PROMPT-4-PROGRESS.md", "PROMPT-4-RESULT.md", "PROMPT-5-SPEC.md",

@@ -13,12 +13,18 @@
 
 pub mod analytics;
 pub mod authorization_chain;
+pub mod backtest_worker;
 pub mod backtests;
 pub mod bots;
 pub mod config_store;
 pub mod copy;
 pub mod executions;
+pub mod dca;
+pub mod dca_worker;
 pub mod integrations;
+pub mod limit_order_worker;
+pub mod limit_orders;
+pub mod market_service;
 pub mod markets;
 pub mod module_control_store;
 pub mod module_controls;
@@ -30,6 +36,7 @@ pub mod recovery;
 pub mod service;
 pub mod sniper;
 pub mod strategies;
+pub mod strategy_runtime;
 pub mod telegram;
 
 use axum::routing::{get, post, put};
@@ -42,6 +49,8 @@ use crate::api::ApiState;
 /// The tenant trading data-plane routes.
 pub fn routes() -> Router<ApiState> {
     Router::new()
+        .merge(limit_orders::routes())
+        .merge(dca::routes())
         // --- bots (§H customer surface) ------------------------------------
         .route("/api/tenant/bots", get(bots::list))
         .route("/api/tenant/bots/:module", get(bots::detail))

@@ -30,6 +30,7 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use solana_sdk::pubkey::Pubkey;
@@ -49,13 +50,110 @@ use solana_kit::pumpportal::{
 };
 use solana_kit::raydium::{self, PoolInitEvent};
 use solana_kit::rpc::Rpc;
-use solana_kit::ws::{LogsFilter, SolanaWs, TransactionFilter, WsMessage, WsPolicy, WsStatus};
+use solana_kit::ws::{redact_ws_url, LogsFilter, SolanaWs, TransactionFilter, WsMessage, WsPolicy, WsStatus};
 
 use crate::event::{raw_hash_of, LaunchEvent, LaunchProtocol, SequenceTracker};
 
 /// Capacity of the merged launch channel. A burst of launches should buffer,
 /// not block the feed readers.
 const LAUNCH_BUFFER: usize = 512;
+const FEED_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+const FEED_TASK_ABORT_GRACE: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Default)]
+struct DetectorTasks {
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl DetectorTasks {
+    fn push(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.handles.push(handle);
+    }
+
+    async fn join_all(&mut self) {
+        let join_deadline = tokio::time::Instant::now() + FEED_TASK_JOIN_TIMEOUT;
+        let abort_deadline = join_deadline + FEED_TASK_ABORT_GRACE;
+        let mut aborting = false;
+
+        // Keep handles in the owner while awaiting. If this shutdown future is
+        // cancelled, Drop still has access to every worker and can abort them.
+        for task in &mut self.handles {
+            if aborting {
+                abort_launch_task(task, abort_deadline).await;
+                continue;
+            }
+            let remaining = join_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                aborting = true;
+                abort_launch_task(task, abort_deadline).await;
+                continue;
+            }
+            match tokio::time::timeout(remaining, &mut *task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!(error = %error, "sniper launch-feed task failed while joining");
+                }
+                Err(_) => {
+                    warn!("sniper launch-feed task did not stop before deadline; aborting it");
+                    aborting = true;
+                    abort_launch_task(task, abort_deadline).await;
+                }
+            }
+        }
+        self.handles.clear();
+    }
+}
+
+async fn abort_launch_task(
+    task: &mut tokio::task::JoinHandle<()>,
+    deadline: tokio::time::Instant,
+) {
+    task.abort();
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        warn!("sniper launch-feed abort join grace elapsed; cancellation was requested");
+        return;
+    }
+    match tokio::time::timeout(remaining, &mut *task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if !error.is_cancelled() => {
+            warn!(error = %error, "aborted sniper launch-feed task failed while joining");
+        }
+        Ok(Err(_)) => {}
+        Err(_) => warn!("sniper launch-feed task did not finish during abort join grace"),
+    }
+}
+
+impl Drop for DetectorTasks {
+    fn drop(&mut self) {
+        for task in &self.handles {
+            task.abort();
+        }
+    }
+}
+
+/// Owns the merged launch stream and every task that feeds it.
+#[derive(Debug)]
+pub struct LaunchFeedHandle {
+    receiver: mpsc::Receiver<LaunchEvent>,
+    tasks: DetectorTasks,
+}
+
+impl LaunchFeedHandle {
+    pub async fn recv(&mut self) -> Option<LaunchEvent> {
+        self.receiver.recv().await
+    }
+
+    pub fn len(&self) -> usize {
+        self.receiver.len()
+    }
+
+    /// Close the stream and join all feed tasks within one bounded deadline.
+    pub async fn shutdown(&mut self) {
+        self.receiver.close();
+        self.tasks.join_all().await;
+    }
+}
 
 /// Source labels for metrics (low cardinality, fixed set).
 const SRC_PUMPPORTAL: &str = "pumpportal";
@@ -81,7 +179,7 @@ fn count_reconnect(source: &str) {
 fn count_gap(source: &str) {
     feed_counter(
         "sniper_feed_gaps_total",
-        "Launch-feed outages reported after a reconnect (launches in the gap were not observed).",
+        "Launch-feed gaps reported after reconnects or bounded consumer-queue overflow.",
         source,
     );
 }
@@ -112,10 +210,11 @@ impl LaunchDetector {
     ///
     /// Returns an error only if *no* feed could be started; a single feed
     /// failing degrades latency but keeps the module alive.
-    pub async fn spawn(state: Shared, rpc: Rpc) -> BotResult<mpsc::Receiver<LaunchEvent>> {
+    pub async fn spawn(state: Shared, rpc: Rpc) -> BotResult<LaunchFeedHandle> {
         let cfg = state.config_snapshot().await;
         let sniper = cfg.sniper.clone();
         let (tx, rx) = mpsc::channel(LAUNCH_BUFFER);
+        let mut tasks = DetectorTasks::default();
 
         let mut started = 0;
 
@@ -130,7 +229,8 @@ impl LaunchDetector {
             let state_pp = state.clone();
             let api_key = sniper.pumpportal_api_key.clone();
             match start_pumpportal(url, api_key, tx_pp, state_pp).await {
-                Ok(()) => {
+                Ok(task) => {
+                    tasks.push(task);
                     started += 1;
                     info!("sniper launch feed: pumpportal enabled");
                 }
@@ -158,9 +258,10 @@ impl LaunchDetector {
                 )
                 .await
                 {
-                    Ok(()) => {
+                    Ok(task) => {
+                        tasks.push(task);
                         started += 1;
-                        info!(%ws_url, %protocol, "sniper launch feed: logsSubscribe enabled");
+                        info!(endpoint = %redact_ws_url(&ws_url), %protocol, "sniper launch feed: logsSubscribe enabled");
                     }
                     Err(e) => {
                         warn!(error = %e, %protocol, "logsSubscribe feed failed to start")
@@ -190,9 +291,10 @@ impl LaunchDetector {
                     }
                     match start_geyser_subscription(url.to_string(), programs, tx_g, state_g).await
                     {
-                        Ok(()) => {
+                        Ok(task) => {
+                            tasks.push(task);
                             started += 1;
-                            info!(url, "sniper launch feed: transactionSubscribe (geyser) enabled");
+                            info!(endpoint = %redact_ws_url(url), "sniper launch feed: transactionSubscribe (geyser) enabled");
                         }
                         Err(e) => warn!(error = %e, "geyser transactionSubscribe feed failed to start"),
                     }
@@ -212,7 +314,10 @@ impl LaunchDetector {
         // Drop our copy of the sender: the feed tasks hold the only others, so
         // the receiver closes when every feed has stopped.
         drop(tx);
-        Ok(rx)
+        Ok(LaunchFeedHandle {
+            receiver: rx,
+            tasks,
+        })
     }
 }
 
@@ -222,7 +327,7 @@ async fn start_pumpportal(
     api_key: Option<String>,
     tx: mpsc::Sender<LaunchEvent>,
     state: Shared,
-) -> BotResult<()> {
+) -> BotResult<tokio::task::JoinHandle<()>> {
     // PumpPortal needs no key for the public data feed; a key only raises rate
     // limits. We accept it for completeness but the subscription is identical.
     if api_key.is_some() {
@@ -235,18 +340,25 @@ async fn start_pumpportal(
     let mut rx = match feed.receiver().await {
         Some(rx) => rx,
         None => {
+            feed.stop().await;
             return Err(bot_core::error::BotError::ws(
                 "pumpportal receiver already taken",
-            ))
+            ));
         }
     };
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         // Keep the feed alive for the lifetime of this task.
-        let _feed = feed;
+        let feed = feed;
         let mut seq = SequenceTracker::default();
         count_reconnect(SRC_PUMPPORTAL);
-        while let Some(message) = rx.recv().await {
+        loop {
+            let message = tokio::select! {
+                _ = tx.closed() => break,
+                _ = state.wait_shutdown() => break,
+                message = rx.recv() => message,
+            };
+            let Some(message) = message else { break };
             match message {
                 PumpPortalMessage::NewToken(m) => {
                     let event = event_from_pumpportal(&m, seq.next_seq());
@@ -266,8 +378,9 @@ async fn start_pumpportal(
             }
         }
         warn!("pumpportal forwarder ended");
+        feed.stop().await;
     });
-    Ok(())
+    Ok(task)
 }
 
 /// Start a `logsSubscribe` on the protocol's program and decode its launch
@@ -278,28 +391,45 @@ async fn start_log_subscription(
     tx: mpsc::Sender<LaunchEvent>,
     state: Shared,
     rpc: Rpc,
-) -> BotResult<()> {
+) -> BotResult<tokio::task::JoinHandle<()>> {
     let ws = SolanaWs::with_policy(
         ws_url,
         WsPolicy::from_network(&state.config_snapshot().await.network),
     );
-    let _handle = ws.spawn();
+    let mut connection = ws.spawn();
     let (program, source) = match protocol {
         LaunchProtocol::PumpFun => (PUMP_PROGRAM_ID.to_string(), SRC_LOGS_PUMP),
         LaunchProtocol::PumpSwap => (PUMPSWAP_PROGRAM_ID.to_string(), SRC_LOGS_PUMPSWAP),
         LaunchProtocol::RaydiumAmmV4 => (RAYDIUM_AMM_V4.to_string(), SRC_LOGS_RAYDIUM),
     };
-    let mut sub = ws
+    let mut sub = match ws
         .logs_subscribe(LogsFilter::default().mentions([program]))
-        .await?;
-    let mut rx = sub.receiver();
+        .await
+    {
+        Ok(sub) => sub,
+        Err(error) => {
+            connection.shutdown().await;
+            return Err(error);
+        }
+    };
+    let mut rx = match sub.receiver() {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            sub.cancel().await;
+            connection.shutdown().await;
+            return Err(error);
+        }
+    };
     let seq = Arc::new(Mutex::new(SequenceTracker::default()));
 
-    tokio::spawn(async move {
-        // Keep both the connection and the subscription alive.
-        let _ws = ws;
-        let _sub = &mut sub;
-        while let Some(message) = rx.recv().await {
+    let task = tokio::spawn(async move {
+        loop {
+            let message = tokio::select! {
+                _ = tx.closed() => break,
+                _ = state.wait_shutdown() => break,
+                message = rx.recv() => message,
+            };
+            let Some(message) = message else { break };
             match message {
                 WsMessage::Logs {
                     signature,
@@ -387,22 +517,34 @@ async fn start_log_subscription(
                 WsMessage::Gap {
                     last_slot,
                     outage_ms,
+                    dropped_messages,
                     ..
                 } => {
                     count_gap(source);
-                    warn!(
-                        source,
-                        ?last_slot,
-                        outage_ms,
-                        "logsSubscribe restored after an outage — launches in the gap were not observed"
-                    );
-                    state
-                        .record_error(
-                            bot_core::models::BotModule::Sniper,
-                            &format!(
-                                "launch feed gap ({source}): websocket down for {outage_ms} ms"
-                            ),
+                    let detail = if dropped_messages > 0 {
+                        warn!(
+                            source,
+                            ?last_slot,
+                            outage_ms,
+                            dropped_messages,
+                            "logsSubscribe consumer queue overflow; launches may have been missed"
+                        );
+                        format!(
+                            "launch feed consumer overflow ({source}): dropped {dropped_messages} notifications over about {outage_ms} ms"
                         )
+                    } else {
+                        warn!(
+                            source,
+                            ?last_slot,
+                            outage_ms,
+                            "logsSubscribe restored after an outage — launches in the gap were not observed"
+                        );
+                        format!(
+                            "launch feed gap ({source}): websocket down for {outage_ms} ms"
+                        )
+                    };
+                    state
+                        .record_error(bot_core::models::BotModule::Sniper, &detail)
                         .await;
                 }
                 WsMessage::Status(s) => {
@@ -415,8 +557,10 @@ async fn start_log_subscription(
             }
         }
         warn!(source, "logsSubscribe forwarder ended");
+        sub.cancel().await;
+        connection.shutdown().await;
     });
-    Ok(())
+    Ok(task)
 }
 
 /// Start a Geyser `transactionSubscribe` on the enabled programs and decode
@@ -432,25 +576,41 @@ async fn start_geyser_subscription(
     programs: Vec<String>,
     tx: mpsc::Sender<LaunchEvent>,
     state: Shared,
-) -> BotResult<()> {
+) -> BotResult<tokio::task::JoinHandle<()>> {
     let ws = SolanaWs::with_policy(
         ws_url,
         WsPolicy::from_network(&state.config_snapshot().await.network),
     );
-    let _handle = ws.spawn();
+    let mut connection = ws.spawn();
     let filter = TransactionFilter {
         account_include: programs,
         ..Default::default()
     };
-    let mut sub = ws.transaction_subscribe(filter).await?;
-    let mut rx = sub.receiver();
+    let mut sub = match ws.transaction_subscribe(filter).await {
+        Ok(sub) => sub,
+        Err(error) => {
+            connection.shutdown().await;
+            return Err(error);
+        }
+    };
+    let mut rx = match sub.receiver() {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            sub.cancel().await;
+            connection.shutdown().await;
+            return Err(error);
+        }
+    };
 
-    tokio::spawn(async move {
-        // Keep both the connection and the subscription alive.
-        let _ws = ws;
-        let _sub = &mut sub;
+    let task = tokio::spawn(async move {
         let mut seq = SequenceTracker::default();
-        while let Some(message) = rx.recv().await {
+        loop {
+            let message = tokio::select! {
+                _ = tx.closed() => break,
+                _ = state.wait_shutdown() => break,
+                message = rx.recv() => message,
+            };
+            let Some(message) = message else { break };
             match message {
                 WsMessage::Transaction { slot, raw, .. } => {
                     let Some(notif) = parse_transaction_notification(&raw) else {
@@ -484,19 +644,30 @@ async fn start_geyser_subscription(
                 WsMessage::Gap {
                     last_slot,
                     outage_ms,
+                    dropped_messages,
                     ..
                 } => {
                     count_gap(SRC_GEYSER);
-                    warn!(
-                        ?last_slot,
-                        outage_ms,
-                        "geyser transactionSubscribe restored after an outage — launches in the gap were not observed"
-                    );
-                    state
-                        .record_error(
-                            bot_core::models::BotModule::Sniper,
-                            &format!("launch feed gap: geyser websocket down for {outage_ms} ms"),
+                    let detail = if dropped_messages > 0 {
+                        warn!(
+                            ?last_slot,
+                            outage_ms,
+                            dropped_messages,
+                            "geyser consumer queue overflow; launches may have been missed"
+                        );
+                        format!(
+                            "launch feed consumer overflow (geyser): dropped {dropped_messages} notifications over about {outage_ms} ms"
                         )
+                    } else {
+                        warn!(
+                            ?last_slot,
+                            outage_ms,
+                            "geyser transactionSubscribe restored after an outage — launches in the gap were not observed"
+                        );
+                        format!("launch feed gap: geyser websocket down for {outage_ms} ms")
+                    };
+                    state
+                        .record_error(bot_core::models::BotModule::Sniper, &detail)
                         .await;
                 }
                 WsMessage::Status(s) => {
@@ -509,8 +680,10 @@ async fn start_geyser_subscription(
             }
         }
         warn!("geyser transactionSubscribe forwarder ended");
+        sub.cancel().await;
+        connection.shutdown().await;
     });
-    Ok(())
+    Ok(task)
 }
 
 /// Decode whichever launch signal a pushed transaction carries: a pump.fun

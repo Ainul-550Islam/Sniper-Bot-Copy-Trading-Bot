@@ -3,7 +3,7 @@
   "gap_id": "GAP-003",
   "provider": "deployment",
   "environment": "test",
-  "timestamp": "2026-10-06T03:40:23Z",
+  "timestamp": "2026-10-08T02:39:34Z",
   "command": "DEPLOYMENT_BASE_URL=<redacted> cargo test --test deployment_smoke",
   "mode": "all-safe",
   "status": "NOT_RUN",

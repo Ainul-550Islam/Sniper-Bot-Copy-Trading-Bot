@@ -9,7 +9,7 @@ crate by hand; the tooling below does that reproducibly.
 
 | Artifact | Scope | Size |
 |---|---|---|
-| `Cargo.lock` | Application workspace (8 crates) — full resolved graph | 707 packages |
+| `Cargo.lock` | Application workspace (<!-- stat:crates -->8<!-- /stat --> crates) — full resolved graph | resolved graph |
 | `programs/staking-suite/Cargo.lock` | Staking program — independent lockfile (own workspace root, MSRV-aware resolution for the agave platform-tools compiler) | 580 packages |
 | `deny.toml` | cargo-deny policy: advisories, bans, licenses, sources | — |
 | `rust-toolchain.toml` | Pinned Rust 1.98.1 for both host projects | — |
@@ -122,4 +122,4 @@ cargo cyclonedx --workspace --all > sbom.cyclonedx.json
 ```
 
 `scripts/release-check.sh` runs the audit/deny gates for both projects
-automatically as part of the 20-gate release validation.
+automatically as part of the scripted release validation.

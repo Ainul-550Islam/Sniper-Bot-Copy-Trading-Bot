@@ -76,22 +76,24 @@ pub fn trading_data_plane_paths() -> Value {
     json!({
         "/api/tenant/strategies": {
             "get": {
+                "operationId": "tenant.listStrategies",
                 "summary": "List tenant strategies",
                 "tags": ["Strategies"],
                 "parameters": [
                     { "name": "module", "in": "query", "schema": { "type": "string" } }
                 ],
                 "responses": {
-                    "200": { "description": "Strategy list returned" },
+                    "200": { "description": "Strategy list returned", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StrategyRecord" } } } } },
                     "401": { "description": "Unauthorized" },
                     "403": { "description": "Forbidden" }
                 }
             },
             "post": {
+                "operationId": "tenant.createStrategy",
                 "summary": "Create strategy",
                 "tags": ["Strategies"],
                 "responses": {
-                    "201": { "description": "Strategy created" },
+                    "201": { "description": "Strategy created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StrategyRecord" } } } },
                     "400": { "description": "Validation error" },
                     "401": { "description": "Unauthorized" },
                     "403": { "description": "Forbidden" }
@@ -100,26 +102,29 @@ pub fn trading_data_plane_paths() -> Value {
         },
         "/api/tenant/backtests": {
             "get": {
+                "operationId": "tenant.listBacktests",
                 "summary": "List backtests",
                 "tags": ["Backtesting"],
                 "responses": {
-                    "200": { "description": "Backtest list returned" }
+                    "200": { "description": "Backtest list returned", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/BacktestRecord" } } } } }
                 }
             },
             "post": {
+                "operationId": "tenant.createBacktest",
                 "summary": "Queue backtest execution",
                 "tags": ["Backtesting"],
                 "responses": {
-                    "201": { "description": "Backtest queued" }
+                    "201": { "description": "Backtest queued", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BacktestRecord" } } } }
                 }
             }
         },
         "/api/tenant/markets": {
             "get": {
+                "operationId": "tenant.listMarkets",
                 "summary": "List discovered markets",
                 "tags": ["Market Data"],
                 "responses": {
-                    "200": { "description": "Markets list returned" }
+                    "200": { "description": "Markets list returned", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/MarketTicker" } } } } }
                 }
             }
         }

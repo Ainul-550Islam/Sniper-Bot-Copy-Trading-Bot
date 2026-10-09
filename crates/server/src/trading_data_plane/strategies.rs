@@ -93,6 +93,12 @@ fn parse_module(value: &str) -> Result<BotModule, Response> {
     }
 }
 
+/// What an update does to the strategy runtime (GAP-MAP P1).
+enum RuntimeHook {
+    Activate(super::strategy_runtime::ActivationPlan),
+    Deactivate(super::strategy_runtime::DeactivationPlan),
+}
+
 fn parse_mode(value: Option<&str>) -> Result<ExecutionMode, Response> {
     let selected = value.unwrap_or("paper");
     ExecutionMode::from_str(selected).map_err(|_| {
@@ -485,6 +491,42 @@ pub async fn update(
         },
         None => current.status,
     };
+    // GAP-MAP P1 — activation/deactivation runs through the strategy
+    // runtime: the strategy's parameters become the tenant's VERSIONED
+    // module configuration, which the module runtime rebuilds engines
+    // from. A refused activation changes NOTHING (fail closed): the
+    // refusal is planned BEFORE the row is written.
+    let status_changed = status != current.status;
+    let config_changed = config != current.config_json;
+    let runtime_hook = if status == StrategyStatus::Active && (status_changed || config_changed) {
+        let mut candidate = current.clone();
+        candidate.status = status;
+        candidate.config_json = config.clone();
+        let funded =
+            super::strategy_runtime::funded_mode_from_deployment(&state.shared.config_snapshot().await);
+        match super::strategy_runtime::plan_activation(&candidate, &funded) {
+            Ok(plan) => Some(RuntimeHook::Activate(plan)),
+            Err(refusal) => {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    "strategy_activation_denied",
+                    refusal.message(),
+                )
+            }
+        }
+    } else if current.status == StrategyStatus::Active
+        && status != StrategyStatus::Active
+    {
+        match super::strategy_runtime::plan_deactivation(&current) {
+            Ok(plan) => Some(RuntimeHook::Deactivate(plan)),
+            // Deactivation of an unwired module is a no-op, not an error:
+            // there was never an engine to retire.
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
     let now = Utc::now();
     let result = sqlx::query(
         "UPDATE tenant_strategies
@@ -504,7 +546,35 @@ pub async fn update(
     .await;
 
     match result {
-        Ok(done) if done.rows_affected() == 1 => match fetch_one(db, org, strategy_id).await {
+        Ok(done) if done.rows_affected() == 1 => {
+            // Apply the runtime hook AFTER the row landed: the versioned
+            // config write is the signal the module runtime rebuilds from.
+            if let Some(hook) = runtime_hook {
+                let actor = auth.ctx.actor_label();
+                let applied = match &hook {
+                    RuntimeHook::Activate(plan) => {
+                        super::strategy_runtime::apply_activation(db, plan, &actor).await
+                    }
+                    RuntimeHook::Deactivate(plan) => {
+                        super::strategy_runtime::apply_deactivation(db, plan, &actor).await
+                    }
+                };
+                if let Err(error) = applied {
+                    tracing::error!(
+                        strategy = %strategy_id,
+                        error = %error,
+                        "strategy row updated but the versioned runtime config write failed"
+                    );
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "strategy_runtime_not_applied",
+                        format!(
+                            "strategy updated, but the runtime configuration write failed: {error}"
+                        ),
+                    );
+                }
+            }
+            match fetch_one(db, org, strategy_id).await {
             Ok(Some(record)) => (StatusCode::OK, Json(record)).into_response(),
             Ok(None) => error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -512,7 +582,8 @@ pub async fn update(
                 "updated strategy could not be reloaded",
             ),
             Err(response) => response,
-        },
+            }
+        }
         Ok(_) => error_response(
             StatusCode::CONFLICT,
             "strategy_version_conflict",
@@ -560,22 +631,60 @@ pub async fn archive(
             )
         }
     };
+    let org = auth.organization_id();
+    // Read the record first: archiving an ACTIVE strategy must also retire
+    // its runtime binding (GAP-MAP P1 deactivation path).
+    let current = match fetch_one(db, org, strategy_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "strategy_not_found",
+                "strategy was not found",
+            )
+        }
+        Err(response) => return response,
+    };
+
     let result = sqlx::query(
         "UPDATE tenant_strategies
             SET status = 'archived', version = version + 1, updated_at = now()
           WHERE id = $1 AND organization_id = $2 AND status <> 'archived'",
     )
     .bind(strategy_id.as_uuid())
-    .bind(auth.organization_id().as_uuid())
+    .bind(org.as_uuid())
     .execute(db.pool())
     .await;
 
     match result {
-        Ok(done) if done.rows_affected() == 1 => (
-            StatusCode::OK,
-            Json(json!({ "archived": true, "id": strategy_id.to_string(), "status": "archived" })),
-        )
-            .into_response(),
+        Ok(done) if done.rows_affected() == 1 => {
+            if current.status == StrategyStatus::Active {
+                if let Ok(plan) = super::strategy_runtime::plan_deactivation(&current) {
+                    let actor = auth.ctx.actor_label();
+                    if let Err(error) =
+                        super::strategy_runtime::apply_deactivation(db, &plan, &actor).await
+                    {
+                        tracing::error!(
+                            strategy = %strategy_id,
+                            error = %error,
+                            "strategy archived but the runtime deactivation write failed"
+                        );
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "strategy_runtime_not_applied",
+                            format!(
+                                "strategy archived, but the runtime deactivation write failed: {error}"
+                            ),
+                        );
+                    }
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(json!({ "archived": true, "id": strategy_id.to_string(), "status": "archived" })),
+            )
+                .into_response()
+        }
         Ok(_) => error_response(
             StatusCode::NOT_FOUND,
             "strategy_not_found",

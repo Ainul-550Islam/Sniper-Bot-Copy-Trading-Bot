@@ -2,7 +2,7 @@
 
 This document describes the security controls that are **implemented and
 tested** in this repository. It is not an external audit — no third-party
-audit has been performed (see AUDIT.md for the honest status of assurance
+audit has been performed (see archive/AUDIT.md for the honest status of assurance
 claims; a future audit's deliverables have a defined handover slot in
 `docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006).
 
@@ -46,7 +46,7 @@ Documented commands are asserted to match the executable harnesses by the test `
 | GAP-005 | Staking validator E2E | `EXTERNAL_REQUIRED` / `NOT_RUN` | `cd programs/staking-suite && STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1` |
 | GAP-006 | External security audit | `EXTERNAL_REQUIRED` / `BUYER_ACTION` — no report exists | Handover slot: `docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006 (findings/severity/remediation/retest/sign-off) |
 
-All live modes: `bash scripts/run-external-validation.sh all-safe` → `6/6 NOT_RUN` in a credential-free sandbox (correct, not a failure).
+All live modes: `bash scripts/run-external-validation.sh all-safe` → all evidence stubs NOT_RUN in a credential-free sandbox (correct, not a failure).
 
 ## Threat model (summary)
 

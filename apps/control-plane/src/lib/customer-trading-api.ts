@@ -244,25 +244,46 @@ export interface BacktestsResponse {
   count: number;
 }
 
+/**
+ * One market row from `GET /api/tenant/markets` (wire shape).
+ *
+ * Units are the server's: integer USD cents for price/volume/liquidity and
+ * integer basis points for the 24h change. Presentation conversions live with
+ * the display helpers, never here. See `lib/api/market-api.ts` for the
+ * matching typed client and those helpers.
+ */
 export interface MarketItem {
   id: string;
   symbol: string;
   name: string;
-  venue: "raydium" | "pumpfun" | "pumpswap" | "polymarket";
+  /** snake_case wire form of the Rust `Venue` enum. */
+  venue: string;
   base_asset: string;
   quote_asset: string;
-  price_usd: number;
-  change_24h_pct: number;
-  volume_24h_usd: number;
-  liquidity_usd: number;
+  price_usd_cents: number;
+  change_24h_bps: number;
+  volume_24h_usd_cents: number;
+  liquidity_usd_cents: number;
   is_active: boolean;
   compatible_modules: string[];
+  updated_at: string;
+}
+
+/** Feed health as reported alongside the market list. */
+export interface MarketFeedStatus {
+  name: string;
+  ok: boolean;
+  detail: string;
+  fetched_at: string;
+  tickers: number;
 }
 
 export interface MarketsResponse {
-  organization_id: string;
   items: MarketItem[];
   count: number;
+  fetched_at: string;
+  from_cache: boolean;
+  feeds: MarketFeedStatus[];
 }
 
 export interface SniperConfig {

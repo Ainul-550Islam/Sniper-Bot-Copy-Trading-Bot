@@ -216,7 +216,15 @@ async fn run_provisioning(
                 job.complete_step(step, now);
             }
             ProvisioningStep::MembershipCreated => {
-                let org_id = job.organization_id.expect("set by the previous step");
+                let Some(org_id) = job.organization_id else {
+                    job.record_failure("organization id missing before membership creation", now);
+                    let _ = state.saas.update_job(job).await;
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "provisioning organization id is missing",
+                    )
+                        .into_response());
+                };
                 let membership = match state.saas.membership(org_id, user_id).await {
                     Ok(value) => value,
                     Err(error) => {
@@ -279,7 +287,15 @@ async fn run_provisioning(
                 job.complete_step(step, now);
             }
             ProvisioningStep::PlanAssigned => {
-                let org_id = job.organization_id.expect("set by an earlier step");
+                let Some(org_id) = job.organization_id else {
+                    job.record_failure("organization id missing before plan assignment", now);
+                    let _ = state.saas.update_job(job).await;
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "provisioning organization id is missing",
+                    )
+                        .into_response());
+                };
                 let subscription = match state.saas.subscription_of(org_id).await {
                     Ok(value) => value,
                     Err(error) => {

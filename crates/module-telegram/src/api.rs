@@ -77,14 +77,36 @@ pub struct Message {
     pub text: Option<String>,
 }
 
+/// An inline-keyboard button tap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallbackQuery {
+    /// Unique query id — answered via `answerCallbackQuery` so the client
+    /// stops the tap spinner.
+    pub id: String,
+    /// The user who tapped (authorization: only the trade requester may
+    /// confirm/cancel — enforced by the trade session, checked here for
+    /// attribution).
+    #[serde(default)]
+    pub from: Option<User>,
+    /// The button payload, signed by [`crate::callbacks::CallbackSecret`].
+    #[serde(default)]
+    pub data: Option<String>,
+    /// The message the keyboard is attached to (optional per Telegram).
+    #[serde(default)]
+    pub message: Option<Message>,
+}
+
 /// An update from `getUpdates`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
     /// Monotonic update id — used as the `getUpdates` long-poll offset.
     pub update_id: i64,
-    /// Present only for plain message updates (the only kind we handle).
+    /// Plain message updates (commands).
     #[serde(default)]
     pub message: Option<Message>,
+    /// Inline-keyboard taps (trade confirmations).
+    #[serde(default)]
+    pub callback_query: Option<CallbackQuery>,
 }
 
 /// A bot command for the `/`-menu.
@@ -152,7 +174,7 @@ impl TelegramApi {
             .query(&[
                 ("offset", offset.to_string()),
                 ("timeout", timeout_secs.to_string()),
-                ("allowed_updates", "[\"message\"]".to_string()),
+                ("allowed_updates", "[\"message\",\"callback_query\"]".to_string()),
             ])
             .send()
             .await
@@ -235,6 +257,84 @@ impl TelegramApi {
                     )));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// `sendMessage` with an inline keyboard (`reply_markup` JSON). Used
+    /// for trade confirmations; falls back to [`Self::send_message`]
+    /// semantics (chunking, parse-mode retry) minus the keyboard, which is
+    /// always attached to the FIRST chunk only.
+    pub async fn send_message_with_keyboard(
+        &self,
+        chat_id: i64,
+        text: &str,
+        parse_mode: Option<&str>,
+        reply_markup_json: &str,
+    ) -> BotResult<()> {
+        let chunks = split_message(text, 4096);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let url = self.method_url("sendMessage");
+            let mut form = vec![
+                ("chat_id", chat_id.to_string()),
+                ("text", chunk.clone()),
+                ("disable_web_page_preview", "true".to_string()),
+            ];
+            if let Some(mode) = parse_mode {
+                if !mode.trim().is_empty() && mode.trim() != "none" {
+                    form.push(("parse_mode", mode.to_string()));
+                }
+            }
+            if i == 0 {
+                form.push(("reply_markup", reply_markup_json.to_string()));
+            }
+            let resp = self
+                .http
+                .post(&url)
+                .form(&form)
+                .send()
+                .await
+                .map_err(|e| BotError::http(format!("sendMessage(kb): {}", e.without_url())))?;
+            let body: TgResponse<serde_json::Value> = resp.json().await.map_err(|e| {
+                BotError::encoding(format!("sendMessage(kb) json: {}", e.without_url()))
+            })?;
+            if !body.ok {
+                return Err(BotError::http(format!(
+                    "sendMessage(kb) failed: {}",
+                    body.description.unwrap_or_default()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// `answerCallbackQuery` — acknowledges an inline-keyboard tap (stops
+    /// the client spinner; `text` shows as a toast). Never returns an
+    /// error to the caller path: a failed ack is logged by the caller.
+    pub async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: &str,
+    ) -> BotResult<()> {
+        let url = self.method_url("answerCallbackQuery");
+        let resp = self
+            .http
+            .post(&url)
+            .form(&[
+                ("callback_query_id", callback_query_id.to_string()),
+                ("text", text.to_string()),
+            ])
+            .send()
+            .await
+            .map_err(|e| BotError::http(format!("answerCallbackQuery: {}", e.without_url())))?;
+        let body: TgResponse<serde_json::Value> = resp.json().await.map_err(|e| {
+            BotError::encoding(format!("answerCallbackQuery json: {}", e.without_url()))
+        })?;
+        if !body.ok {
+            return Err(BotError::http(format!(
+                "answerCallbackQuery failed: {}",
+                body.description.unwrap_or_default()
+            )));
         }
         Ok(())
     }

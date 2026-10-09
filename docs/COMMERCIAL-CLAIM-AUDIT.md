@@ -1,32 +1,110 @@
-# COMMERCIAL-CLAIM-AUDIT.md
-## Customer-Facing Claim Audit & Evidence Ledger
+# Commercial Claim Audit — single source of truth
 
-- **Date:** 2026-10-03
-- **Audit Requirement:** Reconcile every customer-facing marketing and technical claim against exact repository source code and test evidence.
-- **Rule:** Banned unsubstantiated claims (such as "unbeatable speed", "guaranteed profit", "zero risk", or claiming live mainnet proof when only unit/mock tests exist) are strictly prohibited.
+> Regenerated: 2026-10-08 (P0-B TASK 5 rework). This is the ONE claims table
+> for the package.
+> Rule (GAP-MAP v2, rule 2): a claim is closed only by a machine-generated
+> `evidence/live/*.json` with `"status": "PASSED"` (or a passing test the
+> buyer can re-run), **never by editing a document**. The gate
+> `scripts/verify-marketing-claims.sh` fails CI/docs while unsupported
+> terms (VERIFIED / 100% / HSM / FIPS / SOC2 / sub-millisecond, plus the
+> ALWAYS-banned phrases listed in the script) appear without backing
+> evidence.
 
----
+## PUBLIC-SAFE logic
 
-### 1. Verification of Commercial Claims
+Every claim below carries TWO evidence columns:
 
-| # | Marketing / Technical Claim | Evidence Level | Validated Implementation Source | Verification Status | Limitation / Disclosure |
-|:---|:---|:---:|:---|:---:|:---|
-| 01 | **"Sub-second launch detection on Raydium & Pump.fun"** | `UNIT_TEST` / `INTEGRATION_TEST` | `crates/module-sniper/src/detect.rs`, `crates/solana-kit/src/pumpportal.rs` | **VERIFIED** | Dependent on buyer's Yellowstone Geyser gRPC validator connection quality. |
-| 02 | **"Automated Copy Trading with proportional sizing"** | `INTEGRATION_TEST` | `crates/module-copy/src/mirror.rs`, `crates/module-copy/src/feeds.rs` | **VERIFIED** | Tracks only user-specified Solana public keys; does not guarantee profitable signals. |
-| 03 | **"Polymarket V3 CLOB order signing with EIP-712 v2"** | `UNIT_TEST` | `crates/module-polymarket/src/eip712.rs`, `crates/module-polymarket/src/clob.rs` | **VERIFIED** | Live execution requires user-funded Polygon wallet and CLOB API key. |
-| 04 | **"AWS KMS & HashiCorp Vault hardware-backed custody"** | `UNIT_TEST` | `crates/server/src/custody/kms/client.rs`, `crates/server/src/custody/vault/client.rs` | **VERIFIED** | Requires AWS / Vault infrastructure credentials; fails closed if unreachable. |
-| 05 | **"Multi-tenant PostgreSQL data isolation in SQL"** | `INTEGRATION_TEST` | `crates/core/src/db/repo.rs`, `crates/server/src/trading_data_plane/service.rs` | **VERIFIED** | 0 missing tenant enforcement findings across all 569 Rust files. |
-| 06 | **"Exact double-entry financial accounting"** | `UNIT_TEST` | `crates/core/src/accounting/posting.rs`, `crates/core/src/accounting/book.rs` | **VERIFIED** | Exact integer arithmetic (`u64`/`u128`) without lossy `f64` conversions. |
-| 07 | **"Self-service SaaS billing and usage quotas"** | `INTEGRATION_TEST` | `crates/server/src/saas/billing.rs`, `crates/server/src/saas/usage_limits.rs` | **VERIFIED** | Stripe/Paddle webhook signatures verified with HMAC-SHA256. |
-| 08 | **"Historical strategy backtesting simulation workspace"** | `CODE` / `TURBOPACK` | `apps/control-plane/src/app/backtests/page.tsx`, `crates/server/src/trading_data_plane/` | **VERIFIED** | Historical tick performance depends on available historical dataset snapshots. |
-| 09 | **"Role-Based Access Control (RBAC) with 5 permission tiers"** | `INTEGRATION_TEST` | `bot-core/src/membership/mod.rs`, `crates/server/src/saas/organizations.rs` | **VERIFIED** | Owner, Admin, Trader, Viewer, Auditor roles enforced on all endpoints. |
-| 10 | **"Zero-latency multi-replica distributed lease fencing"** | `INTEGRATION_TEST` | `crates/core/src/ha/lease.rs`, `crates/core/src/ownership.rs` | **VERIFIED** | Redis CAS leases backed by PostgreSQL durability guarantees single-primary execution. |
+1. **Shipped-artifact evidence** — code, harnesses, and scripts that exist
+   in this tree and that a buyer can read or re-run. These facts are always
+   safe to state.
+2. **Live evidence** — a machine-generated `evidence/live/*.json` file with
+   `"status": "PASSED"`. Until that file exists and says PASSED, the claim
+   has NO live proof in this package.
 
----
+A claim is **PUBLIC-SAFE** only when its live-evidence column shows a
+PASSED file. Until then the only public wording allowed is the
+**PUBLIC-SAFE wording** column: it describes the harness/artifact, never a
+result. Claims #01, #04, #08, #10 below carry explicit rewordings; the same
+rewording applies everywhere these claims are repeated (listing pages,
+fact sheets, handover docs).
 
-### 2. Prohibited Claims & Banned Phrasing Guard
+## 1. Live-performance and integration claims
 
-The automated claim verification scan (`scripts/verify-marketing-claims.sh`) confirms that:
-- **0 Banned Superlatives:** No instances of "unhackable", "infinite yield", "guaranteed alpha", or "zero slippage".
-- **Transparent Risk Disclosures:** Every trading surface clearly distinguishes Paper Simulation mode from Live Funded Execution.
-- **Fail-Closed Custody Policy:** Explicit disclosures that hardware signing fails closed when network connectivity is lost.
+| # | Claim category | Shipped-artifact evidence (in-tree) | Live evidence (`evidence/live/*.json`) | PUBLIC-SAFE? |
+|---|----------------|--------------------------------------|----------------------------------------|--------------|
+| 1 | Small funded Solana trade lands | `crates/solana-kit` sign/send/confirm path; `crates/solana-kit/tests/latency_bench.rs` (simulate leg) | `solana_funded_preflight.json` — exists, **NOT_RUN** | **NO** |
+| 2 | pump.fun buy + sell round-trip | `crates/module-sniper` entry/exit logic; `tests/mock_pumpportal.rs` | `pumpfun_buy_sell_roundtrip.json` — exists, **NOT_RUN** | **NO** |
+| 3 | PumpSwap buy + sell round-trip | `crates/module-sniper` swap routing | `pumpswap_buy_sell_roundtrip.json` — exists, **NOT_RUN** | **NO** |
+| 4 | Polymarket place + cancel + fill | `crates/module-polymarket` (builder.rs/clob.rs order + cancel paths) + mock test suite | `polymarket_order_roundtrip.json` — exists, **NOT_RUN** | **NO** |
+| 5 | Stripe checkout + webhook verify (test mode) | `live_billing_contract` harness; `docs/WEBHOOK-COMPATIBILITY-MATRIX.md` fixture tests | `stripe_checkout_roundtrip.json` — exists, **NOT_RUN** | **NO** |
+| 6 | AWS KMS signing round-trip | `live_custody_contract` harness; signer registry code | `kms_sign_transit.json` — exists, **NOT_RUN** | **NO** |
+| 7 | Vault Transit signing round-trip | `live_custody_contract` harness; signer registry code | `vault_transit.json` — exists, **NOT_RUN** | **NO** |
+| 8 | Deployment smoke against a real deployment | `scripts/run-external-validation.sh` (`deployment_smoke` op); `docs/DEPLOYMENT.md` | `deployment_smoke.json` — exists, **NOT_RUN** | **NO** |
+| 9 | Staking program e2e (devnet/validator) | `programs/staking-suite/tests/validator_e2e.rs` (gated on `STAKING_E2E=1`) | `staking_devnet_e2e.json` — exists, **NOT_RUN** | **NO** |
+| 10 | Latency report (p50/p95 detect→submit→landed) | `crates/solana-kit/tests/latency_bench.rs` (read-only + simulate legs; no landed leg without funding) | `latency_report.json` — exists, **NOT_RUN** | **NO** |
+| 11 | One green CI run at the release commit | `.github/workflows/ci.yml` exists | `ci_run.json` — exists, **NOT_RUN** | **NO** |
+
+### PUBLIC-SAFE rewordings for claims #01, #04, #08, #10
+
+Use ONLY these wordings in any public/buyer-facing surface until the
+live-evidence column shows PASSED:
+
+- **#01 (funded Solana trade):** "The Solana sign/send/confirm path ships
+  with a latency harness whose simulate leg is runnable in-tree. A funded
+  mainnet trade has NOT been demonstrated in this package; no run log
+  ships."
+- **#04 (Polymarket place + cancel + fill):** "The Polymarket module ships
+  V2 order build, place and cancel paths with a mock test suite. A live
+  place + cancel + fill round-trip has NOT been demonstrated in this
+  package; no run log ships."
+- **#08 (deployment smoke):** "A scripted deployment-smoke operation ships
+  in `scripts/run-external-validation.sh`. A smoke run against a real
+  deployment has NOT been demonstrated in this package; no run log ships."
+- **#10 (latency report):** "A latency bench harness ships
+  (`crates/solana-kit/tests/latency_bench.rs`, read-only + simulate legs).
+  No p50/p95 detect→submit→landed numbers exist in this package; no run
+  log ships."
+
+## 2. External-validation records carried over (`evidence/external/`)
+
+All six files currently declare `NOT_RUN` and remain so until a real run
+writes `PASSED` with identifiers (rule 2):
+
+| File | Status |
+|------|--------|
+| `evidence/external/billing_stripe.json` | NOT_RUN |
+| `evidence/external/custody_vault.json` | NOT_RUN |
+| `evidence/external/deployment_deployment.json` | NOT_RUN |
+| `evidence/external/funded-preflight_funded.json` | NOT_RUN |
+| `evidence/external/solana_solana_rpc.json` | NOT_RUN |
+| `evidence/external/staking_staking_validator.json` | NOT_RUN |
+
+## 3. Claims that may NEVER be made (regardless of evidence)
+
+- Profit/risk-absence promises (the phrases banned by
+  `scripts/verify-marketing-claims.sh`) — trading outcomes are uncertain;
+  the license disclaims them.
+- Any SOC 2 / FIPS / hardware-security-module certification for this
+  product — no such audit or certification exists. (Code paths for
+  KMS/Vault/hardware-module signing exist; that is a code fact, not a
+  certification.)
+- Sub-millisecond end-to-end latency — no measurement exists.
+- "Audited" (security) — no external audit has been performed
+  (`evidence/audits/` is empty).
+
+## 4. What IS currently supportable (code facts, buyer can re-verify)
+
+These are statements about the shipped source, checkable by reading or
+running the code, and are the only basis for marketing today:
+
+| Fact | Where to verify |
+|------|-----------------|
+| Workspace + program test suites exist and are runnable | `cargo test --workspace`; `programs/staking-suite/tests/` (requires a Rust toolchain; none is bundled) |
+| Zero-panic hardening across execution, risk, accounting, data plane | `AUDIT-ROUND-{3..7}-2026-10-07.md` static-review findings (static review only — see each report's verification banner) |
+| Proprietary license + third-party notices | `LICENSE`, `legal/THIRD-PARTY-NOTICES.md` |
+| Claims gate fails on unsupported terms | `scripts/verify-marketing-claims.sh` |
+| Release packaging refuses sandbox artifacts / ELF / >5 MB files | `scripts/build-release-package.sh` |
+
+Everything else must wait for Section 1 evidence. Historical counts and
+"VERIFIED" statements from earlier documents were archived with those
+documents (`docs/archive/`) and are NOT part of the buyer package.

@@ -43,6 +43,7 @@ pub mod invoice;
 pub mod lifecycle;
 pub mod payment;
 pub mod payment_intent;
+pub mod platform_fee;
 pub mod plan;
 pub mod pricing;
 pub mod provider;

@@ -62,6 +62,7 @@ jobs:
           --health-retries 12
     env:
       POSTGRES_URL: postgres://sniper:sniper@localhost:5432/sniper
+      POSTGRES_MIGRATION_URL: postgres://sniper:sniper@localhost:5432/sniper_migrations
       REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
@@ -92,9 +93,17 @@ jobs:
       - name: build (all targets)
         run: cargo build --workspace --all-targets
 
+      # The clean-migration test is destructive by design, so provision a
+      # second database rather than letting it inspect or mutate the shared
+      # integration database. Its test requires POSTGRES_MIGRATION_URL and
+      # refuses POSTGRES_URL as a fallback.
+      - name: create isolated clean-migration database
+        run: psql "postgres://sniper:sniper@localhost:5432/postgres" --command 'CREATE DATABASE sniper_migrations'
+
       # POSTGRES_URL / REDIS_URL are set job-wide, so the gated integration
       # tests run against the service containers (single-threaded: the DB
-      # tests share one database).
+      # tests share the integration database; migrations_apply_clean uses
+      # only POSTGRES_MIGRATION_URL).
       # Covers:
       #  - PG matrix: migration/schema, billing isolation, lifecycle/retention
       #    via crates/server/tests/postgres_saas_integration + tenant_lifecycle_integration
@@ -139,6 +148,9 @@ jobs:
       - name: production source truthfulness gate
         run: ./scripts/forbid-fake-data.sh
 
+      - name: stats single-source-of-truth gate
+        run: bash tests/release/stats_current.sh
+
       - name: server and frontend route contract gate
         run: ./scripts/check-routes-vs-ui.sh
 
@@ -146,6 +158,44 @@ jobs:
         run: |
           cp .env.template .env
           POSTGRES_PASSWORD=ci-only docker compose config -q
+
+  # ------------------------------------------------------- integrity-gates --
+  # GAP MAP v2 (Part 5) — offline, cargo-free honesty and contract gates.
+  # Every one of these fails closed on drift or fabricated evidence:
+  #   - openapi coverage : every /api/saas + /api/tenant route is documented
+  #                        and every documented scoped path is routed.
+  #   - protocol drift   : pinned program ids / discriminators / Polymarket
+  #                        addresses / EIP-712 versions match the compiled code.
+  #   - stats freshness  : docs/STATS.md equals the tree, recomputed by
+  #                        scripts/generate-stats.sh (single source of truth).
+  #   - marketing claims : buyer-facing docs carry no claim term without a
+  #                        PASSED evidence/live/*.json behind it.
+  integrity-gates:
+    name: Integrity gates (openapi / drift / stats / claims)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OpenAPI coverage (saas + tenant scope)
+        run: bash scripts/check-openapi-coverage.sh
+
+      - name: Protocol drift (static pins vs code)
+        run: bash scripts/check-protocol-drift.sh
+
+      - name: Statistics freshness (stats == tree, single source of truth)
+        run: bash tests/release/stats_current.sh
+
+      - name: Marketing claims (no claim without PASSED evidence)
+        run: bash scripts/verify-marketing-claims.sh
+
+      - name: Script exec bits (tracked *.sh must be 100755)
+        run: bash scripts/verify-script-modes.sh
+
+      - name: Secret scan (high-confidence patterns + tracked filenames)
+        run: bash scripts/scan-secrets.sh
+
+      - name: External validation honesty gate (no unbacked PASSED)
+        run: bash scripts/run-external-validation.sh all-safe
 
   # ------------------------------------------------------------- deploy -----
   # P0 §5/§6/§7 — the deployment configuration is CODE and is gated like

@@ -598,7 +598,11 @@ impl ExecutionLedger {
         if intent.intent_id.trim().is_empty() {
             return Err(BotError::invalid("execution intent_id must not be empty"));
         }
+        // Lock order (shared with `evict_if_needed` and `hydrate`): fifo
+        // FIRST, then records, then by_signature. Nesting the other way
+        // (records → fifo) would deadlock with eviction under load.
         let (record, transition, outcome_kind) = {
+            let mut fifo = self.fifo.write().await;
             let mut records = self.records.write().await;
             match records.get_mut(&intent.intent_id) {
                 Some(existing) if existing.can_rearm() => {
@@ -654,7 +658,9 @@ impl ExecutionLedger {
                     };
                     let id = record.intent_id.clone();
                     records.insert(id.clone(), record.clone());
-                    self.fifo.write().await.push_back(id);
+                    // `fifo` is already held (acquired before `records`,
+                    // matching the eviction lock order) — push directly.
+                    fifo.push_back(id);
                     (record, t, 0u8)
                 }
             }
@@ -962,9 +968,11 @@ impl ExecutionLedger {
     pub async fn hydrate(&self, rows: Vec<ExecutionRecord>) -> usize {
         let mut n = 0;
         {
+            // Same lock order as `begin`/`evict_if_needed`: fifo first,
+            // then records, then by_signature.
+            let mut fifo = self.fifo.write().await;
             let mut records = self.records.write().await;
             let mut by_sig = self.by_signature.write().await;
-            let mut fifo = self.fifo.write().await;
             for mut rec in rows {
                 if records.contains_key(&rec.intent_id) {
                     continue;

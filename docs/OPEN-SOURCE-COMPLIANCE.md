@@ -4,8 +4,8 @@
 
 ## 1. Your Code License
 
-- `LICENSE` MIT (2026 sniper-suite authors) — permissive, requires preservation of copyright + license notice in copies.
-- `Cargo.toml` `license.workspace = "MIT"` inherited by 8 members.
+- `LICENSE` — proprietary (all rights reserved). The project itself is NOT open source; only third-party dependencies below carry permissive licenses.
+- `Cargo.toml` `license.workspace = "LicenseRef-Proprietary"` inherited by <!-- stat:crates -->8<!-- /stat --> members.
 
 ## 2. Dependency Licenses (actual, from `licenses.json` 707 entries, `sbom.json` 200 comps)
 
@@ -25,7 +25,7 @@ cat sbom.json | jq '.components[] | .licenses' | sort | uniq -c
 
 ## 3. What You Must Do (permissive compliance)
 
-- Preserve `LICENSE` (MIT) + per-dependency notices. `licenses.json`/`licenses.csv` already aggregated for buyer.
+- Preserve `LICENSE` (proprietary) + per-dependency notices. `licenses.json`/`licenses.csv` already aggregated for buyer.
 - For MIT/Apache/BSD: include license text in distribution if you redistribute binaries (buyer-release already includes `LICENSE` + `licenses/`).
 - No source disclosure required for MIT/Apache/BSD.
 

@@ -54,6 +54,27 @@ const AUTH_FRAME_WINDOW: Duration = Duration::from_secs(10);
 /// Broadcast capacity for the SaaS-side event channel.
 const SAAS_CHANNEL_CAP: usize = 256;
 
+/// Upper bound for delivering one frame to a client. A stalled client
+/// (full TCP buffers, half-dead connection) must not pin the stream loop:
+/// while a send is blocked the 60 s revalidation cannot run, which would
+/// let a REVOKED credential keep its socket open indefinitely. A send
+/// that exceeds this bound is treated as a dead connection.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Deliver one frame with [`SEND_TIMEOUT`]. `false` = the socket is dead
+/// (send failed or stalled) and the stream must close. Generic over the
+/// sink: both an unsplit [`WebSocket`] (first-frame auth) and the split
+/// sink of an established stream use it.
+async fn send_with_timeout<S>(sink: &mut S, msg: Message) -> bool
+where
+    S: futures::Sink<Message, Error = axum::Error> + Unpin,
+{
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, sink.send(msg)).await,
+        Ok(Ok(()))
+    )
+}
+
 fn saas_channel() -> &'static broadcast::Sender<Arc<Value>> {
     static CHANNEL: OnceLock<broadcast::Sender<Arc<Value>>> = OnceLock::new();
     CHANNEL.get_or_init(|| broadcast::channel(SAAS_CHANNEL_CAP).0)
@@ -138,35 +159,42 @@ async fn first_frame_auth(state: ApiState, mut socket: WebSocket, headers: Heade
         _ => None,
     };
     let Some(token) = token else {
-        let _ = socket
-            .send(Message::Text(
+        // Best-effort, bounded: a stalled peer must not pin this task.
+        let _ = send_with_timeout(
+            &mut socket,
+            Message::Text(
                 json!({ "kind": "error", "reason": "expected {\"type\":\"auth\",\"token\":\"…\"}" })
                     .to_string(),
-            ))
-            .await;
-        let _ = socket
-            .send(Message::Close(Some(CloseFrame {
+            ),
+        )
+        .await;
+        let _ = send_with_timeout(
+            &mut socket,
+            Message::Close(Some(CloseFrame {
                 code: 1008,
                 reason: "authentication required".into(),
-            })))
-            .await;
+            })),
+        )
+        .await;
         return;
     };
     let headers = credential_headers(&headers, Some(&token));
     match resolve(&state, &headers).await {
         Ok(ctx) => run_stream(state, socket, ctx, headers).await,
         Err(denied) => {
-            let _ = socket
-                .send(Message::Text(
-                    json!({ "kind": "error", "reason": denied.reason }).to_string(),
-                ))
-                .await;
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame {
+            let _ = send_with_timeout(
+                &mut socket,
+                Message::Text(json!({ "kind": "error", "reason": denied.reason }).to_string()),
+            )
+            .await;
+            let _ = send_with_timeout(
+                &mut socket,
+                Message::Close(Some(CloseFrame {
                     code: 1008,
                     reason: "authentication failed".into(),
-                })))
-                .await;
+                })),
+            )
+            .await;
         }
     }
 }
@@ -192,22 +220,27 @@ async fn run_stream(
                 // Revoked session/key, suspended membership or closed
                 // organization ⇒ the socket dies with 1008.
                 if resolve(&state, &headers).await.is_err() {
-                    let _ = sink
-                        .send(Message::Close(Some(CloseFrame {
+                    // Best-effort close — bounded so a stalled client cannot
+                    // keep this task alive past SEND_TIMEOUT.
+                    let _ = send_with_timeout(
+                        &mut sink,
+                        Message::Close(Some(CloseFrame {
                             code: 1008,
                             reason: "authorization lost".into(),
-                        })))
-                        .await;
+                        })),
+                    )
+                    .await;
                     return;
                 }
             }
             client = source.next() => match client {
                 Some(Ok(Message::Text(text))) => {
                     if text.trim().eq_ignore_ascii_case("ping")
-                        && sink
-                            .send(Message::Text(json!({ "kind": "pong" }).to_string()))
-                            .await
-                            .is_err()
+                        && !send_with_timeout(
+                            &mut sink,
+                            Message::Text(json!({ "kind": "pong" }).to_string()),
+                        )
+                        .await
                     {
                         return;
                     }
@@ -227,7 +260,9 @@ async fn run_stream(
                             "organization": organization.to_string(),
                             "event": inner,
                         });
-                        if sink.send(Message::Text(frame.to_string())).await.is_err() {
+                        if !send_with_timeout(&mut sink, Message::Text(frame.to_string()))
+                            .await
+                        {
                             return;
                         }
                     }
@@ -243,7 +278,9 @@ async fn run_stream(
                             "organization": organization.to_string(),
                             "event": *inner,
                         });
-                        if sink.send(Message::Text(frame.to_string())).await.is_err() {
+                        if !send_with_timeout(&mut sink, Message::Text(frame.to_string()))
+                            .await
+                        {
                             return;
                         }
                     }
@@ -291,6 +328,7 @@ mod tests {
             api_key: None,
             auth: None,
             limiter: bot_core::auth::RateLimiter::new(0),
+            sensitive_limiter: bot_core::auth::RateLimiter::new(10),
             db: None,
             journal: None,
             serve_dashboard: false,

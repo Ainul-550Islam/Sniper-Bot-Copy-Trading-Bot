@@ -202,7 +202,7 @@ SOL and USDC exposure meet in one figure.
 
 ## 7. Tests
 
-`crates/core/tests/global_risk_accounting.rs` (18 tests, offline, real
+`crates/core/tests/global_risk_accounting.rs` (offline, real
 `AppState` + real `RiskEngine::check_entry`): portfolio / wallet / venue /
 strategy / asset / open-position / order-notional limits, fail-closed
 reference rates, daily loss from the ledger, drawdown from peak + unrealized,

@@ -1,0 +1,11 @@
+{
+  "validation_id": "pumpfun_buy_sell_roundtrip",
+  "provider": "pump_fun",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "LIVE_PUMPFUN=1 RPC_URL=<redacted> SOLANA_KEYPAIR=<redacted> cargo test -p sniper-suite --test live_pumpfun_roundtrip -- --ignored",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"dust-sized bonding-curve buy+sell on mainnet; requires funded keypair; attestation = both tx signatures"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

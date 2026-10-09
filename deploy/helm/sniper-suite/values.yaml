@@ -1,0 +1,178 @@
+# Default values for sniper-suite.
+# Overrides: helm install -f myvalues.yaml, or --set key=value.
+
+# --- Container image -------------------------------------------------------
+image:
+  # Replace with your registry. The demo stack builds sniper-suite:demo from
+  # the repo-root Dockerfile; production should pin a DIGEST, not a tag.
+  repository: sniper-suite
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Number of server replicas. The server is stateless except for the optional
+# journal volume and Postgres/Redis, so horizontal scale is safe; tenant
+# fencing (migration 0036) keeps concurrent replicas correct.
+replicaCount: 1
+
+# --- Service ---------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 8080
+
+# --- Ingress (optional) ----------------------------------------------------
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: sniper.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# --- Probes ----------------------------------------------------------------
+# The server serves GET /api/health (readiness) and /health (liveness).
+probes:
+  readiness:
+    path: /api/health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  liveness:
+    path: /health
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    failureThreshold: 3
+
+# --- Configuration ---------------------------------------------------------
+# Rendered into a ConfigMap and mounted at /app/config.toml (CONFIG_PATH).
+# Keep secrets OUT of this block — they belong in `secrets.env` below.
+configToml: |
+  # Minimal production config. Extend per docs/DEMO-RUNBOOK.md and the
+  # config.toml.example at the repo root. Non-loopback bind requires an
+  # API key to be present (see secrets.env.API_KEY / DEMO_API_KEY).
+  [api]
+  bind = "0.0.0.0:8080"
+
+# --- Secrets ---------------------------------------------------------------
+# When `create` is true the chart renders a Secret from `env`. Alternatively
+# set create=false and name an existing Secret in `existingSecret`; its keys
+# are injected as environment variables listed in `envKeysFromExisting`.
+secrets:
+  create: true
+  existingSecret: ""
+  # Keys here become environment variables AND Secret data entries.
+  # Postgres/Redis URLs carry credentials, so they are secrets, not config.
+  env:
+    POSTGRES_URL: ""
+    REDIS_URL: ""
+    # Deployment API key required for non-loopback binds. Generate per
+    # deploy/environments/. NEVER commit a real value.
+    API_KEY: ""
+    # Encryption keys (base64, 32 bytes) for secrets-at-rest. See
+    # crates/server/src/saas/security.rs (MFA) and webhooks.rs.
+    MFA_ENCRYPTION_KEY: ""
+    WEBHOOK_SECRET_ENCRYPTION_KEY: ""
+    SSO_CLIENT_SECRET_ENCRYPTION_KEY: ""
+    # Solana trading keypair (base58). Leave empty for paper/demo.
+    SOLANA_KEYPAIR: ""
+
+# Explicit list of keys to project when using an existing Secret. Must match
+# the key names present in that Secret.
+envKeysFromExisting:
+  - POSTGRES_URL
+  - REDIS_URL
+  - API_KEY
+
+# Extra plain (non-secret) environment variables, injected verbatim.
+extraEnv:
+  RUST_LOG: info
+
+# --- Journal persistence (optional) ----------------------------------------
+# The server writes a JSONL journal under /app/data when configured. Off by
+# default (emptyDir); enable a PVC for durable journals.
+persistence:
+  enabled: false
+  size: 5Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+# --- Resources -------------------------------------------------------------
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+# --- Pod security ----------------------------------------------------------
+# The image runs as the non-root `sniper` user (Dockerfile: USER sniper).
+podSecurityContext:
+  runAsNonRoot: true
+  fsGroup: 1000
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# --- Schema migration Job (GAP-MAP v2) -------------------------------------
+# Off by default: the server auto-migrates at startup. Enable when you want
+# schema applied by a dedicated one-shot Job BEFORE pods roll (multi-replica
+# or zero-downtime upgrades). Rendered as a helm pre-install/pre-upgrade
+# hook running the same image with MIGRATE_ONLY=1.
+migrationJob:
+  enabled: false
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# --- Autoscaling (GAP-MAP v2) ----------------------------------------------
+# Requires resources.requests (set above) so metrics-server can compute
+# utilisation. The server is stateless apart from the optional journal PVC;
+# disable persistence before scaling beyond 1 replica, or mount it ReadWriteMany.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  scaleDownStabilizationSeconds: 300
+
+# --- NetworkPolicy (GAP-MAP v2) --------------------------------------------
+# Default-deny ingress to the pods, allow only `ingressFrom`. Typical value
+# for an nginx ingress controller installed with default names:
+#   ingressFrom:
+#     - namespaceSelector:
+#         matchLabels:
+#           kubernetes.io/metadata.name: ingress-nginx
+# Egress is intentionally left open (Postgres/Redis/RPC/webhooks).
+networkPolicy:
+  enabled: false
+  ingressFrom: []
+
+# --- Scheduling ------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+serviceAccount:
+  # Created and used when true. When false the default SA is used.
+  create: true
+  name: ""
+  annotations: {}
+
+# Extra labels/annotations applied to every rendered object.
+commonLabels: {}
+podAnnotations: {}

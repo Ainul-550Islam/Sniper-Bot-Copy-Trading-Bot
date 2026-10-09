@@ -36,8 +36,24 @@ impl TenantStreamHub {
     /// is intentionally dropped, not queued globally).
     pub async fn publish(&self, event: TenantEvent) -> usize {
         let org = event.organization_id();
-        let sender = self.channel_for(org).await;
-        sender.send(event).unwrap_or(0)
+        let mut channels = self.channels.write().await;
+        // Opportunistic reap (the one the module docs promise): channels
+        // whose last receiver went away are dropped here, so the map stays
+        // bounded by ACTIVE subscriptions rather than tenant history.
+        channels.retain(|id, sender| sender.receiver_count() > 0 || *id == org);
+        let sender = channels
+            .entry(org)
+            .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
+            .clone();
+        // `broadcast::Sender::send` is synchronous - the write lock is
+        // never held across an await point here.
+        let delivered = sender.send(event).unwrap_or(0);
+        if delivered == 0 && sender.receiver_count() == 0 {
+            // Nobody was listening and nobody subscribed during the
+            // publish - do not leave the channel behind.
+            channels.remove(&org);
+        }
+        delivered
     }
 
     /// Subscribe to a tenant's events.
@@ -45,7 +61,15 @@ impl TenantStreamHub {
         &self,
         organization_id: OrganizationId,
     ) -> broadcast::Receiver<TenantEvent> {
-        self.channel_for(organization_id).await.subscribe()
+        let mut channels = self.channels.write().await;
+        // Same opportunistic reap as `publish` (keeps the map bounded).
+        channels.retain(|id, sender| {
+            sender.receiver_count() > 0 || *id == organization_id
+        });
+        channels
+            .entry(organization_id)
+            .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
+            .subscribe()
     }
 
     /// Drop channels with no receivers (called opportunistically; keeps
@@ -72,13 +96,6 @@ impl TenantStreamHub {
             .unwrap_or(0)
     }
 
-    async fn channel_for(&self, organization_id: OrganizationId) -> broadcast::Sender<TenantEvent> {
-        let mut channels = self.channels.write().await;
-        channels
-            .entry(organization_id)
-            .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
-            .clone()
-    }
 }
 
 /// Share the hub.
@@ -124,11 +141,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publishing_without_listeners_leaves_no_channel_behind() {
+        let hub = TenantStreamHub::new();
+        let org = OrganizationId::new();
+        hub.publish(decision(org)).await; // no subscribers: self-reaped
+        assert_eq!(hub.channel_count().await, 0);
+        assert_eq!(hub.reap_empty().await, 0);
+    }
+
+    #[tokio::test]
     async fn empty_channels_are_reaped() {
         let hub = TenantStreamHub::new();
         let org = OrganizationId::new();
-        hub.publish(decision(org)).await; // creates the channel
+        let receiver = hub.subscribe(org).await; // channel with a receiver
         assert_eq!(hub.channel_count().await, 1);
+        drop(receiver); // receiver gone: channel is now empty
 
         assert_eq!(hub.reap_empty().await, 1);
         assert_eq!(hub.channel_count().await, 0);

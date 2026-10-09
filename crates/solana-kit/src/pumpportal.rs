@@ -30,11 +30,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::VersionedTransaction;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tracing::{debug, info, warn};
 
 use bot_core::error::{BotError, BotResult};
+use crate::ws::redact_ws_url;
 use bot_core::maths;
 
 use crate::consts::{PUMPPORTAL_TRADE_API, PUMPPORTAL_WS_URL};
@@ -249,6 +250,92 @@ impl PumpPortalSubscription {
     }
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const ABORT_JOIN_GRACE: Duration = Duration::from_secs(1);
+
+/// A join handle that aborts its task if the joining future is cancelled.
+/// This matters when service shutdown itself is interrupted or its parent task
+/// is aborted while waiting for the PumpPortal supervisor.
+struct AbortOnDropJoin {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    label: &'static str,
+}
+
+struct SupervisorStatusGuard {
+    running: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
+}
+
+impl Drop for SupervisorStatusGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.connected.store(false, Ordering::Relaxed);
+    }
+}
+
+impl AbortOnDropJoin {
+    fn new(handle: tokio::task::JoinHandle<()>, label: &'static str) -> Self {
+        Self {
+            handle: Some(handle),
+            label,
+        }
+    }
+
+    async fn join_with_timeout(mut self, timeout: Duration) {
+        let Some(task) = self.handle.as_mut() else {
+            return;
+        };
+        match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(())) => {
+                self.handle.take();
+            }
+            Ok(Err(error)) => {
+                if !error.is_cancelled() {
+                    warn!(task = self.label, error = %error, "owned task failed");
+                }
+                self.handle.take();
+            }
+            Err(_) => {
+                warn!(task = self.label, "task did not stop before deadline; aborting it");
+                if let Some(task) = self.handle.as_ref() {
+                    task.abort();
+                }
+                if let Some(mut task) = self.handle.take() {
+                    match tokio::time::timeout(ABORT_JOIN_GRACE, &mut task).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) if !error.is_cancelled() => {
+                            warn!(task = self.label, error = %error, "aborted task failed while joining");
+                        }
+                        Ok(Err(_)) => {}
+                        Err(_) => warn!(
+                            task = self.label,
+                            "abort was requested but task did not finish within the join grace period"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for AbortOnDropJoin {
+    fn drop(&mut self) {
+        if let Some(task) = &self.handle {
+            task.abort();
+        }
+    }
+}
+
+fn lock_task_slot(
+    slot: &std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+) -> std::sync::MutexGuard<'_, Option<tokio::task::JoinHandle<()>>> {
+    match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// Reconnecting PumpPortal feed.
 pub struct PumpPortalFeed {
     url: String,
@@ -256,7 +343,12 @@ pub struct PumpPortalFeed {
     tx: mpsc::Sender<PumpPortalMessage>,
     rx: Arc<Mutex<Option<mpsc::Receiver<PumpPortalMessage>>>>,
     running: Arc<AtomicBool>,
-    handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Serializes start/stop transitions without holding a synchronous mutex
+    /// across an await. The join-handle slot itself is accessed synchronously
+    /// and only for brief, non-awaiting moves.
+    lifecycle: Mutex<()>,
+    handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    stop_signal: watch::Sender<bool>,
     /// Updated by the connection task, read by the health endpoint.
     connected: Arc<AtomicBool>,
     messages_seen: Arc<tokio::sync::Mutex<u64>>,
@@ -265,13 +357,16 @@ pub struct PumpPortalFeed {
 impl PumpPortalFeed {
     pub fn new(subscription: PumpPortalSubscription, buffer: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer.max(16));
+        let (stop_signal, _stop_receiver) = watch::channel(false);
         PumpPortalFeed {
             url: PUMPPORTAL_WS_URL.to_string(),
             subscription,
             tx,
             rx: Arc::new(Mutex::new(Some(rx))),
             running: Arc::new(AtomicBool::new(false)),
-            handle: Arc::new(Mutex::new(None)),
+            lifecycle: Mutex::new(()),
+            handle: std::sync::Mutex::new(None),
+            stop_signal,
             connected: Arc::new(AtomicBool::new(false)),
             messages_seen: Arc::new(tokio::sync::Mutex::new(0)),
         }
@@ -297,27 +392,39 @@ impl PumpPortalFeed {
 
     /// Start the supervisor.
     pub async fn start(&self) -> BotResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         if self.subscription.is_empty() {
             return Err(BotError::config(
                 "pumpportal feed started with an empty subscription",
             ));
         }
-        if self.running.swap(true, Ordering::SeqCst) {
+        if self.running.load(Ordering::SeqCst) {
             return Ok(());
         }
+        let previous = { lock_task_slot(&self.handle).take() };
+        if let Some(previous) = previous {
+            AbortOnDropJoin::new(previous, "previous pumpportal supervisor")
+                .join_with_timeout(STOP_TIMEOUT)
+                .await;
+        }
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|error| BotError::config(format!("pumpportal start requires a Tokio runtime: {error}")))?;
         let url = self.url.clone();
         let frames = self.subscription.frames();
         let tx = self.tx.clone();
         let running = self.running.clone();
         let connected = self.connected.clone();
         let seen = self.messages_seen.clone();
+        self.stop_signal.send_replace(false);
+        let stop = self.stop_signal.subscribe();
+        self.running.store(true, Ordering::SeqCst);
 
-        let handle = tokio::spawn(async move {
-            run_feed(url, frames, tx, running, connected, seen).await;
+        let handle = runtime.spawn(async move {
+            run_feed(url, frames, tx, running, connected, seen, stop).await;
         });
-        *self.handle.lock().await = Some(handle);
+        *lock_task_slot(&self.handle) = Some(handle);
         info!(
-            url = %self.url,
+            endpoint = %redact_ws_url(&self.url),
             new_tokens = self.subscription.new_tokens,
             token_trades = self.subscription.token_trades.len(),
             account_trades = self.subscription.account_trades.len(),
@@ -326,21 +433,50 @@ impl PumpPortalFeed {
         Ok(())
     }
 
-    /// Stop the supervisor and close the socket.
+    /// Stop the supervisor and close the socket. The lifecycle lock prevents
+    /// a concurrent restart until the old supervisor has joined or been
+    /// aborted, and the join guard makes caller cancellation safe.
     pub async fn stop(&self) {
-        if !self.running.swap(false, Ordering::SeqCst) {
-            return;
+        let _lifecycle = self.lifecycle.lock().await;
+        self.running.store(false, Ordering::SeqCst);
+        self.stop_signal.send_replace(true);
+        self.connected.store(false, Ordering::Relaxed);
+        let handle = lock_task_slot(&self.handle).take();
+        if let Some(handle) = handle {
+            AbortOnDropJoin::new(handle, "pumpportal supervisor")
+                .join_with_timeout(STOP_TIMEOUT)
+                .await;
         }
         self.connected.store(false, Ordering::Relaxed);
-        let handle = self.handle.lock().await.take();
-        if let Some(h) = handle {
-            let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
-        }
         info!("pumpportal feed stopped");
     }
 
     pub async fn messages_seen(&self) -> u64 {
         *self.messages_seen.lock().await
+    }
+}
+
+impl Drop for PumpPortalFeed {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.stop_signal.send_replace(true);
+        self.connected.store(false, Ordering::Relaxed);
+        // Take the handle under a short synchronous critical section so a
+        // contended async mutex can never silently detach the supervisor.
+        if let Some(task) = lock_task_slot(&self.handle).take() {
+            task.abort();
+        }
+    }
+}
+
+async fn wait_for_stop(mut stop: watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow() {
+            return;
+        }
+        if stop.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -351,25 +487,43 @@ async fn run_feed(
     running: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     seen: Arc<tokio::sync::Mutex<u64>>,
+    stop: watch::Receiver<bool>,
 ) {
+    let _status_guard = SupervisorStatusGuard {
+        running: running.clone(),
+        connected: connected.clone(),
+    };
     let mut backoff = Duration::from_millis(500);
     const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-    while running.load(Ordering::SeqCst) {
-        match connect_once(&url, &frames, &tx, &running, &connected, &seen).await {
+    while running.load(Ordering::SeqCst) && !*stop.borrow() && !tx.is_closed() {
+        let attempt = tokio::select! {
+            _ = wait_for_stop(stop.clone()) => break,
+            result = connect_once(
+                &url,
+                &frames,
+                &tx,
+                &running,
+                &connected,
+                &seen,
+                stop.clone(),
+            ) => result,
+        };
+        match attempt {
             Ok(()) => {
-                debug!("pumpportal feed closed cleanly");
+                debug!("pumpportal feed connection ended");
                 backoff = Duration::from_millis(500);
             }
-            Err(e) => {
-                warn!(error = %e, "pumpportal feed disconnected");
-            }
+            Err(error) => warn!(error = %error, "pumpportal feed disconnected"),
         }
         connected.store(false, Ordering::Relaxed);
-        if !running.load(Ordering::SeqCst) {
+        if !running.load(Ordering::SeqCst) || *stop.borrow() || tx.is_closed() {
             break;
         }
-        tokio::time::sleep(backoff).await;
+        tokio::select! {
+            _ = wait_for_stop(stop.clone()) => break,
+            _ = tokio::time::sleep(backoff) => {}
+        }
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
     connected.store(false, Ordering::Relaxed);
@@ -382,17 +536,35 @@ async fn connect_once(
     running: &Arc<AtomicBool>,
     connected: &Arc<AtomicBool>,
     seen: &Arc<tokio::sync::Mutex<u64>>,
+    stop: watch::Receiver<bool>,
 ) -> BotResult<()> {
-    let (socket, _response) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|e| BotError::ws(format!("pumpportal connect: {e}")))?;
+    let result = tokio::select! {
+        _ = wait_for_stop(stop.clone()) => return Ok(()),
+        result = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url)) => result,
+    };
+    let (socket, _response) = result
+        .map_err(|_| {
+            BotError::ws(format!(
+                "pumpportal websocket connect timed out for {}",
+                redact_ws_url(url)
+            ))
+        })?
+        .map_err(|_| {
+            BotError::ws(format!(
+                "pumpportal websocket connect failed for {}",
+                redact_ws_url(url)
+            ))
+        })?;
     let (mut sink, mut stream) = socket.split();
     connected.store(true, Ordering::Relaxed);
 
     for frame in frames {
-        sink.send(TungsteniteMessage::Text(frame.to_string()))
-            .await
-            .map_err(|e| BotError::ws(format!("pumpportal subscribe: {e}")))?;
+        let text = TungsteniteMessage::Text(frame.to_string());
+        let sent = tokio::select! {
+            _ = wait_for_stop(stop.clone()) => return Ok(()),
+            result = sink.send(text) => result,
+        };
+        sent.map_err(|error| BotError::ws(format!("pumpportal subscribe: {error}")))?;
         debug!(method = %frame["method"], "pumpportal subscription sent");
     }
 
@@ -401,12 +573,22 @@ async fn connect_once(
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     keepalive.tick().await;
 
-    while running.load(Ordering::SeqCst) {
+    'socket: loop {
+        if !running.load(Ordering::SeqCst) || *stop.borrow() {
+            break;
+        }
         tokio::select! {
+            _ = wait_for_stop(stop.clone()) => break 'socket,
             _ = keepalive.tick() => {
-                sink.send(TungsteniteMessage::Ping(Vec::new()))
-                    .await
-                    .map_err(|e| BotError::ws(format!("pumpportal ping: {e}")))?;
+                let sent = tokio::select! {
+                    _ = wait_for_stop(stop.clone()) => None,
+                    result = sink.send(TungsteniteMessage::Ping(Vec::new())) => Some(result),
+                };
+                match sent {
+                    None => break 'socket,
+                    Some(Err(error)) => return Err(BotError::ws(format!("pumpportal ping: {error}"))),
+                    Some(Ok(())) => {}
+                }
             }
             frame = stream.next() => {
                 let Some(frame) = frame else {
@@ -415,27 +597,58 @@ async fn connect_once(
                 match frame {
                     Ok(TungsteniteMessage::Text(text)) => {
                         let message = classify(&text);
-                        *seen.lock().await += 1;
-                        if tx.send(message).await.is_err() {
-                            // The consumer went away; stop the feed.
-                            debug!("pumpportal consumer dropped, stopping feed");
-                            return Ok(());
+                        let mut counter = tokio::select! {
+                            _ = wait_for_stop(stop.clone()) => break 'socket,
+                            counter = seen.lock() => counter,
+                        };
+                        *counter = counter.saturating_add(1);
+                        drop(counter);
+                        let sent = tokio::select! {
+                            _ = wait_for_stop(stop.clone()) => None,
+                            result = tx.send(message) => Some(result),
+                        };
+                        match sent {
+                            None => break 'socket,
+                            Some(Err(_)) => {
+                                debug!("pumpportal consumer dropped, stopping feed");
+                                break 'socket;
+                            }
+                            Some(Ok(())) => {}
                         }
                     }
                     Ok(TungsteniteMessage::Ping(payload)) => {
-                        let _ = sink.send(TungsteniteMessage::Pong(payload)).await;
+                        let sent = tokio::select! {
+                            _ = wait_for_stop(stop.clone()) => None,
+                            result = sink.send(TungsteniteMessage::Pong(payload)) => Some(result),
+                        };
+                        match sent {
+                            None => break 'socket,
+                            Some(Err(error)) => return Err(BotError::ws(format!("pumpportal pong: {error}"))),
+                            Some(Ok(())) => {}
+                        }
                     }
                     Ok(TungsteniteMessage::Close(frame)) => {
                         info!(?frame, "pumpportal closed the connection");
-                        return Ok(());
+                        break 'socket;
                     }
                     Ok(_) => {}
-                    Err(e) => return Err(BotError::ws(format!("pumpportal frame: {e}"))),
+                    Err(error) => return Err(BotError::ws(format!("pumpportal frame: {error}"))),
                 }
             }
         }
     }
-    let _ = sink.send(TungsteniteMessage::Close(None)).await;
+
+    // Close handshakes are best-effort, but cannot delay shutdown indefinitely.
+    match tokio::time::timeout(
+        Duration::from_secs(1),
+        sink.send(TungsteniteMessage::Close(None)),
+    )
+    .await
+    {
+        Ok(Err(error)) => debug!(error = %error, "pumpportal close frame failed"),
+        Err(_) => debug!("pumpportal close frame timed out"),
+        Ok(Ok(())) => {}
+    }
     Ok(())
 }
 
@@ -605,17 +818,28 @@ impl TradeLocalClient {
             .json(req)
             .send()
             .await
-            .map_err(|e| BotError::http(format!("pumpportal trade-local: {e}")))?;
+            .map_err(|e| {
+                BotError::http(format!(
+                    "pumpportal trade-local request failed (timeout={}, connect={}, status={:?})",
+                    e.is_timeout(),
+                    e.is_connect(),
+                    e.status()
+                ))
+            })?;
         let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| BotError::http(format!("pumpportal trade-local body: {e}")))?;
+        let bytes = response.bytes().await.map_err(|e| {
+            BotError::http(format!(
+                "pumpportal trade-local response body failed (timeout={}, connect={}, status={:?})",
+                e.is_timeout(),
+                e.is_connect(),
+                e.status()
+            ))
+        })?;
         if !status.is_success() {
-            let text = String::from_utf8_lossy(&bytes);
+            // Do not echo an arbitrary third-party response body into logs or
+            // errors: providers sometimes include request URLs or credentials.
             return Err(BotError::http(format!(
-                "pumpportal trade-local http {status}: {}",
-                text.chars().take(300).collect::<String>()
+                "pumpportal trade-local returned HTTP {status}"
             )));
         }
         // The endpoint returns the raw serialized transaction, not base64.

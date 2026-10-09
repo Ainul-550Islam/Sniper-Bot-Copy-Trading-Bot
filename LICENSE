@@ -1,30 +1,113 @@
-MIT License
+SNIPER-SUITE — PROPRIETARY SOURCE CODE LICENSE AND SALE TERMS
+==============================================================
 
-Copyright (c) 2026 sniper-suite authors
+Copyright (c) 2026 [SELLER LEGAL ENTITY NAME] ("Licensor").
+All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+>>> ACTION REQUIRED BEFORE ANY TRANSFER OF THIS PACKAGE <<<
+This file is the proprietary-license replacement for the MIT license under
+which this repository was previously distributed. The bracketed placeholder
+MUST be replaced with the real legal-entity name (and counsel should review
+the final text together with legal/SOURCE-CODE-BILL-OF-SALE.md and
+legal/IP-ASSIGNMENT-TEMPLATE.md before the package is delivered to a buyer).
+Do NOT deliver this package while any "[SELLER LEGAL ENTITY NAME]"
+placeholder remains.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+--------------------------------------------------------------------
+1. GRANT
+--------------------------------------------------------------------
+Subject to full payment of the agreed purchase price and execution of the
+Source Code Bill of Sale (legal/SOURCE-CODE-BILL-OF-SALE.md) or an IP
+Assignment (legal/IP-ASSIGNMENT-TEMPLATE.md), Licensor grants the named
+buyer ("Buyer") ONE of the following estates, as specified in the signed
+sale documents:
 
+  (a) LICENSE MODEL — a perpetual, worldwide, non-exclusive,
+      non-transferable, non-sublicensable license to use, modify, and
+      internally deploy the Software for Buyer's own business, subject to
+      the restrictions in Section 2; OR
+
+  (b) ASSIGNMENT MODEL — full assignment of Licensor's copyright and
+      associated intellectual-property rights in the Software to Buyer,
+      subject to Section 4 (third-party components).
+
+No other estate is granted. If no sale document has been executed, the
+recipient has NO rights whatsoever and must delete the Software.
+
+--------------------------------------------------------------------
+2. RESTRICTIONS
+--------------------------------------------------------------------
+Unless the signed sale documents expressly state otherwise, Buyer may NOT:
+
+  a. redistribute, resell, lease, lend, publish, or sublicense the Software
+     (in whole or in part, modified or unmodified) to any third party;
+  b. offer the Software, or any service whose essential value derives from
+     the Software, to third parties as a product, template, or codebase;
+  c. remove, alter, or obscure any proprietary notices, license texts, or
+     attribution contained in the Software;
+  d. use the Software to build a competing product for sale or distribution;
+  e. represent that the Software's past performance guarantees future
+     results. The Software executes trades with real funds; all trading
+     outcomes are uncertain and Buyer assumes all financial risk.
+
+--------------------------------------------------------------------
+3. NO WARRANTY; LIMITATION OF LIABILITY
+--------------------------------------------------------------------
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. LICENSOR MAKES NO
+WARRANTY REGARDING TRADING PROFITS, LATENCY, UPTIME, OR THE CONTINUED
+OPERATION OF ANY THIRD-PARTY BLOCKCHAIN, EXCHANGE, OR PROTOCOL.
 
----
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, LICENSOR'S TOTAL AGGREGATE
+LIABILITY ARISING OUT OF OR RELATING TO THE SOFTWARE SHALL NOT EXCEED THE
+AMOUNT ACTUALLY PAID BY BUYER FOR THE SOFTWARE. IN NO EVENT SHALL LICENSOR
+BE LIABLE FOR ANY INDIRECT, INCIDENTAL, CONSEQUENTIAL, SPECIAL, OR
+PUNITIVE DAMAGES, INCLUDING LOST PROFITS, LOST FUNDS, OR TRADING LOSSES,
+EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
-NOTE FOR HANDOVER: the copyright line above intentionally names the generic
-"sniper-suite authors". The transferring party must replace it with the legal
-entity that owns these rights before distribution. The `license = "MIT"`
-fields in `Cargo.toml` and `programs/staking-suite/Cargo.toml` refer to this
-file. Third-party dependency licenses are enumerated by `cargo deny check
-licenses` (policy in `deny.toml`) and by the committed `Cargo.lock` files.
+--------------------------------------------------------------------
+4. THIRD-PARTY COMPONENTS
+--------------------------------------------------------------------
+The Software depends on open-source components, each under its own license
+(MIT, Apache-2.0, MPL-2.0, BSD, and similar). The complete inventory is in
+legal/THIRD-PARTY-NOTICES.md. Those components remain under their original
+licenses; this agreement governs only the code and documentation authored
+by Licensor. Nothing in this agreement restricts the rights granted under
+the third-party licenses, and nothing in the third-party licenses grants
+rights over Licensor's proprietary code.
+
+--------------------------------------------------------------------
+5. BLOCKCHAIN AND REGULATORY ACKNOWLEDGEMENTS
+--------------------------------------------------------------------
+Buyer acknowledges that: (i) use of the Software may be subject to
+financial-services, securities, tax, and sanctions regulation in Buyer's
+jurisdiction(s); (ii) Licensor does not provide legal, tax, or investment
+advice; and (iii) Buyer is solely responsible for compliance, including the
+matters listed in legal/REGULATORY-CHECKLIST.md.
+
+--------------------------------------------------------------------
+6. TERMINATION
+--------------------------------------------------------------------
+Any breach of Sections 2, 4, or 5 terminates this license automatically.
+Upon termination, Buyer must cease all use and destroy all copies of the
+Software, except archival copies required by law. Sections 3, 4, 5, 7, and
+8 survive termination.
+
+--------------------------------------------------------------------
+7. GOVERNING LAW; DISPUTES
+--------------------------------------------------------------------
+[GOVERNING LAW / FORUM — insert with counsel. Example: "This agreement is
+governed by the laws of ___, without regard to conflict-of-laws rules.
+The parties submit to the exclusive jurisdiction of the courts of ___.
+Arbitration alternative: disputes shall be finally settled under the ___
+arbitration rules by one arbitrator seated in ___."]
+
+--------------------------------------------------------------------
+8. ENTIRE AGREEMENT
+--------------------------------------------------------------------
+Together with the executed sale documents and legal/THIRD-PARTY-NOTICES.md,
+this license constitutes the entire agreement between the parties regarding
+the Software and supersedes all prior understandings, including any earlier
+open-source license text shipped with the repository prior to this
+replacement.

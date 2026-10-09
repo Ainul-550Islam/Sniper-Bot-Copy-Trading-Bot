@@ -11,14 +11,14 @@ is repository-backed (pointers in `docs/SELLER-FACT-SHEET.md` and
 ## Title candidates (factual, non-deceptive)
 
 1. "sniper-suite 0.1.0 — Rust modular crypto trading system (5 modules +
-   control plane) with Solana staking program source, 537 tests, full
+   control plane) with Solana staking program source, full
    handover documentation"
 2. "Rust trading suite: pump.fun sniper, copy trading, Polymarket CLOB,
-   Telegram control, native Solana staking program — verified test evidence,
-   MIT source transfer"
-3. "Complete Rust crypto-trading codebase (8 crates + on-chain program) —
-   paper-safe defaults, distributed execution ownership, audit chain, 20/20
-   release gates, buyer due-diligence package included"
+   Telegram control, native Solana staking program — static test inventory
+   and honest evidence index"
+3. "Complete Rust crypto-trading codebase (<!-- stat:crates -->8<!-- /stat --> crates + on-chain program) —
+   paper-safe defaults, distributed execution ownership, audit chain,
+   scripted release gates, buyer due-diligence package included"
 
 Rules for any derived title: it may state component names, test counts, and
 delivered artifacts; it may not state performance guarantees, profitability,
@@ -32,25 +32,20 @@ Jupiter exit routing, wallet copy trading, Polymarket CLOB trading with
 EIP-712 v2 order signing, a native Solana staking/reward program, and
 deny-by-default Telegram remote control) behind a single Axum control plane
 with REST, WebSocket, dashboard, Prometheus metrics, and liveness/readiness
-probes. Financial truth lives in PostgreSQL (21 forward-only migrations);
+probes. Financial truth lives in PostgreSQL (<!-- stat:migrations -->54<!-- /stat --> forward-only migrations);
 Redis is non-authoritative. Money paths follow one invariant pipeline —
 risk → ownership claim → idempotency → intent journal → execution →
 persistence → reconciliation → append-only hash-chained audit — and
 multi-process deployments enforce "one logical execution, at most one owner,
 at most one money-moving submission" via claims, leases, epochs and fencing
 tokens. The system defaults to paper trading and requires two explicit
-configuration gates plus real keys before anything broadcasts. Delivered
-state: 537/537 workspace tests (hardening-pass re-execution against real
-PostgreSQL/Redis; 521/521 at freeze), staking program built with
-cargo build-sbf and all 3 validator e2e executed/passed on
-solana-test-validator 2.1.21, a 20-gate release check, cargo-audit/deny
-clean, and a complete buyer due-diligence documentation package. No external security
+configuration gates plus real keys before anything broadcasts. Static test inventory: <!-- stat:test_attrs_plain -->2061<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->888<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN. Release tooling includes a scripted release check, cargo-audit/deny configuration, and a complete buyer due-diligence documentation package. No external security
 audit exists and the staking program is undeployed — both are documented,
 not hidden.
 
 ## Feature facts
 
-- 5 modules + control plane; 7 workspace crates + 1 standalone on-chain
+- 5 modules + control plane; <!-- stat:crates -->8<!-- /stat --> workspace crates + 1 standalone on-chain
   program crate.
 - Sniper feeds: PumpPortal WS, Yellowstone-style Geyser
   `transactionSubscribe`, poll fallback; exits: PumpSwap, Raydium (v1+v2
@@ -65,7 +60,7 @@ not hidden.
   one-shot latched genesis mint.
 - Telegram: owner/operator/readonly roles, kill switch, module toggles,
   rate-limited alerts, provable bot-token redaction in error paths.
-- Control plane: 28 documented endpoints; API-key auth on mutations;
+- Control plane: documented endpoints (see `docs/API.md` and the OpenAPI spec); API-key auth on mutations;
   refusal to bind non-loopback without auth; per-IP and per-principal rate
   limits; request-ID correlation; embedded dashboard.
 - Safety architecture: paper default, dual live gates, simulate mode
@@ -90,19 +85,16 @@ not hidden.
 
 ## Testing facts
 
-- 537/537 workspace tests at hardening, 521/521 at freeze (offline-deterministic core + protocol mocks:
-  PumpPortal WS, Geyser WS, JSON-RPC pair, CLOB/Gamma HTTP, journal).
-- Gated integration vs real services: db 23/23, redis 10/10, distributed
-  4/4, two-replica mirror 1/1 (all executed in the final freeze gate).
-- Staking: 48/48 host tests; build-sbf (5,440-byte .so) + validator e2e 2/2
-  incl. funded stake→reward→unstake — previously verified on identical
-  source (agave 2.1.21).
+- Static test inventory: <!-- stat:test_attrs_plain -->2061<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->888<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN. No test-run logs ship in this repository; earlier pass/fail figures have been removed rather than quoted without logs.
+- Test harnesses exist for gated integration vs real services (PostgreSQL,
+  Redis, distributed ownership, two-replica mirroring) and for the staking
+  program (host + validator e2e); their runs are NOT_RUN here (see evidence/).
 - Audit chain: tamper detection (modify/reorder/missing/duplicate) + linear
   chain under 8 concurrent appenders.
 - Recovery: journal restart fidelity, corrupt-line tolerance, OMS
   restart-recovery, pg_dump→restore→full-suite-green.
-- Gates: fmt, clippy `-D warnings` (both projects), cargo-audit ×2
-  (0 findings), cargo-deny, `release-check.sh` 20/20.
+- Gates: fmt, clippy `-D warnings` (both projects), cargo-audit,
+  cargo-deny, scripted release checks (`scripts/release-check.sh`).
 - Honest gaps: Docker build/smoke and CI runs not executed in the build
   environment; funded live trading never executed; >2-replica topology
   untested.

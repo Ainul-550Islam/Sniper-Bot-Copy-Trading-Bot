@@ -3,7 +3,7 @@
 Buyer-readable map of the complete control-and-money path. For every
 boundary the eight required questions are answered strictly from the
 implementation (file references given; each backed by executed tests inside
-the recorded 537/537 + 71/71 + 3/3 evidence runs). No guarantee is claimed
+the evidence runs recorded in the seller's engineering log (no run logs ship in this tree)). No guarantee is claimed
 beyond what the code does.
 
 Path: USER → TELEGRAM → API → AUTHORIZATION → RISK → ORDER INTENT →
@@ -53,7 +53,7 @@ Legend: ✓ = implemented + test-executed; ⚠ = depends on buyer configuration;
 * **Idempotent?** ✓ risk checks are pure reads of config/state — no side
   effects to replay.
 * **Failure-safe?** ✓ risk decision `!allowed()` blocks the entry (fail-closed);
-  GlobalRiskOracle is tighten-only across replicas (distributed_integration 4/4).
+  GlobalRiskOracle is tighten-only across replicas (`distributed_integration` harness exists; no run log shipped).
 * **Persisted?** ✓ risk config in PG; decisions logged.
 * **Observable?** ✓ decision reasons in logs (`d.reason`), rejection metrics.
 * **Recoverable?** ✓ config reloaded at startup from PG.
@@ -75,7 +75,7 @@ Legend: ✓ = implemented + test-executed; ⚠ = depends on buyer configuration;
 ## 5. INTENT → OWNERSHIP CLAIM (`crates/core/src/{ownership,redis_ownership}.rs`, `db/claims.rs`)
 
 * **Authorized?** ✓ only the claim holder (lease + epoch + fencing token)
-  may execute an intent; two_replica_mirror 1/1 executed with two real
+  may execute an intent; `two_replica_mirror` harness exists for two real
   processes.
 * **Idempotent / replay-resistant?** ✓ fencing tokens invalidate stale
   claimants after restarts/failover; PG is the authoritative claim store,
@@ -131,14 +131,14 @@ Legend: ✓ = implemented + test-executed; ⚠ = depends on buyer configuration;
 * **Authenticated?** ⚠ connection string is operator-managed; app uses one
   PG URL (trust/localhost in dev evidence; TLS/roles = buyer deployment).
 * **Idempotent/replay-resistant?** ✓ migrations forward-only + checksummed
-  (sqlx `_sqlx_migrations`, 11/11 verified on restored DB); audit rows are
+  (sqlx `_sqlx_migrations`); audit rows are
   insert-only — no API path mutates them (master rule, chain tests).
 * **Persisted?** ✓ this IS the durable layer: orders, positions, claims,
   audit chain, flags. Redis holds no sole-copy financial state.
 * **Failure-safe?** ✓ PG outage → modules fail their DB ops loudly; no
   in-memory silent continuation of money state (degradation matrix in
   `docs/OPERATIONS.md`). **Recoverable?** ✓ backup/restore round-trip
-  EXECUTED (dump `5989ecf1…`, 23/23 suite on restored DB, app started on it).
+  historical claim (dump `5989ecf1…`; the run log does not ship in this tree).
 
 ## 10. → RECONCILIATION (`crates/core/src/reconciliation.rs`, `crates/server/src/recon.rs`)
 

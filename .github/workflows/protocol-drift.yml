@@ -1,0 +1,79 @@
+name: Protocol Drift
+
+# GAP MAP v2 (Part 5) — protocol drift detection.
+#
+# Every push/PR runs the STATIC gate: the pinned values in
+# scripts/protocol-pins.json must exactly match the constants compiled into
+# the crates. This is offline, needs no secrets, and catches accidental edits
+# to program ids, discriminators, Polymarket addresses, or EIP-712 versions.
+#
+# The LIVE gate (on-chain verification that the pinned programs actually exist
+# and are executable) needs a read-only RPC endpoint, so it only runs on
+# workflow_dispatch or the weekly schedule, and only when RPC_URL is provided.
+# It writes evidence/live/protocol_drift_check.json (PASSED only if every
+# probe succeeded) but never commits it — evidence from CI is for inspection.
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'crates/solana-kit/src/consts.rs'
+      - 'crates/module-polymarket/src/**'
+      - 'crates/core/src/config.rs'
+      - 'scripts/protocol-pins.json'
+      - 'scripts/check-protocol-drift.sh'
+      - '.github/workflows/protocol-drift.yml'
+  pull_request:
+    paths:
+      - 'crates/solana-kit/src/consts.rs'
+      - 'crates/module-polymarket/src/**'
+      - 'crates/core/src/config.rs'
+      - 'scripts/protocol-pins.json'
+      - 'scripts/check-protocol-drift.sh'
+      - '.github/workflows/protocol-drift.yml'
+  schedule:
+    # Weekly on-chain verification (Sunday 03:00 UTC) — chain reality can
+    # drift under us even when our code does not change.
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      live:
+        description: 'Run the live on-chain verification (needs RPC_URL secret)'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: protocol-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static pin/code consistency (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static drift check
+        run: bash scripts/check-protocol-drift.sh
+
+  live:
+    name: Live on-chain verification (gated)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Live drift check (requires RPC_URL; skips honestly without it)
+        env:
+          PROTOCOL_DRIFT_LIVE: '1'
+          RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+        run: bash scripts/check-protocol-drift.sh
+
+      - name: Upload drift evidence (for inspection; not committed)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-drift-evidence
+          path: evidence/live/protocol_drift_check.json
+          if-no-files-found: ignore

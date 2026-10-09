@@ -1,0 +1,13 @@
+{
+  "validation_id": "latency_report",
+  "provider": "solana_rpc",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "E2E_NETWORK=1 E2E_LIVE=1 RPC_URL=<redacted> cargo test -p solana-kit --test latency_bench",
+  "attestation_ref": "",
+  "redacted_metadata": {
+    "reason": "getSlot/getLatestBlockhash round-trip percentiles; no latency claim may be published without a PASSED run"
+  },
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

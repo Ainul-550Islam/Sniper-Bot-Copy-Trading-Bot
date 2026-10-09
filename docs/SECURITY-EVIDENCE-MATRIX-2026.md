@@ -24,7 +24,7 @@ silently.
 | Claim | Evidence | Level |
 | --- | --- | --- |
 | Trading data plane (orders/positions/executions/reports) is org-scoped in SQL | tenant data-plane suites (PostgreSQL) + forensic sweep G1–G8 | INTEGRATION_TEST |
-| Every tenant-table upsert arbiter is tenant-composite (0026–0034 swaps hold in code) | forensic sweep G6: 11/11 arbiters carry organization_id | CODE (mechanical) |
+| Every tenant-table upsert arbiter is tenant-composite (0026–0034 swaps hold in code) | forensic sweep G6: all arbiters carry organization_id | CODE (mechanical) |
 | Zero unscoped tenant-table SQL statements ship | `scripts/forensic-sql-scan.sh` — 371 classified, 0 class-4; gate `tests/forensics/sql-pattern-regression.sh` | CODE (mechanical) |
 | Custody profiles/signers are org-scoped end-to-end incl. durable writes | 3 custody rotation suites (missing profile, cross-tenant, profile resolution) | INTEGRATION_TEST |
 | Sanctioned global access is enumerated and justified | forensic sweep class-2/3 tables in `docs/FORENSIC-SQL-RESEARCH-2026.md` | CODE (mechanical + documented) |

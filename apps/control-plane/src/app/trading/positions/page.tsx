@@ -30,7 +30,7 @@ export default function PositionsPage() {
             <h2>Inventory Valuation Rules</h2>
             <p className="muted small" style={{ marginTop: "0.5rem" }}>
               Mark prices are derived from authoritative on-chain AMM pools (Raydium v4 &amp; Pump.fun) and CLOB midpoints.
-              All monetary values preserve exact integer atomic representations to guarantee ledger reconciliation integrity.
+              All monetary values preserve exact integer atomic representations so ledger reconciliation stays exact.
             </p>
           </div>
         </div>

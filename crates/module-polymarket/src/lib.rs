@@ -49,6 +49,7 @@
 //! | `venue.rs` | credentials, authenticated client, heartbeat, kill-switch cancel / flatten |
 //! | `orders.rs` | frozen intents, stages, reject reasons, the order state machine |
 //! | `strategy.rs` | the two hardened strategies and their explicit verdicts |
+//! | `copy.rs` / `leaders.rs` / `builder.rs` | copy-follow engine (P2), leader stats/leaderboard (P2), CLOB V2 builder-code attribution (P2) |
 //! | `gamma.rs` / `clob.rs` / `ws.rs` / `auth.rs` / `eip712.rs` / `ctf.rs` / `collateral.rs` / `error.rs` | venue clients, signing, chain reads, typed errors |
 
 #![forbid(unsafe_code)]
@@ -86,6 +87,12 @@ pub mod reconcile_async;
 pub mod tenant_context;
 pub mod tenant_executor;
 pub mod trade_resolution;
+
+// GAP-MAP v2 P2: copy trading (follow selected wallets), leader
+// discovery/stats, and CLOB V2 builder-code attribution.
+pub mod builder;
+pub mod copy;
+pub mod leaders;
 
 pub use audit::AUDIT_ACTOR;
 pub use funding::CollateralSnapshot;

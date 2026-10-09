@@ -1,7 +1,7 @@
 # Engineering handover
 
 This document lets a receiving engineering team verify, run and maintain the
-repository from a cold machine. It states exactly what was verified where,
+repository from a cold machine. It states exactly what was run and where,
 and what was not.
 
 ## 1. What is being handed over
@@ -34,7 +34,7 @@ plane) at version `0.1.0` (see `VERSION`, `CHANGELOG.md`):
   `.env.template`, `config.toml.example`, `.github/workflows/ci.yml`,
   `deny.toml`, `rust-toolchain.toml`, `scripts/release-check.sh`,
   `release-manifest.json` (machine-readable delivery manifest).
-- `AUDIT.md` — the full historical audit/build trail with per-pass evidence.
+- `archive/AUDIT.md` — the full historical audit/build trail with per-pass evidence.
 
 No secrets, keys, credentials, private databases or build artifacts are part
 of the repository (`.gitignore`/`.dockerignore` enforce; the tree was
@@ -62,46 +62,34 @@ export REDIS_URL=redis://127.0.0.1:6379
 Equivalent manual matrix — the exact commands and their last known results
 are in `docs/TESTING.md` §Layers and §"What is covered where".
 
-Reproducibility evidence: the whole suite has been rebuilt and re-verified
+Reproducibility evidence: the whole suite has been rebuilt and re-run
 **from source alone on a wiped machine** (fresh rustup install, PostgreSQL
 16.4 compiled from the official tarball, Redis 7.2.10 compiled from source,
 empty target directory, empty database), and re-gated on the final tree by
-`scripts/release-check.sh` (**20/20 gates PASS**): workspace 521/521,
-db_integration 23/23 (fresh + rerun + `pg_dump`→restore round-trip with the
-full suite green on the restored database), redis 10/10, distributed 4/4,
-two-replica 1/1, staking 48/48 host (gated e2e skipped — no validator),
-fmt/clippy/audit/deny all clean. The earlier 518/518, db 21/21 figures
-predate the two audit-chain regression tests added in the release pass
-(see CHANGELOG "Fixed"). The post-delivery AUDIT PASS (2026-09-18, this
-tree) re-gated everything after the live/paper balance-separation fixes and
-the staking max-supply/metadata additions: workspace **537/537** (real
-PostgreSQL 17.11 + Redis 8.0.2), staking host **71/71**, fmt/clippy/audit/
-deny clean — see `AUDIT.md` §28 and CHANGELOG [Unreleased].
+`scripts/release-check.sh` gates the release (fmt → tests → staking →
+audit/deny). Historical pass-count prose that used to sit here was removed:
+the run logs it cited do not ship in this tree, so those numbers are not
+verifiable from this repository. Re-run the gates and suites yourself
+(`docs/TESTING.md`); the seller's own record of past passes is `archive/AUDIT.md`
+(internal engineering log, not third-party evidence).
 
 ## 3. Verification status taxonomy (honest labeling)
 
 | Label | Meaning |
 |---|---|
-| VERIFIED | Executed successfully in the most recent full pass in the handover environment (results in `AUDIT.md` final sections + `docs/TESTING.md`) |
+| VERIFIED | Executed successfully in the most recent full pass in the handover environment (results in `archive/AUDIT.md` final sections + `docs/TESTING.md`) |
 | PREVIOUSLY VERIFIED | Executed successfully in an earlier build session on identical source, not re-executed in the latest restored environment |
 | GATED | Runs automatically when its env var/dependency is present; skips cleanly otherwise |
 | NOT EXECUTED / ENVIRONMENT-BLOCKED | Cannot run in the build sandbox; wired into CI or requires external resources |
 
 Current classification:
 
-- **VERIFIED (latest pass — audit pass 2026-09-18, release gate
-  `scripts/release-check.sh` 20/20):** all 537 workspace tests (incl. the
-  38 gated integration tests against real PG 17.11 + Redis 8.0.2), 71
-  staking host tests, fmt, `clippy -D warnings` (both cargo projects),
-  `cargo check`, cargo-audit (both lockfiles), cargo-deny, migrations
-  0001–0011 applied on a fresh database. The freeze-gate pass (521/521,
-  48 staking host, PG 16.4 + Redis 7.2.10) additionally included a
-  `pg_dump`→restore→full-suite round-trip on the restored database.
-  The buyer-hardening pass RE-EXECUTED that round-trip in its sandbox
-  (PostgreSQL 17.11: dump SHA-256 `5989ecf1…`, restore to a clean database,
-  table/rowcount/schema identity, db_integration 23/23 ON the restored DB,
-  plus app startup + health/ready/status/metrics + clean SIGTERM shutdown
-  against it — `evidence/phase8-*`).
+- **VERIFIED (label withdrawn for the shipped state):** this bullet used to
+  quote a full-pass run (workspace suite, gated integration vs real PG +
+  Redis, staking host suite, `pg_dump`→restore round-trip, app startup +
+  clean shutdown). The run logs it cited (`evidence/phase8-*` etc.) do not
+  ship in this tree, so the counts were removed. The harnesses exist; see
+  `docs/TESTING.md`, and `evidence/` for the NOT_RUN validation stubs.
 - **VERIFIED BY EXECUTION (buyer-hardening pass, 2026-09-18, agave 2.1.21 +
   platform-tools v1.43):** `cargo build-sbf` (187,504-byte .so, SHA-256
   `57a890fa…`; byte-identical rebuild from the same source — real

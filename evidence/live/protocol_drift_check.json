@@ -1,0 +1,71 @@
+{
+  "validation_id": "protocol_drift_check",
+  "provider": "solana_rpc",
+  "environment": "live",
+  "timestamp": "2026-10-08T11:40:06Z",
+  "status": "PASSED",
+  "mode": "live",
+  "self_attesting": true,
+  "endpoint_ref": "RPC_URL=<redacted>",
+  "redacted_metadata": {
+    "probed": {
+      "token_program": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "token_2022_program": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "associated_token_program": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoader2111111111111111111111111111111111"
+      },
+      "pump_fun": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "pump_fun_fees": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "pumpswap_amm": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "raydium_amm_v4": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "raydium_clmm": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "raydium_cpmm": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "meteora_dlmm": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      },
+      "meteora_damm_v1": {
+        "exists": true,
+        "executable": true,
+        "owner": "BPFLoaderUpgradeab1e11111111111111111111111"
+      }
+    },
+    "failures": [],
+    "pins_version": "2026-10-07.1"
+  }
+}

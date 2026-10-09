@@ -1,0 +1,11 @@
+{
+  "validation_id": "kms_sign_transit",
+  "provider": "aws_kms",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "LIVE_KMS=1 KMS_KEY_ID=<redacted> cargo test -p sniper-suite --test live_kms_sign -- --ignored",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"remote sign round-trip; key material never leaves KMS; attestation = signature blob reference"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

@@ -94,7 +94,7 @@ code change — restart with new env values.
   `9c677cd` + `0e139c3` present, `git status` clean, `release-check.sh`
   green on the buyer's machine (`docs/BUYER-DEPLOYMENT.md` §9).
 - History note: the repository carries the full commit history through the
-  freeze; `AUDIT.md` preserves the per-pass engineering evidence independent
+  freeze; `archive/AUDIT.md` preserves the per-pass engineering evidence independent
   of git.
 
 ## 9. Staking program ownership
@@ -118,8 +118,8 @@ A factual definition of "done" for the transfer, matching
 `docs/ACCEPTANCE-CHECKLIST.md`:
 
 1. Full local gate (`release-check.sh`) green on buyer infrastructure.
-2. Paper-mode run stable on buyer infra; health/readiness/metrics verified;
-   Telegram verified live; crash-recovery drill passed; backup→restore drill
+2. Paper-mode run stable on buyer infra; health/readiness/metrics checked;
+   Telegram confirmed live; crash-recovery drill passed; backup→restore drill
    passed on the buyer's PG.
 3. (If simulating) `simulate` mode exercised — real transactions built and
    RPC-simulated, nothing broadcast.

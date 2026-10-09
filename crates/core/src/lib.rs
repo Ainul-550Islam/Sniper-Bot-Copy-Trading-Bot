@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![allow(
     clippy::match_like_matches_macro,
     clippy::new_without_default,

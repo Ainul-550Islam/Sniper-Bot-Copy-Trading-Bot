@@ -40,6 +40,41 @@ pub struct Config {
     pub auth: AuthConfig,
     pub signing: SigningConfig,
     pub secrets: SecretConfig,
+    /// On-chain platform-fee collection (GAP-MAP P1): a fee is taken from
+    /// the swap notional and transferred to the vault inside the SAME
+    /// transaction as the swap (atomic: fee lands or the swap does not).
+    pub platform_fee: PlatformFeeConfig,
+}
+
+/// On-chain platform-fee settings (GAP-MAP P1).
+///
+/// The accounting side of the fee (journal postings, tenant entries) lives
+/// in `bot_core::billing::platform_fee`; this struct only controls the
+/// ON-CHAIN collection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlatformFeeConfig {
+    /// Fee vault (base58). EMPTY = on-chain fee collection disabled — the
+    /// vault is operator-specific and must never ship with a default that
+    /// could receive funds by accident.
+    pub vault: String,
+    /// Fee in basis points of the swap notional (`100` = 1%).
+    pub bps: u64,
+    /// Fees below this many lamports are skipped (dust guard): collecting
+    /// them would cost more in rent/egress than they are worth.
+    pub min_fee_lamports: u64,
+}
+
+impl Default for PlatformFeeConfig {
+    fn default() -> Self {
+        PlatformFeeConfig {
+            vault: String::new(),
+            bps: 0,
+            // Ten thousand lamports (~0.00001 SOL): below this the transfer
+            // is economically pointless.
+            min_fee_lamports: 10_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +183,16 @@ pub struct ExecutionConfig {
     pub use_jito: bool,
     pub jito_block_engine_url: String,
     pub jito_tip_lamports: u64,
+    /// Race broadcast (GAP-MAP P1): send the SAME signed transaction via
+    /// Jito and the staked RPC in parallel; first landing wins. Only
+    /// meaningful when `use_jito` is true.
+    pub jito_race: bool,
+    /// Dynamic Jito tip (GAP-MAP P1): target this tip-floor percentile
+    /// (25/50/75/95/99 buckets, values map UP to the nearest bucket)
+    /// instead of the fixed `jito_tip_lamports`. `0` disables dynamic
+    /// tips; the fixed tip remains the explicit override when a request
+    /// sets one.
+    pub jito_dynamic_tip_percentile: u8,
     /// Compute-unit price for the priority-fee instruction (micro-lamports).
     pub priority_fee_micro_lamports: u64,
     pub compute_unit_limit: u32,
@@ -204,6 +249,8 @@ impl Default for ExecutionConfig {
             use_jito: false,
             jito_block_engine_url: "https://mainnet.block-engine.jito.wtf".into(),
             jito_tip_lamports: 1_000_000,
+            jito_race: false,
+            jito_dynamic_tip_percentile: 0,
             priority_fee_micro_lamports: 250_000,
             compute_unit_limit: 400_000,
             confirm_timeout_ms: 60_000,
@@ -557,6 +604,12 @@ pub struct SniperConfig {
     /// token account — the classic honeypot lever). pump.fun tokens always
     /// pass; this bites for Raydium-native launches.
     pub require_freeze_authority_revoked: bool,
+    /// Sell-simulation gate (GAP-MAP P1): before entering, simulate the
+    /// venue's SELL instruction with `simulateTransaction` and refuse tokens
+    /// whose sell path is broken — the real honeypot check that supersedes
+    /// "freeze authority present = warning". Costs one extra RPC round trip
+    /// per candidate; turn off only for maximum-speed profiles.
+    pub simulate_sell: bool,
     /// Concentration gate: reject when the creator's opening buy exceeds
     /// this many SOL (`0` = off). Only PumpPortal reports it.
     pub max_creator_initial_buy_sol: f64,
@@ -564,6 +617,19 @@ pub struct SniperConfig {
     /// that must sit inside the pool (`0` = off, e.g. `0.5` = at least half
     /// the supply is pooled; less means the rest can be dumped on you).
     pub min_pool_supply_fraction: f64,
+    /// Holder gate (GAP-MAP P1): reject when any single NON-infrastructure
+    /// holder controls more than this percent of the supply (`0` = off).
+    /// Infrastructure accounts (bonding curve, pool, AMM vaults, burn) are
+    /// excluded by the data layer before evaluation. Off by default because
+    /// holder-list ingestion lands with the data plane (P2); until a holder
+    /// table is ingested, enabling this REFUSES every snapshot (an enabled
+    /// gate with no data fails closed, regardless of strict_gates).
+    pub max_top_holder_pct: f64,
+    /// Bundler gate (GAP-MAP P1): reject when the fraction of first-slot
+    /// buyers flagged as bundler-coordinated reaches this ratio (`0` = off,
+    /// e.g. `0.5` = refuse when half or more of the opening buyers look
+    /// bundled). Same enablement note as `max_top_holder_pct`.
+    pub max_bundler_ratio: f64,
     /// Reject when the market snapshot (curve/pool read) used for the
     /// decision is older than this at submission time.
     pub max_snapshot_age_ms: u64,
@@ -581,6 +647,48 @@ pub struct SniperConfig {
     /// Close (without selling) positions whose ENTRY provably never landed
     /// according to the execution ledger (failed / expired attempts).
     pub failed_entry_cleanup: bool,
+    /// Advanced exit policy (GAP-MAP v2 P2): laddered take-profit,
+    /// break-even stop, dev-sell trigger. Absent = the feature is inert and
+    /// behaviour is exactly the classic single-TP/SL/trailing engine.
+    #[serde(default)]
+    pub advanced_exit: Option<AdvancedExitConfig>,
+}
+
+/// One rung of the advanced take-profit ladder (GAP-MAP v2 P2).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TpLevelConfig {
+    /// Fire when `mark >= avg_entry * trigger_multiple` (e.g. `2.0` = +100%).
+    /// Values <= 1.0 are pruned by the policy engine.
+    pub trigger_multiple: f64,
+    /// Fraction of the CURRENT position sold at this rung (clamped to [0, 1]).
+    pub sell_fraction: f64,
+}
+
+/// Break-even stop rule (GAP-MAP v2 P2): arms once the high-water mark
+/// reaches `activation_multiple` × entry, then stops out at entry ×
+/// (1 + `buffer`) so a winning trade cannot turn into a loss.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BreakEvenRuleConfig {
+    /// High-water multiple that arms the stop (e.g. `1.5` = +50%).
+    pub activation_multiple: f64,
+    /// Fraction above entry for the armed stop (e.g. `0.02`).
+    pub buffer: f64,
+}
+
+/// The advanced exit policy block (GAP-MAP v2 P2). Every field defaults
+/// off/empty; an empty block is a no-op by design.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdvancedExitConfig {
+    /// Take-profit ladder rungs, fired in ascending trigger order.
+    pub ladder: Vec<TpLevelConfig>,
+    /// Break-even stop (None = off).
+    pub break_even: Option<BreakEvenRuleConfig>,
+    /// Flatten when a creator/dev sell was observed within this many seconds
+    /// (`0` = off). Signals arrive from the risk_intel layer.
+    pub dev_sell_ttl_secs: u64,
 }
 
 impl Default for SniperConfig {
@@ -625,13 +733,17 @@ impl Default for SniperConfig {
             min_liquidity_sol: 0.0,
             require_mint_authority_revoked: false,
             require_freeze_authority_revoked: true,
+            simulate_sell: true,
             max_creator_initial_buy_sol: 0.0,
             min_pool_supply_fraction: 0.0,
+            max_top_holder_pct: 0.0,
+            max_bundler_ratio: 0.0,
             max_snapshot_age_ms: 2_000,
             strict_gates: false,
             stale_position_exit_secs: 0,
             exit_retry_backoff_secs: 10,
             failed_entry_cleanup: true,
+            advanced_exit: None,
         }
     }
 }
@@ -1506,10 +1618,30 @@ pub const PRIMARY_SIGNER_IDENTITY: &str = "primary_trading";
 
 /// Key-custody backend used for Solana transaction signing.
 ///
-/// Only [`SigningProvider::Local`] is implemented in this build. Selecting
-/// `vault`, `kms` or `hsm` parses, but startup fails with
+/// Only [`SigningProvider::Local`] is implemented for OPERATOR mode in this
+/// build. Selecting `vault`, `kms` or `hsm` parses, but startup fails with
 /// `SignerError::UnsupportedBackend` instead of silently falling back to a
-/// local keypair (see `solana_kit::signer::build_signer_registry`).
+/// local keypair (see `solana_kit::signer::build_signer_registry`, pinned by
+/// the test `build_registry_rejects_unsupported_backends_without_fallback`).
+///
+/// ## Why the variants stay (GAP-MAP v2 VERIFY, resolved 2026-10-08)
+/// The GAP MAP asked to either wire operator mode to remote signers or
+/// delete the variants. The verified resolution keeps them:
+/// * **fail-fast is the honest behaviour** — an operator who configures
+///   `SIGNING_PROVIDER=vault` gets a loud, actionable startup error naming
+///   the backend, not a config-parse mystery and never a silent local key;
+/// * **working Vault/KMS clients already exist on the tenant path** —
+///   SaaS custody (`crates/server/src/saas/custody.rs`,
+///   `custody_rotation.rs`, provider types `vault`/`kms`/`hsm` in
+///   migration 0020) signs tenant keys through real Vault-transit and KMS
+///   integrations. Remote signing for the product lives THERE, by design:
+///   tenant keys are custodial, the operator wallet is deployment-local;
+/// * deleting the variants would turn a clear runtime error into a schema
+///   break for configs that already declare them, while adding zero safety.
+///
+/// When an operator-mode remote backend lands, it plugs into
+/// `build_signer_registry`'s `is_supported()` gate — no config change
+/// needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SigningProvider {
@@ -1892,6 +2024,23 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     if let Some(v) = env_u64("JITO_TIP_LAMPORTS", w) {
         c.execution.jito_tip_lamports = v;
     }
+    if let Some(v) = env_bool("JITO_RACE", w) {
+        c.execution.jito_race = v;
+    }
+    if let Some(v) = env_u64("JITO_DYNAMIC_TIP_PERCENTILE", w) {
+        c.execution.jito_dynamic_tip_percentile = v.min(100) as u8;
+    }
+
+    // --- platform fee (on-chain collection) ---
+    if let Some(v) = env_str("PLATFORM_FEE_VAULT", w) {
+        c.platform_fee.vault = v;
+    }
+    if let Some(v) = env_u64("PLATFORM_FEE_BPS", w) {
+        c.platform_fee.bps = v.min(10_000);
+    }
+    if let Some(v) = env_u64("PLATFORM_FEE_MIN_LAMPORTS", w) {
+        c.platform_fee.min_fee_lamports = v;
+    }
     if let Some(v) = env_u64("PRIORITY_FEE_MICRO_LAMPORTS", w) {
         c.execution.priority_fee_micro_lamports = v;
     }
@@ -2070,8 +2219,17 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     if let Some(v) = env_bool("SNIPER_REQUIRE_FREEZE_AUTHORITY_REVOKED", w) {
         c.sniper.require_freeze_authority_revoked = v;
     }
+    if let Some(v) = env_bool("SNIPER_SIMULATE_SELL", w) {
+        c.sniper.simulate_sell = v;
+    }
     if let Some(v) = env_bool("SNIPER_STRICT_GATES", w) {
         c.sniper.strict_gates = v;
+    }
+    if let Some(v) = env_f64("SNIPER_MAX_TOP_HOLDER_PCT", w) {
+        c.sniper.max_top_holder_pct = v;
+    }
+    if let Some(v) = env_f64("SNIPER_MAX_BUNDLER_RATIO", w) {
+        c.sniper.max_bundler_ratio = v;
     }
     if let Some(v) = env_i64("SNIPER_STALE_POSITION_EXIT_SECS", w) {
         c.sniper.stale_position_exit_secs = v;
@@ -2518,6 +2676,14 @@ fn validate_sniper_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
         return Err(BotError::config(
             "sniper.min_pool_supply_fraction must be in [0, 1]",
         ));
+    }
+    if !sn.max_top_holder_pct.is_finite() || !(0.0..=100.0).contains(&sn.max_top_holder_pct) {
+        return Err(BotError::config(
+            "sniper.max_top_holder_pct must be in [0, 100]",
+        ));
+    }
+    if !sn.max_bundler_ratio.is_finite() || !(0.0..=1.0).contains(&sn.max_bundler_ratio) {
+        return Err(BotError::config("sniper.max_bundler_ratio must be in [0, 1]"));
     }
     if sn.max_snapshot_age_ms == 0 {
         return Err(BotError::config("sniper.max_snapshot_age_ms must be > 0"));

@@ -28,7 +28,7 @@ bad()  { FAIL=$((FAIL+1)); printf 'FAIL  %s\n' "$1"; }
 
 # ------------------------------------------------------- 1. required files --
 REQUIRED_FILES="
-VERSION LICENSE SECURITY.md README.md CHANGELOG.md AUDIT.md
+VERSION LICENSE SECURITY.md README.md CHANGELOG.md
 Cargo.toml Cargo.lock rust-toolchain.toml deny.toml release-manifest.json
 sbom.json sbom.cyclonedx.json licenses.json licenses.csv
 Dockerfile docker-compose.yml .dockerignore .env.template config.toml.example .gitignore
@@ -37,12 +37,12 @@ programs/staking-suite/Cargo.toml programs/staking-suite/Cargo.lock
 docs/ARCHITECTURE.md docs/API.md docs/SECURITY.md docs/DEPLOYMENT.md docs/OPERATIONS.md
 docs/MODULES.md docs/STAKING.md docs/TESTING.md docs/RECONCILIATION.md docs/DISTRIBUTED.md
 docs/RELEASE.md docs/HANDOVER.md docs/BACKUP-RESTORE.md
-docs/BUYER-OVERVIEW.md docs/CAPABILITY-MATRIX.md docs/BUYER-DUE-DILIGENCE.md
-docs/IP-COMPONENTS.md docs/THIRD-PARTY.md docs/BUYER-DEPLOYMENT.md
-docs/ACCEPTANCE-CHECKLIST.md docs/RELEASE-NOTES-0.1.0.md docs/BUYER-FAQ.md
-docs/SCOPE-BOUNDARY.md docs/SUPPORT-HANDOVER.md docs/BUYER-RISK-REGISTER.md
+docs/CAPABILITY-MATRIX.md
+docs/IP-COMPONENTS.md docs/THIRD-PARTY.md
+docs/ACCEPTANCE-CHECKLIST.md docs/RELEASE-NOTES-0.1.0.md
+docs/SCOPE-BOUNDARY.md docs/SUPPORT-HANDOVER.md
 docs/TECHNICAL-DIFFERENTIATORS.md docs/DELIVERY-MANIFEST.md
-docs/FINAL-DELIVERY.md docs/BUYER-QUICKSTART.md docs/TECHNICAL-FACT-SHEET.md
+docs/TECHNICAL-FACT-SHEET.md
 docs/SELLER-FACT-SHEET.md docs/SELLING-LISTING-SOURCE.md docs/DEMO-RUNBOOK.md
 docs/EVIDENCE-INDEX.md docs/REPOSITORY-MAP.md docs/ARCHIVE-CHECKLIST.md
 docs/EXECUTION-RELIABILITY.md docs/SNIPER-ENGINE.md
@@ -50,8 +50,24 @@ docs/COPY-TRADING-ENGINE.md docs/COPY-TRADING-OPERATIONS.md docs/COPY-TRADING-RE
 docs/POLYMARKET-ENGINE.md docs/POLYMARKET-OPERATIONS.md docs/POLYMARKET-RECOVERY.md
 docs/GLOBAL-RISK.md docs/ACCOUNTING-LEDGER.md docs/RISK-OPERATIONS.md
 docs/HA-ARCHITECTURE.md docs/DISTRIBUTED-OPERATIONS.md docs/CRASH-RECOVERY.md
-docs/FORENSIC-FILE-INVENTORY.md docs/SOURCE-OF-TRUTH.md docs/FINAL-RELEASE-AUDIT.md
+docs/FORENSIC-FILE-INVENTORY.md docs/SOURCE-OF-TRUTH.md docs/BUYER-HANDOVER.md
 "
+# p0d docs consolidation (2026-10-07): docs/BUYER-HANDOVER.md replaced the former
+# BUYER-*/FINAL-*/CURRENT-* families. The eight names below were removed from
+# REQUIRED_FILES because their purpose now lives in tracked successor documents
+# (originals preserved under docs/archive/, not part of the buyer package):
+#   docs/BUYER-OVERVIEW.md       -> docs/BUYER-HANDOVER.md (what is delivered) + docs/ARCHITECTURE.md (overview)
+#   docs/BUYER-DUE-DILIGENCE.md  -> docs/ACCEPTANCE-CHECKLIST.md + docs/BUYER-HANDOVER.md verification table
+#   docs/BUYER-DEPLOYMENT.md     -> docs/DEPLOYMENT.md + docs/DEPLOYMENT-ENVIRONMENT-MATRIX.md
+#   docs/BUYER-FAQ.md            -> docs/KNOWN-LIMITATIONS.md + docs/HANDOVER.md (FAQ content consolidated)
+#   docs/BUYER-RISK-REGISTER.md  -> docs/KNOWN-LIMITATIONS.md + docs/GLOBAL-RISK.md + docs/RISK-OPERATIONS.md
+#   docs/FINAL-DELIVERY.md       -> docs/BUYER-HANDOVER.md (the single human-readable starting point)
+#   docs/BUYER-QUICKSTART.md     -> docs/DEMO-RUNBOOK.md + docs/HANDOVER.md §2 (verify-from-zero)
+#   AUDIT.md                     -> moved to docs/archive/AUDIT.md (GAP-MAP v2 root hygiene,
+#                                   2026-10-08); seller's internal engineering log, archived
+#                                   alongside the AUDIT-* records
+#   docs/FINAL-RELEASE-AUDIT.md  -> RETIRED: superseded self-report of the 2026-09-19 handover pass;
+#                                   delivery verification is now scripted (this file) + release-manifest.json
 missing=""
 # Four supply-chain artifacts sit at the repository root yet are RELOCATED in the release
 # package to <PKG>/sbom/ and <PKG>/licenses/. A buyer running this script inside the

@@ -41,6 +41,11 @@ pub struct TxRequest {
     pub wrap_sol_lamports: u64,
     /// Close the wSOL ATA at the end (sweeps dust back to SOL).
     pub unwrap_sol: bool,
+    /// Instructions appended AFTER the wSOL sweep (GAP-MAP P1 platform
+    /// fee): they can only spend native SOL the sweep has already released,
+    /// so they are ordered after `unwrap_sol` and before the Jito tip.
+    /// Empty for every request that does not opt in.
+    pub post_unwrap_instructions: Vec<Instruction>,
     /// Address lookup tables to compress the account list with.
     pub lookup_tables: Vec<AddressLookupTableAccount>,
     /// Override the blockhash (used when re-signing a prebuilt transaction).
@@ -85,6 +90,7 @@ impl Default for TxRequest {
             jito_tip_lamports: 0,
             wrap_sol_lamports: 0,
             unwrap_sol: false,
+            post_unwrap_instructions: Vec::new(),
             lookup_tables: Vec::new(),
             blockhash: None,
             extra_signers: Vec::new(),
@@ -107,6 +113,14 @@ impl TxRequest {
 
     pub fn with_instruction(mut self, ix: Instruction) -> Self {
         self.instructions.push(ix);
+        self
+    }
+
+    /// Append one instruction AFTER the wSOL sweep (platform fees on
+    /// sells, GAP-MAP P1). Only meaningful when `unwrap_sol` is set;
+    /// ordering inside the vector is preserved.
+    pub fn after_unwrap(mut self, ix: Instruction) -> Self {
+        self.post_unwrap_instructions.push(ix);
         self
     }
 
@@ -184,7 +198,11 @@ impl TxRequest {
         for signer in &self.extra_signers {
             bytes.extend_from_slice(signer.as_ref());
         }
-        for ix in &self.instructions {
+        for ix in self
+            .instructions
+            .iter()
+            .chain(self.post_unwrap_instructions.iter())
+        {
             bytes.extend_from_slice(ix.program_id.as_ref());
             bytes.extend_from_slice(&(ix.accounts.len() as u32).to_le_bytes());
             for meta in &ix.accounts {
@@ -260,6 +278,11 @@ impl<'a> TxBuilder<'a> {
             let unwrap_ixs = self.wallet.unwrap_sol_instructions(self.rpc).await?;
             ixs.extend(unwrap_ixs);
         }
+
+        // 4b. Post-unwrap instructions (platform fee on sells, GAP-MAP P1):
+        // they spend the native SOL the sweep just released, so they must
+        // come after step 4 and before the tip.
+        ixs.extend(req.post_unwrap_instructions.iter().cloned());
 
         // 5. Jito tip last: block engines require the tip transfer to be part
         //    of the bundle and it must not fail before the swap executes.

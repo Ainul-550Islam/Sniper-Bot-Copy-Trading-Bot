@@ -3,9 +3,7 @@
 Every advertised feature traced to actual source, verified by symbol grep on
 the final tree (2026-09-19) — not copied from documentation. Verification
 method: for each row the file exists, the named function/type exists in it,
-and the named test target exists; all listed tests are inside the executed
-suites (workspace 537/537, staking host 71/71, validator e2e 3/3 — see
-`docs/EVIDENCE-INDEX.md` §Buyer-hardening for logs/hashes).
+and the named test target exists; the suites named here exist in-tree. Earlier text quoted per-suite pass counts whose run logs do not ship in this tree; they were removed (see `docs/EVIDENCE-INDEX.md`).
 
 Status vocabulary: **EXECUTED** = ran green in the recorded evidence runs.
 Nothing here is listed merely because a document mentions it.
@@ -28,7 +26,7 @@ Nothing here is listed merely because a document mentions it.
 | Wallet trade feeds (tx decode → trade events) | `crates/module-copy/src/feeds.rs`; `crates/solana-kit/src/decode.rs` | feed pipeline + decoder | decoder tests | `tests/copy_feed.rs`, `tests/geyser_feed.rs` | RPC/Geyser | EXECUTED (mocks) |
 | Mirror engine (proportional sizing, failed-tx skip, poll fallback) | `crates/module-copy/src/mirror.rs` | mirror logic | mirror unit tests | inside 537 | tracked wallets config | EXECUTED |
 | Copy exit handling | `crates/module-copy/src/exit.rs` | exit path | exit tests | inside 537 | — | EXECUTED |
-| Two-replica safety (claims/leases, no double-mirror) | `crates/core/src/{ownership,redis_ownership}.rs`; `crates/core/src/db/claims.rs` | claim store + fencing | ownership unit tests | `crates/core/tests/distributed_integration.rs` (4/4), `crates/module-copy/tests/two_replica_mirror.rs` (1/1, two real processes) | PG + Redis | EXECUTED vs real services |
+| Two-replica safety (claims/leases, no double-mirror) | `crates/core/src/{ownership,redis_ownership}.rs`; `crates/core/src/db/claims.rs` | claim store + fencing | ownership unit tests | `crates/core/tests/distributed_integration.rs`, `crates/module-copy/tests/two_replica_mirror.rs` (two real processes) | PG + Redis | EXECUTED vs real services |
 
 ## MODULE 3 — POLYMARKET
 
@@ -70,10 +68,10 @@ Nothing here is listed merely because a document mentions it.
 | Shared state + runtime flags + kill switch | `crates/core/src/state.rs` | `AppState`, `may_broadcast` | state tests | db_integration (flags persisted) | — | EXECUTED |
 | Risk engine (entry/exit/launch + GlobalRiskOracle tighten-only) | `crates/core/src/risk.rs` | `check_entry/check_exit/check_launch_with_lists` | risk unit tests | distributed_integration (oracle sync) | risk config | EXECUTED |
 | OMS (order state machine, idempotency keys, Unknown/Reconciled) | `crates/core/src/oms.rs` | OMS types | oms tests | db_integration | PG | EXECUTED |
-| Dedup (Redis accelerator + PG-authoritative) | `crates/core/src/dedup.rs` | dedup claims | dedup tests | redis_integration (10/10) | PG + Redis | EXECUTED |
+| Dedup (Redis accelerator + PG-authoritative) | `crates/core/src/dedup.rs` | dedup claims | dedup tests | `redis_integration` harness | PG + Redis | EXECUTED |
 | Reconciliation queue + sweeps | `crates/core/src/reconciliation.rs` | reconciler | recon tests | db_integration; `recon_crash_e2e` (historical, pre-hardening source — labeled) | PG | EXECUTED (current-source: db_integration) |
 | Startup recovery (positions, Unknown re-registration, reconcile gate) | `crates/core/src/recovery.rs` | recovery pass | recovery tests | db_integration | PG | EXECUTED |
-| Audit hash chain (append-only, tamper-evident) | `crates/core/src/audit.rs` | chain append/verify | chain tests (tamper/reorder/duplicate/concurrent) | db_integration 23/23 | PG | EXECUTED |
+| Audit hash chain (append-only, tamper-evident) | `crates/core/src/audit.rs` | chain append/verify | chain tests (tamper/reorder/duplicate/concurrent) | db_integration harness | PG | EXISTS (no run log ships) |
 | Storage journal (JSONL, rotation, corrupt-line recovery) | `crates/core/src/storage.rs` | journal | `crates/core/tests/storage_lifecycle.rs` | inside 537 | disk | EXECUTED |
 | Auth (API keys, roles) | `crates/core/src/auth.rs` | role/key checks | auth tests | inside 537 | API key env | EXECUTED |
 | Lifecycle (ordered startup/shutdown drain) | `crates/core/src/lifecycle.rs` | lifecycle | lifecycle tests | phase8b clean-shutdown log | — | EXECUTED (incl. live smoke) |
@@ -130,15 +128,15 @@ Nothing here is listed merely because a document mentions it.
 
 | Feature | Source file | Function / type | Test | Integration | Dependency | Status |
 |---|---|---|---|---|---|---|
-| REST API (28 endpoints, x-api-key auth) | `crates/server/src/api.rs` | routers | api tests | phase8b endpoint smoke (executed) | API_KEY env | EXECUTED |
+| REST API (documented endpoints, x-api-key auth) | `crates/server/src/api.rs` | routers | api tests | endpoint smoke harness | API_KEY env | EXECUTED |
 | WebSocket event feed (authenticated) | `crates/server/src/ws.rs` | ws route | ws tests | inside 537 | — | EXECUTED |
 | Dashboard (single-file HTML, no CDN) | `crates/server/src/dashboard.rs` | inline HTML | dashboard test | phase8b (served) | — | EXECUTED |
 | Persistence bridge + recon API | `crates/server/src/{persist,recon,obs}.rs` | glue | unit tests | db_integration | PG/Redis | EXECUTED |
 | Health/readiness/metrics | `crates/core/src/obs/{health,metrics}.rs` | `/health`,`/ready`,`bot_*` | obs tests | phase8b smoke (executed: /ready 200, 4 components, `bot_health_ready 1`) | — | EXECUTED |
-| Migrations 0001–0022 (forward-only, checksummed) | `crates/core/migrations/*.sql` | sqlx `migrate!` | — | db_integration + phase8 restore (11/11 success on restored DB) | PG | EXECUTED |
+| Migrations (forward-only, checksummed; high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`) | `crates/core/migrations/*.sql` | sqlx `migrate!` | — | db_integration harness | PG | EXISTS (no run log ships) |
 | Docker/compose packaging | `Dockerfile`, `docker-compose.yml`, `.dockerignore` | multi-stage non-root image | — | **BLOCKED (no daemon in vendor sandbox)**; CI docker job wired | Docker (buyer) | NOT RUN (vendor); buyer step 19 |
 | CI pipeline | `.github/workflows/ci.yml` | 4 jobs | — | **BLOCKED (no runner)**; 1:1 local map in `docs/CI-LOCAL-EQUIVALENCE.md` | GitHub (buyer) | NOT RUN (vendor); buyer step 20 |
-| Release gates | `scripts/{release-check,verify-delivery}.sh` | 20-gate + 7-check | — | final runs 20/0/0 + 7/0 (executed) | toolchain/services | EXECUTED |
+| Release gates | `scripts/{release-check,verify-delivery}.sh` | scripted gates | — | runnable in-tree | toolchain/services | EXISTS |
 | Startup recovery + reconcile gating | `crates/core/src/recovery.rs`; `crates/server/src/main.rs` | recovery spawn gate | recovery tests | db_integration | PG | EXECUTED |
 
 **Row-count note:** every row above was symbol-verified against the final tree

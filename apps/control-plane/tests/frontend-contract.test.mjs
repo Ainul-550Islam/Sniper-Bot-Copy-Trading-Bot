@@ -88,6 +88,27 @@ test("kill-switch contract remains confirmed, POST-only, and refreshes server tr
   assert.match(panel, /finally \{/);
 });
 
+test("MFA login and invite enrollment remain limited until server promotion", () => {
+  const api = read("apps/control-plane/src/lib/api.ts");
+  const auth = read("apps/control-plane/src/lib/auth.ts");
+  const loginPage = read("apps/control-plane/src/app/page.tsx");
+  const invitePage = read("apps/control-plane/src/app/accept-invite/page.tsx");
+  const enrollmentPage = read("apps/control-plane/src/app/mfa-enrollment/page.tsx");
+  const e2e = read("apps/control-plane/e2e/mfa-authentication.spec.ts");
+
+  assert.match(api, /mfa_code: mfaCode/);
+  assert.match(auth, /if \(response\.mfa_enrollment_required\)/);
+  assert.match(auth, /mfaEnrollmentRequired: response\.mfa_enrollment_required === true/);
+  assert.match(loginPage, /router\.replace\("\/mfa-enrollment"\)/);
+  assert.match(invitePage, /response\.mfa_enrollment_required/);
+  assert.match(invitePage, /result\.session_promoted/);
+  assert.match(enrollmentPage, /needsMfaEnrollment\(\)/);
+  assert.match(enrollmentPage, /result\.session_promoted/);
+  assert.match(e2e, /MFA login challenge/);
+  assert.match(e2e, /only an enrollment session/);
+  assert.match(e2e, /invitation acceptance enrolls, verifies/);
+});
+
 test("all frontend source files avoid obvious synthetic-data primitives", () => {
   const violations = [];
   for (const path of sourceFiles(SRC)) {

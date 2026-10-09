@@ -655,6 +655,7 @@ impl Sniper {
             &self.wallet.pubkey,
             event,
             sniper,
+            &cfg.platform_fee,
             intended_lamports,
             fetched_at,
         )
@@ -861,10 +862,22 @@ impl Sniper {
                     let store = self.layouts.read().await;
                     pump::build_buy_ix(ctx, &store, &opts, amount, max_sol_cost)?
                 };
-                let req = with_common(
-                    TxRequest::new(format!("snipe-{}", event.launch.symbol))
-                        .with_instruction(buy_ix),
-                );
+                let mut buy_req = TxRequest::new(format!("snipe-{}", event.launch.symbol))
+                    .with_instruction(buy_ix);
+                // Atomic platform fee (GAP-MAP P1): the fee transfer rides
+                // in the SAME transaction as the buy — it lands or the buy
+                // does not. Dust is skipped by the fee module itself.
+                if let Some((fee_ix, decision)) =
+                    solana_kit::fee_transfer::build_fee_transfer_ix(
+                        &self.wallet.pubkey,
+                        lamports,
+                        &cfg.platform_fee,
+                    )
+                {
+                    debug!(fee_lamports = decision.lamports, "platform fee appended to snipe");
+                    buy_req = buy_req.with_instruction(fee_ix);
+                }
+                let req = with_common(buy_req);
                 Ok(Prepared::Request {
                     req,
                     expected_out_raw: amount,
@@ -891,6 +904,18 @@ impl Sniper {
                 let mut req = TxRequest::new(format!("snipe-ps-{}", event.launch.symbol));
                 if let Some(ix) = create_ata {
                     req = req.with_instruction(ix);
+                }
+                // Atomic platform fee (GAP-MAP P1) — native SOL transfer
+                // alongside the wrapped swap.
+                if let Some((fee_ix, decision)) =
+                    solana_kit::fee_transfer::build_fee_transfer_ix(
+                        &self.wallet.pubkey,
+                        quote_in,
+                        &cfg.platform_fee,
+                    )
+                {
+                    debug!(fee_lamports = decision.lamports, "platform fee appended to pumpswap snipe");
+                    req = req.with_instruction(fee_ix);
                 }
                 // Wrap enough SOL to cover the swap plus protocol/creator
                 // fees; the remainder is swept back by `unwrap_sol`.
@@ -932,6 +957,17 @@ impl Sniper {
                 let mut req = TxRequest::new(format!("snipe-ray-{}", event.launch.symbol));
                 if let Some(ix) = create_ata {
                     req = req.with_instruction(ix);
+                }
+                // Atomic platform fee (GAP-MAP P1).
+                if let Some((fee_ix, decision)) =
+                    solana_kit::fee_transfer::build_fee_transfer_ix(
+                        &self.wallet.pubkey,
+                        lamports,
+                        &cfg.platform_fee,
+                    )
+                {
+                    debug!(fee_lamports = decision.lamports, "platform fee appended to raydium snipe");
+                    req = req.with_instruction(fee_ix);
                 }
                 let mut req = with_common(req.with_instruction(swap_ix)).wrap_sol(lamports);
                 req.unwrap_sol = true;

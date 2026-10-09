@@ -3,16 +3,15 @@
 **Purpose:** a factual source document from which a seller can compose a
 listing (Fiverr/Upwork/direct) or answer buyer questions. It is **not** an
 advertisement and contains no price, revenue, ROI, client-count, user-count,
-production-volume, latency-guarantee, or "enterprise" claim. Every line is
+production-volume, latency-promise, or "enterprise" claim. Every line is
 supported by the repository; the evidence pointer is given per section.
 Companion source-material file: `docs/SELLING-LISTING-SOURCE.md`.
-Fact base synchronized to the 2026-09-29 tree (see `AUDIT.md`, the 2026-09-29
+Fact base synchronized to the 2026-09-29 tree (see `archive/AUDIT.md`, the 2026-09-29
 re-audit, and `PROMPT-3-RESULT.md`).
 
 ## Project name & version
 
-- **sniper-suite**, version **0.1.0**, MIT license (copyright-holder line is
-  a documented transfer placeholder). Evidence: `VERSION`, `Cargo.toml`,
+- **sniper-suite**, version **0.1.0**, proprietary license (`LICENSE`, all rights reserved; earlier MIT wording is withdrawn). Evidence: `VERSION`, `Cargo.toml`,
   `LICENSE`, `release-manifest.json`.
 
 ## Architecture (facts)
@@ -24,8 +23,7 @@ re-audit, and `PROMPT-3-RESULT.md`).
   embedded dashboard) plus a Next.js 16 tenant console
   (`apps/control-plane`). Evidence: `crates/`, `apps/`,
   `docs/ARCHITECTURE.md`.
-- PostgreSQL = durable financial truth (**34 forward-only migrations**,
-  `0001`–`0034`); Redis = non-authoritative coordination/cache; JSONL intent
+- PostgreSQL = durable financial truth (**<!-- stat:migrations -->54<!-- /stat --> forward-only migrations**, high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`); Redis = non-authoritative coordination/cache; JSONL intent
   journal for crash recovery. Evidence: `crates/core/migrations/`,
   `docs/BACKUP-RESTORE.md`, `release-manifest.json`.
 - Tenant-scoped trading data plane: 17 trading-truth PK/arbiter surfaces are
@@ -93,38 +91,24 @@ re-audit, and `PROMPT-3-RESULT.md`).
 
 ## Test evidence (facts; labels matter)
 
-- VERIFIED (PROMPT-3 close-out, 2026-09-29, current tree, real PostgreSQL
-  17.11): `cargo test -p bot-core --lib --tests -- --test-threads=1` →
-  18 binaries / **727 passed / 0 failed** — includes 599 lib tests,
-  `db_integration` 26/26 live-PG, and the 18 new cross-tenant isolation
-  tests (orders/executions/intents/positions/copy/polymarket/workers/
-  reporting vs a real database); `cargo test -p sniper-suite
-  trading_data_plane` → 2/2 (real router + real PG); clippy
-  `--all-targets -D warnings` clean on both crates; `cargo fmt --check`
-  clean; `release_manifest_counts_and_version_are_current` PASS. Evidence:
-  `PROMPT-3-RESULT.md` §4.
-- VERIFIED (2026-09-26 tree): `cargo test --workspace -- --test-threads=1`
-  (real PostgreSQL 17.11) → 70 suites / 2077 passed / 0 failed / 13 ignored;
-  `cargo audit` ×2 (0 vulnerabilities); `cargo test -p saas-sdk` 32/32;
-  `cargo test -p sniper-suite --lib` 263/263.
-- VERIFIED BY EXECUTION (buyer-hardening pass 2026-09-18, then-current tree):
-  `build-sbf` 187,504-byte .so (SHA-256 `57a890fa…`, byte-identical
-  rebuild); validator e2e 3/3 incl. funded stake→reward→claim→unstake and
-  cap/metadata vs the real mpl clone; db backup→restore round-trip + app
-  startup on the restored DB; latency-bench read-only + simulate legs.
+- Static test inventory: <!-- stat:test_attrs_plain -->2061<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->888<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+- No test-run logs ship in this repository. Earlier pass/fail figures
+  (workspace, db_integration, saas-sdk, staking validator e2e) were quoted
+  without logs and have been removed; run `cargo test --workspace` yourself
+  or see `evidence/` for the validation harnesses and their NOT_RUN state.
 - VERIFIED (2026-09-29): buyer package regenerated from the canonical tree
   and `verify-buyer-package.sh` PASS (the 2026-09-29 external re-audit had
-  flagged the previously shipped package as stale — `AUDIT.md` §4; the
+  flagged the previously shipped package as stale — `archive/AUDIT.md` §4; the
   regeneration closes that finding).
 - NOT EXECUTED: Docker build+smoke (no daemon), CI run (no runner), funded
   live trading, external audit (none exists).
-- Evidence: `AUDIT.md` (2026-09-29 re-audit), `PROMPT-3-RESULT.md`,
-  `docs/TESTING.md`, `release-manifest.json`, `docs/EVIDENCE-INDEX.md`.
+- Evidence: `archive/AUDIT.md` (seller's internal engineering log),
+  `docs/TESTING.md`, `docs/STATS.md`, `evidence/`, `docs/EVIDENCE-INDEX.md`.
 
 ## Documentation (facts)
 
 - 101 Markdown documents under `docs/` (engineering docs, buyer/delivery
-  docs, evidence index, registers) + README + CHANGELOG + AUDIT.md (the
+  docs, evidence index, registers) + README + CHANGELOG + archive/AUDIT.md (the
   2026-09-29 re-audit, installed verbatim) + PROMPT-2-RESULT.md +
   PROMPT-3-RESULT.md + SECURITY.md + LICENSE. Evidence:
   `docs/DELIVERY-MANIFEST.md`, `release-manifest.json` (`docs_files 101`).
@@ -155,20 +139,20 @@ re-audit, and `PROMPT-3-RESULT.md`).
   implemented and isolation-tested against a live database, but the five
   trading module crates are not yet tenant-context-wired — module startup
   is still process-level (one deployment runs one module set; per-tenant
-  isolated runtimes are not yet built). Evidence: `AUDIT.md` §11.
+  isolated runtimes are not yet built). Evidence: `archive/AUDIT.md` §11.
 - Remote custody: the Vault-transit and AWS-KMS adapters are REAL
   implemented code (unit-tested wire protocols; KMS SigV4 verified against
   the AWS-documented test vector), fail-closed, with no local fallback —
   but no live round-trip has been performed (LIVE_TEST remains buyer-side,
   `LIVE_CUSTODY=1`). HSM remains an explicitly fail-closed unimplemented
-  provider. Evidence: `docs/CUSTODY-STATUS-2026.md`; `AUDIT.md` §13.8
+  provider. Evidence: `docs/CUSTODY-STATUS-2026.md`; `archive/AUDIT.md` §13.8
   remediation note (the 2026-09-29 audit predates the adapters).
 - Billing: manual provider implemented; Stripe/Paddle adapters return 501
   until configured; no self-service checkout/invoicing/tax. Evidence:
   `docs/SAAS-PRODUCT.md`.
 - Polymarket integration is EIP-712 V2-centered; Exchange V3
   position-backed orders and async `tradeIDs` response handling are not
-  implemented. Evidence: `AUDIT.md` §8/§16.
+  implemented. Evidence: `archive/AUDIT.md` §8/§16.
 - Third-party venues (pump.fun, PumpSwap, Raydium, Jupiter, Polymarket,
   PumpPortal, Telegram) can change their protocols/APIs; integration
   maintenance is an ongoing cost.

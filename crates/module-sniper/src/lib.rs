@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Module 1 — the new-launch sniper.
 //!
 //! ## What it does
@@ -45,7 +46,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use bot_core::config::Config;
@@ -63,14 +64,19 @@ use solana_kit::tenant_signing_context::TenantSigningContext;
 use solana_kit::tenant_transaction::TenantTransactionMeta;
 use solana_kit::tokens::Wallet;
 
+pub mod backtest;
+pub mod dca;
 pub mod detect;
 pub mod entry;
 pub mod event;
 pub mod exit;
+pub mod exit_policy;
 pub mod gates;
+pub mod limit_orders;
 pub mod market;
 pub mod pipeline;
 pub mod replay;
+pub mod risk_intel;
 pub mod slippage;
 pub mod tenant_context;
 pub mod tenant_executor;
@@ -80,6 +86,71 @@ pub use detect::LaunchDetector;
 pub use entry::EntryOutcome;
 pub use event::{LaunchEvent, LaunchProtocol};
 pub use pipeline::{EntryRoute, RejectReason, SniperStage};
+
+const OWNED_TASK_ABORT_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct OwnedTask {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    label: &'static str,
+}
+
+impl OwnedTask {
+    fn new(handle: tokio::task::JoinHandle<()>, label: &'static str) -> Self {
+        Self {
+            handle: Some(handle),
+            label,
+        }
+    }
+
+    async fn join_with_timeout(mut self, timeout: std::time::Duration) {
+        let result = {
+            let Some(task) = self.handle.as_mut() else {
+                return;
+            };
+            tokio::time::timeout(timeout, task).await
+        };
+        match result {
+            Ok(Ok(())) => {
+                self.handle.take();
+            }
+            Ok(Err(error)) => {
+                if !error.is_cancelled() {
+                    warn!(task = self.label, error = %error, "owned task failed");
+                }
+                self.handle.take();
+            }
+            Err(_) => {
+                warn!(task = self.label, "task did not stop before deadline; aborting it");
+                if let Some(task) = &self.handle {
+                    task.abort();
+                }
+                let aborted = {
+                    let Some(task) = self.handle.as_mut() else {
+                        return;
+                    };
+                    tokio::time::timeout(OWNED_TASK_ABORT_GRACE, task).await
+                };
+                match aborted {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) if !error.is_cancelled() => {
+                        warn!(task = self.label, error = %error, "aborted task failed while joining");
+                    }
+                    Ok(Err(_)) => {}
+                    Err(_) => warn!(task = self.label, "task did not finish during abort join grace"),
+                }
+                self.handle.take();
+            }
+        }
+    }
+}
+
+impl Drop for OwnedTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.handle {
+            task.abort();
+        }
+    }
+}
 
 /// The sniper. One instance owns the detection feeds, the execution path and
 /// the exit sweeper for Module 1.
@@ -114,6 +185,18 @@ pub struct Sniper {
     tenant_guard: Option<Arc<TenantBroadcastGuard>>,
     /// Sweeper-local exit bookkeeping (mark failures, retry backoff).
     exits: exit::ExitTracker,
+    /// Advanced exit policy (GAP-MAP v2 P2): laddered take-profit,
+    /// break-even stop, dev-sell trigger. Built from
+    /// `sniper.advanced_exit`; inert (no-op) when that block is absent, so
+    /// classic behaviour is unchanged unless the operator opts in.
+    exit_policy: crate::exit_policy::ExitPolicyEngine,
+    /// Dev-sell signal feed from the risk_intel layer (mint + observed
+    /// time). The sweeper drains this into `exit_policy` each pass. `None`
+    /// = no dev-sell detection wired.
+    dev_sell_rx: Option<tokio::sync::broadcast::Receiver<crate::exit_policy::DevSellSignal>>,
+    /// The dev-sell bus sender kept so the exit-sweeper clone can subscribe
+    /// (`None` until `with_dev_sell_bus` attaches one).
+    dev_sell_tx: Option<crate::exit_policy::DevSellBus>,
 }
 
 impl Sniper {
@@ -132,6 +215,11 @@ impl Sniper {
         let policy = exec_policy(&cfg);
         let mut executor = Executor::new(rpc.clone(), wallet.clone(), policy)
             .with_fee_policy(solana_kit::execute::fee_policy_from_config(&cfg));
+        // Dynamic Jito tip (GAP-MAP P1): priced from the tip floor when
+        // `execution.jito_dynamic_tip_percentile > 0`.
+        if let Some(tip) = solana_kit::execute::dynamic_tip_from_config(&cfg) {
+            executor = executor.with_dynamic_tip(tip);
+        }
         if let Some(reg) = &signers {
             executor = executor.with_signer_registry(Arc::clone(reg));
         }
@@ -162,6 +250,9 @@ impl Sniper {
             tenant: None,
             tenant_guard: None,
             exits: exit::ExitTracker::default(),
+            exit_policy: crate::exit_policy::engine_from_config(cfg.sniper.advanced_exit.as_ref()),
+            dev_sell_rx: None,
+            dev_sell_tx: None,
         })
     }
 
@@ -184,6 +275,23 @@ impl Sniper {
     pub fn with_intent_sink(mut self, sink: Arc<dyn bot_core::recovery::IntentSink>) -> Self {
         self.intents = Some(sink);
         self
+    }
+
+    /// Attach the dev-sell signal bus (GAP-MAP v2 P2). The risk_intel layer
+    /// publishes `(mint, observed_at)` here; the exit sweeper subscribes and
+    /// feeds the advanced exit policy's dev-sell trigger. Attaching also
+    /// (re)subscribes THIS sniper's own receiver.
+    #[must_use]
+    pub fn with_dev_sell_bus(mut self, tx: crate::exit_policy::DevSellBus) -> Self {
+        self.dev_sell_rx = Some(tx.subscribe());
+        self.dev_sell_tx = Some(tx);
+        self
+    }
+
+    /// The dev-sell bus sender, when attached — risk_intel uses this to
+    /// publish creator/dev-sell observations.
+    pub fn dev_sell_sender(&self) -> Option<crate::exit_policy::DevSellBus> {
+        self.dev_sell_tx.clone()
     }
 
     /// Bind this sniper to ONE tenant (PROMPT 4/10 §B).
@@ -343,6 +451,9 @@ impl Sniper {
                 exec_policy(&sweeper_cfg),
             )
             .with_fee_policy(solana_kit::execute::fee_policy_from_config(&sweeper_cfg));
+            if let Some(tip) = solana_kit::execute::dynamic_tip_from_config(&sweeper_cfg) {
+                sweeper_executor = sweeper_executor.with_dynamic_tip(tip);
+            }
             if let Some(reg) = &self.signers {
                 sweeper_executor = sweeper_executor.with_signer_registry(Arc::clone(reg));
             }
@@ -363,6 +474,13 @@ impl Sniper {
                     }
                 }
             }
+            // The sweeper gets its OWN policy-engine instance (per-position
+            // ladder cursors belong to the loop that evaluates them) and its
+            // own subscription to the dev-sell bus when one is attached.
+            let sweeper_exit_policy = crate::exit_policy::engine_from_config(
+                sweeper_cfg.sniper.advanced_exit.as_ref(),
+            );
+            let sweeper_dev_sell_rx = self.dev_sell_tx.as_ref().map(|tx| tx.subscribe());
             let mut this = Sniper {
                 state: self.state.clone(),
                 rpc: self.rpc.clone(),
@@ -376,12 +494,18 @@ impl Sniper {
                 tenant: self.tenant.clone(),
                 tenant_guard: self.tenant_guard.clone(),
                 exits: exit::ExitTracker::default(),
+                exit_policy: sweeper_exit_policy,
+                dev_sell_rx: sweeper_dev_sell_rx,
+                dev_sell_tx: self.dev_sell_tx.clone(),
             };
-            tokio::spawn(async move { this.exit_sweeper().await })
+            OwnedTask::new(
+                tokio::spawn(async move { this.exit_sweeper().await }),
+                "sniper exit sweeper",
+            )
         };
 
         // Launch detection produces a merged stream of normalised events.
-        let mut launches: mpsc::Receiver<LaunchEvent> =
+        let mut launches =
             match LaunchDetector::spawn(self.state.clone(), self.rpc.clone()).await {
                 Ok(rx) => rx,
                 Err(e) => {
@@ -389,8 +513,12 @@ impl Sniper {
                     self.state
                         .record_error(BotModule::Sniper, &format!("detection: {e}"))
                         .await;
-                    // Keep the sweeper alive but stop this task.
-                    let _ = sweeper.await;
+                    // Keep the sweeper alive while the service is running,
+                    // then stop and join it on process shutdown.
+                    self.state.wait_shutdown().await;
+                    sweeper
+                        .join_with_timeout(std::time::Duration::from_secs(5))
+                        .await;
                     return;
                 }
             };
@@ -463,12 +591,17 @@ impl Sniper {
             }
         }
 
-        // The detector closed (shutdown). Wind down.
+        // Closing the merged receiver wakes all feed forwarders. Join them
+        // before returning so their websocket/PumpPortal owners cannot outlive
+        // this module task.
+        launches.shutdown().await;
         info!("launch stream ended; stopping sniper");
         self.state
             .set_running(BotModule::Sniper, false, false)
             .await;
-        sweeper.abort();
+        sweeper
+            .join_with_timeout(std::time::Duration::from_secs(5))
+            .await;
     }
 
     /// Current execution mode from live config (paper by default).

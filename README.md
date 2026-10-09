@@ -48,19 +48,23 @@ supervises every module.
 | [docs/RELEASE.md](docs/RELEASE.md) | versioning, reproducible-build analysis, release manifest, cut-a-release checklist |
 | [docs/HANDOVER.md](docs/HANDOVER.md) | engineering handover: verify from zero, verification-status taxonomy, maintenance invariants |
 | [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) | durable vs ephemeral data, backup/restore procedures, Redis-loss behavior |
-| [AUDIT.md](AUDIT.md) | full pre-build audit + build-plan execution status |
+| [docs/archive/AUDIT.md](docs/archive/AUDIT.md) | seller's internal engineering log (not an external audit; archived at repo root 2026-10-08 per GAP-MAP v2) |
 
 ### Buyer / engineering handover
 
-Start at **[docs/FINAL-DELIVERY.md](docs/FINAL-DELIVERY.md)** — the single
-delivery index (version, commits, evidence, statuses, buyer actions). Then:
+Start at **[docs/BUYER-HANDOVER.md](docs/BUYER-HANDOVER.md)** — the
+consolidated single entry point (2026-10-07 it replaced the former
+`BUYER-*`, `FINAL-*`, and `CURRENT-*` families; those originals are kept for
+internal history under `docs/archive/` and are not part of the buyer
+package). Then:
 
-- [docs/BUYER-QUICKSTART.md](docs/BUYER-QUICKSTART.md) — 18-step hands-on
-  verification (paper/simulate only; no live trading).
-- [docs/BUYER-DUE-DILIGENCE.md](docs/BUYER-DUE-DILIGENCE.md) — independent
-  verification checklist.
+- [docs/DEMO-RUNBOOK.md](docs/DEMO-RUNBOOK.md) — hands-on verification demos
+  (paper/simulate only; no live trading).
+- [docs/HANDOVER.md](docs/HANDOVER.md) — verify-from-zero sequence (§2) and
+  the verification-status taxonomy (§3).
 - [docs/ACCEPTANCE-CHECKLIST.md](docs/ACCEPTANCE-CHECKLIST.md) — sign-off list.
-- [docs/BUYER-RISK-REGISTER.md](docs/BUYER-RISK-REGISTER.md) — remaining risks.
+- [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) — remaining risks
+  and honest limitations.
 - [docs/DELIVERY-MANIFEST.md](docs/DELIVERY-MANIFEST.md) — index of the whole
   buyer/delivery package and its current machine-measured release facts.
 
@@ -74,7 +78,7 @@ code changed. Machine-readable facts:
 ## Requirements
 
 - **Rust** — declared MSRV is **1.82** (`rust-version` in `Cargo.toml`); the
-  pinned, verified toolchain is **1.98.1** (`rust-toolchain.toml` — rustup
+  pinned toolchain is **1.98.1** (`rust-toolchain.toml` — rustup
   selects it automatically; the full test suite and CI gate on that exact
   version). Install via [rustup](https://rustup.rs).
 - For building Module 4 only: the **Solana CLI / cargo-build-sbf** toolchain.
@@ -444,7 +448,7 @@ end-to-end test evidence are in [docs/STAKING.md](docs/STAKING.md).
   the staker's token account must be an SPL account of the config mint owned by
   the staker. Program PDAs sign via `invoke_signed` with their derivation seeds.
 * **Parameter caps** — the deposit fee is capped at `MAX_FEE_BPS` (10%) and the
-  annual reward rate at `MAX_REWARD_RATE_BPS` (100% APR); both `Initialize` and
+  annual reward rate at `MAX_REWARD_RATE_BPS` (10000 bps APR); both `Initialize` and
   `UpdateParams` reject anything above, so a compromised admin cannot set a
   confiscatory fee or an inflationary mint rate.
 * **Immutable max supply** — `Initialize` records `max_supply` (> 0); it is
@@ -513,7 +517,7 @@ end-to-end test evidence are in [docs/STAKING.md](docs/STAKING.md).
   signer must be declared (`extra_signers`) and resolvable, or the build
   fails with a structured error; nothing is silently skipped. `[signing]
   provider` selects the custody backend: `local` is implemented; `vault` /
-  `kms` / `hsm` are configuration-level extension points that **fail
+  `kms` / hardware-security-module custody are configuration-level extension points that **fail
   startup** in this build (no silent fallback). See `docs/SECURITY.md`.
 
 ---
@@ -586,21 +590,21 @@ STAKING_E2E=1 cargo test --test validator_e2e -- --test-threads=1
 
 ```
 sniper-suite/
-├─ Cargo.toml / Cargo.lock      workspace root (8 members; programs/ excluded)
+├─ Cargo.toml / Cargo.lock      workspace root (<!-- stat:crates -->8<!-- /stat --> members; programs/ excluded)
 ├─ config.toml.example          annotated reference config
 ├─ docker-compose.yml           bot + Postgres 16 + Redis 7 stack
 ├─ .env.template                compose env template (copy to .env)
 ├─ Dockerfile / .dockerignore   multi-stage image for the server binary
 ├─ deny.toml                    cargo-deny policy (advisories/bans/sources)
 ├─ rust-toolchain.toml          pinned toolchain (1.98.1) — local + CI + image
-├─ VERSION / CHANGELOG.md       release identity + history (LICENSE = MIT)
+├─ VERSION / CHANGELOG.md       release identity + history (licence: see LICENSE — all rights reserved)
 ├─ SECURITY.md                  vulnerability-reporting policy
-├─ scripts/                     release-check.sh (20-gate release validation)
+├─ scripts/                     release-check.sh (scripted release validation)
 │                               + verify-delivery.sh (bundle integrity check)
-├─ docs/                        149 current documents covering engineering,
+├─ docs/                        <!-- stat:docs_canonical -->101<!-- /stat --> current documents covering engineering,
 │                               SaaS, buyer handover, evidence, release and
 │                               operations (index: docs/DELIVERY-MANIFEST.md;
-│                               start: docs/FINAL-DELIVERY.md)
+│                               start: docs/BUYER-HANDOVER.md)
 ├─ .github/workflows/ci.yml     fmt/clippy/build/test + services + sbf + docker
 ├─ crates/
 │  ├─ core/            bot-core: config, state, events, risk, OMS, dedup,

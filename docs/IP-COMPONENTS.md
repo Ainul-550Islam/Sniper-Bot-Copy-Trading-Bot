@@ -4,7 +4,7 @@ Technically significant implementation work in sniper-suite 0.1.0, with
 provenance classification. Two categories are used honestly:
 
 - **Original application code** — written for this project; copyright
-  transfers with the repository (MIT, see `LICENSE`; holder placeholder is a
+  transfers with the repository (proprietary, see `LICENSE`; earlier MIT wording is withdrawn — it is a
   documented handover action).
 - **External protocol integration** — original code that *implements against*
   a third-party protocol/API/spec. The code is original; the protocol, its

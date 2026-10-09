@@ -37,7 +37,7 @@ skip() { # skip <name> <reason>
 # ---------------------------------------------------------------- files ----
 required_files=(
     Cargo.toml Cargo.lock VERSION CHANGELOG.md LICENSE SECURITY.md README.md
-    AUDIT.md rust-toolchain.toml deny.toml Dockerfile .dockerignore
+    docs/archive/AUDIT.md rust-toolchain.toml deny.toml Dockerfile .dockerignore
     docker-compose.yml .env.template config.toml.example .gitignore
     release-manifest.json
     .github/workflows/ci.yml scripts/release-check.sh

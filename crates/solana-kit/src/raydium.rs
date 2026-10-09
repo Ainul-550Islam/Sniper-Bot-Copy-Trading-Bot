@@ -30,6 +30,7 @@ use bot_core::maths;
 use crate::consts::*;
 use crate::layout::{AccountLayout, LayoutStore};
 use crate::rpc::Rpc;
+use crate::tokens::{MintInfo, TokenAccountInfo};
 
 /// The parsed `AmmInfo` pool-state account (784 bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,8 +85,7 @@ impl AmmInfo {
             Pubkey::new_from_array(b)
         };
         let _ = u128_at; // swap accumulators are deprecated upstream; not read
-
-        Ok(AmmInfo {
+        let parsed = AmmInfo {
             status: u64_at(AMM_OFF_STATUS),
             nonce: u64_at(AMM_OFF_NONCE),
             coin_decimals: u64_at(AMM_OFF_COIN_DECIMALS),
@@ -108,7 +108,34 @@ impl AmmInfo {
             amm_owner: pk_at(AMM_OFF_AMM_OWNER),
             lp_amount: u64_at(AMM_OFF_LP_AMOUNT),
             data_len: data.len(),
-        })
+        };
+        if parsed.coin_decimals > 18 || parsed.pc_decimals > 18 {
+            return Err(BotError::solana(format!(
+                "Raydium mint decimals are out of supported range (coin={}, pc={})",
+                parsed.coin_decimals, parsed.pc_decimals
+            )));
+        }
+        if parsed.trade_fee_denominator == 0
+            || parsed.trade_fee_numerator >= parsed.trade_fee_denominator
+        {
+            return Err(BotError::solana(format!(
+                "Raydium pool has invalid trade fee {}/{}",
+                parsed.trade_fee_numerator, parsed.trade_fee_denominator
+            )));
+        }
+        if parsed.coin_mint == Pubkey::default()
+            || parsed.pc_mint == Pubkey::default()
+            || parsed.coin_mint == parsed.pc_mint
+            || parsed.coin_vault == Pubkey::default()
+            || parsed.pc_vault == Pubkey::default()
+            || parsed.market == Pubkey::default()
+            || parsed.market_program == Pubkey::default()
+        {
+            return Err(BotError::solana(
+                "Raydium AMM account contains a zero or duplicate mint/account address",
+            ));
+        }
+        Ok(parsed)
     }
 
     pub fn is_swappable(&self) -> bool {
@@ -135,7 +162,9 @@ impl AmmInfo {
         if self.trade_fee_denominator == 0 {
             return 0;
         }
-        self.trade_fee_numerator.saturating_mul(maths::BPS_DENOM) / self.trade_fee_denominator
+        ((self.trade_fee_numerator as u128 * maths::BPS_DENOM as u128)
+            / self.trade_fee_denominator as u128)
+            .min(u64::MAX as u128) as u64
     }
 }
 
@@ -252,27 +281,63 @@ impl RaydiumPool {
             let accounts = rpc
                 .get_multiple_accounts(&[amm.market, amm.coin_vault, amm.pc_vault])
                 .await?;
-            if let Some(market_account) = accounts.first().and_then(|a| a.as_ref()) {
-                let parsed = MarketStateV3::parse(&market_account.data)?;
-                market_vault_signer =
-                    Some(parsed.vault_signer(&amm.market_program).map_err(|e| {
-                        BotError::solana(format!(
-                            "pool {amm_id} market vault signer: {e} — the market_program field \
-                             at offset {AMM_OFF_MARKET_PROGRAM} may be misaligned for this pool"
-                        ))
-                    })?);
-                market = Some(parsed);
+            let market_account = accounts
+                .first()
+                .and_then(|account| account.as_ref())
+                .ok_or_else(|| BotError::NotFound(format!("Raydium market {} not found", amm.market)))?;
+            if market_account.owner != amm.market_program {
+                return Err(BotError::solana(format!(
+                    "Raydium market {} is owned by {}, expected market program {}",
+                    amm.market, market_account.owner, amm.market_program
+                )));
             }
-            coin_vault_balance = accounts
+            let parsed = MarketStateV3::parse(&market_account.data)?;
+            if parsed.own_address != amm.market
+                || parsed.base_mint != amm.coin_mint
+                || parsed.quote_mint != amm.pc_mint
+            {
+                return Err(BotError::solana(format!(
+                    "Raydium market {} identity/mints do not match AMM pool {amm_id}",
+                    amm.market
+                )));
+            }
+            market_vault_signer = Some(parsed.vault_signer(&amm.market_program).map_err(|e| {
+                BotError::solana(format!(
+                    "pool {amm_id} market vault signer: {e} — the market_program field \
+                     at offset {AMM_OFF_MARKET_PROGRAM} may be misaligned for this pool"
+                ))
+            })?);
+            market = Some(parsed);
+
+            let coin_vault = accounts
                 .get(1)
-                .and_then(|a| a.as_ref())
-                .and_then(|a| token_account_amount(&a.data))
-                .unwrap_or(0);
-            pc_vault_balance = accounts
+                .and_then(|account| account.as_ref())
+                .ok_or_else(|| BotError::NotFound(format!("Raydium coin vault {} not found", amm.coin_vault)))?;
+            let pc_vault = accounts
                 .get(2)
-                .and_then(|a| a.as_ref())
-                .and_then(|a| token_account_amount(&a.data))
-                .unwrap_or(0);
+                .and_then(|account| account.as_ref())
+                .ok_or_else(|| BotError::NotFound(format!("Raydium pc vault {} not found", amm.pc_vault)))?;
+            for (label, account, expected_mint) in [
+                ("coin", coin_vault, amm.coin_mint),
+                ("pc", pc_vault, amm.pc_mint),
+            ] {
+                if account.owner != *TOKEN_PROGRAM {
+                    return Err(BotError::solana(format!(
+                        "Raydium {label} vault is owned by {}, expected legacy SPL Token program {}",
+                        account.owner, *TOKEN_PROGRAM
+                    )));
+                }
+                let info = TokenAccountInfo::parse(&account.data)?;
+                if info.mint != expected_mint || info.authority != amm_authority || info.state != 1 {
+                    return Err(BotError::solana(format!(
+                        "Raydium {label} vault has the wrong mint, authority, or account state"
+                    )));
+                }
+            }
+            let coin_info = TokenAccountInfo::parse(&coin_vault.data)?;
+            let pc_info = TokenAccountInfo::parse(&pc_vault.data)?;
+            coin_vault_balance = coin_info.amount;
+            pc_vault_balance = pc_info.amount;
         }
 
         Ok(RaydiumPool {
@@ -338,14 +403,17 @@ impl RaydiumPool {
         if self.coin_vault_balance == 0 {
             return 0.0;
         }
-        let coin = maths::from_raw_amount(
-            self.coin_vault_balance,
-            u8::try_from(self.amm.coin_decimals).unwrap_or(6),
-        );
-        let pc = maths::from_raw_amount(
-            self.pc_vault_balance,
-            u8::try_from(self.amm.pc_decimals).unwrap_or(9),
-        );
+        let (Ok(coin_decimals), Ok(pc_decimals)) = (
+            u8::try_from(self.amm.coin_decimals),
+            u8::try_from(self.amm.pc_decimals),
+        ) else {
+            return 0.0;
+        };
+        if coin_decimals > 18 || pc_decimals > 18 {
+            return 0.0;
+        }
+        let coin = maths::from_raw_amount(self.coin_vault_balance, coin_decimals);
+        let pc = maths::from_raw_amount(self.pc_vault_balance, pc_decimals);
         if coin == 0.0 {
             return 0.0;
         }
@@ -638,10 +706,12 @@ impl RaydiumPool {
 
 /// `Pubkey::create_program_address(&[b"amm authority", &[nonce]], program_id)`.
 ///
-/// The program stores `nonce` as a `u64` in `AmmInfo` but only the first byte
-/// is a real ed25519 bump, so truncate before deriving.
+/// The program stores `nonce` as a `u64` in `AmmInfo`, but it must contain a
+/// valid one-byte PDA bump. Reject out-of-range values instead of truncating.
 pub fn amm_authority_pda(nonce: u64) -> BotResult<Pubkey> {
-    let bump = [u8::try_from(nonce & 0xff).unwrap_or(0)];
+    let bump = [u8::try_from(nonce).map_err(|_| {
+        BotError::solana(format!("Raydium AMM nonce {nonce} does not fit in a PDA bump byte"))
+    })?];
     Pubkey::create_program_address(&[RAYDIUM_AMM_AUTHORITY_SEED, &bump], &RAYDIUM_AMM_V4)
         .map_err(|e| BotError::solana(format!("derive amm authority (nonce {nonce}): {e}")))
 }
@@ -940,14 +1010,16 @@ impl From<&RaydiumPool> for PoolSummary {
             status: p.amm.status,
             swappable: p.amm.is_swappable(),
             price_quote_per_base: p.price_pc_per_coin(),
-            base_reserve: maths::from_raw_amount(
-                p.coin_vault_balance,
-                u8::try_from(p.amm.coin_decimals).unwrap_or(6),
-            ),
-            quote_reserve: maths::from_raw_amount(
-                p.pc_vault_balance,
-                u8::try_from(p.amm.pc_decimals).unwrap_or(9),
-            ),
+            base_reserve: u8::try_from(p.amm.coin_decimals)
+                .ok()
+                .filter(|decimals| *decimals <= 18)
+                .map(|decimals| maths::from_raw_amount(p.coin_vault_balance, decimals))
+                .unwrap_or(0.0),
+            quote_reserve: u8::try_from(p.amm.pc_decimals)
+                .ok()
+                .filter(|decimals| *decimals <= 18)
+                .map(|decimals| maths::from_raw_amount(p.pc_vault_balance, decimals))
+                .unwrap_or(0.0),
             trade_fee_bps: p.amm.trade_fee_bps(),
             has_market: p.market.is_some(),
         }

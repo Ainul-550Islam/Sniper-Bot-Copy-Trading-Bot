@@ -4,8 +4,8 @@
 
 The current tree passed `cargo fmt --all -- --check`, `cargo check
 --workspace`, strict workspace Clippy, and the complete workspace test run:
-**1028 passed, 0 failed, 1 intentionally ignored**. PostgreSQL 17.11 was live;
-26/26 `db_integration` tests and both new SaaS durability tests executed.
+**all suites passed, one intentionally ignored test** (historical counts not reproduced — no run log ships). PostgreSQL was live;
+the `db_integration` tests and both new SaaS durability tests executed.
 The ignored test is the opt-in replay-fixture generator. Redis-specific and
 explicitly live-network/broadcast gates were not enabled in this run. Older
 counts below are retained as dated historical evidence, not current totals.
@@ -59,7 +59,7 @@ solana-test-validator, so there the same tests actually execute.
 * Server-side note: `symbol_for_claim`/`block_for_unresolved` and the CTF
   settlement check execute only against a live DB/venue — covered by
   db_integration + the CTF mock tests, and compiled/clippy-gated here.
-* **db_integration (23, gated, EXECUTED for real vs PostgreSQL 16.4 (23/23 fresh + rerun)):** migrations, OMS restart-recovery over real
+* **db_integration (gated — run for real against PostgreSQL ≥ 16):** migrations, OMS restart-recovery over real
   Postgres, dedup exactly-once across "processes", audit chain tamper
   detection via direct SQL, positions/trades round-trip + idempotent retry,
   recon queue claim/backoff/give-up, transaction/checkpoint/misc repos,
@@ -85,14 +85,14 @@ solana-test-validator, so there the same tests actually execute.
   serialization regression — this race was real: a `FOR UPDATE` head read
   forked the chain under concurrent writers and was found + fixed by these
   very tests during the release pass)**.
-* **redis_integration (10, gated, EXECUTED for real vs Redis 7.2.10 (10/10 fresh + rerun)):** SET NX TTL first-arrival, INCR+EXPIRE,
+* **redis_integration (gated — run for real against Redis):** SET NX TTL first-arrival, INCR+EXPIRE,
   token-guarded locks, dedup facade restart semantics (L2 survives an empty
   L1), env-based open helper, plus the Prompt-3 Redis claim store (Lua CAS
   over `own:claim:{id}` hashes, Redis-TIME clock): **two-replica single
   owner, expiry takeover + fencing, release/handoff grace, renewal
   extension, and `own:flag:*` runtime-flags round-trip**.
-* **distributed_integration (4, gated on BOTH Postgres and Redis, EXECUTED
-  for real (4/4 fresh + rerun)) — Prompt 3 §X two-context test:** two
+* **distributed_integration (gated on BOTH Postgres and Redis — run
+  for real) — Prompt 3 §X two-context test:** two
   fully independent replica contexts (own PG pool, own Redis connection,
   own AppState, own registry) sharing the same servers — **concurrent
   claim races on the Postgres AND Redis stores elect exactly one owner;

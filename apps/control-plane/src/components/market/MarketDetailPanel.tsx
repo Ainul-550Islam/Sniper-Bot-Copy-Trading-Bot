@@ -1,6 +1,6 @@
 "use client";
 
-import { MarketTicker } from "@/lib/api/market-api";
+import { MarketTicker, changePct, priceUsd, venueLabel } from "@/lib/api/market-api";
 import { formatPercentage, formatUsdCents } from "@/lib/formatters/financial";
 
 interface MarketDetailPanelProps {
@@ -8,7 +8,9 @@ interface MarketDetailPanelProps {
 }
 
 export function MarketDetailPanel({ market }: MarketDetailPanelProps) {
-  const isUp = market.change_24h_pct >= 0;
+  const pct = changePct(market);
+  const isUp = pct >= 0;
+  const price = priceUsd(market);
 
   return (
     <div className="card" style={{ marginBottom: "1.5rem" }}>
@@ -17,7 +19,7 @@ export function MarketDetailPanel({ market }: MarketDetailPanelProps) {
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <h2 style={{ margin: 0 }}>{market.symbol}</h2>
             <span className="badge" style={{ background: "rgba(255,255,255,0.08)" }}>
-              {market.venue.toUpperCase()}
+              {venueLabel(market.venue)}
             </span>
             <span className={`badge ${market.is_active ? "badge-ok" : "badge-warn"}`}>
               {market.is_active ? "ACTIVE TRADING" : "OFFLINE"}
@@ -28,10 +30,10 @@ export function MarketDetailPanel({ market }: MarketDetailPanelProps) {
 
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: "1.5rem", fontWeight: 700, fontFamily: "var(--mono)" }}>
-            ${market.price_usd < 0.01 ? market.price_usd.toFixed(6) : market.price_usd.toFixed(2)}
+            ${price < 0.01 ? price.toFixed(6) : price.toFixed(2)}
           </div>
           <div style={{ fontSize: "0.85rem", color: isUp ? "var(--ok)" : "var(--bad)", fontWeight: 600 }}>
-            {formatPercentage(market.change_24h_pct, { showSign: true })} 24h
+            {formatPercentage(pct, { showSign: true })} 24h
           </div>
         </div>
       </div>
@@ -40,14 +42,14 @@ export function MarketDetailPanel({ market }: MarketDetailPanelProps) {
         <div style={{ background: "rgba(0,0,0,0.2)", padding: "0.75rem", borderRadius: "6px" }}>
           <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>24h Volume</div>
           <div style={{ fontSize: "1.1rem", fontWeight: 600, fontFamily: "var(--mono)", marginTop: "0.25rem" }}>
-            {formatUsdCents(market.volume_24h_usd * 100)}
+            {formatUsdCents(market.volume_24h_usd_cents)}
           </div>
         </div>
 
         <div style={{ background: "rgba(0,0,0,0.2)", padding: "0.75rem", borderRadius: "6px" }}>
           <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>Liquidity Depth</div>
           <div style={{ fontSize: "1.1rem", fontWeight: 600, fontFamily: "var(--mono)", marginTop: "0.25rem" }}>
-            {formatUsdCents(market.liquidity_usd * 100)}
+            {formatUsdCents(market.liquidity_usd_cents)}
           </div>
         </div>
 
@@ -62,6 +64,13 @@ export function MarketDetailPanel({ market }: MarketDetailPanelProps) {
           <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>Quote Asset</div>
           <div style={{ fontSize: "1.1rem", fontWeight: 600, marginTop: "0.25rem" }}>
             {market.quote_asset}
+          </div>
+        </div>
+
+        <div style={{ background: "rgba(0,0,0,0.2)", padding: "0.75rem", borderRadius: "6px" }}>
+          <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>Feed Updated</div>
+          <div style={{ fontSize: "0.95rem", fontWeight: 600, marginTop: "0.25rem" }}>
+            {market.updated_at}
           </div>
         </div>
       </div>

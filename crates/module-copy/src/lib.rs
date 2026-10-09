@@ -56,7 +56,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use bot_core::config::Config;
@@ -66,6 +66,7 @@ use bot_core::models::{BotModule, ExecutionMode, PositionSide, PositionStatus, W
 use bot_core::risk::RiskEngine;
 use bot_core::state::Shared;
 
+use crate::feeds::{CopyFeed, CopyFeedHandle};
 use solana_kit::execute::{ExecPolicy, Executor};
 use solana_kit::layout::LayoutStore;
 use solana_kit::rpc::Rpc;
@@ -74,10 +75,74 @@ use solana_kit::tokens::Wallet;
 
 use event::{CopyStage, EventSource, LeaderTradeEvent};
 use event_ordering::OrderingTracker;
-use feeds::CopyFeed;
 use leader::{LeaderRegistry, LeaderTransition};
 use reconcile::{ReconAction, ReconInputs, ReconReport};
 use recovery::{CopyStore, MemoryCopyStore, RecoveryAction, RecoveryInputs, RecoveryPlan};
+
+const OWNED_TASK_ABORT_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct OwnedTask {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    label: &'static str,
+}
+
+impl OwnedTask {
+    fn new(handle: tokio::task::JoinHandle<()>, label: &'static str) -> Self {
+        Self {
+            handle: Some(handle),
+            label,
+        }
+    }
+
+    async fn join_with_timeout(mut self, timeout: std::time::Duration) {
+        let result = {
+            let Some(task) = self.handle.as_mut() else {
+                return;
+            };
+            tokio::time::timeout(timeout, task).await
+        };
+        match result {
+            Ok(Ok(())) => {
+                self.handle.take();
+            }
+            Ok(Err(error)) => {
+                if !error.is_cancelled() {
+                    warn!(task = self.label, error = %error, "owned task failed");
+                }
+                self.handle.take();
+            }
+            Err(_) => {
+                warn!(task = self.label, "task did not stop before deadline; aborting it");
+                if let Some(task) = &self.handle {
+                    task.abort();
+                }
+                let aborted = {
+                    let Some(task) = self.handle.as_mut() else {
+                        return;
+                    };
+                    tokio::time::timeout(OWNED_TASK_ABORT_GRACE, task).await
+                };
+                match aborted {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) if !error.is_cancelled() => {
+                        warn!(task = self.label, error = %error, "aborted task failed while joining");
+                    }
+                    Ok(Err(_)) => {}
+                    Err(_) => warn!(task = self.label, "task did not finish during abort join grace"),
+                }
+                self.handle.take();
+            }
+        }
+    }
+}
+
+impl Drop for OwnedTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.handle {
+            task.abort();
+        }
+    }
+}
 
 /// The copy-trading bot.
 pub struct CopyBot {
@@ -143,6 +208,10 @@ impl CopyBot {
             solana_kit::execute::exec_policy_from_config(&cfg),
         )
         .with_fee_policy(solana_kit::execute::fee_policy_from_config(&cfg));
+        // Dynamic Jito tip (GAP-MAP P1).
+        if let Some(tip) = solana_kit::execute::dynamic_tip_from_config(&cfg) {
+            executor = executor.with_dynamic_tip(tip);
+        }
         if let Some(reg) = &signers {
             executor = executor.with_signer_registry(Arc::clone(reg));
         }
@@ -695,7 +764,7 @@ impl CopyBot {
     }
 
     /// Run the copy bot until the task is aborted.
-    pub async fn run(&mut self, mut feeds: mpsc::Receiver<WalletTrade>) -> BotResult<()> {
+    pub async fn run(&mut self, mut feeds: CopyFeedHandle) -> BotResult<()> {
         self.state.set_running(BotModule::Copy, true, true).await;
         self.state.set_detail(BotModule::Copy, "starting").await;
         self.state.heartbeat(BotModule::Copy).await;
@@ -729,11 +798,9 @@ impl CopyBot {
         // too — an unguarded sweeper would be a tenant-boundary hole.
         // Fail closed: if the guard cannot be attached the run STOPS
         // rather than continue with a deployment-global sweeper.
-        if let Some(guard) = &self.tenant_guard {
+        let sweeper_task = if let Some(guard) = &self.tenant_guard {
             match sweeper.with_tenant_context(std::sync::Arc::clone(guard)) {
-                Ok(mut guarded) => {
-                    tokio::spawn(async move { guarded.run().await });
-                }
+                Ok(mut guarded) => tokio::spawn(async move { guarded.run().await }),
                 Err(e) => {
                     error!(error = %e, "tenant exit sweeper guard attach failed");
                     self.state
@@ -743,12 +810,14 @@ impl CopyBot {
                         )
                         .await;
                     self.state.set_running(BotModule::Copy, false, false).await;
+                    feeds.shutdown().await;
                     return Err(e);
                 }
             }
         } else {
-            tokio::spawn(async move { sweeper.run().await });
-        }
+            tokio::spawn(async move { sweeper.run().await })
+        };
+        let sweeper = OwnedTask::new(sweeper_task, "copy exit sweeper");
 
         info!(wallets = cfg.copy.wallets.len(), "copy-trading bot running");
         let recon_secs = cfg.copy.reconcile_interval_secs.max(1);
@@ -820,12 +889,16 @@ impl CopyBot {
             self.state.heartbeat(BotModule::Copy).await;
         }
 
+        feeds.shutdown().await;
+        sweeper
+            .join_with_timeout(std::time::Duration::from_secs(5))
+            .await;
         self.state.set_running(BotModule::Copy, false, false).await;
         Ok(())
     }
 
     /// Spawn the merged copy feed (PumpPortal account trades + RPC polling).
-    pub async fn spawn_feed(&self) -> BotResult<mpsc::Receiver<WalletTrade>> {
+    pub async fn spawn_feed(&self) -> BotResult<CopyFeedHandle> {
         CopyFeed::spawn(self.state.clone(), self.rpc.clone()).await
     }
 

@@ -177,6 +177,16 @@ fn snapshot(rng: &mut Rng) -> MarketSnapshot {
             (LaunchProtocol::RaydiumAmmV4, _) => Some((t0().timestamp() - 600) as u64),
             _ => None,
         },
+        sell_probe: match rng.below(4) {
+            0 => None,
+            1 => Some(solana_kit::token_safety::SellProbeOutcome::Sellable),
+            2 => Some(solana_kit::token_safety::SellProbeOutcome::NotSellable(
+                "probe said frozen".into(),
+            )),
+            _ => Some(solana_kit::token_safety::SellProbeOutcome::Unknown(
+                "probe timed out".into(),
+            )),
+        },
         mint_authority_revoked: match rng.below(3) {
             0 => None,
             1 => Some(false),
@@ -191,6 +201,37 @@ fn snapshot(rng: &mut Rng) -> MarketSnapshot {
             None
         } else {
             Some(rng.unit() * 10.0)
+        },
+        // Holder table (GAP-MAP P1): absent, or 1-4 rows mixing
+        // infrastructure and wallet shares.
+        top_holders: match rng.below(3) {
+            0 => None,
+            n => Some(
+                (0..n)
+                    .map(|_| module_sniper::gates::TokenHolder {
+                        address: rng.pubkey().to_string(),
+                        pct_of_supply: rng.unit() * 60.0,
+                        is_infrastructure: rng.chance(3),
+                    })
+                    .collect(),
+            ),
+        },
+        // Bundler signal (GAP-MAP P1): absent, sane, or a degenerate
+        // zero-buyer signal the gate must skip on.
+        bundling: match rng.below(4) {
+            0 => None,
+            1 => Some(module_sniper::gates::BundlingSignal {
+                first_slot_buyers: 0,
+                bundled_wallets: 0,
+            }),
+            _ => {
+                let buyers = 1 + rng.below(40) as u64;
+                Some(module_sniper::gates::BundlingSignal {
+                    first_slot_buyers: buyers,
+                    // Deliberately allow over-counts: the gate clamps.
+                    bundled_wallets: rng.below(buyers + 5) as u64,
+                })
+            }
         },
         spot_price_sol: match rng.below(10) {
             0 => 0.0,
@@ -216,6 +257,12 @@ fn gate_config(rng: &mut Rng) -> SniperConfig {
             rng.unit() * 10.0
         },
         min_pool_supply_fraction: if rng.chance(3) { 0.0 } else { rng.unit() },
+        max_top_holder_pct: if rng.chance(3) {
+            0.0
+        } else {
+            rng.unit() * 100.0
+        },
+        max_bundler_ratio: if rng.chance(3) { 0.0 } else { rng.unit() },
         max_snapshot_age_ms: 1 + rng.below(6_000),
         strict_gates: rng.chance(2),
         ..SniperConfig::default()
@@ -624,7 +671,10 @@ fn gate_reports_are_complete_ordered_and_strict_only_adds_failures() {
                     gates::GATE_POOL_OPEN_TIME
                         | gates::GATE_MINT_AUTHORITY
                         | gates::GATE_FREEZE_AUTHORITY
+                        | gates::GATE_SELL_SIMULATION
                         | gates::GATE_CREATOR_CONCENTRATION
+                        | gates::GATE_HOLDER_CONCENTRATION
+                        | gates::GATE_BUNDLER_DETECTION
                         | gates::GATE_POOL_SUPPLY_FRACTION
                 ),
                 "{skipped} can never be skipped"
@@ -645,6 +695,8 @@ fn gates_pass_when_every_datum_is_healthy_and_every_threshold_is_off() {
         }
         snap.mint_authority_revoked = Some(true);
         snap.freeze_authority_revoked = Some(true);
+        // A healthy market passes the sell probe.
+        snap.sell_probe = Some(solana_kit::token_safety::SellProbeOutcome::Sellable);
         snap.quote_reserve_lamports = 1 + rng.below(100 * SOL);
         snap.pricing_quote_reserve_lamports = snap.quote_reserve_lamports + 30 * SOL;
         snap.base_decimals = rng.below(13) as u8;
@@ -658,6 +710,10 @@ fn gates_pass_when_every_datum_is_healthy_and_every_threshold_is_off() {
         cfg.max_creator_initial_buy_sol = 0.0;
         cfg.min_pool_supply_fraction = 0.0;
         cfg.max_snapshot_age_ms = 1_000;
+        // The two P1 data-plane gates are OFF here (the test's contract is
+        // "every threshold off"), so no holder/bundler data is required.
+        cfg.max_top_holder_pct = 0.0;
+        cfg.max_bundler_ratio = 0.0;
 
         let report = gates::evaluate(&snap, &cfg, t0());
         assert!(report.passed(true), "{}", report.summary());
@@ -684,6 +740,16 @@ fn gate_thresholds_are_monotone() {
         high.max_snapshot_age_ms = 1 + rng.below(low.max_snapshot_age_ms);
         high.require_mint_authority_revoked = true;
         high.require_freeze_authority_revoked = true;
+        high.max_top_holder_pct = if low.max_top_holder_pct > 0.0 {
+            (low.max_top_holder_pct * rng.unit()).max(1e-9)
+        } else {
+            0.0
+        };
+        high.max_bundler_ratio = if low.max_bundler_ratio > 0.0 {
+            (low.max_bundler_ratio * rng.unit()).max(1e-9)
+        } else {
+            0.0
+        };
 
         let loose = gates::evaluate(&snap, &low, t0());
         let tight = gates::evaluate(&snap, &high, t0());

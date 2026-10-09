@@ -426,14 +426,37 @@ async fn request_close(
     // We best-effort revoke; worker will also handle on restart.
     // Note: SaasStore in-memory sessions are not bulk-revoked here — DB path uses SQL below.
     if let Some(db) = &state.db {
-        // Revoke sessions
-        if let Err(error) = sqlx::query("UPDATE saas_runtime_records SET record = jsonb_set(record, '{revoked_at}', to_jsonb(now()), true) WHERE kind='session' AND organization_id=$1")
-            .bind(org_id.as_uuid()).execute(db.pool()).await
+        // Revoke runtime sessions and their normalized projection in one
+        // statement. The session table is not the authentication authority,
+        // but keeping it aligned preserves administrative and audit views.
+        if let Err(error) = sqlx::query(
+            r#"WITH revoked AS (
+                   UPDATE saas_runtime_records
+                      SET record = jsonb_set(
+                                      jsonb_set(record, '{revoked_at}', to_jsonb(now()), true),
+                                      '{revoke_reason}', to_jsonb('tenant_closed'::text), true
+                                  ),
+                          updated_at = now()
+                    WHERE kind = 'session'
+                      AND organization_id = $1
+                      AND (record->>'revoked_at' IS NULL OR record->>'revoked_at' = '')
+                   RETURNING id, record->>'revoked_at' AS revoked_at,
+                             record->>'revoke_reason' AS revoke_reason
+               )
+               UPDATE sessions AS s
+                  SET revoked_at = revoked.revoked_at::timestamptz,
+                      revoke_reason = COALESCE(revoked.revoke_reason, '')
+                 FROM revoked
+                WHERE s.id = revoked.id::uuid"#,
+        )
+        .bind(org_id.as_uuid())
+        .execute(db.pool())
+        .await
         {
             tracing::warn!("session revocation durable update failed (org {}): {}", org_id, error);
         }
-        // Revoke API keys
-        if let Err(error) = sqlx::query("UPDATE saas_runtime_records SET record = jsonb_set(record, '{revoked_at}', to_jsonb(now()), true) WHERE kind='api_key' AND organization_id=$1")
+        // Revoke API keys in the authoritative runtime-record store.
+        if let Err(error) = sqlx::query("UPDATE saas_runtime_records SET record = jsonb_set(jsonb_set(record, '{revoked_at}', to_jsonb(now()), true), '{revoke_reason}', to_jsonb('tenant_closed'::text), true), updated_at = now() WHERE kind='api_key' AND organization_id=$1 AND (record->>'revoked_at' IS NULL OR record->>'revoked_at' = '')")
             .bind(org_id.as_uuid()).execute(db.pool()).await
         {
             tracing::warn!("api-key revocation durable update failed (org {}): {}", org_id, error);

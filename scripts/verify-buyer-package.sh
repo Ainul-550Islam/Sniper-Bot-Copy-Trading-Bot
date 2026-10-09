@@ -170,7 +170,7 @@ skip_dirs = {"buyer-release", "target", "node_modules", ".git", "__pycache__"}
 # Local toolchain state under .cargo/bin is never product (mirrors the
 # manifest walker's EXCLUDED_PREFIXES); .cargo config files like
 # audit.toml ARE product and stay mirrored.
-skip_prefixes = [(".cargo", "bin")]
+skip_prefixes = [(".cargo", "bin"), ("docs", "archive")]
 # Session artifacts excluded from the product by the manifest walker and
 # the rebuild mirror (one list, all three scripts — no drift).
 excluded_files = {

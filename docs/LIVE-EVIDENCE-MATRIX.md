@@ -43,5 +43,5 @@ that actually exists for it today. Evidence levels:
 ## Consequences for marketing
 
 Every claim must stay at or below its row's evidence level. See
-`docs/MARKETING-CLAIMS.md` for the enforceable registry and
+`docs/CURRENT-MARKETING-CLAIMS-2026.md` for the enforceable registry and
 `scripts/verify-marketing-claims.sh` for the checker.

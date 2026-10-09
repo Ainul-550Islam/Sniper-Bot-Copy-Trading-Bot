@@ -54,6 +54,21 @@ jobs:
         run: npm run typecheck
         # Fails on type errors — hard gate
 
+      - name: Unit tests (vitest — no-fake-data, api-contract, qr)
+        run: npm run test:unit
+        # Hard gates: the no-fake-data scan refuses fabricated fixtures and
+        # banned literals in src/, api-contract pins every frontend call to a
+        # documented route, qr locks the encoder's known-answer matrix.
+
+      - name: Contract tests (node:test)
+        run: npm test
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright e2e suite (auth, consent, MFA, kill-switch, strategies, billing, markets)
+        run: npm run test:e2e
+
       - name: Frontend contract and truthfulness gate
         run: ../../scripts/check-frontend-contract.sh
 

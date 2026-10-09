@@ -19,6 +19,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::Row;
+use tracing::warn;
 
 use crate::accounting::{
     Account, AccountingEvent, AccountingFinding, AccountingFindingKind, BookPosition, Entry,
@@ -481,12 +482,35 @@ fn ts_or_now(r: &PgRow, col: &str) -> DateTime<Utc> {
 }
 
 fn stored_from_row(r: &PgRow) -> Option<StoredEvent> {
+    let stored = stored_from_row_inner(r);
+    if stored.is_none() {
+        // A journal row that fails to decode must never disappear silently:
+        // replay builds the money truth from these rows, and the resulting
+        // book drift would otherwise surface only indirectly (as quantity or
+        // position reconciliation findings) with no pointer to its cause.
+        let event_id: String = r.try_get("event_id").unwrap_or_default();
+        let kind: String = r.try_get("kind").unwrap_or_default();
+        let module: String = r.try_get("module").unwrap_or_default();
+        let venue: String = r.try_get("venue").unwrap_or_default();
+        let mode: String = r.try_get("mode").unwrap_or_default();
+        warn!(
+            %event_id,
+            %kind,
+            %module,
+            %venue,
+            %mode,
+            "ledger journal row could not be decoded and is EXCLUDED from replay — investigate this row before trusting the rebuilt book"
+        );
+    }
+    stored
+}
+
+fn stored_from_row_inner(r: &PgRow) -> Option<StoredEvent> {
     let kind = EventKind::parse(&r.try_get::<String, _>("kind").ok()?)?;
     let module: BotModule = r.try_get::<String, _>("module").ok()?.parse().ok()?;
     let venue = Venue::parse(&r.try_get::<String, _>("venue").ok()?)?;
     let mode: ExecutionMode = r.try_get::<String, _>("mode").ok()?.parse().ok()?;
-    let side = opt_string(r, "side").and_then(|s| EventSide::parse(&s));
-    Some(StoredEvent {
+    let side = opt_string(r, "side").and_then(|s| EventSide::parse(&s));    Some(StoredEvent {
         event_id: r.try_get("event_id").ok()?,
         event: AccountingEvent {
             kind,

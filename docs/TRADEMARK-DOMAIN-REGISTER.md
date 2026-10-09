@@ -31,7 +31,7 @@
 
 ## Verdict
 
-**All brand/trademark/domain/registry assets are NOT INCLUDED / NOT VERIFIED** unless buyer verifies otherwise. This transaction is **source code + documentation + migrations + scripts** (MIT), not a brand sale.
+**All brand/trademark/domain/registry assets are NOT INCLUDED / NOT VERIFIED** unless buyer verifies otherwise. This transaction is **source code + documentation + migrations + scripts** (proprietary license, see `LICENSE`), not a brand sale.
 
 - No domain is transferred.
 - No trademark is assigned.

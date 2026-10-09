@@ -354,6 +354,14 @@ impl ExitDecision {
     pub fn forced(rule: ExitRule, reason: impl Into<String>) -> Self {
         ExitDecision::exit(rule, 1.0, reason)
     }
+
+    /// An exit with an explicit fraction, from a module-level rule (GAP-MAP
+    /// P2 advanced exit policy: laddered take-profit sells partial slices).
+    /// The fraction is clamped to [0, 1]; the rule attribution is preserved
+    /// for the ownership claim key and telemetry.
+    pub fn with_fraction(rule: ExitRule, fraction: f64, reason: impl Into<String>) -> Self {
+        ExitDecision::exit(rule, fraction, reason)
+    }
 }
 
 /// Everything the engine needs to evaluate one candidate entry.

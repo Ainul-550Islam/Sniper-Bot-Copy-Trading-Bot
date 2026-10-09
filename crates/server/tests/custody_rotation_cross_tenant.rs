@@ -41,6 +41,7 @@ fn test_state() -> ApiState {
         api_key: None,
         auth: None,
         limiter: RateLimiter::new(0),
+        sensitive_limiter: RateLimiter::new(0),
         db: None,
         journal: None,
         serve_dashboard: false,

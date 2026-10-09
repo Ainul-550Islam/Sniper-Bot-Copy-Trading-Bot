@@ -85,6 +85,19 @@ const MFA_KEY_ENV: &str = "MFA_ENCRYPTION_KEY";
 const MFA_PREFIX: &str = "enc:v1:";
 const MFA_NONCE_BYTES: usize = 12;
 
+/// Validate that an invitation can complete mandatory TOTP enrollment before
+/// the invite is consumed. This prevents accepting an invite into a tenant
+/// whose encryption configuration would make secure onboarding impossible.
+pub(crate) fn mfa_enrollment_ready() -> Result<(), String> {
+    // Validate both configured key material and the OS CSPRNG before a flow
+    // consumes a one-time invitation or issues a restricted session.
+    let _key = mfa_encryption_key()?;
+    let mut nonce_probe = [0u8; MFA_NONCE_BYTES];
+    SystemRandom::new()
+        .fill(&mut nonce_probe)
+        .map_err(|_| "secure randomness for MFA enrollment is unavailable".to_string())
+}
+
 fn mfa_encryption_key() -> Result<[u8; 32], String> {
     let encoded = std::env::var(MFA_KEY_ENV)
         .map_err(|_| format!("{MFA_KEY_ENV} must be configured as a base64-encoded 32-byte key"))?;
@@ -203,26 +216,38 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     ring::constant_time::verify_slices_are_equal(left, right).is_ok()
 }
 
-fn verify_totp_code(secret: &[u8], code: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+fn matching_totp_counter(
+    secret: &[u8],
+    code: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
     if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
+        return None;
     }
-    let counter = now.timestamp().div_euclid(30) as u64;
-    (-1i64..=1).any(|offset| {
-        let candidate = if offset.is_negative() {
-            counter.saturating_sub(offset.unsigned_abs())
-        } else {
-            counter.saturating_add(offset as u64)
+    let base = now.timestamp().div_euclid(30);
+    // Prefer the current step when two six-digit HMAC outputs happen to
+    // collide; adjacent steps are accepted only to tolerate small clock skew.
+    for offset in [0i64, -1, 1] {
+        let candidate = base.saturating_add(offset);
+        if candidate < 0 {
+            continue;
+        }
+        let candidate_u64 = match u64::try_from(candidate) {
+            Ok(value) => value,
+            Err(_) => continue,
         };
-        let expected = totp_code(secret, candidate);
-        constant_time_equal(expected.as_bytes(), code.as_bytes())
-    })
+        let expected = totp_code(secret, candidate_u64);
+        if constant_time_equal(expected.as_bytes(), code.as_bytes()) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub(crate) async fn session_mfa_is_current(
     state: &ApiState,
     organization_id: bot_core::tenant::OrganizationId,
-    session_created_at: chrono::DateTime<chrono::Utc>,
+    session_policy_version: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), String> {
     let Some(db) = state.db.as_deref() else {
         // MFA enforcement is only writable in the durable PostgreSQL path;
@@ -239,11 +264,13 @@ pub(crate) async fn session_mfa_is_current(
     let Some(row) = policy else {
         return Ok(());
     };
-    let enforced = row.try_get::<bool, _>("mfa_enforced").unwrap_or(false);
+    let enforced = row
+        .try_get::<bool, _>("mfa_enforced")
+        .map_err(|error| format!("MFA policy flag could not be decoded: {error}"))?;
     let updated_at = row
         .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
         .map_err(|error| format!("MFA policy timestamp could not be decoded: {error}"))?;
-    if enforced && session_created_at < updated_at {
+    if enforced && session_policy_version != Some(updated_at) {
         return Err("mfa_reauthentication_required".to_string());
     }
     Ok(())
@@ -254,23 +281,29 @@ pub(crate) async fn verify_login_mfa(
     user_id: bot_core::tenant::UserId,
     organization_id: bot_core::tenant::OrganizationId,
     code: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
     let Some(db) = state.db.as_deref() else {
         return Err("MFA policy requires an attached PostgreSQL database".to_string());
     };
-    let policy =
-        sqlx::query("SELECT mfa_enforced FROM tenant_security_policies WHERE organization_id = $1")
-            .bind(organization_id.as_uuid())
-            .fetch_optional(db.pool())
-            .await
-            .map_err(|error| format!("MFA policy could not be loaded: {error}"))?;
+    let policy = sqlx::query(
+        "SELECT mfa_enforced, updated_at FROM tenant_security_policies WHERE organization_id = $1",
+    )
+    .bind(organization_id.as_uuid())
+    .fetch_optional(db.pool())
+    .await
+    .map_err(|error| format!("MFA policy could not be loaded: {error}"))?;
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
     let enforced = policy
-        .as_ref()
-        .and_then(|row| row.try_get::<bool, _>("mfa_enforced").ok())
-        .unwrap_or(false);
+        .try_get::<bool, _>("mfa_enforced")
+        .map_err(|error| format!("MFA policy flag could not be decoded: {error}"))?;
     if !enforced {
-        return Ok(());
+        return Ok(None);
     }
+    let policy_version = policy
+        .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+        .map_err(|error| format!("MFA policy timestamp could not be decoded: {error}"))?;
     let code = code
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -283,6 +316,9 @@ pub(crate) async fn verify_login_mfa(
     .fetch_all(db.pool())
     .await
     .map_err(|error| format!("MFA devices could not be loaded: {error}"))?;
+    if rows.is_empty() {
+        return Err("mfa_enrollment_required".to_string());
+    }
     for row in rows {
         let device_id: uuid::Uuid = row
             .try_get("id")
@@ -293,16 +329,17 @@ pub(crate) async fn verify_login_mfa(
         let secret = decrypt_mfa_secret(&encrypted)
             .and_then(|value| decode_base32(&value))
             .map_err(|error| format!("MFA secret could not be decrypted: {error}"))?;
-        if verify_totp_code(&secret, code, Utc::now()) {
+        if let Some(counter) = matching_totp_counter(&secret, code, Utc::now()) {
             let claimed = sqlx::query(
-                "UPDATE user_mfa_devices SET last_used_at = now() WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '30 seconds')",
+                "UPDATE user_mfa_devices SET last_used_at = now(), counter = $2 WHERE id = $1 AND counter < $2",
             )
             .bind(device_id)
+            .bind(counter)
             .execute(db.pool())
             .await
-            .map_err(|error| format!("MFA use timestamp could not be persisted: {error}"))?;
+            .map_err(|error| format!("MFA use counter could not be persisted: {error}"))?;
             if claimed.rows_affected() > 0 {
-                return Ok(());
+                return Ok(Some(policy_version));
             }
         }
     }
@@ -374,7 +411,20 @@ pub async fn get_status(State(state): State<ApiState>, headers: HeaderMap) -> Re
     .fetch_one(db.pool())
     .await;
     let has_totp_configured = match mfa_device {
-        Ok(row) => row.try_get::<bool, _>("configured").unwrap_or(false),
+        Ok(row) => match row.try_get::<bool, _>("configured") {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, organization = %ctx.organization.id, "MFA enrollment state could not be decoded");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "security_storage_unavailable",
+                        "reason": "MFA enrollment state could not be loaded"
+                    })),
+                )
+                    .into_response();
+            }
+        },
         Err(error) => {
             tracing::error!(error = %error, organization = %ctx.organization.id, "MFA device query failed");
             return (
@@ -395,16 +445,35 @@ pub async fn get_status(State(state): State<ApiState>, headers: HeaderMap) -> Re
         require_signed_commits,
         policy_configured,
     ) = match policy {
-        Some(row) => (
-            row.try_get::<bool, _>("mfa_enforced").unwrap_or(false),
-            row.try_get::<Vec<String>, _>("ip_allowlist")
-                .unwrap_or_default(),
-            row.try_get::<i32, _>("session_duration_hours")
-                .unwrap_or(12),
-            row.try_get::<bool, _>("require_signed_commits")
-                .unwrap_or(false),
-            true,
-        ),
+        Some(row) => {
+            let decoded = (
+                row.try_get::<bool, _>("mfa_enforced"),
+                row.try_get::<Vec<String>, _>("ip_allowlist"),
+                row.try_get::<i32, _>("session_duration_hours"),
+                row.try_get::<bool, _>("require_signed_commits"),
+            );
+            match decoded {
+                (Ok(mfa), Ok(allowlist), Ok(duration), Ok(signed_commits)) => {
+                    (mfa, allowlist, duration, signed_commits, true)
+                }
+                (mfa, allowlist, duration, signed_commits) => {
+                    let error = mfa
+                        .err()
+                        .or_else(|| allowlist.err())
+                        .or_else(|| duration.err())
+                        .or_else(|| signed_commits.err());
+                    tracing::error!(?error, organization = %ctx.organization.id, "security policy row could not be decoded");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "security_storage_unavailable",
+                            "reason": "security policy could not be decoded"
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
         None => (false, Vec::new(), 12, false, false),
     };
 
@@ -459,14 +528,70 @@ pub async fn rotate_tokens(State(state): State<ApiState>, headers: HeaderMap) ->
                 .into_response();
         }
     };
-    let sessions = sqlx::query(
-        "UPDATE saas_runtime_records SET record = jsonb_set(jsonb_set(record, '{revoked_at}', to_jsonb(now()), true), '{revoke_reason}', to_jsonb('tenant_credential_rotation'::text), true), updated_at = now() WHERE kind = 'session' AND (record->>'revoked_at' IS NULL OR record->>'revoked_at' = '') AND (organization_id = $1 OR (organization_id IS NULL AND user_id IN (SELECT user_id FROM organization_members WHERE organization_id = $1 AND status = 'active')))"
+    let session_counts = sqlx::query(
+        r#"WITH revoked AS (
+               UPDATE saas_runtime_records
+                  SET record = jsonb_set(
+                                  jsonb_set(record, '{revoked_at}', to_jsonb(now()), true),
+                                  '{revoke_reason}',
+                                  to_jsonb('tenant_credential_rotation'::text),
+                                  true
+                              ),
+                      updated_at = now()
+                WHERE kind = 'session'
+                  AND (record->>'revoked_at' IS NULL OR record->>'revoked_at' = '')
+                  AND (
+                      organization_id = $1
+                      OR (organization_id IS NULL AND user_id IN (
+                          SELECT user_id
+                            FROM saas_runtime_records
+                           WHERE kind = 'membership'
+                             AND organization_id = $1
+                             AND record->>'status' = 'active'
+                      ))
+                  )
+               RETURNING id, record->>'revoked_at' AS revoked_at,
+                         record->>'revoke_reason' AS revoke_reason
+           ), normalized AS (
+               UPDATE sessions AS s
+                  SET revoked_at = revoked.revoked_at::timestamptz,
+                      revoke_reason = COALESCE(revoked.revoke_reason, '')
+                 FROM revoked
+                WHERE s.id = revoked.id::uuid
+               RETURNING s.id
+           )
+           SELECT (SELECT COUNT(*) FROM revoked)::bigint AS runtime_count,
+                  (SELECT COUNT(*) FROM normalized)::bigint AS normalized_count"#,
     )
     .bind(ctx.organization.id.as_uuid())
-    .execute(&mut *transaction)
+    .fetch_one(&mut *transaction)
     .await;
-    let sessions = match sessions {
-        Ok(value) => value.rows_affected(),
+    let counts = match session_counts {
+        Ok(row) => {
+            let runtime = row.try_get::<i64, _>("runtime_count");
+            let normalized = row.try_get::<i64, _>("normalized_count");
+            match (runtime, normalized) {
+                (Ok(runtime), Ok(normalized)) if runtime == normalized => (runtime, normalized),
+                (Ok(runtime), Ok(normalized)) => {
+                    tracing::error!(organization = %ctx.organization.id, runtime, normalized, "session projection is incomplete during credential rotation");
+                    let _ = transaction.rollback().await;
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({ "error": "credential_rotation_unavailable", "reason": "session revocations could not be synchronized" })),
+                    )
+                        .into_response();
+                }
+                (runtime, normalized) => {
+                    tracing::error!(?runtime, ?normalized, organization = %ctx.organization.id, "session revocation counts could not be decoded");
+                    let _ = transaction.rollback().await;
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({ "error": "credential_rotation_unavailable", "reason": "session revocations could not be verified" })),
+                    )
+                        .into_response();
+                }
+            }
+        }
         Err(error) => {
             tracing::error!(error = %error, organization = %ctx.organization.id, "session credential rotation failed");
             let _ = transaction.rollback().await;
@@ -477,6 +602,7 @@ pub async fn rotate_tokens(State(state): State<ApiState>, headers: HeaderMap) ->
                 .into_response();
         }
     };
+    let sessions = counts.0;
     let api_keys = sqlx::query(
         "UPDATE saas_runtime_records SET record = jsonb_set(jsonb_set(record, '{revoked_at}', to_jsonb(now()), true), '{revoke_reason}', to_jsonb('tenant_credential_rotation'::text), true), updated_at = now() WHERE kind = 'api_key' AND organization_id = $1 AND (record->>'revoked_at' IS NULL OR record->>'revoked_at' = '')",
     )
@@ -526,12 +652,8 @@ pub async fn rotate_tokens(State(state): State<ApiState>, headers: HeaderMap) ->
 }
 
 pub async fn setup_totp(State(state): State<ApiState>, headers: HeaderMap) -> Response {
-    let ctx = match authorize_request(
-        &state,
-        &headers,
-        AccessRequest::manage(Permission::UsersManage),
-    )
-    .await
+    let ctx = match crate::saas::middleware::authorize_mfa_enrollment_request(&state, &headers)
+        .await
     {
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
@@ -543,6 +665,15 @@ pub async fn setup_totp(State(state): State<ApiState>, headers: HeaderMap) -> Re
         )
             .into_response();
     };
+    if let Some(response) = crate::saas::rate_limit::reject_sensitive_attempt(
+        &state,
+        "totp_setup",
+        &format!("{}:{}", user_id, ctx.organization.id),
+    )
+    .await
+    {
+        return response;
+    }
     let Some(db) = state.db.as_deref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -578,22 +709,34 @@ pub async fn setup_totp(State(state): State<ApiState>, headers: HeaderMap) -> Re
         }
     };
     let device_id = uuid::Uuid::new_v4();
-    let deleted = sqlx::query(
+    let mut enrollment_tx = match db.pool().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::error!(error = %error, "MFA enrollment transaction could not start");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "mfa_storage_unavailable", "reason": "MFA enrollment could not be prepared" })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(error) = sqlx::query(
         "DELETE FROM user_mfa_devices WHERE user_id = $1 AND organization_id = $2 AND device_type = 'totp' AND verified = false",
     )
     .bind(user_id.as_uuid())
     .bind(ctx.organization.id.as_uuid())
-    .execute(db.pool())
-    .await;
-    if let Err(error) = deleted {
+    .execute(&mut *enrollment_tx)
+    .await
+    {
         tracing::error!(error = %error, "old MFA enrollment cleanup failed");
+        let _ = enrollment_tx.rollback().await;
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "mfa_storage_unavailable", "reason": "MFA enrollment could not be prepared" })),
         )
             .into_response();
     }
-    let inserted = sqlx::query(
+    if let Err(error) = sqlx::query(
         "INSERT INTO user_mfa_devices (id, user_id, organization_id, device_type, name, secret_encrypted, verified) VALUES ($1, $2, $3, 'totp', $4, $5, false)",
     )
     .bind(device_id)
@@ -601,10 +744,19 @@ pub async fn setup_totp(State(state): State<ApiState>, headers: HeaderMap) -> Re
     .bind(ctx.organization.id.as_uuid())
     .bind("Authenticator app")
     .bind(encrypted)
-    .execute(db.pool())
-    .await;
-    if let Err(error) = inserted {
+    .execute(&mut *enrollment_tx)
+    .await
+    {
         tracing::error!(error = %error, "MFA enrollment insert failed");
+        let _ = enrollment_tx.rollback().await;
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "mfa_storage_unavailable", "reason": "MFA enrollment could not be persisted" })),
+        )
+            .into_response();
+    }
+    if let Err(error) = enrollment_tx.commit().await {
+        tracing::error!(error = %error, "MFA enrollment transaction could not commit");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "mfa_storage_unavailable", "reason": "MFA enrollment could not be persisted" })),
@@ -642,17 +794,72 @@ pub async fn setup_totp(State(state): State<ApiState>, headers: HeaderMap) -> Re
         .into_response()
 }
 
+async fn promote_verified_enrollment_session(
+    state: &ApiState,
+    ctx: &crate::saas::middleware::SaasContext,
+    user_id: bot_core::tenant::UserId,
+    organization_id: bot_core::tenant::OrganizationId,
+) -> Result<bool, String> {
+    let bot_core::authorization::Principal::UserSession { session_id } =
+        &ctx.authorization.principal
+    else {
+        return Ok(false);
+    };
+    let session_id = bot_core::session::SessionId::parse(session_id)
+        .ok_or_else(|| "MFA enrollment session id is invalid".to_string())?;
+    let mut session = state
+        .saas
+        .session(session_id)
+        .await
+        .map_err(|error| format!("MFA enrollment session could not be loaded: {error}"))?
+        .ok_or_else(|| "MFA enrollment session no longer exists".to_string())?;
+    if session.user_id != user_id || session.organization_id != Some(organization_id) {
+        return Err("MFA enrollment session scope changed unexpectedly".to_string());
+    }
+    let Some(db) = state.db.as_deref() else {
+        return Err("MFA policy requires an attached PostgreSQL database".to_string());
+    };
+    let policy = sqlx::query(
+        "SELECT mfa_enforced, updated_at FROM tenant_security_policies WHERE organization_id = $1",
+    )
+    .bind(organization_id.as_uuid())
+    .fetch_optional(db.pool())
+    .await
+    .map_err(|error| format!("MFA policy could not be loaded: {error}"))?;
+    let (enforced, policy_version) = match policy {
+        Some(row) => {
+            let enforced = row
+                .try_get::<bool, _>("mfa_enforced")
+                .map_err(|error| format!("MFA policy flag could not be decoded: {error}"))?;
+            let version = row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+                .map_err(|error| format!("MFA policy timestamp could not be decoded: {error}"))?;
+            (enforced, if enforced { Some(version) } else { None })
+        }
+        None => (false, None),
+    };
+    if !session.mfa_enrollment_only
+        && (!enforced || session.mfa_policy_updated_at == policy_version)
+    {
+        return Ok(false);
+    }
+    session.mfa_policy_updated_at = policy_version;
+    session.mfa_enrollment_only = false;
+    state
+        .saas
+        .update_session(&session)
+        .await
+        .map_err(|error| format!("MFA enrollment session could not be promoted: {error}"))?;
+    Ok(true)
+}
+
 pub async fn verify_totp(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Json(body): Json<VerifyTotpBody>,
 ) -> Response {
-    let ctx = match authorize_request(
-        &state,
-        &headers,
-        AccessRequest::manage(Permission::UsersManage),
-    )
-    .await
+    let ctx = match crate::saas::middleware::authorize_mfa_enrollment_request(&state, &headers)
+        .await
     {
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
@@ -664,6 +871,15 @@ pub async fn verify_totp(
         )
             .into_response();
     };
+    if let Some(response) = crate::saas::rate_limit::reject_sensitive_attempt(
+        &state,
+        "totp_verify",
+        &format!("{}:{}", user_id, ctx.organization.id),
+    )
+    .await
+    {
+        return response;
+    }
     let Some(db) = state.db.as_deref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -719,7 +935,7 @@ pub async fn verify_totp(
                 .into_response();
         }
     };
-    if !verify_totp_code(&secret, &body.code, Utc::now()) {
+    let Some(counter) = matching_totp_counter(&secret, &body.code, Utc::now()) else {
         state
             .audit
             .record(
@@ -735,13 +951,14 @@ pub async fn verify_totp(
             Json(json!({ "error": "invalid_totp_code" })),
         )
             .into_response();
-    }
+    };
     let updated = sqlx::query(
-        "UPDATE user_mfa_devices SET verified = true, last_used_at = now() WHERE id = $1 AND user_id = $2 AND organization_id = $3 AND (last_used_at IS NULL OR last_used_at < now() - interval '30 seconds')",
+        "UPDATE user_mfa_devices SET verified = true, last_used_at = now(), counter = $4 WHERE id = $1 AND user_id = $2 AND organization_id = $3 AND counter < $4",
     )
     .bind(device_id)
     .bind(user_id.as_uuid())
     .bind(ctx.organization.id.as_uuid())
+    .bind(counter)
     .execute(db.pool())
     .await;
     match updated {
@@ -762,6 +979,27 @@ pub async fn verify_totp(
                 .into_response();
         }
     }
+    let session_promoted = match promote_verified_enrollment_session(
+        &state,
+        &ctx,
+        user_id,
+        ctx.organization.id,
+    )
+    .await
+    {
+        Ok(promoted) => promoted,
+        Err(reason) => {
+            tracing::error!(organization = %ctx.organization.id, user = %user_id, %reason, "verified MFA session could not be promoted");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "mfa_storage_unavailable",
+                    "reason": "the authenticator was verified but the onboarding session could not be activated"
+                })),
+            )
+                .into_response();
+        }
+    };
     state
         .audit
         .success(
@@ -772,7 +1010,12 @@ pub async fn verify_totp(
         .await;
     (
         StatusCode::OK,
-        Json(json!({ "success": true, "device_id": device_id.to_string(), "verified": true })),
+        Json(json!({
+            "success": true,
+            "device_id": device_id.to_string(),
+            "verified": true,
+            "session_promoted": session_promoted
+        })),
     )
         .into_response()
 }
@@ -810,7 +1053,17 @@ pub async fn enforce_mfa(
         .fetch_one(db.pool())
         .await;
         let enrolled = match enrolled {
-            Ok(row) => row.try_get::<bool, _>("enrolled").unwrap_or(false),
+            Ok(row) => match row.try_get::<bool, _>("enrolled") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::error!(error = %error, "MFA enrollment result could not be decoded");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({ "error": "mfa_storage_unavailable" })),
+                    )
+                        .into_response();
+                }
+            },
             Err(error) => {
                 tracing::error!(error = %error, "MFA enrollment check failed");
                 return (
@@ -940,4 +1193,181 @@ pub async fn update_ip_allowlist(
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn totp_matches_rfc_6238_sha1_vector_and_returns_replay_counter() {
+        let secret = b"12345678901234567890";
+        let now = Utc
+            .timestamp_opt(59, 0)
+            .single()
+            .expect("the RFC test timestamp is valid");
+
+        assert_eq!(totp_code(secret, 1), "287082");
+        assert_eq!(matching_totp_counter(secret, "287082", now), Some(1));
+        assert_eq!(matching_totp_counter(secret, "28708x", now), None);
+    }
+
+    #[test]
+    fn base32_encoding_round_trips_without_padding() {
+        let bytes = [0u8, 1, 2, 3, 255];
+        let encoded = encode_base32(&bytes);
+        assert_eq!(decode_base32(&encoded).as_deref(), Ok(bytes.as_slice()));
+        assert!(decode_base32("").is_err());
+    }
+
+    /// Every SHA-1 vector from RFC 6238 appendix B, truncated to the six
+    /// digits this deployment uses. The seed is the RFC's ASCII key.
+    #[test]
+    fn totp_matches_every_rfc_6238_sha1_vector() {
+        let secret = b"12345678901234567890";
+        let vectors = [
+            (59u64, 1u64, "287082"),
+            (1_111_111_109, 37_037_036, "081804"),
+            (1_111_111_111, 37_037_037, "050471"),
+            (1_234_567_890, 41_152_263, "005924"),
+            (2_000_000_000, 66_666_666, "279037"),
+            (20_000_000_000, 666_666_666, "353130"),
+        ];
+        for (unix, counter, code) in vectors {
+            assert_eq!(unix / 30, counter, "counter is floor(T/30)");
+            assert_eq!(totp_code(secret, counter), code, "T = {unix}");
+        }
+    }
+
+    /// The verifier must resolve the RFC vectors back to their counters
+    /// when "now" is exactly that vector's timestamp.
+    #[test]
+    fn matching_counter_resolves_the_rfc_vectors() {
+        let secret = b"12345678901234567890";
+        for (unix, counter, code) in [
+            (59i64, 1i64, "287082"),
+            (1_111_111_109, 37_037_036, "081804"),
+            (1_234_567_890, 41_152_263, "005924"),
+            (2_000_000_000, 66_666_666, "279037"),
+        ] {
+            let now = Utc
+                .timestamp_opt(unix, 0)
+                .single()
+                .expect("the RFC test timestamps are valid");
+            assert_eq!(
+                matching_totp_counter(secret, code, now),
+                Some(counter),
+                "code {code} at T = {unix}"
+            );
+        }
+    }
+
+    /// ±1 step of clock skew is accepted; the returned counter identifies
+    /// WHICH step matched (the caller persists it to defeat replay).
+    #[test]
+    fn adjacent_steps_are_accepted_and_identified() {
+        let secret = b"12345678901234567890";
+        // now sits on step 2 of the RFC timeline.
+        let now = Utc
+            .timestamp_opt(60, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let previous = totp_code(secret, 1); // step 1: code for T = 59
+        let current = totp_code(secret, 2);
+        let next = totp_code(secret, 3);
+
+        assert_eq!(matching_totp_counter(secret, &previous, now), Some(1));
+        assert_eq!(matching_totp_counter(secret, &current, now), Some(2));
+        assert_eq!(matching_totp_counter(secret, &next, now), Some(3));
+
+        // Two steps away is OUTSIDE the skew window.
+        let far_past = totp_code(secret, 0);
+        let far_future = totp_code(secret, 4);
+        if far_past != current {
+            assert_eq!(matching_totp_counter(secret, &far_past, now), None);
+        }
+        if far_future != current {
+            assert_eq!(matching_totp_counter(secret, &far_future, now), None);
+        }
+    }
+
+    /// The current step is preferred when codes collide across steps: the
+    /// search order is 0, -1, +1, so an ambiguous code resolves to the
+    /// present, never to a past step a replay could reuse.
+    #[test]
+    fn current_step_wins_on_collision() {
+        let secret = b"12345678901234567890";
+        let now = Utc
+            .timestamp_opt(1_111_111_109, 0)
+            .single()
+            .expect("valid timestamp");
+        let base = 1_111_111_109i64.div_euclid(30);
+        let current_code = totp_code(secret, base as u64);
+        assert_eq!(
+            matching_totp_counter(secret, &current_code, now),
+            Some(base),
+            "the current step must be checked first"
+        );
+    }
+
+    /// Replay detection depends on the returned counter being stable and
+    /// monotonic per secret: the same code at the same time always yields
+    /// the same counter, so a stored "last used" comparison is sound.
+    #[test]
+    fn replay_counter_is_deterministic() {
+        let secret = b"12345678901234567890";
+        let now = Utc
+            .timestamp_opt(1_234_567_890, 0)
+            .single()
+            .expect("valid timestamp");
+        let first = matching_totp_counter(secret, "005924", now);
+        let second = matching_totp_counter(secret, "005924", now);
+        assert_eq!(first, Some(41_152_263));
+        assert_eq!(first, second);
+        // A code from a step BEFORE the last-used counter must be refused
+        // by the caller; the verifier hands back exactly the step it used,
+        // so the stored counter (41152263) makes 41152262 a replay.
+        assert!(first > Some(41_152_262));
+    }
+
+    /// Anything that is not exactly six ASCII digits never reaches the
+    /// HMAC comparison.
+    #[test]
+    fn malformed_codes_are_rejected_before_any_crypto() {
+        let secret = b"12345678901234567890";
+        let now = Utc
+            .timestamp_opt(59, 0)
+            .single()
+            .expect("valid timestamp");
+        for bad in [
+            "", "28708", "2870823", "28708x", "28 708", "28708\n", "-87082",
+            "２８７０８２", // fullwidth digits: bytes() sees multi-byte UTF-8
+            "287082\r",
+        ] {
+            assert_eq!(matching_totp_counter(secret, bad, now), None, "input {bad:?}");
+        }
+    }
+
+    #[test]
+    fn base32_decode_rejects_non_alphabet_characters() {
+        // '1', '8', '9', '0' and punctuation are not in RFC 4648 base32.
+        for bad in ["1", "8", "9", "0", "ABC$", "!!!", "AB C"] {
+            assert!(decode_base32(bad).is_err(), "input {bad:?}");
+        }
+        // Lowercase and padding are tolerated (authenticator apps vary).
+        let upper = decode_base32("JBSWY3DPEHPK3PXP").expect("valid base32");
+        let lower = decode_base32("jbswy3dpehpk3pxp").expect("lowercase ok");
+        let padded = decode_base32("JBSWY3DPEHPK3PXP====").expect("padding ok");
+        assert_eq!(upper, lower);
+        assert_eq!(upper, padded);
+    }
+
+    #[test]
+    fn constant_time_compare_matches_semantics() {
+        assert!(constant_time_equal(b"005924", b"005924"));
+        assert!(!constant_time_equal(b"005924", b"005925"));
+        assert!(!constant_time_equal(b"005924", b"00592"));
+    }
 }

@@ -44,6 +44,283 @@ use crate::tenant_context::SniperTenantContext;
 use crate::tenant_state::TenantSniperState;
 use crate::Sniper;
 
+// ---------------------------------------------------------------------------
+// Wallet pools (GAP-MAP v2 P2; durable schema in migration 0050)
+// ---------------------------------------------------------------------------
+
+/// How a pool assigns buys to its members. Mirrors `wallet_pools.allocation`
+/// in migration 0050.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolAllocation {
+    /// Next active member in deterministic rotation order; the cursor is
+    /// persisted server-side (`wallet_pools.rotation_cursor`) so rotation
+    /// survives restarts.
+    RoundRobin,
+    /// Members chosen proportionally to `weight` via a smooth weighted
+    /// round-robin (nginx-style): deterministic, no RNG, exact long-run
+    /// proportions.
+    WeightedSplit,
+}
+
+impl PoolAllocation {
+    /// Parse the SQL column value. Unknown values fail closed.
+    pub fn from_column(value: &str) -> BotResult<Self> {
+        match value {
+            "round_robin" => Ok(Self::RoundRobin),
+            "weighted_split" => Ok(Self::WeightedSplit),
+            other => Err(BotError::invalid(format!(
+                "wallet pool: unknown allocation '{other}'"
+            ))),
+        }
+    }
+
+    /// The SQL column value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PoolAllocation::RoundRobin => "round_robin",
+            PoolAllocation::WeightedSplit => "weighted_split",
+        }
+    }
+}
+
+/// One pool member (projection of an ACTIVE `wallet_pool_members` row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolMember {
+    /// Wallet address of the tenant-bound custody signer.
+    pub wallet_address: String,
+    /// Selection weight for `weighted_split` (1..=1000 per the schema);
+    /// ignored by round-robin.
+    pub weight: u32,
+    /// Smooth-round-robin bookkeeping (not persisted).
+    current_weight: i64,
+    /// How many positions this wallet currently holds open. Positions stay
+    /// with their ORIGINAL wallet for their whole life; only NEW buys are
+    /// re-assigned.
+    open_positions: u32,
+}
+
+/// In-memory selector over one tenant's wallet pool. The server builds this
+/// from the pool + member rows at executor startup and re-builds it when
+/// membership changes (changes are immediate by design: a removed member
+/// stops receiving new orders but keeps its open positions).
+#[derive(Debug, Clone)]
+pub struct WalletPoolSelector {
+    allocation: PoolAllocation,
+    members: Vec<PoolMember>,
+    /// Index of the LAST member used by round-robin (mirrors the persisted
+    /// cursor so a restart continues where it left off).
+    rotation_cursor: usize,
+    /// Hard cap of concurrently open positions per wallet. `None` = no cap
+    /// (the risk engine still applies its global exposure limits).
+    max_open_per_wallet: Option<u32>,
+}
+
+/// The outcome of a pool selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolPick {
+    /// Wallet address that should execute the buy.
+    pub wallet_address: String,
+    /// Positions that wallet held open BEFORE this pick.
+    pub open_before: u32,
+}
+
+impl WalletPoolSelector {
+    /// Build from the allocation column and members (already filtered to
+    /// `status = 'active'`, ordered deterministically by member id).
+    pub fn new(
+        allocation: PoolAllocation,
+        members: Vec<(String, u32)>,
+        rotation_cursor: usize,
+        max_open_per_wallet: Option<u32>,
+    ) -> BotResult<Self> {
+        if members.is_empty() {
+            return Err(BotError::invalid(
+                "wallet pool: at least one active member is required",
+            ));
+        }
+        for (address, weight) in &members {
+            if address.trim().is_empty() {
+                return Err(BotError::invalid("wallet pool: empty member address"));
+            }
+            if *weight == 0 {
+                return Err(BotError::invalid(format!(
+                    "wallet pool: member {address} has weight 0"
+                )));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (address, _) in &members {
+            if !seen.insert(address.as_str()) {
+                return Err(BotError::invalid(format!(
+                    "wallet pool: duplicate member {address}"
+                )));
+            }
+        }
+        Ok(Self {
+            allocation,
+            members: members
+                .into_iter()
+                .map(|(wallet_address, weight)| PoolMember {
+                    wallet_address,
+                    weight,
+                    current_weight: 0,
+                    open_positions: 0,
+                })
+                .collect(),
+            rotation_cursor,
+            max_open_per_wallet,
+        })
+    }
+
+    /// The allocation strategy.
+    pub fn allocation(&self) -> PoolAllocation {
+        self.allocation
+    }
+
+    /// Active member count.
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    /// True with no members (cannot happen through `new`, kept for callers
+    /// filtering membership live).
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// The persisted round-robin cursor (for the server to write back to
+    /// `wallet_pools.rotation_cursor`).
+    pub fn rotation_cursor(&self) -> usize {
+        self.rotation_cursor
+    }
+
+    /// Open positions currently tracked for one wallet.
+    pub fn open_positions(&self, wallet_address: &str) -> u32 {
+        self.members
+            .iter()
+            .find(|m| m.wallet_address == wallet_address)
+            .map(|m| m.open_positions)
+            .unwrap_or(0)
+    }
+
+    /// Pick the wallet for the NEXT buy. Fails closed when every member is
+    /// at its per-wallet position cap. Deterministic for both strategies.
+    pub fn select_for_buy(&mut self) -> BotResult<PoolPick> {
+        let eligible = self
+            .members
+            .iter()
+            .filter(|m| match self.max_open_per_wallet {
+                None => true,
+                Some(cap) => m.open_positions < cap,
+            })
+            .count();
+        if eligible == 0 {
+            return Err(BotError::risk(
+                "wallet pool: every member is at its per-wallet position cap",
+            ));
+        }
+        let index = match self.allocation {
+            PoolAllocation::RoundRobin => self.round_robin_pick(),
+            PoolAllocation::WeightedSplit => self.weighted_pick(),
+        };
+        let member = &mut self.members[index];
+        let pick = PoolPick {
+            wallet_address: member.wallet_address.clone(),
+            open_before: member.open_positions,
+        };
+        member.open_positions += 1;
+        Ok(pick)
+    }
+
+    /// Round-robin: walk forward from the cursor, skipping wallets at their
+    /// cap, then advance the cursor past the picked member.
+    fn round_robin_pick(&mut self) -> usize {
+        let n = self.members.len();
+        let start = self.rotation_cursor % n;
+        let mut i = start;
+        loop {
+            let eligible = match self.max_open_per_wallet {
+                None => true,
+                Some(cap) => self.members[i].open_positions < cap,
+            };
+            if eligible {
+                self.rotation_cursor = (i + 1) % n;
+                return i;
+            }
+            i = (i + 1) % n;
+        }
+    }
+
+    /// Smooth weighted round-robin (nginx-style): add each member's weight
+    /// to its current weight, pick the max among cap-eligible members, then
+    /// subtract the total weight from the pick. Deterministic, no RNG, and
+    /// the long-run share of each member equals weight/total exactly.
+    fn weighted_pick(&mut self) -> usize {
+        let total: i64 = self.members.iter().map(|m| i64::from(m.weight)).sum();
+        for member in &mut self.members {
+            member.current_weight += i64::from(member.weight);
+        }
+        let mut best: Option<usize> = None;
+        for (i, member) in self.members.iter().enumerate() {
+            let capped = self
+                .max_open_per_wallet
+                .map(|cap| member.open_positions >= cap)
+                .unwrap_or(false);
+            if capped {
+                continue;
+            }
+            match best {
+                None => best = Some(i),
+                Some(b) if member.current_weight > self.members[b].current_weight => {
+                    best = Some(i)
+                }
+                _ => {}
+            }
+        }
+        // `select_for_buy` guarantees at least one eligible member.
+        let index = best.expect("weighted pick: caller guarantees an eligible member");
+        self.members[index].current_weight -= total;
+        index
+    }
+
+    /// A position on `wallet_address` was opened externally (recovery /
+    /// re-adoption after restart): sync the bookkeeping.
+    pub fn note_open(&mut self, wallet_address: &str) {
+        if let Some(member) = self
+            .members
+            .iter_mut()
+            .find(|m| m.wallet_address == wallet_address)
+        {
+            member.open_positions += 1;
+        }
+    }
+
+    /// A position closed — frees capacity on that wallet.
+    pub fn note_closed(&mut self, wallet_address: &str) {
+        if let Some(member) = self
+            .members
+            .iter_mut()
+            .find(|m| m.wallet_address == wallet_address)
+        {
+            member.open_positions = member.open_positions.saturating_sub(1);
+        }
+    }
+
+    /// Remove a member (immediate: it stops receiving new orders; its open
+    /// positions are unaffected and still closeable). Returns true when the
+    /// member existed.
+    pub fn remove_member(&mut self, wallet_address: &str) -> bool {
+        let before = self.members.len();
+        self.members.retain(|m| m.wallet_address != wallet_address);
+        if self.members.len() != before {
+            self.rotation_cursor = 0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Why a scoped execution was refused before the pipeline ran. Closed
 /// vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +395,13 @@ pub struct TenantSniperExecutor {
     signing: TenantSigningContext,
     state: TenantSniperState,
     sink: Arc<dyn TenantExecutionSink>,
+    /// Optional wallet pool for spreading buys across several of the
+    /// tenant's custody wallets (GAP-MAP v2 P2, migration 0050). When
+    /// present, each NEW buy is assigned a pool wallet by
+    /// [`Self::select_wallet_for_buy`]; the server routes that buy through
+    /// the pool member's own signing context. When absent, buys use the
+    /// single bound funding wallet exactly as before.
+    pool: Option<WalletPoolSelector>,
 }
 
 impl TenantSniperExecutor {
@@ -153,6 +437,7 @@ impl TenantSniperExecutor {
             signing,
             state: tenant_state,
             sink: Arc::new(NullExecutionSink),
+            pool: None,
         })
     }
 
@@ -161,6 +446,39 @@ impl TenantSniperExecutor {
     pub fn with_execution_sink(mut self, sink: Arc<dyn TenantExecutionSink>) -> Self {
         self.sink = sink;
         self
+    }
+
+    /// Attach a wallet pool: new buys are spread across the pool members
+    /// (round-robin or weighted, per migration 0050) instead of always
+    /// using the single bound funding wallet.
+    #[must_use]
+    pub fn with_wallet_pool(mut self, pool: WalletPoolSelector) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// The attached pool, if any.
+    pub fn wallet_pool(&self) -> Option<&WalletPoolSelector> {
+        self.pool.as_ref()
+    }
+
+    /// Mutable access to the pool (the sweep/exit path calls
+    /// [`WalletPoolSelector::note_closed`] when a position exits).
+    pub fn wallet_pool_mut(&mut self) -> Option<&mut WalletPoolSelector> {
+        self.pool.as_mut()
+    }
+
+    /// Pick the wallet that should execute the NEXT buy for this tenant.
+    /// Fails closed (typed risk error) when no pool is attached AND the
+    /// caller explicitly asked for pool distribution — callers that do not
+    /// configure a pool simply keep using the bound funding wallet.
+    pub fn select_wallet_for_buy(&mut self) -> BotResult<PoolPick> {
+        match self.pool.as_mut() {
+            Some(pool) => pool.select_for_buy(),
+            None => Err(BotError::invalid(
+                "tenant sniper: no wallet pool attached — buys use the bound funding wallet",
+            )),
+        }
     }
 
     /// The bound tenant context.
@@ -439,5 +757,191 @@ mod tests {
             Ok(_) => panic!("a context bound to another wallet must not construct the executor"),
         };
         assert!(err.to_string().contains("wallet"));
+    }
+
+    // ---------------- wallet pool selector ----------------
+
+    fn pool(allocation: PoolAllocation, members: &[(&str, u32)], cap: Option<u32>) -> WalletPoolSelector {
+        WalletPoolSelector::new(
+            allocation,
+            members.iter().map(|(a, w)| (a.to_string(), *w)).collect(),
+            0,
+            cap,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pool_rejects_empty_duplicate_and_zero_weight() {
+        assert!(WalletPoolSelector::new(PoolAllocation::RoundRobin, vec![], 0, None).is_err());
+        assert!(WalletPoolSelector::new(
+            PoolAllocation::RoundRobin,
+            vec![("A".into(), 1), ("A".into(), 1)],
+            0,
+            None,
+        )
+        .is_err());
+        assert!(WalletPoolSelector::new(
+            PoolAllocation::RoundRobin,
+            vec![("A".into(), 0)],
+            0,
+            None,
+        )
+        .is_err());
+        assert!(WalletPoolSelector::new(
+            PoolAllocation::RoundRobin,
+            vec![("".into(), 1)],
+            0,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn allocation_column_round_trips_and_fails_closed() {
+        assert_eq!(PoolAllocation::from_column("round_robin").unwrap(), PoolAllocation::RoundRobin);
+        assert_eq!(PoolAllocation::from_column("weighted_split").unwrap(), PoolAllocation::WeightedSplit);
+        assert!(PoolAllocation::from_column("random").is_err());
+        assert_eq!(PoolAllocation::RoundRobin.as_str(), "round_robin");
+        assert_eq!(PoolAllocation::WeightedSplit.as_str(), "weighted_split");
+    }
+
+    #[test]
+    fn round_robin_rotates_and_resumes_from_cursor() {
+        let mut sel = pool(
+            PoolAllocation::RoundRobin,
+            &[("A", 1), ("B", 1), ("C", 1)],
+            None,
+        );
+        let got: Vec<String> = (0..6)
+            .map(|_| sel.select_for_buy().unwrap().wallet_address)
+            .collect();
+        assert_eq!(got, vec!["A", "B", "C", "A", "B", "C"]);
+        assert_eq!(sel.rotation_cursor(), 0, "cursor wraps to the head");
+
+        // Restart with a persisted cursor: rotation continues mid-cycle.
+        let mut resumed = WalletPoolSelector::new(
+            PoolAllocation::RoundRobin,
+            vec![("A".into(), 1), ("B".into(), 1), ("C".into(), 1)],
+            2,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumed.select_for_buy().unwrap().wallet_address, "C");
+        assert_eq!(resumed.select_for_buy().unwrap().wallet_address, "A");
+    }
+
+    #[test]
+    fn round_robin_skips_wallets_at_their_cap() {
+        let mut sel = pool(
+            PoolAllocation::RoundRobin,
+            &[("A", 1), ("B", 1), ("C", 1)],
+            Some(1),
+        );
+        assert_eq!(sel.select_for_buy().unwrap().wallet_address, "A");
+        assert_eq!(sel.select_for_buy().unwrap().wallet_address, "B");
+        assert_eq!(sel.select_for_buy().unwrap().wallet_address, "C");
+        // Every wallet now holds one open position = the cap.
+        let err = sel.select_for_buy().unwrap_err();
+        assert!(err.to_string().contains("cap"));
+        // Freeing one wallet reopens selection there.
+        sel.note_closed("B");
+        assert_eq!(sel.select_for_buy().unwrap().wallet_address, "B");
+    }
+
+    #[test]
+    fn weighted_split_matches_weights_exactly_over_a_cycle() {
+        // Weights 5/3/2 -> over 10 buys the shares are exactly 5/3/2.
+        let mut sel = pool(
+            PoolAllocation::WeightedSplit,
+            &[("A", 5), ("B", 3), ("C", 2)],
+            None,
+        );
+        let mut counts = std::collections::HashMap::new();
+        for _ in 0..10 {
+            let pick = sel.select_for_buy().unwrap();
+            *counts.entry(pick.wallet_address).or_insert(0) += 1;
+        }
+        assert_eq!(counts.get("A").copied().unwrap_or(0), 5);
+        assert_eq!(counts.get("B").copied().unwrap_or(0), 3);
+        assert_eq!(counts.get("C").copied().unwrap_or(0), 2);
+    }
+
+    #[test]
+    fn weighted_split_never_starves_a_small_weight() {
+        // Smooth round-robin interleaves instead of front-loading the big
+        // member: the first three picks of a 2/1 pool must contain both.
+        let mut sel = pool(PoolAllocation::WeightedSplit, &[("BIG", 2), ("small", 1)], None);
+        let picks: Vec<String> = (0..3)
+            .map(|_| sel.select_for_buy().unwrap().wallet_address)
+            .collect();
+        assert!(picks.contains(&"BIG".to_string()));
+        assert!(picks.contains(&"small".to_string()));
+    }
+
+    #[test]
+    fn remove_member_is_immediate_for_new_orders_only() {
+        let mut sel = pool(
+            PoolAllocation::RoundRobin,
+            &[("A", 1), ("B", 1)],
+            None,
+        );
+        let pick = sel.select_for_buy().unwrap();
+        assert_eq!(pick.wallet_address, "A");
+        assert_eq!(sel.open_positions("A"), 1);
+        assert!(sel.remove_member("A"));
+        assert_eq!(sel.len(), 1);
+        // New orders only go to B now.
+        assert_eq!(sel.select_for_buy().unwrap().wallet_address, "B");
+        assert!(!sel.remove_member("A"), "already removed");
+    }
+
+    #[test]
+    fn open_position_bookkeeping_tracks_open_and_close() {
+        let mut sel = pool(
+            PoolAllocation::RoundRobin,
+            &[("A", 1), ("B", 1)],
+            None,
+        );
+        sel.note_open("A"); // recovered position after restart
+        sel.note_open("A");
+        assert_eq!(sel.open_positions("A"), 2);
+        sel.note_closed("A");
+        assert_eq!(sel.open_positions("A"), 1);
+        // Closing below zero saturates — bookkeeping can never wrap.
+        sel.note_closed("B");
+        assert_eq!(sel.open_positions("B"), 0);
+        assert_eq!(sel.open_positions("missing"), 0);
+    }
+
+    #[tokio::test]
+    async fn executor_without_pool_refuses_pool_selection() {
+        let kp = solana_sdk::signature::Keypair::new();
+        let b58 = bs58::encode(kp.to_bytes()).into_string();
+        let wallet = Arc::new(Wallet::load(&b58).unwrap());
+        let address = wallet.pubkey.to_string();
+        let bound = issued_for(
+            BotModule::Sniper,
+            OrganizationId::new(),
+            RuntimeId::new(),
+            RuntimeGeneration::first(),
+            &address,
+        );
+        let shared = AppState::new(bot_core::config::AppConfig::from_defaults());
+        let rpc = Rpc::new(&bot_core::config::NetworkConfig::default()).unwrap();
+        let mut executor = TenantSniperExecutor::new(shared, rpc, wallet, None, bound)
+            .await
+            .unwrap();
+        assert!(executor.wallet_pool().is_none());
+        assert!(executor.select_wallet_for_buy().is_err());
+
+        // Attaching a pool enables distribution.
+        executor = executor.with_wallet_pool(pool(
+            PoolAllocation::RoundRobin,
+            &[("W1", 1), ("W2", 1)],
+            None,
+        ));
+        assert_eq!(executor.select_wallet_for_buy().unwrap().wallet_address, "W1");
+        assert_eq!(executor.select_wallet_for_buy().unwrap().wallet_address, "W2");
     }
 }

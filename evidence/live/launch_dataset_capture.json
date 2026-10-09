@@ -1,0 +1,11 @@
+{
+  "validation_id": "launch_dataset_capture",
+  "provider": "live_feed_capture",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "capture session per crates/module-sniper/tests/fixtures/launches/README.md (>= 50 real launches, pump.fun + Raydium)",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"recorded launch dataset must come from a real capture session; attestation = dataset content hash recorded when crates/module-sniper/tests/fixtures/launches/ is populated and the DatasetLabel::Recorded path passes. Synthetic fixtures in tests/fixtures/backtest/ never satisfy this item"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

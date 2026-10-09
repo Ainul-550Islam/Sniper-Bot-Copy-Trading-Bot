@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -48,6 +48,38 @@ use tracing::{debug, info, warn};
 
 use bot_core::config::NetworkConfig;
 use bot_core::error::{BotError, BotResult};
+
+/// Return an endpoint identifier safe for logs/errors. Credentials, query
+/// parameters, fragments, and non-root paths are removed because providers
+/// commonly put API keys in any of those URL components.
+pub fn redact_ws_url(endpoint: &str) -> String {
+    let Ok(parsed) = url::Url::parse(endpoint) else {
+        return "<invalid-websocket-endpoint>".to_string();
+    };
+    let Some(host) = parsed.host() else {
+        return "<invalid-websocket-endpoint>".to_string();
+    };
+    let port = parsed
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!("{}://{}{}/<redacted>", parsed.scheme(), host, port)
+}
+
+fn unsubscribe_method(method: &str) -> Option<&'static str> {
+    match method {
+        "accountSubscribe" => Some("accountUnsubscribe"),
+        "logsSubscribe" => Some("logsUnsubscribe"),
+        "programSubscribe" => Some("programUnsubscribe"),
+        "signatureSubscribe" => Some("signatureUnsubscribe"),
+        "slotSubscribe" => Some("slotUnsubscribe"),
+        "slotsUpdatesSubscribe" => Some("slotsUpdatesUnsubscribe"),
+        "rootSubscribe" => Some("rootUnsubscribe"),
+        "voteSubscribe" => Some("voteUnsubscribe"),
+        "transactionSubscribe" => Some("transactionUnsubscribe"),
+        _ => None,
+    }
+}
 
 /// Everything a subscriber can receive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,11 +126,16 @@ pub enum WsMessage {
     /// (poll `getSignaturesForAddress`, re-read an account) should do so.
     Gap {
         subscription: u64,
-        /// Highest slot seen on any notification before the outage (`None`
+        /// Highest slot seen before the outage or queue overflow (`None`
         /// when nothing was observed on the previous connection).
         last_slot: Option<u64>,
-        /// Wall-clock length of the outage in milliseconds.
+        /// Wall-clock outage duration or time since the first local queue
+        /// overflow, in milliseconds. Zero only when timing was unavailable.
         outage_ms: u64,
+        /// Number of notifications dropped because this consumer's bounded
+        /// queue was full. Zero for a pure reconnect gap.
+        #[serde(default)]
+        dropped_messages: u64,
     },
     Error {
         message: String,
@@ -191,7 +228,9 @@ impl WsPolicy {
         if !self.jitter || cap.is_zero() {
             return cap;
         }
-        let cap_us = cap.as_micros() as u64;
+        // `Duration::as_micros` is u128. Clamp before narrowing and leave
+        // room for the inclusive-range divisor (`cap_us + 1`).
+        let cap_us = cap.as_micros().min((u64::MAX - 1) as u128) as u64;
         let sample = rand::random::<u64>() % (cap_us + 1);
         Duration::from_micros(sample.max(cap_us / 8))
     }
@@ -307,12 +346,31 @@ impl TransactionFilter {
     }
 }
 
+/// Each consumer gets a bounded queue so a stalled strategy cannot retain
+/// an unbounded number of full transaction notifications.
+const SUBSCRIPTION_BUFFER: usize = 512;
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
 /// A registered subscription: survives reconnects.
 #[derive(Debug, Clone)]
 struct Subscription {
     method: String,
     params: Value,
-    tx: mpsc::UnboundedSender<WsMessage>,
+    tx: mpsc::Sender<WsMessage>,
+    dropped_messages: Arc<AtomicU64>,
+    /// Unix milliseconds when the first notification in the current overflow
+    /// streak was dropped; lets backfill consumers bound their recovery query.
+    overflow_started_ms: Arc<AtomicU64>,
 }
 
 struct Shared {
@@ -324,15 +382,24 @@ struct Shared {
     by_server: RwLock<HashMap<u64, u64>>,
     /// local_id -> the caller waiting for its first subscription confirmation
     waiters: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<BotResult<u64>>>>,
+    /// Serializes cancellation against subscribe-response and disconnect
+    /// bookkeeping so an in-flight cancellation cannot lose the server id.
+    subscription_state: Mutex<()>,
+    /// request_id -> subscribe method for requests canceled before the server
+    /// confirmation arrives. A late success is immediately unsubscribed.
+    cancelled_requests: Mutex<HashMap<u64, String>>,
     next_local_id: AtomicU64,
     next_request_id: AtomicU64,
     connected: AtomicBool,
     shutdown: AtomicBool,
+    supervisor_started: AtomicBool,
     /// Frames the supervisor must write to the socket. Using a channel rather
     /// than `Notify` avoids a lost-wakeup race: a subscription registered while
     /// the socket is idle would otherwise sit unsent until the next reconnect.
     outbound: mpsc::UnboundedSender<String>,
     outbound_rx: RwLock<Option<mpsc::UnboundedReceiver<String>>>,
+    cancel_tx: mpsc::UnboundedSender<u64>,
+    cancel_rx: Mutex<Option<mpsc::UnboundedReceiver<u64>>>,
     policy: WsPolicy,
     /// Highest slot carried by any notification (`context.slot`) on the
     /// current or previous connection: the "you may have missed everything
@@ -353,17 +420,23 @@ struct Shared {
 impl Shared {
     fn new(policy: WsPolicy) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<u64>();
         Arc::new(Shared {
             subs: RwLock::new(HashMap::new()),
             by_request: RwLock::new(HashMap::new()),
             by_server: RwLock::new(HashMap::new()),
             waiters: Mutex::new(HashMap::new()),
+            subscription_state: Mutex::new(()),
+            cancelled_requests: Mutex::new(HashMap::new()),
             next_local_id: AtomicU64::new(1),
             next_request_id: AtomicU64::new(1),
             connected: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            supervisor_started: AtomicBool::new(false),
             outbound: tx,
             outbound_rx: RwLock::new(Some(rx)),
+            cancel_tx,
+            cancel_rx: Mutex::new(Some(cancel_rx)),
             policy,
             last_slot: AtomicU64::new(0),
             disconnected_at: Mutex::new(None),
@@ -387,6 +460,7 @@ impl Shared {
 
     /// Mark the socket up. Returns the outage this connection ends, if any.
     async fn on_connect(&self) -> Option<Duration> {
+        let _state = self.subscription_state.lock().await;
         self.connected.store(true, Ordering::Relaxed);
         let outage = self
             .disconnected_at
@@ -395,7 +469,7 @@ impl Shared {
             .take()
             .map(|t| t.elapsed());
         self.last_outage_ms.store(
-            outage.map(|d| d.as_millis() as u64).unwrap_or(0),
+            outage.map(duration_ms).unwrap_or(0),
             Ordering::Relaxed,
         );
         self.ever_connected.store(true, Ordering::Relaxed);
@@ -414,10 +488,68 @@ impl Shared {
         self.connected.load(Ordering::Relaxed)
     }
 
+    /// Deliver without blocking the socket reader. A full bounded queue drops
+    /// the newest notification and records a per-subscription gap for the next
+    /// time the consumer has room; a slow strategy can never grow memory
+    /// without limit or stall every subscription on the connection.
+    fn deliver(&self, local_id: u64, sub: &Subscription, message: WsMessage) {
+        let pending = sub.dropped_messages.load(Ordering::Relaxed);
+        if pending > 0 && sub.tx.capacity() >= 2 {
+            let first_drop = sub.overflow_started_ms.load(Ordering::Relaxed);
+            let outage_ms = if first_drop > 0 {
+                unix_time_ms().saturating_sub(first_drop)
+            } else {
+                0
+            };
+            let gap = WsMessage::Gap {
+                subscription: local_id,
+                last_slot: self.last_slot(),
+                outage_ms,
+                dropped_messages: pending,
+            };
+            if sub.tx.try_send(gap).is_ok() {
+                let _ = sub.dropped_messages.fetch_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |current| Some(current.saturating_sub(pending)),
+                );
+                if sub.dropped_messages.load(Ordering::Relaxed) == 0 {
+                    sub.overflow_started_ms.store(0, Ordering::Relaxed);
+                }
+            }
+        }
+
+        if let Err(error) = sub.tx.try_send(message) {
+            if matches!(error, mpsc::error::TrySendError::Full(_)) {
+                let previous = sub.dropped_messages.fetch_add(1, Ordering::Relaxed);
+                if previous == 0 {
+                    sub.overflow_started_ms
+                        .store(unix_time_ms().max(1), Ordering::Relaxed);
+                }
+                let dropped = previous.saturating_add(1);
+                bot_core::obs::metrics::global()
+                    .counter(
+                        "bot_ws_subscription_notifications_dropped_total",
+                        "Notifications dropped because a bounded websocket consumer queue was full.",
+                        &[],
+                    )
+                    .inc();
+                if dropped == 1 || dropped.is_power_of_two() {
+                    warn!(
+                        subscription = local_id,
+                        method = %sub.method,
+                        dropped,
+                        "websocket consumer queue is full; notification dropped"
+                    );
+                }
+            }
+        }
+    }
+
     async fn broadcast_status(&self, status: WsStatus) {
         let subs = self.subs.read().await;
-        for sub in subs.values() {
-            let _ = sub.tx.send(WsMessage::Status(status));
+        for (local_id, sub) in subs.iter() {
+            self.deliver(*local_id, sub, WsMessage::Status(status));
         }
     }
 
@@ -433,9 +565,116 @@ impl Shared {
         self.outbound_rx.write().await.take()
     }
 
+    async fn take_cancellations(&self) -> Option<mpsc::UnboundedReceiver<u64>> {
+        self.cancel_rx.lock().await.take()
+    }
+
+    /// Remove a subscription and, while connected, request its server-side
+    /// removal. Safe to call more than once.
+    async fn cancel_subscription(&self, local_id: u64) {
+        // The lock closes the race where a subscribe response is consumed at
+        // the same time that the caller drops its handle: either cancellation
+        // marks the request and the late response is unsubscribed, or the
+        // response installs the server id first and cancellation removes it.
+        let _state = self.subscription_state.lock().await;
+        let subscription = self.subs.write().await.remove(&local_id);
+        let Some(subscription) = subscription else {
+            // The registration future may have been cancelled between its
+            // waiter and subscription inserts; still release every partial
+            // piece of that registration.
+            let request_ids: Vec<u64> = self
+                .by_request
+                .read()
+                .await
+                .iter()
+                .filter_map(|(request_id, id)| (*id == local_id).then_some(*request_id))
+                .collect();
+            self.by_request
+                .write()
+                .await
+                .retain(|_, id| *id != local_id);
+            let mut cancelled = self.cancelled_requests.lock().await;
+            for request_id in request_ids {
+                cancelled.remove(&request_id);
+            }
+            self.waiters.lock().await.remove(&local_id);
+            return;
+        };
+
+        let connected = self.is_connected() && !self.shutdown.load(Ordering::SeqCst);
+        let request_ids: Vec<u64> = self
+            .by_request
+            .read()
+            .await
+            .iter()
+            .filter_map(|(request_id, id)| (*id == local_id).then_some(*request_id))
+            .collect();
+        if connected {
+            let mut cancelled = self.cancelled_requests.lock().await;
+            for request_id in request_ids {
+                // Keep `by_request` until its response or disconnect. Removing
+                // it here would orphan the server id and leak that subscription.
+                cancelled.insert(request_id, subscription.method.clone());
+            }
+        } else {
+            self.by_request
+                .write()
+                .await
+                .retain(|_, id| *id != local_id);
+        }
+
+        if let Some(waiter) = self.waiters.lock().await.remove(&local_id) {
+            let _ = waiter.send(Err(BotError::ws("subscription was cancelled")));
+        }
+
+        let mut server_ids = Vec::new();
+        self.by_server.write().await.retain(|server_id, id| {
+            if *id == local_id {
+                server_ids.push(*server_id);
+                false
+            } else {
+                true
+            }
+        });
+
+        if !connected {
+            return;
+        }
+        let Some(method) = unsubscribe_method(&subscription.method) else {
+            return;
+        };
+        for server_id in server_ids {
+            let request_id = self.alloc_request();
+            let frame = json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": [server_id],
+            })
+            .to_string();
+            let _ = self.enqueue(frame);
+        }
+    }
+
+    async fn clear_subscriptions(&self) {
+        let _state = self.subscription_state.lock().await;
+        self.connected.store(false, Ordering::SeqCst);
+        self.subs.write().await.clear();
+        self.by_server.write().await.clear();
+        self.by_request.write().await.clear();
+        self.cancelled_requests.lock().await.clear();
+        for (_, waiter) in self.waiters.lock().await.drain() {
+            let _ = waiter.send(Err(BotError::ws("websocket supervisor stopped")));
+        }
+        if let Some(receiver) = self.cancel_rx.lock().await.as_mut() {
+            while receiver.try_recv().is_ok() {}
+        }
+    }
+
     /// Drop every server-side mapping (the connection is gone) and tell all
     /// subscribers we are reconnecting.
     async fn on_disconnect(&self) {
+        let _state = self.subscription_state.lock().await;
         self.connected.store(false, Ordering::Relaxed);
         {
             let mut at = self.disconnected_at.lock().await;
@@ -444,6 +683,7 @@ impl Shared {
             }
         }
         self.by_server.write().await.clear();
+        self.cancelled_requests.lock().await.clear();
         // In-flight subscribe requests die with the connection: their frames
         // are gone and no response will ever arrive. Clearing the mappings
         // lets `register_outgoing` re-send the surviving subscriptions on the
@@ -462,8 +702,38 @@ impl Shared {
 pub struct SubscriptionHandle {
     local_id: u64,
     method: String,
-    rx: Option<mpsc::UnboundedReceiver<WsMessage>>,
+    rx: Option<mpsc::Receiver<WsMessage>>,
     shared: Arc<Shared>,
+    armed: bool,
+}
+
+/// Cancels a subscription even if the async `subscribe` future itself is
+/// dropped while waiting for the server response.
+struct SubscriptionRegistration {
+    local_id: u64,
+    shared: Arc<Shared>,
+    armed: bool,
+}
+
+impl SubscriptionRegistration {
+    async fn cancel(&mut self) {
+        if self.armed {
+            self.shared.cancel_subscription(self.local_id).await;
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SubscriptionRegistration {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.shared.cancel_tx.send(self.local_id);
+        }
+    }
 }
 
 impl SubscriptionHandle {
@@ -476,36 +746,28 @@ impl SubscriptionHandle {
         &self.method
     }
 
-    /// Take the receiver. Panics if called twice — there is one consumer per
-    /// subscription by design.
-    pub fn receiver(&mut self) -> mpsc::UnboundedReceiver<WsMessage> {
-        self.rx
-            .take()
-            .expect("SubscriptionHandle::receiver called twice")
+    /// Take the receiver once. A repeated call is a recoverable API error.
+    pub fn receiver(&mut self) -> BotResult<mpsc::Receiver<WsMessage>> {
+        self.rx.take().ok_or_else(|| {
+            BotError::ws("SubscriptionHandle::receiver may only be called once")
+        })
     }
 
     /// Stop the subscription locally and ask the server to unsubscribe.
-    pub async fn cancel(self) {
-        self.shared.subs.write().await.remove(&self.local_id);
-        let mut by_server = self.shared.by_server.write().await;
-        by_server.retain(|_, local| *local != self.local_id);
+    pub async fn cancel(mut self) {
+        self.shared.cancel_subscription(self.local_id).await;
+        self.armed = false;
     }
 }
 
 impl Drop for SubscriptionHandle {
     fn drop(&mut self) {
-        // Dropping the handle stops delivery: nobody can read the channel any
-        // more, so remove the registration instead of leaking it.
-        let shared = self.shared.clone();
-        let local_id = self.local_id;
-        tokio::spawn(async move {
-            shared.subs.write().await.remove(&local_id);
-            shared
-                .by_server
-                .write()
-                .await
-                .retain(|_, local| *local != local_id);
-        });
+        // Drop cannot await. Signal the owning supervisor, which performs
+        // registry removal and the server unsubscribe without spawning a
+        // detached cleanup task.
+        if self.armed {
+            let _ = self.shared.cancel_tx.send(self.local_id);
+        }
     }
 }
 
@@ -547,97 +809,122 @@ impl SolanaWs {
         self.shared.is_connected()
     }
 
-    /// Spawn the connection supervisor.
+    /// Spawn the connection supervisor. A cloned client shares one socket;
+    /// repeated `spawn` calls return a non-owning handle instead of creating a
+    /// second supervisor that could shut down the first one.
     pub fn spawn(&self) -> WsHandle {
-        let shared = self.shared.clone();
-        let url = self.url.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(supervise(url, shared, shutdown_rx));
+        let owner = self
+            .shared
+            .supervisor_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        let task = if owner {
+            let shared = self.shared.clone();
+            let url = self.url.clone();
+            Some(tokio::spawn(supervise(url, shared, shutdown_rx)))
+        } else {
+            warn!(endpoint = %redact_ws_url(&self.url), "websocket supervisor already started; returning a non-owning handle");
+            None
+        };
         WsHandle {
             task,
             shutdown_tx,
             shared: self.shared.clone(),
+            owner,
         }
     }
 
     /// Register a subscription and wait for the server to confirm it.
     pub async fn subscribe(&self, method: &str, params: Value) -> BotResult<SubscriptionHandle> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
         let local_id = self.shared.alloc_local();
         let request_id = self.shared.alloc_request();
-
-        self.shared.subs.write().await.insert(
-            local_id,
-            Subscription {
-                method: method.to_string(),
-                params: params.clone(),
-                tx,
-            },
-        );
-
         let (waiter_tx, waiter_rx) = tokio::sync::oneshot::channel();
-        self.shared.waiters.lock().await.insert(local_id, waiter_tx);
+        let mut registration = SubscriptionRegistration {
+            local_id,
+            shared: self.shared.clone(),
+            armed: true,
+        };
 
-        // If we are already connected, push the request out right away;
-        // otherwise it stays registered *without* a by_request mapping, and
-        // `register_outgoing` flushes it (allocating the request id itself) on
-        // the next (re)connect. Mapping a request that was never written would
-        // poison the in-flight set and the subscription would never be sent.
-        if self.shared.is_connected() {
-            // Insert the mapping *before* writing: a fast server could answer
-            // before we got to record it otherwise.
-            self.shared
-                .by_request
-                .write()
-                .await
-                .insert(request_id, local_id);
-            let frame = json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params,
-            })
-            .to_string();
-            if !self.shared.enqueue(frame) {
-                // The supervisor is gone; nothing will ever send or answer.
-                self.shared.by_request.write().await.remove(&request_id);
-                self.shared.subs.write().await.remove(&local_id);
-                self.shared.waiters.lock().await.remove(&local_id);
-                return Err(BotError::ws(format!(
-                    "{method}: websocket supervisor is not running"
-                )));
+        let mut send_failed = false;
+        {
+            // Make the waiter visible before the subscription itself. The
+            // supervisor cannot observe/flush the subscription until this
+            // critical section ends, and a fast response cannot beat waiter
+            // registration or race an initial reconnect flush.
+            let _state = self.shared.subscription_state.lock().await;
+            self.shared.waiters.lock().await.insert(local_id, waiter_tx);
+            self.shared.subs.write().await.insert(
+                local_id,
+                Subscription {
+                    method: method.to_string(),
+                    params: params.clone(),
+                    tx,
+                    dropped_messages: Arc::new(AtomicU64::new(0)),
+                    overflow_started_ms: Arc::new(AtomicU64::new(0)),
+                },
+            );
+
+            // A newly registered subscription either queues exactly one frame
+            // on the live socket or remains un-mapped for register_outgoing to
+            // flush after the next connection is established.
+            if self.shared.is_connected() {
+                self.shared
+                    .by_request
+                    .write()
+                    .await
+                    .insert(request_id, local_id);
+                let frame = json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                })
+                .to_string();
+                if !self.shared.enqueue(frame) {
+                    self.shared.by_request.write().await.remove(&request_id);
+                    send_failed = true;
+                }
             }
+        }
+
+        if send_failed {
+            registration.cancel().await;
+            return Err(BotError::ws(format!(
+                "{method}: websocket supervisor is not running"
+            )));
         }
 
         let result = tokio::time::timeout(self.shared.policy.subscribe_timeout, waiter_rx).await;
         match result {
             Err(_) => {
-                self.shared.waiters.lock().await.remove(&local_id);
+                registration.cancel().await;
                 Err(BotError::ws(format!(
                     "{method}: timed out waiting for the websocket to subscribe"
                 )))
             }
             Ok(Err(_)) => {
-                self.shared.waiters.lock().await.remove(&local_id);
+                registration.cancel().await;
                 Err(BotError::ws(format!(
                     "{method}: subscription channel closed before confirmation"
                 )))
             }
-            Ok(Ok(inner)) => match inner {
-                Ok(server_id) => {
-                    info!(method, local_id, server_id, "websocket subscription active");
-                    Ok(SubscriptionHandle {
-                        local_id,
-                        method: method.to_string(),
-                        rx: Some(rx),
-                        shared: self.shared.clone(),
-                    })
-                }
-                Err(e) => {
-                    self.shared.subs.write().await.remove(&local_id);
-                    Err(e)
-                }
-            },
+            Ok(Ok(Ok(server_id))) => {
+                registration.disarm();
+                info!(method, local_id, server_id, "websocket subscription active");
+                Ok(SubscriptionHandle {
+                    local_id,
+                    method: method.to_string(),
+                    rx: Some(rx),
+                    shared: self.shared.clone(),
+                    armed: true,
+                })
+            }
+            Ok(Ok(Err(error))) => {
+                registration.cancel().await;
+                Err(error)
+            }
         }
     }
 
@@ -681,20 +968,49 @@ impl SolanaWs {
 
 /// Owns the supervisor task.
 pub struct WsHandle {
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shared: Arc<Shared>,
+    owner: bool,
 }
 
 impl WsHandle {
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
+        if !self.owner {
+            return;
+        }
         self.shared.shutdown.store(true, Ordering::SeqCst);
         let _ = self.shutdown_tx.send(true);
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.task).await;
+        if let Some(mut task) = self.task.take() {
+            if tokio::time::timeout(Duration::from_secs(5), &mut task)
+                .await
+                .is_err()
+            {
+                warn!("websocket supervisor did not stop before deadline; aborting it");
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        self.shared.clear_subscriptions().await;
     }
 
     pub fn is_finished(&self) -> bool {
-        self.task.is_finished()
+        self.task.as_ref().is_none_or(|task| task.is_finished())
+    }
+}
+
+impl Drop for WsHandle {
+    fn drop(&mut self) {
+        if !self.owner {
+            return;
+        }
+        self.shared.shutdown.store(true, Ordering::SeqCst);
+        let _ = self.shutdown_tx.send(true);
+        // The supervisor races every blocking network wait with the shutdown
+        // watch and clears its registries before returning. Let that short
+        // cleanup run rather than aborting it halfway through a lock update.
+        // The JoinHandle is dropped here, but the task is self-terminating.
+        self.task.take();
     }
 }
 
@@ -711,6 +1027,17 @@ async fn supervise(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let policy = shared.policy;
+    let safe_url = redact_ws_url(&url);
+    let Some(mut cancellations) = shared.take_cancellations().await else {
+        warn!(endpoint = %safe_url, "websocket cancellation receiver already has an owner");
+        shared.clear_subscriptions().await;
+        return;
+    };
+    let Some(mut outbound) = shared.take_outbound().await else {
+        warn!(endpoint = %safe_url, "websocket outbound receiver already has an owner");
+        shared.clear_subscriptions().await;
+        return;
+    };
     let reg = bot_core::obs::metrics::global();
     let mut attempt = 0u64;
     // Consecutive failed / short-lived connections: drives the backoff ladder.
@@ -718,8 +1045,9 @@ async fn supervise(
 
     loop {
         if *shutdown.borrow_and_update() || shared.shutdown.load(Ordering::SeqCst) {
-            info!(%url, "websocket supervisor shutting down");
+            info!(endpoint = %safe_url, "websocket supervisor shutting down");
             shared.on_disconnect().await;
+            shared.clear_subscriptions().await;
             return;
         }
 
@@ -733,11 +1061,26 @@ async fn supervise(
         }
         attempt += 1;
 
-        info!(%url, attempt, "connecting to solana websocket");
+        info!(endpoint = %safe_url, attempt, "connecting to solana websocket");
         let started = Instant::now();
-        let outcome = run_connection(&url, &shared, &mut shutdown).await;
+        while let Ok(local_id) = cancellations.try_recv() {
+            shared.cancel_subscription(local_id).await;
+        }
+        // Frames queued on the just-ended socket are stale: subscribe
+        // requests are rebuilt from the registry below, and unsubscriptions
+        // from the old connection are no longer meaningful.
+        while outbound.try_recv().is_ok() {}
+        let outcome = run_connection(
+            &url,
+            &safe_url,
+            &shared,
+            &mut shutdown,
+            &mut cancellations,
+            &mut outbound,
+        )
+        .await;
         match &outcome {
-            Ok(()) => debug!(%url, "websocket closed cleanly"),
+            Ok(()) => debug!(endpoint = %safe_url, "websocket closed cleanly"),
             Err(e) => {
                 // No URL label: provider URLs may embed credentials.
                 reg.counter(
@@ -746,10 +1089,15 @@ async fn supervise(
                     &[],
                 )
                 .inc();
-                warn!(%url, error = %e, "websocket connection failed");
+                warn!(endpoint = %safe_url, error = %e, "websocket connection failed");
             }
         }
         shared.on_disconnect().await;
+        if *shutdown.borrow_and_update() || shared.shutdown.load(Ordering::SeqCst) {
+            info!(endpoint = %safe_url, "websocket supervisor shutting down after connection close");
+            shared.clear_subscriptions().await;
+            return;
+        }
 
         // Reset the ladder after a clean close or a connection that actually
         // stayed up; otherwise climb it.
@@ -765,25 +1113,56 @@ async fn supervise(
             &[],
             bot_core::obs::metrics::LATENCY_BUCKETS_MS,
         )
-        .observe(delay.as_millis() as u64);
-        debug!(%url, failures, ?delay, "websocket reconnect scheduled");
+        .observe(duration_ms(delay));
+        debug!(endpoint = %safe_url, failures, ?delay, "websocket reconnect scheduled");
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
-            _ = shutdown.changed() => continue,
+            changed = shutdown.changed() => {
+                if changed.is_err()
+                    || *shutdown.borrow_and_update()
+                    || shared.shutdown.load(Ordering::SeqCst)
+                {
+                    shared.clear_subscriptions().await;
+                    return;
+                }
+            }
         }
     }
 }
 
 /// One connection attempt.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn run_connection(
     url: &str,
+    safe_url: &str,
     shared: &Arc<Shared>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    cancellations: &mut mpsc::UnboundedReceiver<u64>,
+    outbound: &mut mpsc::UnboundedReceiver<String>,
 ) -> BotResult<()> {
     let policy = shared.policy;
-    let (socket, _response) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|e| BotError::ws(format!("connect {url}: {e}")))?;
+    let connect = tokio::time::timeout(WS_CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url));
+    let connected = tokio::select! {
+        _ = shutdown.changed() => return Ok(()),
+        result = connect => result,
+    };
+    let (socket, _response) = match connected {
+        Err(_) => {
+            return Err(BotError::ws(format!(
+                "websocket connect timed out for {safe_url}"
+            )))
+        }
+        Ok(Err(_)) => {
+            // The provider URL may include credentials, and TLS/websocket
+            // errors sometimes echo it. Keep diagnostics endpoint-safe.
+            return Err(BotError::ws(format!(
+                "websocket connect failed for {safe_url}"
+            )))
+        }
+        Ok(Ok(connection)) => connection,
+    };
     let (mut sink, mut stream) = socket.split();
 
     let reg = bot_core::obs::metrics::global();
@@ -794,15 +1173,12 @@ async fn run_connection(
             &[],
             bot_core::obs::metrics::LATENCY_BUCKETS_MS,
         )
-        .observe(outage.as_millis() as u64);
-        info!(%url, outage_ms = outage.as_millis() as u64, last_slot = ?shared.last_slot(), "websocket reconnected");
+        .observe(duration_ms(outage));
+        info!(endpoint = %safe_url, outage_ms = duration_ms(outage), last_slot = ?shared.last_slot(), "websocket reconnected");
     }
-    shared.broadcast_status(WsStatus::Connected).await;
-
-    // Take the outbound queue. It survives across reconnects: on the first
-    // connection we take it, on later ones it is already taken so we fall back
-    // to flushing registered-but-unmapped subscriptions only.
-    let mut outbound = shared.take_outbound().await;
+    while let Ok(local_id) = cancellations.try_recv() {
+        shared.cancel_subscription(local_id).await;
+    }
 
     // Send every registered subscription (new ones and ones to restore).
     for (request_id, method, params) in register_outgoing(shared).await {
@@ -812,9 +1188,18 @@ async fn run_connection(
             "method": method,
             "params": params,
         });
-        sink.send(TungsteniteMessage::Text(msg.to_string()))
-            .await
-            .map_err(|e| BotError::ws(format!("send {method}: {e}")))?;
+        let send = tokio::time::timeout(
+            WS_WRITE_TIMEOUT,
+            sink.send(TungsteniteMessage::Text(msg.to_string())),
+        );
+        tokio::select! {
+            _ = shutdown.changed() => return Ok(()),
+            result = send => match result {
+                Err(_) => return Err(BotError::ws(format!("send {method}: timed out"))),
+                Ok(Err(_)) => return Err(BotError::ws(format!("send {method}: websocket write failed"))),
+                Ok(Ok(())) => {}
+            }
+        }
         debug!(request_id, %method, "sent subscription request");
     }
 
@@ -841,9 +1226,16 @@ async fn run_connection(
     loop {
         tokio::select! {
             _ = ping.tick() => {
-                sink.send(TungsteniteMessage::Ping(Vec::new()))
-                    .await
-                    .map_err(|e| BotError::ws(format!("ping: {e}")))?;
+                match tokio::time::timeout(
+                    WS_WRITE_TIMEOUT,
+                    sink.send(TungsteniteMessage::Ping(Vec::new())),
+                )
+                .await
+                {
+                    Err(_) => return Err(BotError::ws("websocket ping timed out")),
+                    Ok(Err(_)) => return Err(BotError::ws("websocket ping write failed")),
+                    Ok(Ok(())) => {}
+                }
             }
             _ = stale_check.tick() => {
                 if !stale_after.is_zero() && last_inbound.elapsed() >= stale_after {
@@ -854,7 +1246,11 @@ async fn run_connection(
                     )
                     .inc();
                     shared.broadcast_status(WsStatus::Stale).await;
-                    let _ = sink.send(TungsteniteMessage::Close(None)).await;
+                    let _ = tokio::time::timeout(
+                        WS_WRITE_TIMEOUT,
+                        sink.send(TungsteniteMessage::Close(None)),
+                    )
+                    .await;
                     return Err(BotError::ws(format!(
                         "stale connection: no inbound frame for {} ms (limit {} ms)",
                         last_inbound.elapsed().as_millis(),
@@ -862,20 +1258,32 @@ async fn run_connection(
                     )));
                 }
             }
-            Some(frame) = async {
-                match outbound.as_mut() {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending::<Option<String>>().await,
+            Some(frame) = outbound.recv() => {
+                match tokio::time::timeout(
+                    WS_WRITE_TIMEOUT,
+                    sink.send(TungsteniteMessage::Text(frame)),
+                )
+                .await
+                {
+                    Err(_) => return Err(BotError::ws("queued websocket write timed out")),
+                    Ok(Err(_)) => return Err(BotError::ws("queued websocket write failed")),
+                    Ok(Ok(())) => {}
                 }
-            } => {
-                sink.send(TungsteniteMessage::Text(frame))
-                    .await
-                    .map_err(|e| BotError::ws(format!("send queued frame: {e}")))?;
                 debug!("sent queued subscription frame");
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    let _ = sink.send(TungsteniteMessage::Close(None)).await;
+            Some(local_id) = cancellations.recv() => {
+                shared.cancel_subscription(local_id).await;
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err()
+                    || *shutdown.borrow_and_update()
+                    || shared.shutdown.load(Ordering::SeqCst)
+                {
+                    let _ = tokio::time::timeout(
+                        WS_WRITE_TIMEOUT,
+                        sink.send(TungsteniteMessage::Close(None)),
+                    )
+                    .await;
                     return Ok(());
                 }
             }
@@ -892,7 +1300,11 @@ async fn run_connection(
                         }
                     }
                     Ok(TungsteniteMessage::Ping(payload)) => {
-                        let _ = sink.send(TungsteniteMessage::Pong(payload)).await;
+                        let _ = tokio::time::timeout(
+                            WS_WRITE_TIMEOUT,
+                            sink.send(TungsteniteMessage::Pong(payload)),
+                        )
+                        .await;
                     }
                     Ok(TungsteniteMessage::Pong(_)) => {}
                     Ok(TungsteniteMessage::Close(frame)) => {
@@ -910,6 +1322,7 @@ async fn run_connection(
 /// Take every subscription that has no server id yet and allocate a request id
 /// for it. Returns the frames to send.
 async fn register_outgoing(shared: &Arc<Shared>) -> Vec<(u64, String, Value)> {
+    let _state = shared.subscription_state.lock().await;
     let subs = shared.subs.read().await;
     if subs.is_empty() {
         return Vec::new();
@@ -951,20 +1364,28 @@ async fn handle_text(shared: &Arc<Shared>, text: &str) {
 
     // ---- subscribe response: {"id":N,"result":<server id>} | {"id":N,"error":…}
     if let Some(request_id) = value.get("id").and_then(|v| v.as_u64()) {
+        let _state = shared.subscription_state.lock().await;
         let local_id = shared.by_request.write().await.remove(&request_id);
         let Some(local_id) = local_id else {
             debug!(request_id, "response for an unknown request id");
             return;
         };
+        let cancelled_method = shared.cancelled_requests.lock().await.remove(&request_id);
 
         if let Some(error) = value.get("error") {
-            warn!(request_id, local_id, %error, "subscription rejected");
-            if let Some(waiter) = shared.waiters.lock().await.remove(&local_id) {
-                let _ = waiter.send(Err(BotError::ws(error.to_string())));
-            } else if let Some(sub) = shared.subs.read().await.get(&local_id) {
-                let _ = sub.tx.send(WsMessage::Error {
-                    message: error.to_string(),
-                });
+            if cancelled_method.is_none() {
+                warn!(request_id, local_id, %error, "subscription rejected");
+                if let Some(waiter) = shared.waiters.lock().await.remove(&local_id) {
+                    let _ = waiter.send(Err(BotError::ws(error.to_string())));
+                } else if let Some(sub) = shared.subs.read().await.get(&local_id) {
+                    shared.deliver(
+                        local_id,
+                        sub,
+                        WsMessage::Error {
+                            message: error.to_string(),
+                        },
+                    );
+                }
             }
             shared.subs.write().await.remove(&local_id);
             return;
@@ -974,10 +1395,39 @@ async fn handle_text(shared: &Arc<Shared>, text: &str) {
             warn!(request_id, local_id, "subscribe response had no result");
             return;
         };
+
+        if let Some(method) = cancelled_method {
+            // The caller canceled after the request was sent but before its
+            // response arrived. Unsubscribe the server-side id immediately;
+            // do not resurrect a local subscription with no receiver.
+            if let Some(unsubscribe) = unsubscribe_method(&method) {
+                let unsubscribe_id = shared.alloc_request();
+                let frame = json!({
+                    "jsonrpc": "2.0",
+                    "id": unsubscribe_id,
+                    "method": unsubscribe,
+                    "params": [server_id],
+                })
+                .to_string();
+                if !shared.enqueue(frame) {
+                    warn!(
+                        request_id,
+                        local_id,
+                        server_id,
+                        "late websocket subscription could not be unsubscribed before disconnect"
+                    );
+                }
+            }
+            return;
+        }
+
         shared.by_server.write().await.insert(server_id, local_id);
         debug!(request_id, local_id, server_id, "subscribed");
 
         if let Some(waiter) = shared.waiters.lock().await.remove(&local_id) {
+            if let Some(sub) = shared.subs.read().await.get(&local_id) {
+                shared.deliver(local_id, sub, WsMessage::Status(WsStatus::Connected));
+            }
             let _ = waiter.send(Ok(server_id));
         } else if let Some(sub) = shared.subs.read().await.get(&local_id) {
             // Re-established after a reconnect: first tell the consumer what
@@ -989,12 +1439,17 @@ async fn handle_text(shared: &Arc<Shared>, text: &str) {
                     &[],
                 )
                 .inc();
-            let _ = sub.tx.send(WsMessage::Gap {
-                subscription: local_id,
-                last_slot: shared.last_slot(),
-                outage_ms: shared.last_outage_ms.load(Ordering::Relaxed),
-            });
-            let _ = sub.tx.send(WsMessage::Status(WsStatus::Connected));
+            shared.deliver(
+                local_id,
+                sub,
+                WsMessage::Gap {
+                    subscription: local_id,
+                    last_slot: shared.last_slot(),
+                    outage_ms: shared.last_outage_ms.load(Ordering::Relaxed),
+                    dropped_messages: 0,
+                },
+            );
+            shared.deliver(local_id, sub, WsMessage::Status(WsStatus::Connected));
         }
         return;
     }
@@ -1044,9 +1499,10 @@ async fn handle_text(shared: &Arc<Shared>, text: &str) {
         None => None,
     };
     let subs = shared.subs.read().await;
-    match local_id.and_then(|l| subs.get(&l)) {
-        Some(sub) => {
-            let _ = sub.tx.send(message);
+    let matching_sub = local_id.and_then(|id| subs.get(&id).map(|sub| (id, sub)));
+    match matching_sub {
+        Some((local_id, sub)) => {
+            shared.deliver(local_id, sub, message);
         }
         None => {
             // Unmapped notification (e.g. it arrived before the subscribe
@@ -1056,8 +1512,8 @@ async fn handle_text(shared: &Arc<Shared>, text: &str) {
                 message,
                 WsMessage::Logs { .. } | WsMessage::Transaction { .. }
             ) {
-                for sub in subs.values() {
-                    let _ = sub.tx.send(message.clone());
+                for (local_id, sub) in subs.iter() {
+                    shared.deliver(*local_id, sub, message.clone());
                 }
             }
         }
@@ -1244,7 +1700,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_response_maps_request_to_server_id() {
         let shared = Shared::new(WsPolicy::default());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
         let (wtx, wrx) = tokio::sync::oneshot::channel();
 
         shared.subs.write().await.insert(
@@ -1253,6 +1709,8 @@ mod tests {
                 method: "logsSubscribe".into(),
                 params: json!([]),
                 tx,
+                dropped_messages: Arc::new(AtomicU64::new(0)),
+                overflow_started_ms: Arc::new(AtomicU64::new(0)),
             },
         );
         shared.by_request.write().await.insert(11, 1);
@@ -1271,16 +1729,24 @@ mod tests {
             "params": {"subscription": 999, "result": {"value": {"signature": "sig1", "err": null, "logs": ["l"]}}}
         });
         handle_text(&shared, &notif.to_string()).await;
-        match rx.recv().await.unwrap() {
-            WsMessage::Logs { signature, .. } => assert_eq!(signature, "sig1"),
-            other => panic!("expected Logs, got {other:?}"),
+        // The acknowledgement itself is delivered first as `Status(Connected)`
+        // (by design, see the subscribe path); skip it and expect the log.
+        loop {
+            match rx.recv().await.unwrap() {
+                WsMessage::Status(WsStatus::Connected) => continue,
+                WsMessage::Logs { signature, .. } => {
+                    assert_eq!(signature, "sig1");
+                    break;
+                }
+                other => panic!("expected Logs, got {other:?}"),
+            }
         }
     }
 
     #[tokio::test]
     async fn rejected_subscription_reports_the_error_and_deregisters() {
         let shared = Shared::new(WsPolicy::default());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
         let (wtx, wrx) = tokio::sync::oneshot::channel();
         shared.subs.write().await.insert(
             5,
@@ -1288,6 +1754,8 @@ mod tests {
                 method: "transactionSubscribe".into(),
                 params: json!([]),
                 tx,
+                dropped_messages: Arc::new(AtomicU64::new(0)),
+                overflow_started_ms: Arc::new(AtomicU64::new(0)),
             },
         );
         shared.by_request.write().await.insert(50, 5);
@@ -1311,13 +1779,15 @@ mod tests {
     #[tokio::test]
     async fn disconnect_clears_server_ids_but_keeps_subscriptions() {
         let shared = Shared::new(WsPolicy::default());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
         shared.subs.write().await.insert(
             3,
             Subscription {
                 method: "logsSubscribe".into(),
                 params: json!([]),
                 tx,
+                dropped_messages: Arc::new(AtomicU64::new(0)),
+                overflow_started_ms: Arc::new(AtomicU64::new(0)),
             },
         );
         shared.by_server.write().await.insert(777, 3);
@@ -1338,7 +1808,7 @@ mod tests {
     #[tokio::test]
     async fn register_outgoing_skips_subscriptions_already_sent() {
         let shared = Shared::new(WsPolicy::default());
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
         for id in 1..=3u64 {
             shared.subs.write().await.insert(
                 id,
@@ -1346,6 +1816,8 @@ mod tests {
                     method: "logsSubscribe".into(),
                     params: json!([]),
                     tx: tx.clone(),
+                    dropped_messages: Arc::new(AtomicU64::new(0)),
+                    overflow_started_ms: Arc::new(AtomicU64::new(0)),
                 },
             );
         }
@@ -1368,13 +1840,15 @@ mod tests {
     #[tokio::test]
     async fn unmapped_logs_notifications_fan_out_instead_of_vanishing() {
         let shared = Shared::new(WsPolicy::default());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
         shared.subs.write().await.insert(
             1,
             Subscription {
                 method: "logsSubscribe".into(),
                 params: json!([]),
                 tx,
+                dropped_messages: Arc::new(AtomicU64::new(0)),
+                overflow_started_ms: Arc::new(AtomicU64::new(0)),
             },
         );
         // No by_server entry: the notification arrives before the response.
@@ -1390,15 +1864,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_subscription_queue_is_bounded_and_reports_dropped_events() {
+        let shared = Shared::new(WsPolicy::default());
+        let (tx, mut rx) = mpsc::channel(2);
+        let sub = Subscription {
+            method: "logsSubscribe".into(),
+            params: json!([]),
+            tx,
+            dropped_messages: Arc::new(AtomicU64::new(0)),
+            overflow_started_ms: Arc::new(AtomicU64::new(0)),
+        };
+        let logs = |signature: &str| WsMessage::Logs {
+            subscription: 1,
+            signature: signature.into(),
+            err: None,
+            logs: Vec::new(),
+            slot: 1,
+        };
+
+        shared.deliver(1, &sub, logs("first"));
+        shared.deliver(1, &sub, logs("second"));
+        shared.deliver(1, &sub, logs("dropped"));
+        assert_eq!(sub.dropped_messages.load(Ordering::Relaxed), 1);
+
+        assert!(matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "first"));
+        // One spare slot is reserved for live data, not consumed by a gap.
+        shared.deliver(1, &sub, logs("fourth"));
+        assert!(matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "second"));
+        assert!(matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "fourth"));
+
+        // Once two slots are free, the overflow marker is delivered before the
+        // next event and reports exactly how many notifications were lost.
+        shared.deliver(1, &sub, logs("fifth"));
+        match rx.recv().await {
+            Some(WsMessage::Gap {
+                dropped_messages,
+                outage_ms,
+                ..
+            }) => {
+                assert_eq!(dropped_messages, 1);
+                assert!(outage_ms < 10_000, "overflow duration={outage_ms} ms");
+            }
+            other => panic!("expected overflow Gap, got {other:?}"),
+        }
+        assert!(matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "fifth"));
+        assert_eq!(sub.dropped_messages.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn a_late_subscribe_success_is_unsubscribed_after_cancellation() {
+        let shared = Shared::new(WsPolicy::default());
+        shared.on_connect().await;
+        let (tx, _rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
+        shared.subs.write().await.insert(
+            9,
+            Subscription {
+                method: "logsSubscribe".into(),
+                params: json!([]),
+                tx,
+                dropped_messages: Arc::new(AtomicU64::new(0)),
+                overflow_started_ms: Arc::new(AtomicU64::new(0)),
+            },
+        );
+        shared.by_request.write().await.insert(11, 9);
+        let mut outbound = shared.take_outbound().await.expect("outbound owner");
+
+        shared.cancel_subscription(9).await;
+        assert!(shared.subs.read().await.is_empty());
+        assert_eq!(shared.by_request.read().await.get(&11), Some(&9));
+
+        handle_text(&shared, r#"{"jsonrpc":"2.0","id":11,"result":999}"#).await;
+        let frame: Value = serde_json::from_str(
+            &outbound.recv().await.expect("late unsubscribe frame"),
+        )
+        .expect("unsubscribe frame is JSON");
+        assert_eq!(frame["method"], "logsUnsubscribe");
+        assert_eq!(frame["params"][0], 999);
+        assert!(shared.by_server.read().await.is_empty());
+        assert!(shared.cancelled_requests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn cancel_removes_the_subscription() {
         let ws = SolanaWs::new("wss://example.invalid");
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
         ws.shared().subs.write().await.insert(
             9,
             Subscription {
                 method: "logsSubscribe".into(),
                 params: json!([]),
                 tx,
+                dropped_messages: Arc::new(AtomicU64::new(0)),
+                overflow_started_ms: Arc::new(AtomicU64::new(0)),
             },
         );
         ws.shared().by_server.write().await.insert(1, 9);
@@ -1406,10 +1963,11 @@ mod tests {
         let mut handle = SubscriptionHandle {
             local_id: 9,
             method: "logsSubscribe".into(),
-            rx: Some(mpsc::unbounded_channel().1),
+            rx: Some(mpsc::channel(SUBSCRIPTION_BUFFER).1),
             shared: ws.shared(),
+            armed: true,
         };
-        let _ = handle.receiver();
+        assert!(handle.receiver().is_ok());
         assert_eq!(ws.subscription_count().await, 1);
         handle.cancel().await;
         assert_eq!(ws.subscription_count().await, 0);
@@ -1483,13 +2041,15 @@ mod tests {
     #[tokio::test]
     async fn restored_subscription_gets_a_gap_before_connected() {
         let shared = Shared::new(WsPolicy::default());
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(SUBSCRIPTION_BUFFER);
         shared.subs.write().await.insert(
             1,
             Subscription {
                 method: "logsSubscribe".into(),
                 params: json!([]),
                 tx,
+                dropped_messages: Arc::new(AtomicU64::new(0)),
+                overflow_started_ms: Arc::new(AtomicU64::new(0)),
             },
         );
         // First connection: subscribe answered, a notification at slot 500.
@@ -1523,10 +2083,12 @@ mod tests {
                 subscription,
                 last_slot,
                 outage_ms,
+                dropped_messages,
             } => {
                 assert_eq!(subscription, 1);
                 assert_eq!(last_slot, Some(500));
                 assert!(outage_ms >= 20, "outage_ms={outage_ms}");
+                assert_eq!(dropped_messages, 0, "this gap is a reconnect, not overflow");
             }
             other => panic!("expected Gap, got {other:?}"),
         }
@@ -1603,7 +2165,7 @@ mod tests {
             .logs_subscribe(LogsFilter::default())
             .await
             .expect("first subscribe succeeds");
-        let mut rx = sub.receiver();
+        let mut rx = sub.receiver().expect("receiver is available exactly once");
 
         // Wait for the reconnect + restore, observing the status trail.
         let mut saw_stale = false;

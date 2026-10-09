@@ -34,6 +34,17 @@
 //! No type in this module implements `Debug`/`Display` in a way that can emit
 //! private key bytes; [`SignerError`] variants carry identities, public keys
 //! and context strings only.
+//!
+//! **Operator mode keeps keys in process memory.** The `local` provider loads
+//! key material from a file or an environment variable into a
+//! [`Wallet`](crate::tokens::Wallet) inside this process. Every intermediate
+//! buffer on that path (env-var string, file text, decoded bytes, seed
+//! expansions) is wrapped in `zeroize::Zeroizing` and overwritten on drop
+//! (GAP-MAP P1), but the constructed keypair itself lives in RAM for the
+//! lifetime of the signer — that is the explicit trust boundary of operator
+//! mode. Deployments that must not hold key bytes in process memory select a
+//! Vault/KMS provider ([`SigningProvider`]) once that backend is
+//! implemented; nothing here falls back silently.
 
 use std::sync::Arc;
 
@@ -313,9 +324,17 @@ pub fn build_signer_registry(cfg: &Config, primary: Arc<Wallet>) -> BotResult<Si
             Arc::clone(&registry.require(alias.trim())?)
         } else if let Some(env) = &id.keypair_env {
             let env = env.trim();
-            let spec = std::env::var(env).map_err(|_| SignerError::SecretLoad {
-                context: format!("identity '{name}': environment variable {env} is not set"),
-            })?;
+            // The secret read from the environment is wrapped in
+            // `Zeroizing` (GAP-MAP P1): once the keypair is constructed the
+            // string buffer is overwritten on drop, so the secret does not
+            // survive in freed heap memory.
+            let spec = zeroize::Zeroizing::new(std::env::var(env).map_err(|_| {
+                SignerError::SecretLoad {
+                    context: format!(
+                        "identity '{name}': environment variable {env} is not set"
+                    ),
+                }
+            })?);
             if spec.trim().is_empty() {
                 return Err(SignerError::SecretLoad {
                     context: format!("identity '{name}': environment variable {env} is empty"),

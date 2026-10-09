@@ -61,11 +61,9 @@ Statuses mirror `release-manifest.json` and `docs/HANDOVER.md` §3/§5.
 ## Functional acceptance (re-run by buyer per docs/BUYER-DEPLOYMENT.md)
 
 - [ ] **[VERIFIED at delivery / BUYER RE-RUN]** Full local gate passed on the
-      frozen tree: `./scripts/release-check.sh` → 20 PASS / 0 FAIL / 0 SKIP
-      (521/521 workspace at freeze — 537/537 on the current audit-pass
-      tree, db 23/23, redis 10/10, distributed 4/4,
-      two-replica 1/1, staking 48/48 host at freeze — 71/71 current,
-      fmt/clippy/audit/deny clean).
+      frozen tree: `./scripts/release-check.sh` runs clean (scripted gates;
+      earlier pass-count figures were removed because their run logs do
+      not ship in this tree — re-run on your own infra).
 - [ ] **[BUYER ACTION]** Paper test completed on buyer infrastructure
       (modules enabled, simulated fills observed, dashboard live).
 - [ ] **[BUYER ACTION]** Simulate test completed (`EXECUTION_MODE=simulate`:
@@ -100,8 +98,7 @@ Statuses mirror `release-manifest.json` and `docs/HANDOVER.md` §3/§5.
 ## On-chain program
 
 - [ ] **[PREVIOUSLY VERIFIED]** Staking program compiles to BPF
-      (`cargo build-sbf`, 5,440-byte `.so`, agave 2.1.21) and passed 2/2
-      validator e2e (stake lifecycle, timelock, two-step admin transfer,
+      (`cargo build-sbf`, agave 2.1.21) and passed the validator e2e (stake lifecycle, timelock, two-step admin transfer,
       genesis-mint latch) on identical source in an earlier session; CI
       `program` job re-runs both on every push once CI is active.
 - [ ] **[BUYER ACTION]** External audit completed — **no external security

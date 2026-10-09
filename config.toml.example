@@ -198,6 +198,20 @@ stale_position_exit_secs = 0                 # force-exit when the mark could no
 exit_retry_backoff_secs = 10                 # min seconds between exit attempts after a FAILED exit
 failed_entry_cleanup = true                  # close (no sell) positions whose entry provably never landed
 
+# Advanced exit policy (GAP-MAP v2 P2). Absent/empty = feature off and the
+# classic single-TP/SL/trailing rules behave exactly as before. Ladder rungs
+# fire in ascending trigger order, each selling a fraction of the CURRENT
+# position; break_even arms once the high-water mark clears the activation
+# multiple; dev_sell flattens when the risk_intel layer observed a creator
+# sell within the TTL window.
+# [sniper.advanced_exit]
+# ladder = [
+#   { trigger_multiple = 2.0, sell_fraction = 0.30 },   # +100%: sell 30%
+#   { trigger_multiple = 5.0, sell_fraction = 0.50 },   # +400%: sell 50% of remainder
+# ]
+# break_even = { activation_multiple = 1.5, buffer = 0.02 }
+# dev_sell_ttl_secs = 300
+
 # --- Module 2: copy trading --------------------------------------------------
 [copy]
 enabled = false

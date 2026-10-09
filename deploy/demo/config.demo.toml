@@ -1,0 +1,41 @@
+# ============================================================================
+# sniper-suite — DEMO configuration (deploy/demo/docker-compose.demo.yml)
+# ----------------------------------------------------------------------------
+# Paper-safe evaluation config. Hard guarantees baked in here:
+#   * [execution] mode = "paper" AND allow_live_trading = false — NOTHING can
+#     be broadcast on-chain or to Polymarket from this stack (both gates must
+#     be flipped for live, and neither is).
+#   * No wallet keypair is configured: the server generates an ephemeral
+#     wallet and logs "paper only" (see main.rs::load_wallet).
+#   * Devnet RPC only — no mainnet endpoint appears anywhere in this file.
+#
+# The config loader rejects unknown keys (deny_unknown_fields): every key
+# below is copied verbatim from config.toml.example.
+# ============================================================================
+
+[network]
+cluster = "devnet"
+rpc_url = "https://api.devnet.solana.com"
+# Blank => derived from rpc_url (https -> wss).
+ws_url = ""
+
+[execution]
+mode = "paper"
+# HARD gate: live orders additionally need this true. It stays false.
+allow_live_trading = false
+
+[api]
+enabled = true
+# Container-local bind; compose publishes it to 127.0.0.1 on the host.
+# Non-loopback binds require an API key — DEMO_API_KEY is set by the compose
+# file, so this satisfies the startup gate.
+bind_host = "0.0.0.0"
+bind_port = 8080
+api_key_env = "DEMO_API_KEY"
+# Local demo only: the control-plane dev origin. Lock this down anywhere the
+# stack is reachable beyond localhost.
+cors_origins = ["http://127.0.0.1:3000", "http://localhost:3000"]
+serve_dashboard = true
+
+[storage]
+data_dir = "data"

@@ -42,9 +42,9 @@ use crate::saas::middleware::{authorize_request, deny_response};
 const MAX_EVENT_TYPES: usize = 32;
 const MAX_EVENT_TYPE_LENGTH: usize = 64;
 const MAX_DESCRIPTION_LENGTH: usize = 256;
-const MAX_RESPONSE_BODY_DIGEST_BYTES: usize = 64;
-const MAX_RESPONSE_BODY_BYTES: usize = 1_048_576;
-const DELIVERY_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+pub(crate) const MAX_RESPONSE_BODY_DIGEST_BYTES: usize = 64;
+pub(crate) const MAX_RESPONSE_BODY_BYTES: usize = 1_048_576;
+pub(crate) const DELIVERY_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const WEBHOOK_SECRET_KEY_ENV: &str = "WEBHOOK_SECRET_ENCRYPTION_KEY";
 const ENCRYPTED_SECRET_PREFIX: &str = "enc:v1:";
 const SECRET_NONCE_BYTES: usize = 12;
@@ -183,7 +183,7 @@ fn forbidden_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn parse_https_url(raw: &str) -> Result<Url, String> {
+pub(crate) fn parse_https_url(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw.trim()).map_err(|_| "url must be a valid absolute URL".to_string())?;
     if url.scheme() != "https" {
         return Err("webhook URL must use HTTPS".into());
@@ -211,7 +211,7 @@ fn parse_https_url(raw: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-async fn resolve_public_socket(url: &Url) -> Result<SocketAddr, String> {
+pub(crate) async fn resolve_public_socket(url: &Url) -> Result<SocketAddr, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "webhook host is missing".to_string())?;
@@ -226,7 +226,7 @@ async fn resolve_public_socket(url: &Url) -> Result<SocketAddr, String> {
         .ok_or_else(|| "webhook host resolves only to reserved or private addresses".to_string())
 }
 
-fn sign_payload(secret: &str, timestamp: u64, body: &[u8]) -> String {
+pub(crate) fn sign_payload(secret: &str, timestamp: u64, body: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
         .expect("HMAC accepts secrets of every non-empty length");
     mac.update(timestamp.to_string().as_bytes());
@@ -272,7 +272,7 @@ fn encrypt_webhook_secret(secret: &str) -> Result<String, String> {
     ))
 }
 
-fn decrypt_webhook_secret(stored: &str) -> Result<String, String> {
+pub(crate) fn decrypt_webhook_secret(stored: &str) -> Result<String, String> {
     let encoded = stored
         .strip_prefix(ENCRYPTED_SECRET_PREFIX)
         .ok_or_else(|| {
@@ -898,11 +898,20 @@ async fn test_webhook(
     };
 
     let delivery_id = Uuid::new_v4();
+    // A failed attempt is handed to the retry dispatcher: the payload is
+    // persisted and the first retry is scheduled (exponential backoff from
+    // `webhook_delivery::retry_backoff`). Succeeded rows carry no schedule.
+    let next_retry_at = if status == "failed" {
+        Some(Utc::now() + super::webhook_delivery::retry_backoff(1))
+    } else {
+        None
+    };
     let delivery_insert = sqlx::query(
         "INSERT INTO webhook_deliveries
              (id, organization_id, endpoint_id, event_id, event_type, status,
-              response_status, attempt_count, error, response_body_digest, created_at)
-         VALUES ($1, $2, $3, $4, 'webhook.test', $5, $6, 1, $7, $8, now())",
+              response_status, attempt_count, error, response_body_digest,
+              payload, next_retry_at, created_at)
+         VALUES ($1, $2, $3, $4, 'webhook.test', $5, $6, 1, $7, $8, $9, $10, now())",
     )
     .bind(delivery_id)
     .bind(ctx.organization.id.as_uuid())
@@ -912,6 +921,8 @@ async fn test_webhook(
     .bind(response_status)
     .bind(delivery_error.as_deref())
     .bind(response_digest.as_deref())
+    .bind(sqlx::types::Json(payload.clone()))
+    .bind(next_retry_at)
     .execute(db.pool())
     .await;
 

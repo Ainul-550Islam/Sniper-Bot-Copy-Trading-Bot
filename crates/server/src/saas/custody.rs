@@ -1451,6 +1451,17 @@ async fn resolve_signer(
 
     // Policy check: tenant owns, signer active, tenant allowed, capability etc.
     // For resolve, we check that signer is active and tenant not closed.
+    //
+    // The requested module is pinned to `module.sniper` on purpose: this
+    // control-plane endpoint is a GET with no body, so the caller cannot
+    // name a module, and it answers the narrow question "is this signer
+    // resolvable for the primary trading module?". The module an engine
+    // ACTUALLY wants is enforced where it matters — the sign boundary
+    // (`crates/server/src/custody/sign_boundary.rs`) builds its own
+    // `CustodyRequest` from the engine's request and never reuses this
+    // endpoint's verdict. Do not widen this pin without adding a module
+    // parameter, or a copy/polymarket-only signer would start resolving
+    // here under a rule it never declared.
     let req = CustodyRequest::new(
         ctx.organization.id,
         ctx.organization.status,
@@ -1459,10 +1470,16 @@ async fn resolve_signer(
     );
     let verdict = check_custody_policy(Some(&profile), Some(&signer), &req);
     if !verdict.is_allowed() {
-        let reason = verdict.deny_reason().unwrap();
+        // A denied verdict carries its reason by construction; the fallback
+        // keeps this production path panic-free if that invariant ever
+        // breaks, and the debug payload still identifies the verdict.
+        let reason = verdict
+            .deny_reason()
+            .map(|r| r.as_str())
+            .unwrap_or("denied");
         return (
             axum::http::StatusCode::FORBIDDEN,
-            Json(json!({"error": reason.as_str(), "reason": format!("{:?}", verdict)})),
+            Json(json!({"error": reason, "reason": format!("{:?}", verdict)})),
         )
             .into_response();
     }

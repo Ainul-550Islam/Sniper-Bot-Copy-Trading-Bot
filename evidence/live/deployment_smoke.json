@@ -1,0 +1,11 @@
+{
+  "validation_id": "deployment_smoke",
+  "provider": "deployment",
+  "environment": "live",
+  "timestamp": "2026-10-08T02:11:55Z",
+  "status": "NOT_RUN",
+  "command": "LIVE_DEPLOYMENT=1 DEPLOYMENT_BASE_URL=<redacted> cargo test -p sniper-suite --test deployment_smoke",
+  "attestation_ref": "",
+  "redacted_metadata": {"reason":"read-only /healthz + /api/openapi.json probe of the deployed environment"},
+  "rule": "status PASSED requires attestation_ref to be non-empty (a real transaction signature or provider reference id). Never fabricate."
+}

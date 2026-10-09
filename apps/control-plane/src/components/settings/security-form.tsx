@@ -2,6 +2,15 @@
 
 import { useState } from "react";
 import { enforceMfa, rotateTokens, setupTotp, updateIpAllowlist, verifyTotp } from "@/lib/api/security-api";
+import TotpQrCode from "@/components/settings/TotpQrCode";
+
+/** What `POST /api/saas/security/totp/setup` returns (see TotpEnrollment). */
+interface TotpSetupData {
+  device_id: string;
+  secret: string;
+  otpauth_url: string;
+  backup_codes: string[] | null;
+}
 
 interface SecurityFormProps {
   mfaEnforced: boolean;
@@ -14,7 +23,7 @@ export default function SecurityForm({ mfaEnforced, mfaConfigured, ipAllowlist, 
   const [mfa, setMfa] = useState(mfaEnforced);
   const [configured, setConfigured] = useState(mfaConfigured);
   const [cidrs, setCidrs] = useState(ipAllowlist.join("\n"));
-  const [setupData, setSetupData] = useState<{ device_id: string; secret: string; otpauth_url: string } | null>(null);
+  const [setupData, setSetupData] = useState<TotpSetupData | null>(null);
   const [mfaCode, setMfaCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -24,7 +33,12 @@ export default function SecurityForm({ mfaEnforced, mfaConfigured, ipAllowlist, 
     setMsg(null);
     try {
       const result = await setupTotp();
-      setSetupData({ device_id: result.device_id, secret: result.secret, otpauth_url: result.otpauth_url });
+      setSetupData({
+        device_id: result.device_id,
+        secret: result.secret,
+        otpauth_url: result.otpauth_url,
+        backup_codes: result.backup_codes,
+      });
       setMsg({ text: "Authenticator enrollment created. Verify a current six-digit code before enforcing MFA.", ok: true });
     } catch (err: unknown) {
       setMsg({ text: err instanceof Error ? err.message : "Failed to start MFA enrollment", ok: false });
@@ -139,9 +153,36 @@ export default function SecurityForm({ mfaEnforced, mfaConfigured, ipAllowlist, 
         </div>
         {setupData && (
           <div className="card" style={{ marginTop: "1rem", background: "var(--panel-2)" }}>
-            <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Add this secret to an authenticator app:</div>
-            <code style={{ display: "block", margin: "0.5rem 0", wordBreak: "break-all" }}>{setupData.secret}</code>
-            <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>{setupData.otpauth_url}</div>
+            <div style={{ display: "flex", gap: "1.25rem", flexWrap: "wrap", alignItems: "flex-start" }}>
+              <div style={{ flexShrink: 0 }}>
+                <TotpQrCode
+                  value={setupData.otpauth_url}
+                  size={180}
+                  label="Scan to enroll this account in your authenticator app"
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: "220px" }}>
+                <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                  Scan the code with your authenticator app, or enter the secret
+                  manually. This secret is shown only now — it is never returned
+                  again after enrollment.
+                </div>
+                <code style={{ display: "block", margin: "0.5rem 0", wordBreak: "break-all", fontSize: "0.9rem" }}>
+                  {setupData.secret}
+                </code>
+                {setupData.backup_codes && setupData.backup_codes.length > 0 ? (
+                  <div style={{ marginTop: "0.5rem" }}>
+                    <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                      Store these one-time backup codes somewhere safe; each works
+                      once if you lose access to your authenticator.
+                    </div>
+                    <code style={{ display: "block", margin: "0.5rem 0", whiteSpace: "pre-wrap", fontSize: "0.85rem" }}>
+                      {setupData.backup_codes.join("\n")}
+                    </code>
+                  </div>
+                ) : null}
+              </div>
+            </div>
             <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem" }}>
               <input
                 value={mfaCode}

@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 // invoice types used via handler payloads
@@ -72,6 +73,50 @@ async fn handle_webhook(
                 .into_response();
         }
     };
+
+    // Observation-only events: this build keeps NO durable payment or
+    // invoice record, so these deliveries must not be claimed and marked
+    // `processed` — that marker means "fully handled", which would be a
+    // lie. The delivery is audited and acknowledged honestly; when durable
+    // payment persistence lands, this branch is replaced by real handling
+    // and the claim path applies.
+    if matches!(
+        normalized.event_type.as_str(),
+        "payment.succeeded"
+            | "payment.failed"
+            | "payment.refunded"
+            | "invoice.paid"
+            | "invoice.void"
+    ) {
+        let detail = format!(
+            "{} observed for organization {}",
+            normalized.event_type,
+            normalized
+                .organization_id
+                .map(|o| o.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        );
+        state.audit.record(
+            "saas",
+            "saas.billing.webhook.observed",
+            Some(&normalized.provider_event_id),
+            bot_core::audit::AuditOutcome::Success,
+            json!({
+                "provider": normalized.provider.as_str(),
+                "type": normalized.event_type,
+                "note": "audit-only: no durable payment record exists in this build",
+                "detail": detail,
+            }),
+        ).await;
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "status": "observed_audit_only",
+                "detail": detail,
+            })),
+        )
+            .into_response();
+    }
 
     // Deduplication: has this provider_event_id already been claimed?
     match is_duplicate(&state, &normalized).await {
@@ -193,14 +238,22 @@ fn verify_request(
     // Parse envelope: {"id":"...","type":"...","data":{...}}
     let envelope: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("invalid json: {e}"))?;
+    // Cap the provider event id: it becomes a durable deduplication key,
+    // and a hostile (or buggy) provider must not be able to balloon the
+    // `provider_events` rows with unbounded identifiers. Matches the
+    // billing_webhook envelope rule.
     let event_id = envelope
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "missing id".to_string())?
-        .to_string();
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.chars().take(200).collect::<String>())
+        .ok_or_else(|| "missing id".to_string())?;
     let event_type = envelope
         .get("type")
         .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing type".to_string())?
         .to_string();
     let data = envelope.get("data").cloned().unwrap_or(json!({}));
@@ -243,7 +296,10 @@ async fn is_duplicate(state: &ApiState, event: &NormalizedEvent) -> Result<bool,
     if let Some(db) = &state.db {
         let pool = db.pool();
         let idempotency_key = format!("{}:{}", event.provider.as_str(), event.provider_event_id);
-        let payload_hash = hex::encode(md5::compute(event.payload.to_string()));
+        // SHA-256 of the canonical payload text: a drift detector for the
+        // audit trail, never a trust anchor (trust comes from the HMAC
+        // signature verified before anything else).
+        let payload_hash = hex::encode(Sha256::digest(event.payload.to_string().as_bytes()));
         let claimed = sqlx::query(
             "INSERT INTO provider_events
                  (id, organization_id, provider, provider_event_id, event_type,
@@ -491,7 +547,7 @@ fn memory_seen_set() -> &'static Mutex<HashSet<String>> {
 }
 fn memory_claim(provider: &BillingProviderKind, id: &str) -> Result<bool, String> {
     let key = format!("{}:{}", provider.as_str(), id);
-    let mut seen = memory_seen_set().lock().expect("mutex");
+    let mut seen = memory_seen_set().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if seen.contains(&key) {
         return Ok(true);
     }
@@ -503,43 +559,13 @@ fn memory_claim(provider: &BillingProviderKind, id: &str) -> Result<bool, String
 }
 fn memory_release(provider: &BillingProviderKind, id: &str) {
     let key = format!("{}:{}", provider.as_str(), id);
-    memory_seen_set().lock().expect("mutex").remove(&key);
+    memory_seen_set().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&key);
 }
 fn memory_mark(provider: &BillingProviderKind, id: &str) {
     let key = format!("{}:{}", provider.as_str(), id);
-    let mut seen = memory_seen_set().lock().expect("mutex");
+    let mut seen = memory_seen_set().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if seen.len() < 10_000 {
         seen.insert(key);
-    }
-}
-
-// Minimal md5 for payload hash (stable, not security-sensitive)
-mod md5 {
-    pub fn compute(s: String) -> [u8; 16] {
-        // test-only deterministic signature substitute (real providers sign;
-        // tests just need a stable value to prove idempotent application)
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(s.as_bytes());
-        let result = hasher.finalize();
-        let mut out = [0u8; 16];
-        out.copy_from_slice(&result[..16]);
-        out
-    }
-    impl std::fmt::LowerHex for HexWrap {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            for b in &self.0 {
-                write!(f, "{:02x}", b)?;
-            }
-            Ok(())
-        }
-    }
-    pub struct HexWrap(pub [u8; 16]);
-    // allow format!("{:x}", md5::compute(...)) via wrapper
-    impl From<[u8; 16]> for HexWrap {
-        fn from(v: [u8; 16]) -> Self {
-            HexWrap(v)
-        }
     }
 }
 

@@ -198,29 +198,29 @@ export const commercial = {
     }),
 
   // Team & Organization Members
-  members: (organizationId: string) =>
-    request<TeamListResponse>(`/api/saas/organizations/${encodeURIComponent(organizationId)}/members`),
-  inviteMember: (organizationId: string, email: string, role: string) =>
-    request<{ success: boolean; invitation_id: string }>(
-      `/api/saas/organizations/${encodeURIComponent(organizationId)}/members`,
-      {
-        method: "POST",
-        body: { email, role },
-      },
-    ),
-  removeMember: (organizationId: string, memberId: string) =>
-    request<{ success: boolean }>(
-      `/api/saas/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(memberId)}`,
-      { method: "DELETE" },
-    ),
-  updateMemberRole: (organizationId: string, memberId: string, role: string) =>
-    request<{ success: boolean }>(
-      `/api/saas/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(memberId)}`,
-      {
-        method: "PATCH",
-        body: { role },
-      },
-    ),
+  //
+  // Contract note (Part 5): member management lives under the SaaS team
+  // namespace on the server (crates/server/src/saas/team.rs). The
+  // organization id is NOT a path parameter there — the backend derives it
+  // from the session — so these helpers no longer take one. The earlier
+  // organization-scoped member target did not exist in the router and would
+  // have 404'd.
+  members: () =>
+    request<TeamListResponse>("/api/saas/organizations/current/members"),
+  inviteMember: (email: string, role: string) =>
+    request<{ success: boolean; invitation_id: string }>("/api/saas/team/invites", {
+      method: "POST",
+      body: { email, role },
+    }),
+  removeMember: (memberId: string) =>
+    request<{ success: boolean }>(`/api/saas/team/members/${encodeURIComponent(memberId)}`, {
+      method: "DELETE",
+    }),
+  updateMemberRole: (memberId: string, role: string) =>
+    request<{ success: boolean }>(`/api/saas/team/members/${encodeURIComponent(memberId)}`, {
+      method: "PATCH",
+      body: { role },
+    }),
 
   // Security & Sessions
   securitySummary: () => request<SecuritySummary>("/api/saas/security/summary"),

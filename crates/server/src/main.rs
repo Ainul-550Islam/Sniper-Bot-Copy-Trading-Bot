@@ -1,4 +1,5 @@
-#![recursion_limit = "256"]
+#![forbid(unsafe_code)]
+#![recursion_limit = "1024"]
 #![allow(dead_code)]
 #![allow(clippy::result_large_err)]
 //! sniper-suite — the control-plane binary.
@@ -22,9 +23,11 @@ mod accounting;
 mod api;
 pub mod backup;
 mod dashboard;
+pub mod email;
 mod ha;
 pub mod module_runtime;
 mod obs;
+pub mod openapi_control_plane_surface;
 pub mod openapi_team_security;
 pub mod openapi_trading_data_plane;
 pub mod ops;
@@ -719,6 +722,30 @@ async fn main() -> anyhow::Result<()> {
         }));
     }
 
+    // Webhook delivery retries (GAP-MAP P1): failed tenant-webhook attempts
+    // are re-delivered on an exponential schedule and dead-lettered after
+    // MAX_ATTEMPTS. SKIP LOCKED makes extra replicas harmless.
+    if let Some(db_wh) = db.clone() {
+        let dispatcher = std::sync::Arc::new(
+            crate::saas::webhook_delivery::WebhookRetryDispatcher::new(db_wh.pool().clone()),
+        );
+        worker_handles.push(tokio::spawn(dispatcher.run(shutdown.clone())));
+    }
+
+    // Trusted backtest worker (GAP-MAP P1): claims queued backtest_runs
+    // with SKIP LOCKED, runs the deterministic module-sniper simulator in
+    // spawn_blocking, and writes the authoritative result_json. Without it
+    // queued runs never finish.
+    if let Some(db_bt) = db.clone() {
+        let worker = std::sync::Arc::new(
+            crate::trading_data_plane::backtest_worker::BacktestWorker::new(
+                db_bt,
+                Default::default(),
+            ),
+        );
+        worker_handles.push(tokio::spawn(worker.run(shutdown.clone())));
+    }
+
     // ---- modules -----------------------------------------------------------
     // Write-ahead intent journal (§I crash point C): DB-backed sink handed to
     // the Solana trading modules when enabled and a durable backend exists.
@@ -1031,9 +1058,10 @@ fn serve_api(
     // PROMPT 3/10 — the tenant trading data plane exists exactly when
     // the database is attached (routes answer 503 otherwise).
     let trading = db.as_ref().map(|d| {
-        Arc::new(trading_data_plane::TenantTradingDataPlane::new(Arc::clone(
-            d,
-        )))
+        Arc::new(trading_data_plane::TenantTradingDataPlane::new(
+            Arc::clone(d),
+            cfg,
+        ))
     });
     // §H — the live tenant module registry backing the customer bots
     // surface. Starts empty; runtime module launches register into it.
@@ -1043,6 +1071,7 @@ fn serve_api(
         api_key: api_key.clone(),
         auth,
         limiter,
+        sensitive_limiter: RateLimiter::new(10),
         audit,
         db,
         journal,

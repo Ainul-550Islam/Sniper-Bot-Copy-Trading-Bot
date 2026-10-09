@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Public Rust SDK for the SaaS control-plane API (BATCH file 24).
 //!
 //! Keep dependencies minimal. Target stable public API usage, not server internals.

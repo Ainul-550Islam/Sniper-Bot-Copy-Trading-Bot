@@ -1,0 +1,38 @@
+{{- if .Values.networkPolicy.enabled }}
+# NetworkPolicy (GAP-MAP v2 helm line: "networkpolicy").
+# Default-deny ingress to the app pods, then allow ONLY the configured
+# sources (typically the ingress-controller namespace). Egress stays open:
+# the server needs Postgres, Redis, Solana RPC and outbound SMTP/webhooks.
+#
+# If you run a full default-deny cluster policy, add separate egress rules
+# in your platform layer — this chart deliberately does not guess egress
+# destinations.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sniper-suite.fullname" . }}
+  labels:
+    {{- include "sniper-suite.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sniper-suite.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- with .Values.networkPolicy.ingressFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- else }}
+    # No sources configured: allow in-cluster traffic only (nothing from
+    # other namespaces) so the policy still renders valid.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
+{{- end }}

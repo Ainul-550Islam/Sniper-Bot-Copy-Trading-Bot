@@ -1,4 +1,5 @@
-#![recursion_limit = "256"]
+#![forbid(unsafe_code)]
+#![recursion_limit = "1024"]
 #![allow(dead_code)]
 #![allow(clippy::result_large_err)]
 //! sniper-suite library crate (Batch 7, §G/§H Batch 8).
@@ -15,9 +16,11 @@ pub mod accounting;
 pub mod api;
 pub mod backup;
 pub mod dashboard;
+pub mod email;
 pub mod ha;
 pub mod module_runtime;
 pub mod obs;
+pub mod openapi_control_plane_surface;
 pub mod openapi_team_security;
 pub mod openapi_trading_data_plane;
 pub mod ops;
