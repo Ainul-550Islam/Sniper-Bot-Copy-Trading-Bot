@@ -11,11 +11,11 @@ They are NOT the result of a test run and must never be quoted as one.**
 |---|---|---|
 | `crates` | <!-- stat:crates -->8<!-- /stat --> | workspace `members` listed in the root `Cargo.toml` |
 | `programs` | <!-- stat:programs -->1<!-- /stat --> | directories under `programs/` that contain a `Cargo.toml` |
-| `rust_files` | <!-- stat:rust_files -->675<!-- /stat --> | `find crates -type f -name '*.rs'` |
-| `rust_lines` | <!-- stat:rust_lines -->258381<!-- /stat --> | total lines of those `.rs` files (newline count + 1 per file) |
+| `rust_files` | <!-- stat:rust_files -->677<!-- /stat --> | `find crates -type f -name '*.rs'` |
+| `rust_lines` | <!-- stat:rust_lines -->259245<!-- /stat --> | total lines of those `.rs` files (newline count + 1 per file) |
 | `rust_lines_staking` | <!-- stat:rust_lines_staking -->5699<!-- /stat --> | lines of `*.rs` under `programs/staking-suite/src` and `/tests` |
-| `test_attrs_plain` | <!-- stat:test_attrs_plain -->2064<!-- /stat --> | occurrences of the literal `#[test]` under `crates/` (read_text().count, same method as `update-release-manifest.sh`) |
-| `test_attrs_tokio` | <!-- stat:test_attrs_tokio -->889<!-- /stat --> | occurrences of `#[tokio::test` under `crates/` |
+| `test_attrs_plain` | <!-- stat:test_attrs_plain -->2067<!-- /stat --> | occurrences of the literal `#[test]` under `crates/` (read_text().count, same method as `update-release-manifest.sh`) |
+| `test_attrs_tokio` | <!-- stat:test_attrs_tokio -->896<!-- /stat --> | occurrences of `#[tokio::test` under `crates/` |
 | `test_attrs_staking` | <!-- stat:test_attrs_staking -->81<!-- /stat --> | `#[test]` + `#[tokio::test` occurrences under `programs/staking-suite` |
 | `migrations` | <!-- stat:migrations -->54<!-- /stat --> | `crates/core/migrations/*.sql` |
 | `migrations_high_water` | <!-- stat:migrations_high_water -->0054<!-- /stat --> | numeric prefix of the last migration file in sort order |
