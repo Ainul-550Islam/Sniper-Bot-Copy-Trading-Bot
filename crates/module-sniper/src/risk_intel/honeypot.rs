@@ -12,8 +12,8 @@
 //! * a **decision layer** that maps the three outcomes onto gate behaviour
 //!   without ever guessing: `Sellable` passes, `NotSellable` rejects, and
 //!   `Unknown` stays UNKNOWN — strict gating decides whether unknown is a
-//!   skip or a reject. A honeypot verdict is never invented from a probe
-//!   that did not run.
+//!   a reject (fail closed, regardless of `strict_gates`). A honeypot
+//!   verdict is never invented from a probe that did not run.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -105,9 +105,8 @@ pub enum HoneypotVerdict {
     Sellable,
     /// Sell path confirmed broken — reject the entry.
     Honeypot,
-    /// The probe could not produce a verdict (or was not run). This is a
-    /// skip, not a pass: the caller's `strict_gates` setting decides whether
-    /// an unknown sell path is acceptable.
+    /// The probe could not produce a verdict. Fail closed: an unverified
+    /// sell path is refused regardless of the caller's `strict_gates`.
     Unknown,
 }
 
@@ -132,12 +131,14 @@ pub fn decide(outcome: &SellProbeOutcome) -> HoneypotVerdict {
     }
 }
 
-/// Apply `strict_gates` to a verdict: in strict mode an UNKNOWN sell path
-/// rejects; otherwise it is a skip (returns false = don't reject).
+/// Decide whether a verdict rejects the entry. Honeypot and Unknown both
+/// reject (fail closed); only a positively Sellable path passes. The
+/// `strict_gates` argument is kept for API stability and does NOT relax
+/// Unknown: an inconclusive sell path is never accepted.
 pub fn rejects_with(verdict: HoneypotVerdict, strict_gates: bool) -> bool {
+    let _ = strict_gates;
     match verdict {
-        HoneypotVerdict::Honeypot => true,
-        HoneypotVerdict::Unknown => strict_gates,
+        HoneypotVerdict::Honeypot | HoneypotVerdict::Unknown => true,
         HoneypotVerdict::Sellable => false,
     }
 }
@@ -185,9 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn strictness_controls_unknown() {
-        assert!(!rejects_with(HoneypotVerdict::Unknown, false), "lenient skips");
-        assert!(rejects_with(HoneypotVerdict::Unknown, true), "strict rejects");
+    fn unknown_fails_closed_regardless_of_strictness() {
+        assert!(rejects_with(HoneypotVerdict::Unknown, false), "unknown rejects");
+        assert!(rejects_with(HoneypotVerdict::Unknown, true), "unknown rejects");
         assert!(rejects_with(HoneypotVerdict::Honeypot, false), "honeypot always rejects");
         assert!(!rejects_with(HoneypotVerdict::Sellable, true), "sellable never rejects");
     }

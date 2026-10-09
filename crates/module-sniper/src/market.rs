@@ -525,9 +525,10 @@ async fn load_raydium(
         }
     };
     let swappable = amm.is_swappable();
-    // Raydium AMM v4 has no simulated sell probe yet: the AMM-status gate
-    // (`tradable`) covers the venue side, and the sell-simulation gate
-    // reports this honestly as inconclusive instead of faking a pass.
+    // Raydium AMM v4 has no simulated sell probe yet. The sell-simulation
+    // gate treats this Unknown as a refusal (fail closed), so Raydium
+    // entries are refused while `simulate_sell` is on. This is not faked as
+    // a pass. The AMM-status gate (`tradable`) covers the venue side.
     let sell_probe = Some(SellProbeOutcome::Unknown(
         "sell simulation is not implemented for raydium_amm_v4".into(),
     ));
