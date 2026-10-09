@@ -35,16 +35,16 @@ module-telegram = { path = "crates/module-telegram" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 futures-util = "0.3"
-axum = { version = "0.7", features = ["ws", "macros", "json"] }
+axum = { version = "0.8", features = ["ws", "macros", "json"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 http-body-util = "0.1"
 http = "1.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "stream"] }
 # TLS for the SMTP email provider (already in the lock via reqwest/tungstenite).
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "url"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots", "url"] }
 url = "2"
 
 # --- solana ----------------------------------------------------------------
@@ -64,37 +64,37 @@ spl-associated-token-account = { version = "4", default-features = false, featur
 # --- serialization ---------------------------------------------------------
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-bincode = "1.3"
+bincode = "3.0"
 borsh = "1.5"
 bs58 = "0.5"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
-toml = "0.8"
+toml = "1.1"
 
 # --- crypto ----------------------------------------------------------------
-k256 = { version = "0.13", features = ["ecdsa"] }
-sha2 = "0.10"
-hmac = "0.12"
+k256 = { version = "0.14", features = ["ecdsa"] }
+sha2 = "0.11"
+hmac = "0.13"
 tiny-keccak = { version = "2", features = ["keccak"] }
-ed25519-dalek = "2"
-rand = "0.8"
+ed25519-dalek = "3"
+rand = "0.10"
 ring = "0.17"
 uuid = { version = "1", features = ["v4", "serde"] }
-num-bigint = "0.4"
+num-bigint = "0.5"
 
 # --- persistence ------------------------------------------------------------
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio", "tls-rustls", "postgres", "migrate",
     "chrono", "uuid", "json", "macros",
 ] }
 zeroize = { version = "1.9", features = ["alloc"] }
-redis = { version = "0.27", default-features = false, features = [
+redis = { version = "1.7", default-features = false, features = [
     "tokio-comp", "connection-manager", "script",
 ] }
 
 # --- misc ------------------------------------------------------------------
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
