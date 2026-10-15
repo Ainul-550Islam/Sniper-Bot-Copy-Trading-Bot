@@ -41,10 +41,10 @@ pub const MAX_PLATFORM_FEE_BPS: u16 = 500;
 /// default; the durable override lives in `platform_fee_ledger`'s
 /// configuration row (migration 0048).
 pub const DEFAULT_FEE_BPS: [(PlanCode, u16); 4] = [
-    (PlanCode::Starter, 30),    // 0.30%
-    (PlanCode::Pro, 20),        // 0.20%
-    (PlanCode::Business, 10),   // 0.10%
-    (PlanCode::Enterprise, 5),  // 0.05% (usually renegotiated)
+    (PlanCode::Starter, 30),   // 0.30%
+    (PlanCode::Pro, 20),       // 0.20%
+    (PlanCode::Business, 10),  // 0.10%
+    (PlanCode::Enterprise, 5), // 0.05% (usually renegotiated)
 ];
 
 /// Errors from fee policy handling. Low-cardinality on purpose.
@@ -151,14 +151,11 @@ pub fn compute_platform_fee(notional_micros: i64, policy: &PlatformFeePolicy) ->
     // overflow the fee would exceed any sane cap, so saturate to i64::MAX
     // and let the cap (when present) bring it back. Without a cap the
     // saturated value is still an honest upper bound, never a wrap.
-    let raw = match notional_micros
+    let raw = notional_micros
         .checked_mul(policy.fee_bps as i64)
         .and_then(|v| v.checked_add(BPS_DENOMINATOR / 2))
         .and_then(|v| v.checked_div(BPS_DENOMINATOR))
-    {
-        Some(value) => value,
-        None => i64::MAX,
-    };
+        .unwrap_or(i64::MAX);
     let mut fee = raw;
     if let Some(cap) = policy.cap_micros {
         fee = fee.min(cap);
@@ -204,6 +201,8 @@ pub struct PlatformFeeCharge {
 
 impl PlatformFeeCharge {
     /// Assess a charge for one trade under a policy.
+    // Eight arguments mirror the persisted ledger row; kept stable for existing callers.
+    #[allow(clippy::too_many_arguments)]
     pub fn assess(
         charge_id: impl Into<String>,
         organization_id: impl Into<String>,
@@ -305,7 +304,7 @@ mod tests {
     #[test]
     fn basis_points_math_is_exact_and_half_up() {
         let p = policy(25, None, 0); // 0.25%
-        // 1_000_000_000 micros (1,000 units) -> 2_500_000 micros (2.5 units)
+                                     // 1_000_000_000 micros (1,000 units) -> 2_500_000 micros (2.5 units)
         assert_eq!(compute_platform_fee(1_000_000_000, &p), 2_500_000);
         // Half-up rounding: 3 micros at 25bps = 0.0075 -> rounds to 0.
         assert_eq!(compute_platform_fee(3, &p), 0);
@@ -339,7 +338,11 @@ mod tests {
         assert_eq!(compute_platform_fee(0, &p), 0, "no trade -> no fee");
         assert_eq!(compute_platform_fee(-5, &p), 0, "never charge on negative");
         let z = policy(0, None, 250);
-        assert_eq!(compute_platform_fee(1_000_000, &z), 0, "zero rate -> no fee");
+        assert_eq!(
+            compute_platform_fee(1_000_000, &z),
+            0,
+            "zero rate -> no fee"
+        );
     }
 
     #[test]
@@ -348,7 +351,6 @@ mod tests {
         // i64::MAX notional * 500 bps overflows checked_mul -> saturates.
         let fee = compute_platform_fee(i64::MAX, &p);
         assert!(fee > 0, "saturated fee is still a positive upper bound");
-        assert!(fee <= i64::MAX);
         // With a cap, the saturated value collapses back to the cap.
         let capped = policy(MAX_PLATFORM_FEE_BPS, Some(1_000), 0);
         assert_eq!(compute_platform_fee(i64::MAX, &capped), 1_000);

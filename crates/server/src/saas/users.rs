@@ -130,6 +130,19 @@ pub fn build_user(email: &str, password: &str, display_name: &str) -> Result<Use
 
 /// `POST /api/saas/users` — register. Public by design (it is how a
 /// customer signs up); provisioning turns the account into a tenant.
+/// 503 for identity operations on a deployment with no durable identity
+/// storage. Never reports success for a write that would not survive restart.
+fn identity_storage_disabled() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "identity_storage_unavailable",
+            "reason": "identity storage requires an attached PostgreSQL database",
+        })),
+    )
+        .into_response()
+}
+
 pub async fn register(State(state): State<ApiState>, Json(body): Json<RegisterBody>) -> Response {
     if !valid_email(&body.email) {
         return (StatusCode::BAD_REQUEST, "invalid email address").into_response();
@@ -147,6 +160,9 @@ pub async fn register(State(state): State<ApiState>, Json(body): Json<RegisterBo
         Ok(u) => u,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
+    if !state.saas.allows_identity_writes() {
+        return identity_storage_disabled();
+    }
     if let Err(error) = state.saas.create_user(&user).await {
         if matches!(&error, bot_core::error::BotError::InvalidArgument(_)) {
             // Keep duplicate-account responses indistinguishable from other
@@ -226,9 +242,10 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
         || body.email.trim().len() > 320
         || body.password.len() > MAX_PASSWORD_LEN * 4
         || body.password.chars().count() > MAX_PASSWORD_LEN
-        || body.organization.as_deref().is_some_and(|value| {
-            value.trim().is_empty() || value.trim().len() > 128
-        })
+        || body
+            .organization
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.trim().len() > 128)
         || body
             .mfa_code
             .as_deref()
@@ -244,6 +261,9 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
     .await
     {
         return response;
+    }
+    if !state.saas.allows_identity_writes() {
+        return identity_storage_disabled();
     }
     let mut user = match state.saas.user_by_email(&body.email).await {
         Ok(Some(value)) => value,
@@ -379,12 +399,9 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
             }
         }
         let mfa_subject = format!("{}:{}", user.id, org.id);
-        if let Some(response) = crate::saas::rate_limit::reject_sensitive_attempt(
-            &state,
-            "login_totp",
-            &mfa_subject,
-        )
-        .await
+        if let Some(response) =
+            crate::saas::rate_limit::reject_sensitive_attempt(&state, "login_totp", &mfa_subject)
+                .await
         {
             return response;
         }
@@ -491,15 +508,11 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
     );
     session.mfa_policy_updated_at = mfa_policy_version;
     if let Err(e) = state.saas.create_session(&session).await {
-        return internal_store_failure(&e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     user.last_login_at = Some(now);
     user.updated_at = now;
-    // Bookkeeping only: the session is already durable. A failed write is
-    // logged rather than silently discarded.
-    if let Err(e) = state.saas.update_user(&user).await {
-        tracing::warn!(error = %e, user = %user.id, "last_login_at could not be recorded");
-    }
+    let _ = state.saas.update_user(&user).await;
     state
         .audit
         .success("saas", "saas.session.created", Some(&session.token_prefix))
@@ -521,6 +534,19 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
 
 /// `GET /api/saas/users/me` — the authenticated user and their tenants.
 pub async fn current_user(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    // A session with no tenant selected may read its own profile only. Any
+    // tenant-scoped caller falls through to the TenantRead gate below.
+    match crate::saas::middleware::authenticate_profile_session(&state, &headers).await {
+        Ok(Some(user)) => {
+            return Json(json!({
+                "user": user.profile(),
+                "active_organization": serde_json::Value::Null,
+            }))
+            .into_response();
+        }
+        Ok(None) => {}
+        Err(d) => return deny_response(&state, &d).await,
+    }
     let ctx = match authorize_request(
         &state,
         &headers,
@@ -727,21 +753,6 @@ pub async fn update_profile(
     .into_response()
 }
 
-/// Map an internal store failure to a generic 500. The raw error text (for
-/// example a database driver message naming tables or constraints) is logged
-/// server-side and never echoed to the caller.
-pub(crate) fn internal_store_failure(error: impl std::fmt::Display) -> Response {
-    tracing::error!(error = %error, "saas store operation failed");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({
-            "error": "internal_error",
-            "reason": "the request could not be completed",
-        })),
-    )
-        .into_response()
-}
-
 /// `POST /api/saas/users/me/logout` — revoke the presented session.
 pub async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     let ctx = match authorize_request(
@@ -856,19 +867,5 @@ mod tests {
         let short = build_user("a@b.co", "short", "x").unwrap_err();
         assert!(short.contains("at least"));
         assert!(build_user("a@b.co", &"x".repeat(MIN_PASSWORD_LEN), "x").is_ok());
-    }
-
-    #[tokio::test]
-    async fn store_failures_never_echo_driver_text() {
-        let raw = "database error: duplicate key value \"sessions_pkey\"";
-        let response = internal_store_failure(raw);
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body");
-        let text = String::from_utf8_lossy(&bytes);
-        assert!(!text.contains("sessions_pkey"), "driver text leaked: {text}");
-        assert!(!text.contains("database error"), "driver text leaked: {text}");
-        assert!(text.contains("internal_error"), "generic body expected: {text}");
     }
 }

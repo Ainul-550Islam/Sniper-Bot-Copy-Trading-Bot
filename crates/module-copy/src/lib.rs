@@ -112,7 +112,10 @@ impl OwnedTask {
                 self.handle.take();
             }
             Err(_) => {
-                warn!(task = self.label, "task did not stop before deadline; aborting it");
+                warn!(
+                    task = self.label,
+                    "task did not stop before deadline; aborting it"
+                );
                 if let Some(task) = &self.handle {
                     task.abort();
                 }
@@ -128,7 +131,10 @@ impl OwnedTask {
                         warn!(task = self.label, error = %error, "aborted task failed while joining");
                     }
                     Ok(Err(_)) => {}
-                    Err(_) => warn!(task = self.label, "task did not finish during abort join grace"),
+                    Err(_) => warn!(
+                        task = self.label,
+                        "task did not finish during abort join grace"
+                    ),
                 }
                 self.handle.take();
             }

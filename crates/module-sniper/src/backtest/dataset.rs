@@ -62,7 +62,7 @@ impl BacktestScenario {
         if self.entry_quote_lamports == 0 {
             out.push("entry_quote_lamports is zero".into());
         }
-        if !(self.initial_reserve_sol > 0.0) {
+        if self.initial_reserve_sol.is_nan() || self.initial_reserve_sol <= 0.0 {
             out.push("initial_reserve_sol must be > 0".into());
         }
         if !(0.0..=1.0).contains(&self.congestion) {
@@ -74,7 +74,10 @@ impl BacktestScenario {
         let mut last = None;
         for (i, t) in self.ticks.iter().enumerate() {
             if !(t.price_sol.is_finite() && t.price_sol > 0.0) {
-                out.push(format!("tick[{i}] price {} not positive finite", t.price_sol));
+                out.push(format!(
+                    "tick[{i}] price {} not positive finite",
+                    t.price_sol
+                ));
             }
             if let Some(prev) = last {
                 if t.t_ms <= prev {

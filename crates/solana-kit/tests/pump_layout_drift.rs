@@ -156,8 +156,10 @@ async fn live_layout_probe_detects_which_shape_the_program_accepts() {
             return;
         }
     };
-    let mut net = bot_core::config::NetworkConfig::default();
-    net.rpc_url = url;
+    let net = bot_core::config::NetworkConfig {
+        rpc_url: url,
+        ..Default::default()
+    };
     let rpc = Rpc::new(&net).expect("rpc pool builds from NetworkConfig");
     let prober = Pubkey::new_unique(); // holds nothing; simulate only
 
@@ -184,10 +186,11 @@ async fn live_layout_probe_detects_which_shape_the_program_accepts() {
                         "BUY variant[{idx}] ({} accounts): rejected err={:?} logs={:?}",
                         variant.len(),
                         err,
-                        resp.value
-                            .logs
-                            .as_ref()
-                            .map(|l| l.iter().rev().take(5).collect::<Vec<_>>())
+                        resp.value.logs.as_ref().map(|l| l
+                            .iter()
+                            .rev()
+                            .take(5)
+                            .collect::<Vec<_>>())
                     );
                     // Conservative: only an outright simulation success
                     // counts as a winner.
@@ -226,7 +229,10 @@ async fn live_layout_probe_detects_which_shape_the_program_accepts() {
             Ok(resp) => match resp.value.err.as_ref() {
                 None => {
                     sell_layout_ok.push(idx);
-                    eprintln!("SELL variant[{idx}] ({} accounts): simulated clean", variant.len());
+                    eprintln!(
+                        "SELL variant[{idx}] ({} accounts): simulated clean",
+                        variant.len()
+                    );
                 }
                 Some(err) => match serde_json::to_value(err) {
                     Ok(v) if is_insufficient_funds(&v) => {

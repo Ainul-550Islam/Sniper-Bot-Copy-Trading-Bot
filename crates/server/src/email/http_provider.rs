@@ -124,7 +124,7 @@ impl EmailProvider for HttpEmailProvider {
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| transport(e))?;
+                    .map_err(transport)?;
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
                 if status.is_success() {
@@ -208,7 +208,11 @@ impl EmailProvider for HttpEmailProvider {
                 if status.is_success() {
                     let id = serde_json::from_str::<serde_json::Value>(&text)
                         .ok()
-                        .and_then(|v| v.get("MessageId").and_then(|i| i.as_str()).map(str::to_string));
+                        .and_then(|v| {
+                            v.get("MessageId")
+                                .and_then(|i| i.as_str())
+                                .map(str::to_string)
+                        });
                     return Ok(id);
                 }
                 Err(rejection(status.as_u16(), &text))
@@ -262,9 +266,8 @@ fn sign_sigv4(
 
     let payload_hash = hex_digest(&Sha256::digest(payload));
 
-    let canonical_headers = format!(
-        "content-type:application/json\nhost:{host}\nx-amz-date:{amz_date}\n"
-    );
+    let canonical_headers =
+        format!("content-type:application/json\nhost:{host}\nx-amz-date:{amz_date}\n");
     let signed_headers = "content-type;host;x-amz-date";
     let canonical_request = format!(
         "POST\n/v2/email/outbound-emails\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
@@ -275,7 +278,10 @@ fn sign_sigv4(
         hex_digest(&Sha256::digest(canonical_request.as_bytes()))
     );
 
-    let k_date = hmac_vec(format!("AWS4{secret_access_key}").as_bytes(), datestamp.as_bytes());
+    let k_date = hmac_vec(
+        format!("AWS4{secret_access_key}").as_bytes(),
+        datestamp.as_bytes(),
+    );
     let k_region = hmac_vec(&k_date, region.as_bytes());
     let k_service = hmac_vec(&k_region, b"ses");
     let k_signing = hmac_vec(&k_service, b"aws4_request");
@@ -286,16 +292,13 @@ fn sign_sigv4(
     );
 
     fn hmac_vec(key: &[u8], data: &[u8]) -> Vec<u8> {
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(key)
-            .expect("HMAC accepts keys of any length");
+        let mut mac =
+            <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts keys of any length");
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }
 
-    (
-        vec![("X-Amz-Date", amz_date)],
-        authorization,
-    )
+    (vec![("X-Amz-Date", amz_date)], authorization)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -317,8 +320,12 @@ mod tests {
         assert!(matches!(e, EmailError::Config(_)));
         let e = HttpEmailProvider::postmark("TEST_EMAIL_KEY_ABSENT_XYZ").unwrap_err();
         assert!(matches!(e, EmailError::Config(_)));
-        let e = HttpEmailProvider::ses("us-east-1", "TEST_EMAIL_KEY_ABSENT_XYZ", "TEST_EMAIL_KEY_ABSENT_XYZ")
-            .unwrap_err();
+        let e = HttpEmailProvider::ses(
+            "us-east-1",
+            "TEST_EMAIL_KEY_ABSENT_XYZ",
+            "TEST_EMAIL_KEY_ABSENT_XYZ",
+        )
+        .unwrap_err();
         assert!(matches!(e, EmailError::Config(_)));
         let e = HttpEmailProvider::ses("", "A", "B").unwrap_err();
         assert!(matches!(e, EmailError::Config(_)));

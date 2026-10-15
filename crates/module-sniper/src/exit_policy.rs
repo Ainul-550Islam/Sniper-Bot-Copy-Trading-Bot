@@ -82,8 +82,11 @@ impl ExitPolicyConfig {
         for level in &mut self.ladder {
             level.sell_fraction = level.sell_fraction.clamp(0.0, 1.0);
         }
-        self.ladder
-            .sort_by(|a, b| a.trigger_multiple.partial_cmp(&b.trigger_multiple).unwrap_or(std::cmp::Ordering::Equal));
+        self.ladder.sort_by(|a, b| {
+            a.trigger_multiple
+                .partial_cmp(&b.trigger_multiple)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         if let Some(be) = &mut self.break_even {
             if !be.activation_multiple.is_finite() || be.activation_multiple <= 1.0 {
                 self.break_even = None;
@@ -166,8 +169,12 @@ impl ExitPolicyEngine {
         self.ladders.retain(|id, _| live.iter().any(|p| p == id));
         if self.config.dev_sell_ttl_secs > 0 {
             let ttl = Duration::from_secs(self.config.dev_sell_ttl_secs);
-            self.dev_sells
-                .retain(|_, ts| now.signed_duration_since(*ts).to_std().map(|d| d <= ttl).unwrap_or(false));
+            self.dev_sells.retain(|_, ts| {
+                now.signed_duration_since(*ts)
+                    .to_std()
+                    .map(|d| d <= ttl)
+                    .unwrap_or(false)
+            });
         } else {
             self.dev_sells.clear();
         }
@@ -247,7 +254,7 @@ impl ExitPolicyEngine {
 
         // 3. Laddered take-profit: fire the next rung whose trigger the mark
         //    has reached. Levels fire in order, each at most once.
-        while state.next_level < self.config.ladder.len() {
+        if state.next_level < self.config.ladder.len() {
             let level = self.config.ladder[state.next_level];
             let trigger = avg_entry * level.trigger_multiple;
             if mark >= trigger {
@@ -263,10 +270,50 @@ impl ExitPolicyEngine {
                     ),
                 });
             }
-            break; // rungs are sorted; the next one cannot fire either
+            // Rungs are sorted: if the next one has not fired, later ones cannot either.
         }
 
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config bridge + signal bus
+// ---------------------------------------------------------------------------
+
+/// The dev-sell signal carried on the bus: which mint's creator/dev wallet
+/// sold, and when the sale was observed.
+pub type DevSellSignal = (Pubkey, DateTime<Utc>);
+
+/// Channel type used to fan dev-sell signals from the detection/risk_intel
+/// layer into every exit sweeper (one sender, N subscribed sweepers).
+pub type DevSellBus = tokio::sync::broadcast::Sender<DevSellSignal>;
+
+/// Build a policy engine from the operator's `sniper.advanced_exit` block.
+/// `None` (the default deployment) yields an INERT engine: no ladder, no
+/// break-even, dev-sell disabled — behaviour identical to the classic rules.
+pub fn engine_from_config(cfg: Option<&bot_core::config::AdvancedExitConfig>) -> ExitPolicyEngine {
+    let policy = cfg.map(ExitPolicyConfig::from).unwrap_or_default();
+    ExitPolicyEngine::new(policy)
+}
+
+impl From<&bot_core::config::AdvancedExitConfig> for ExitPolicyConfig {
+    fn from(value: &bot_core::config::AdvancedExitConfig) -> Self {
+        ExitPolicyConfig {
+            ladder: value
+                .ladder
+                .iter()
+                .map(|l| TpLevel {
+                    trigger_multiple: l.trigger_multiple,
+                    sell_fraction: l.sell_fraction,
+                })
+                .collect(),
+            break_even: value.break_even.map(|b| BreakEvenConfig {
+                activation_multiple: b.activation_multiple,
+                buffer: b.buffer,
+            }),
+            dev_sell_ttl_secs: value.dev_sell_ttl_secs,
+        }
     }
 }
 
@@ -277,7 +324,11 @@ impl ExitPolicyEngine {
 mod tests {
     use super::*;
 
-    fn cfg(ladder: Vec<TpLevel>, break_even: Option<BreakEvenConfig>, dev_ttl: u64) -> ExitPolicyConfig {
+    fn cfg(
+        ladder: Vec<TpLevel>,
+        break_even: Option<BreakEvenConfig>,
+        dev_ttl: u64,
+    ) -> ExitPolicyConfig {
         ExitPolicyConfig {
             ladder,
             break_even,
@@ -286,7 +337,10 @@ mod tests {
     }
 
     fn lvl(mult: f64, frac: f64) -> TpLevel {
-        TpLevel { trigger_multiple: mult, sell_fraction: frac }
+        TpLevel {
+            trigger_multiple: mult,
+            sell_fraction: frac,
+        }
     }
 
     fn t(secs: i64) -> DateTime<Utc> {
@@ -368,7 +422,10 @@ mod tests {
 
     #[test]
     fn break_even_arms_on_hwm_and_survives_a_dip() {
-        let be = BreakEvenConfig { activation_multiple: 1.5, buffer: 0.02 };
+        let be = BreakEvenConfig {
+            activation_multiple: 1.5,
+            buffer: 0.02,
+        };
         let mut e = ExitPolicyEngine::new(cfg(vec![], Some(be), 0));
         let now = t(1_000);
         // Never armed: no exit even at a loss.
@@ -420,9 +477,19 @@ mod tests {
     fn degenerate_inputs_never_fire() {
         let mut e = ExitPolicyEngine::new(cfg(vec![lvl(2.0, 0.5)], None, 60));
         let now = t(1_000);
-        assert!(e.evaluate("p", None, 0.0, 2.0, 2.0, now).is_none(), "zero entry");
-        assert!(e.evaluate("p", None, 1.0, f64::NAN, 2.0, now).is_none(), "nan mark");
-        assert!(e.evaluate("p", None, f64::INFINITY, 2.0, 2.0, now).is_none(), "inf entry");
+        assert!(
+            e.evaluate("p", None, 0.0, 2.0, 2.0, now).is_none(),
+            "zero entry"
+        );
+        assert!(
+            e.evaluate("p", None, 1.0, f64::NAN, 2.0, now).is_none(),
+            "nan mark"
+        );
+        assert!(
+            e.evaluate("p", None, f64::INFINITY, 2.0, 2.0, now)
+                .is_none(),
+            "inf entry"
+        );
     }
 
     #[test]
@@ -430,45 +497,5 @@ mod tests {
         let mut e = ExitPolicyEngine::new(cfg(vec![lvl(2.0, 0.5)], None, 0));
         let exit = e.evaluate("p", None, 1.0, 2.0, 2.0, t(1_000)).unwrap();
         assert!(exit.full_reason().starts_with("ladder_tp: "));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Config bridge + signal bus
-// ---------------------------------------------------------------------------
-
-/// The dev-sell signal carried on the bus: which mint's creator/dev wallet
-/// sold, and when the sale was observed.
-pub type DevSellSignal = (Pubkey, DateTime<Utc>);
-
-/// Channel type used to fan dev-sell signals from the detection/risk_intel
-/// layer into every exit sweeper (one sender, N subscribed sweepers).
-pub type DevSellBus = tokio::sync::broadcast::Sender<DevSellSignal>;
-
-/// Build a policy engine from the operator's `sniper.advanced_exit` block.
-/// `None` (the default deployment) yields an INERT engine: no ladder, no
-/// break-even, dev-sell disabled — behaviour identical to the classic rules.
-pub fn engine_from_config(cfg: Option<&bot_core::config::AdvancedExitConfig>) -> ExitPolicyEngine {
-    let policy = cfg.map(ExitPolicyConfig::from).unwrap_or_default();
-    ExitPolicyEngine::new(policy)
-}
-
-impl From<&bot_core::config::AdvancedExitConfig> for ExitPolicyConfig {
-    fn from(value: &bot_core::config::AdvancedExitConfig) -> Self {
-        ExitPolicyConfig {
-            ladder: value
-                .ladder
-                .iter()
-                .map(|l| TpLevel {
-                    trigger_multiple: l.trigger_multiple,
-                    sell_fraction: l.sell_fraction,
-                })
-                .collect(),
-            break_even: value.break_even.map(|b| BreakEvenConfig {
-                activation_multiple: b.activation_multiple,
-                buffer: b.buffer,
-            }),
-            dev_sell_ttl_secs: value.dev_sell_ttl_secs,
-        }
     }
 }

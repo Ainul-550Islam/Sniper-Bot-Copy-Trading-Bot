@@ -50,7 +50,9 @@ use solana_kit::pumpportal::{
 };
 use solana_kit::raydium::{self, PoolInitEvent};
 use solana_kit::rpc::Rpc;
-use solana_kit::ws::{redact_ws_url, LogsFilter, SolanaWs, TransactionFilter, WsMessage, WsPolicy, WsStatus};
+use solana_kit::ws::{
+    redact_ws_url, LogsFilter, SolanaWs, TransactionFilter, WsMessage, WsPolicy, WsStatus,
+};
 
 use crate::event::{raw_hash_of, LaunchEvent, LaunchProtocol, SequenceTracker};
 
@@ -104,10 +106,7 @@ impl DetectorTasks {
     }
 }
 
-async fn abort_launch_task(
-    task: &mut tokio::task::JoinHandle<()>,
-    deadline: tokio::time::Instant,
-) {
+async fn abort_launch_task(task: &mut tokio::task::JoinHandle<()>, deadline: tokio::time::Instant) {
     task.abort();
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
@@ -144,8 +143,14 @@ impl LaunchFeedHandle {
         self.receiver.recv().await
     }
 
+    /// Number of launch events currently queued in the channel.
     pub fn len(&self) -> usize {
         self.receiver.len()
+    }
+
+    /// True when no launch event is queued.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Close the stream and join all feed tasks within one bounded deadline.
@@ -396,7 +401,7 @@ async fn start_log_subscription(
         ws_url,
         WsPolicy::from_network(&state.config_snapshot().await.network),
     );
-    let mut connection = ws.spawn();
+    let connection = ws.spawn();
     let (program, source) = match protocol {
         LaunchProtocol::PumpFun => (PUMP_PROGRAM_ID.to_string(), SRC_LOGS_PUMP),
         LaunchProtocol::PumpSwap => (PUMPSWAP_PROGRAM_ID.to_string(), SRC_LOGS_PUMPSWAP),
@@ -539,9 +544,7 @@ async fn start_log_subscription(
                             outage_ms,
                             "logsSubscribe restored after an outage — launches in the gap were not observed"
                         );
-                        format!(
-                            "launch feed gap ({source}): websocket down for {outage_ms} ms"
-                        )
+                        format!("launch feed gap ({source}): websocket down for {outage_ms} ms")
                     };
                     state
                         .record_error(bot_core::models::BotModule::Sniper, &detail)
@@ -581,7 +584,7 @@ async fn start_geyser_subscription(
         ws_url,
         WsPolicy::from_network(&state.config_snapshot().await.network),
     );
-    let mut connection = ws.spawn();
+    let connection = ws.spawn();
     let filter = TransactionFilter {
         account_include: programs,
         ..Default::default()

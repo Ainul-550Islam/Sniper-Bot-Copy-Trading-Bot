@@ -24,7 +24,7 @@ stated plainly.
 
 ## Measured facts (2026-10-06)
 
-* <!-- stat:rust_files -->678<!-- /stat --> Rust files in `crates/` (+ the staking program), 96 TS/TSX files
+* 617 Rust files in `crates/` (+ the staking program), 96 TS/TSX files
   in the control plane, 149 documents in `docs/`.
 * 43 forward-only migrations (high-water `0043`), no down-migrations by
   design.

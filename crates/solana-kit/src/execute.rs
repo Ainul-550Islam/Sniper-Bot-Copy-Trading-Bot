@@ -129,7 +129,10 @@ impl ExecutionResult {
     /// signature for audit, but it never reached a node).
     pub fn broadcast_signature(&self) -> Option<String> {
         let left_the_process = self.attempts > 0
-            && !matches!(self.status, ExecStatus::SimulationFailed | ExecStatus::Skipped);
+            && !matches!(
+                self.status,
+                ExecStatus::SimulationFailed | ExecStatus::Skipped
+            );
         (!self.paper && left_the_process && !self.signature.is_empty())
             .then(|| self.signature.clone())
     }
@@ -529,7 +532,12 @@ impl TipFloorSampler {
             }
         }
         let body = json!({});
-        let response = self.http.post(&self.policy.tip_floor_url).json(&body).send().await;
+        let response = self
+            .http
+            .post(&self.policy.tip_floor_url)
+            .json(&body)
+            .send()
+            .await;
         let response = match response {
             Ok(r) => r,
             Err(e) => {
@@ -1775,7 +1783,8 @@ impl Executor {
             // no instruction list, so no tip can be found and it cannot be
             // bundled: RPC is the only route that can land it.
             BroadcastMode::Jito | BroadcastMode::JitoThenRpc | BroadcastMode::Race
-                if built.instructions.is_empty() => {
+                if built.instructions.is_empty() =>
+            {
                 debug!(label = %built.label, "externally signed transaction: broadcasting via rpc");
                 self.broadcast_rpc(built).await
             }
@@ -2779,7 +2788,10 @@ mod tests {
             tenant: None,
         };
 
-        let result = executor.send_prebuilt(&built).await.expect("returns result");
+        let result = executor
+            .send_prebuilt(&built)
+            .await
+            .expect("returns result");
         assert_eq!(result.status, ExecStatus::SendFailed);
         assert_eq!(result.state, ExecutionState::Failed);
         assert_eq!(result.failure, Some(FailureClass::Internal));
@@ -3117,7 +3129,6 @@ mod tests {
             "int_pinned"
         );
     }
-
 
     // ------------------------------------------------- Race + dynamic tip --
 

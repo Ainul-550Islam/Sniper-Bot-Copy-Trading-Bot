@@ -134,7 +134,10 @@ pub enum EmailBackend {
     /// Deliver to a local directory as `.eml` files (dev/test only).
     /// Refused unless `allow_file_backend` is set, so production cannot
     /// silently mis-configure into it.
-    File { directory: String, allow_file_backend: bool },
+    File {
+        directory: String,
+        allow_file_backend: bool,
+    },
 }
 
 impl Default for EmailConfig {

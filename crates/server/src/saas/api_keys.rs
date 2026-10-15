@@ -342,12 +342,7 @@ pub async fn create_key(
         Utc::now(),
     );
     if let Err(e) = state.saas.create_api_key(&created.key).await {
-        // Storage failures are 500s with a generic body; only domain
-        // rejections (for example a duplicate) are conflicts with a reason.
-        return match &e {
-            bot_core::error::BotError::Db(_) => crate::saas::users::internal_store_failure(&e),
-            other => (StatusCode::CONFLICT, other.to_string()).into_response(),
-        };
+        return (StatusCode::CONFLICT, e.to_string()).into_response();
     }
     state
         .audit
@@ -425,7 +420,7 @@ pub async fn revoke_key(
         return Json(json!({ "ok": true, "already_revoked": true })).into_response();
     }
     if let Err(e) = state.saas.update_api_key(&key).await {
-        return crate::saas::users::internal_store_failure(&e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     state
         .audit

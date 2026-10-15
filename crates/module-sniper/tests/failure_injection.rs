@@ -867,30 +867,29 @@ async fn missing_liquidity_is_insufficient_liquidity() {
     assert!(o.gates.contains("min_liquidity=fail"));
 }
 
-/// Fail-closed policy (docs/SNIPER-ENGINE.md §18, rpc.rs `token_program_of`):
-/// a mint that cannot be read is NEVER traded, in default or strict mode, and
-/// the outcome must not depend on whether the mint happened to be cached. The
-/// token program cannot be resolved for an unreadable mint, so the launch is
-/// rejected at the load stage as POOL_NOT_READY with the mint named in detail.
 #[tokio::test]
-async fn unreadable_mint_is_rejected_in_default_and_strict_modes() {
+async fn missing_mint_refuses_entry_in_both_modes() {
+    // The pump buy needs the mint's token program. A mint account that does
+    // not exist cannot be verified, so the entry is refused before any gate
+    // could be read as a pass, with or without strict gates.
     let mut w = World::new(base_config()).await;
-    for (seq, strict) in [(26u8, false), (27u8, true)] {
-        w.state
-            .update_config(move |c| c.sniper.strict_gates = strict)
-            .await;
-        // A fresh mint that was never cached, with its account removed.
-        let mint = Pubkey::new_unique();
-        install_pump_token(&w.node, mint, w.creator, CurveSpec::fresh());
-        w.node.remove_account(&mint);
-        let o = w
-            .sniper
-            .consider_event(pump_event(mint, w.creator, seq))
-            .await;
-        let r = o.rejection.expect("unreadable mint must be rejected");
-        assert_eq!(r.reason, RejectReason::PoolNotReady, "strict={strict}");
-        assert!(r.detail.contains("does not exist"), "{}", r.detail);
-    }
+    w.node.remove_account(&w.mint);
+    let o = w.sniper.consider_event(w.event(26)).await;
+    let r = o.rejection.expect("rejected");
+    assert_eq!(r.reason, RejectReason::PoolNotReady);
+    assert!(r.detail.contains("does not exist"), "{}", r.detail);
+    w.state
+        .update_config(|c| c.sniper.strict_gates = true)
+        .await;
+    let mint2 = Pubkey::new_unique();
+    install_pump_token(&w.node, mint2, w.creator, CurveSpec::fresh());
+    w.node.remove_account(&mint2);
+    let o = w
+        .sniper
+        .consider_event(pump_event(mint2, w.creator, 27))
+        .await;
+    let r = o.rejection.expect("rejected");
+    assert_eq!(r.reason, RejectReason::PoolNotReady);
 }
 
 #[tokio::test]

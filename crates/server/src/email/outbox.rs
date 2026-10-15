@@ -20,7 +20,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 use tracing::{debug, info, warn};
@@ -367,12 +366,8 @@ fn leaked_template_key(value: &str) -> &'static str {
 fn sanitized_error(e: &EmailError) -> String {
     let raw = e.to_string();
     let cut: String = raw.chars().take(300).collect();
-    cut.replace(
-        ['\r', '\n'],
-        " ",
-    )
+    cut.replace(['\r', '\n'], " ")
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -418,7 +413,11 @@ mod tests {
         .with_rate_limit(6);
         assert_eq!(d.min_send_interval, Duration::from_millis(10_000));
         let d = d.with_rate_limit(0);
-        assert_eq!(d.min_send_interval, Duration::from_millis(10_000), "0 keeps prior");
+        assert_eq!(
+            d.min_send_interval,
+            Duration::from_millis(10_000),
+            "0 keeps prior"
+        );
     }
 
     struct NullProvider;

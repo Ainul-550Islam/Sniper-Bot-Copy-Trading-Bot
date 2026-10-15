@@ -1,7 +1,7 @@
 # Buyer acceptance test — formal record (final handover edition)
 
 Supersedes the 22-step edition of the hardening pass (kept in git-less
-history via `AUDIT.md` §29 references and the package `docs/` copy of that
+history via `docs/archive/AUDIT.md` §29 references and the package `docs/` copy of that
 edition is replaced BY THIS FILE; the older vendor package
 `buyer-release/` retains the earlier snapshot — labeled, never deleted).
 

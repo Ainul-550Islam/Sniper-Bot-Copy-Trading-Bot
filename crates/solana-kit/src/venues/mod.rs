@@ -172,7 +172,11 @@ mod tests {
         assert_eq!(*cpmm.program_id(), *consts::RAYDIUM_CPMM);
         let dlmm = reg.all().iter().find(|v| v.id() == "meteora_dlmm").unwrap();
         assert_eq!(*dlmm.program_id(), *consts::METEORA_DLMM);
-        let damm = reg.all().iter().find(|v| v.id() == "meteora_damm_v1").unwrap();
+        let damm = reg
+            .all()
+            .iter()
+            .find(|v| v.id() == "meteora_damm_v1")
+            .unwrap();
         assert_eq!(*damm.program_id(), *consts::METEORA_DAMM_V1);
     }
 }

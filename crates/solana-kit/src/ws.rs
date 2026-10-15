@@ -468,10 +468,8 @@ impl Shared {
             .await
             .take()
             .map(|t| t.elapsed());
-        self.last_outage_ms.store(
-            outage.map(duration_ms).unwrap_or(0),
-            Ordering::Relaxed,
-        );
+        self.last_outage_ms
+            .store(outage.map(duration_ms).unwrap_or(0), Ordering::Relaxed);
         self.ever_connected.store(true, Ordering::Relaxed);
         outage
     }
@@ -748,9 +746,9 @@ impl SubscriptionHandle {
 
     /// Take the receiver once. A repeated call is a recoverable API error.
     pub fn receiver(&mut self) -> BotResult<mpsc::Receiver<WsMessage>> {
-        self.rx.take().ok_or_else(|| {
-            BotError::ws("SubscriptionHandle::receiver may only be called once")
-        })
+        self.rx
+            .take()
+            .ok_or_else(|| BotError::ws("SubscriptionHandle::receiver may only be called once"))
     }
 
     /// Stop the subscription locally and ask the server to unsubscribe.
@@ -1159,7 +1157,7 @@ async fn run_connection(
             // errors sometimes echo it. Keep diagnostics endpoint-safe.
             return Err(BotError::ws(format!(
                 "websocket connect failed for {safe_url}"
-            )))
+            )));
         }
         Ok(Ok(connection)) => connection,
     };
@@ -1887,11 +1885,17 @@ mod tests {
         shared.deliver(1, &sub, logs("dropped"));
         assert_eq!(sub.dropped_messages.load(Ordering::Relaxed), 1);
 
-        assert!(matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "first"));
+        assert!(
+            matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "first")
+        );
         // One spare slot is reserved for live data, not consumed by a gap.
         shared.deliver(1, &sub, logs("fourth"));
-        assert!(matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "second"));
-        assert!(matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "fourth"));
+        assert!(
+            matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "second")
+        );
+        assert!(
+            matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "fourth")
+        );
 
         // Once two slots are free, the overflow marker is delivered before the
         // next event and reports exactly how many notifications were lost.
@@ -1907,7 +1911,9 @@ mod tests {
             }
             other => panic!("expected overflow Gap, got {other:?}"),
         }
-        assert!(matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "fifth"));
+        assert!(
+            matches!(rx.recv().await, Some(WsMessage::Logs { signature, .. }) if signature == "fifth")
+        );
         assert_eq!(sub.dropped_messages.load(Ordering::Relaxed), 0);
     }
 
@@ -1934,10 +1940,9 @@ mod tests {
         assert_eq!(shared.by_request.read().await.get(&11), Some(&9));
 
         handle_text(&shared, r#"{"jsonrpc":"2.0","id":11,"result":999}"#).await;
-        let frame: Value = serde_json::from_str(
-            &outbound.recv().await.expect("late unsubscribe frame"),
-        )
-        .expect("unsubscribe frame is JSON");
+        let frame: Value =
+            serde_json::from_str(&outbound.recv().await.expect("late unsubscribe frame"))
+                .expect("unsubscribe frame is JSON");
         assert_eq!(frame["method"], "logsUnsubscribe");
         assert_eq!(frame["params"][0], 999);
         assert!(shared.by_server.read().await.is_empty());

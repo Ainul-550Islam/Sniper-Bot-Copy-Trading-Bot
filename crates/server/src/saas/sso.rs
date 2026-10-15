@@ -53,7 +53,7 @@ use bot_core::authorization::AccessRequest;
 use bot_core::membership::{Membership, MembershipRole, Permission};
 use bot_core::session::token::generate_token;
 use bot_core::session::{SessionRecord, DEFAULT_SESSION_TTL_HOURS};
-use bot_core::tenant::{OrganizationId, User, UserStatus, UserId};
+use bot_core::tenant::{OrganizationId, User, UserId, UserStatus};
 
 use super::sso_state::{self, PendingAuth};
 
@@ -73,10 +73,7 @@ pub fn routes() -> Router<ApiState> {
     Router::new()
         .route("/api/saas/sso/config", axum::routing::get(get_config))
         .route("/api/saas/sso/config", axum::routing::put(put_config))
-        .route(
-            "/api/saas/sso/config",
-            axum::routing::delete(delete_config),
-        )
+        .route("/api/saas/sso/config", axum::routing::delete(delete_config))
         // Public: the browser redirect in and out of the IdP.
         .route("/api/saas/sso/authorize", axum::routing::get(authorize))
         .route("/api/saas/sso/callback", axum::routing::post(callback))
@@ -120,7 +117,11 @@ pub fn build_authorize_url(
     state: &str,
     challenge: &str,
 ) -> String {
-    let sep = if authorization_endpoint.contains('?') { '&' } else { '?' };
+    let sep = if authorization_endpoint.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
     format!(
         "{authorization_endpoint}{sep}response_type=code&client_id={}&redirect_uri={}&scope=openid%20email%20profile&state={}&code_challenge={}&code_challenge_method=S256",
         urlencode(client_id),
@@ -248,11 +249,7 @@ impl SsoError {
 }
 
 fn sso_error_response(err: &SsoError) -> Response {
-    (
-        err.status(),
-        Json(json!({ "error": err.reason() })),
-    )
-        .into_response()
+    (err.status(), Json(json!({ "error": err.reason() }))).into_response()
 }
 
 fn b64url_decode(segment: &str) -> Result<Vec<u8>, SsoError> {
@@ -320,9 +317,9 @@ pub fn validate_claims(
     // aud may be a string or an array containing our client_id.
     let aud_ok = match claims.get("aud") {
         Some(serde_json::Value::String(a)) => a == expected_aud,
-        Some(serde_json::Value::Array(list)) => list
-            .iter()
-            .any(|v| v.as_str() == Some(expected_aud)),
+        Some(serde_json::Value::Array(list)) => {
+            list.iter().any(|v| v.as_str() == Some(expected_aud))
+        }
         _ => false,
     };
     if !aud_ok {
@@ -355,10 +352,10 @@ pub fn validate_claims(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| {
-            claims.get("roles").and_then(|v| v.as_array()).and_then(|list| {
-                list.iter()
-                    .find_map(|v| v.as_str().map(|s| s.to_string()))
-            })
+            claims
+                .get("roles")
+                .and_then(|v| v.as_array())
+                .and_then(|list| list.iter().find_map(|v| v.as_str().map(|s| s.to_string())))
         });
     Ok(IdTokenClaims {
         iss: iss.to_string(),
@@ -426,7 +423,11 @@ pub fn jwk_to_rsa_der(n_b64: &str, e_b64: &str) -> Result<Vec<u8>, SsoError> {
 
 /// Verify an RS256 signature with ring. `signing_input` is
 /// `<header_b64>.<payload_b64>` exactly as transmitted.
-pub fn verify_rs256(signing_input: &str, sig_b64: &str, public_key_der: &[u8]) -> Result<(), SsoError> {
+pub fn verify_rs256(
+    signing_input: &str,
+    sig_b64: &str,
+    public_key_der: &[u8],
+) -> Result<(), SsoError> {
     // An undecodable signature is a bad signature: every signature defect is
     // reported under one variant, so callers never mistake it for a token-shape error.
     let sig = b64url_decode(sig_b64).map_err(|_| SsoError::BadSignature)?;
@@ -466,7 +467,10 @@ fn http_client() -> Result<reqwest::Client, SsoError> {
         .map_err(|_| SsoError::DiscoveryFailed)
 }
 
-async fn fetch_discovery(client: &reqwest::Client, issuer_url: &str) -> Result<DiscoveryDoc, SsoError> {
+async fn fetch_discovery(
+    client: &reqwest::Client,
+    issuer_url: &str,
+) -> Result<DiscoveryDoc, SsoError> {
     let url = format!(
         "{}/.well-known/openid-configuration",
         issuer_url.trim_end_matches('/')
@@ -497,7 +501,10 @@ async fn fetch_jwk_for_kid(
     if !resp.status().is_success() {
         return Err(SsoError::DiscoveryFailed);
     }
-    let jwks = resp.json::<JwksDoc>().await.map_err(|_| SsoError::DiscoveryFailed)?;
+    let jwks = resp
+        .json::<JwksDoc>()
+        .await
+        .map_err(|_| SsoError::DiscoveryFailed)?;
     for key in &jwks.keys {
         if key.get("kty").and_then(|v| v.as_str()) != Some("RSA") {
             continue;
@@ -505,8 +512,14 @@ async fn fetch_jwk_for_kid(
         if key.get("kid").and_then(|v| v.as_str()) != Some(kid) {
             continue;
         }
-        let n = key.get("n").and_then(|v| v.as_str()).ok_or(SsoError::BadSignature)?;
-        let e = key.get("e").and_then(|v| v.as_str()).ok_or(SsoError::BadSignature)?;
+        let n = key
+            .get("n")
+            .and_then(|v| v.as_str())
+            .ok_or(SsoError::BadSignature)?;
+        let e = key
+            .get("e")
+            .and_then(|v| v.as_str())
+            .ok_or(SsoError::BadSignature)?;
         return Ok((n.to_string(), e.to_string()));
     }
     Err(SsoError::BadSignature)
@@ -559,9 +572,8 @@ async fn exchange_code(
 // ---------------------------------------------------------------------------
 
 fn sso_key() -> Result<[u8; 32], String> {
-    let encoded = std::env::var(SSO_KEY_ENV).map_err(|_| {
-        format!("{SSO_KEY_ENV} must be configured as a base64-encoded 32-byte key")
-    })?;
+    let encoded = std::env::var(SSO_KEY_ENV)
+        .map_err(|_| format!("{SSO_KEY_ENV} must be configured as a base64-encoded 32-byte key"))?;
     let bytes = STANDARD_NO_PAD
         .decode(encoded.trim())
         .or_else(|_| base64::engine::general_purpose::STANDARD.decode(encoded.trim()))
@@ -682,9 +694,7 @@ pub async fn put_config(
         )
             .into_response();
     }
-    if body.issuer_url.trim().is_empty()
-        || !body.issuer_url.trim().starts_with("https://")
-    {
+    if body.issuer_url.trim().is_empty() || !body.issuer_url.trim().starts_with("https://") {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -746,13 +756,13 @@ pub async fn put_config(
     let encrypted_secret: Option<String> = match body.client_secret.as_deref() {
         Some(secret) if !secret.trim().is_empty() => match encrypt_client_secret(secret) {
             Ok(enc) => Some(enc),
-            Err(reason) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({ "error": "sso_encryption_unavailable", "reason": reason.to_string() })),
-                )
-                    .into_response()
-            }
+            Err(reason) => return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    json!({ "error": "sso_encryption_unavailable", "reason": reason.to_string() }),
+                ),
+            )
+                .into_response(),
         },
         _ => None,
     };
@@ -905,12 +915,10 @@ pub async fn delete_config(State(state): State<ApiState>, headers: HeaderMap) ->
     let Some(db) = state.db.as_deref() else {
         return db_unavailable("removing SSO config");
     };
-    let result = sqlx::query(
-        "DELETE FROM tenant_sso_configs WHERE organization_id = $1",
-    )
-    .bind(ctx.organization.id.as_uuid())
-    .execute(db.pool())
-    .await;
+    let result = sqlx::query("DELETE FROM tenant_sso_configs WHERE organization_id = $1")
+        .bind(ctx.organization.id.as_uuid())
+        .execute(db.pool())
+        .await;
     match result {
         Ok(_) => {
             state
@@ -1012,7 +1020,11 @@ pub async fn authorize(
     );
     state
         .audit
-        .success("saas", "saas.sso.authorize_started", Some(&org.id.to_string()))
+        .success(
+            "saas",
+            "saas.sso.authorize_started",
+            Some(&org.id.to_string()),
+        )
         .await;
     (
         StatusCode::OK,
@@ -1029,10 +1041,7 @@ pub struct CallbackBody {
 
 /// `POST /api/saas/sso/callback` — finish the flow: verify everything,
 /// JIT-provision, issue a session token (returned exactly once).
-pub async fn callback(
-    State(state): State<ApiState>,
-    Json(body): Json<CallbackBody>,
-) -> Response {
+pub async fn callback(State(state): State<ApiState>, Json(body): Json<CallbackBody>) -> Response {
     let Some(db) = state.db.as_deref() else {
         return db_unavailable("SSO callback");
     };
@@ -1217,7 +1226,11 @@ pub async fn callback(
     }
     state
         .audit
-        .success("saas", "saas.sso.session_created", Some(&session.token_prefix))
+        .success(
+            "saas",
+            "saas.sso.session_created",
+            Some(&session.token_prefix),
+        )
         .await;
     (
         StatusCode::OK,
@@ -1256,9 +1269,9 @@ mod tests {
         let b = pkce_verifier();
         assert_ne!(a, b);
         assert_eq!(a.len(), 43, "32 bytes -> 43 base64url chars");
-        assert!(a.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')
-        }));
+        assert!(a
+            .chars()
+            .all(|c| { c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') }));
         assert_eq!(state_token().len(), 22);
     }
 
@@ -1286,12 +1299,17 @@ mod tests {
     fn domain_gate_rules() {
         let domains = vec!["Example.com".to_string(), ".corp.net".to_string()];
         assert!(email_domain_allowed("alice@example.com", &domains));
-        assert!(email_domain_allowed("bob@deep.corp.net", &domains) == false,
-            "exact-domain match only, no suffix wildcard");
+        assert!(
+            !email_domain_allowed("bob@deep.corp.net", &domains),
+            "exact-domain match only, no suffix wildcard"
+        );
         assert!(email_domain_allowed("bob@corp.net", &domains));
         assert!(!email_domain_allowed("mallory@evil.org", &domains));
         assert!(!email_domain_allowed("no-at-sign", &domains));
-        assert!(email_domain_allowed("any@one.com", &[]), "empty list = unrestricted");
+        assert!(
+            email_domain_allowed("any@one.com", &[]),
+            "empty list = unrestricted"
+        );
     }
 
     #[test]
@@ -1301,10 +1319,16 @@ mod tests {
             "desk": "trader",
             "evil": "platform_admin"
         });
-        assert_eq!(map_role(Some("it-admin"), &mapping), MembershipRole::OrgAdmin);
+        assert_eq!(
+            map_role(Some("it-admin"), &mapping),
+            MembershipRole::OrgAdmin
+        );
         assert_eq!(map_role(Some("desk"), &mapping), MembershipRole::Trader);
         // Direct identity mapping (claim value equals a role name).
-        assert_eq!(map_role(Some("auditor"), &json!({})), MembershipRole::Auditor);
+        assert_eq!(
+            map_role(Some("auditor"), &json!({})),
+            MembershipRole::Auditor
+        );
         // Unknown claim -> viewer.
         assert_eq!(map_role(Some("nobody"), &json!({})), MembershipRole::Viewer);
         // Missing claim -> viewer.
@@ -1337,8 +1361,7 @@ mod tests {
 
         // Wrong audience.
         assert_eq!(
-            validate_claims(&payload, "https://idp.example.com", "other-client", now)
-                .unwrap_err(),
+            validate_claims(&payload, "https://idp.example.com", "other-client", now).unwrap_err(),
             SsoError::BadClaims
         );
         // Wrong issuer.
@@ -1370,13 +1393,22 @@ mod tests {
         let header_hs = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","kid":"k"}"#);
         let payload = URL_SAFE_NO_PAD.encode(b"{}");
         let token_none = format!("{header_none}.{payload}.sig");
-        assert_eq!(split_jwt(&token_none).unwrap_err(), SsoError::MalformedIdToken);
+        assert_eq!(
+            split_jwt(&token_none).unwrap_err(),
+            SsoError::MalformedIdToken
+        );
         let token_hs = format!("{header_hs}.{payload}.sig");
-        assert_eq!(split_jwt(&token_hs).unwrap_err(), SsoError::MalformedIdToken);
+        assert_eq!(
+            split_jwt(&token_hs).unwrap_err(),
+            SsoError::MalformedIdToken
+        );
         // RS256 without kid is also malformed (we need the JWKS lookup key).
         let header_rs = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#);
         let token_rs = format!("{header_rs}.{payload}.sig");
-        assert_eq!(split_jwt(&token_rs).unwrap_err(), SsoError::MalformedIdToken);
+        assert_eq!(
+            split_jwt(&token_rs).unwrap_err(),
+            SsoError::MalformedIdToken
+        );
         // Two segments only.
         assert_eq!(split_jwt("a.b").unwrap_err(), SsoError::MalformedIdToken);
     }

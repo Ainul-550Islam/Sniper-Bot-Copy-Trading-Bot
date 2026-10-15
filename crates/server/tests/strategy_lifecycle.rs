@@ -40,7 +40,11 @@ use sniper_suite::trading_data_plane::{backtest_worker, TenantTradingDataPlane};
 const EMAIL: &str = "strategist@example.com";
 const PASSWORD: &str = "correct-horse-battery";
 
-fn state_with(saas: Arc<SaasStore>, db: Option<Arc<Database>>, trading: Option<Arc<TenantTradingDataPlane>>) -> ApiState {
+fn state_with(
+    saas: Arc<SaasStore>,
+    db: Option<Arc<Database>>,
+    trading: Option<Arc<TenantTradingDataPlane>>,
+) -> ApiState {
     let shared = AppState::new(AppConfig::from_defaults());
     ApiState {
         audit: AuditTrail::new(None, shared.events.clone()),
@@ -121,7 +125,14 @@ async fn strategy_surface_is_503_without_a_plane_and_401_without_auth() {
     // fabrication is not).
     let saas = Arc::new(SaasStore::new());
     for path in ["/api/tenant/strategies", "/api/tenant/backtests"] {
-        let (status, body) = request(state_with(saas.clone(), None, None), "GET", path, None, None).await;
+        let (status, body) = request(
+            state_with(saas.clone(), None, None),
+            "GET",
+            path,
+            None,
+            None,
+        )
+        .await;
         assert!(
             status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::UNAUTHORIZED,
             "{path} without a plane: got {status}"
@@ -192,7 +203,10 @@ async fn register_login_org(
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    let slug = body["organization"]["slug"].as_str().expect("slug").to_string();
+    let slug = body["organization"]["slug"]
+        .as_str()
+        .expect("slug")
+        .to_string();
     let (status, body) = request(
         state_with(saas, Some(db), Some(trading)),
         "POST",
@@ -291,16 +305,16 @@ async fn strategy_lifecycle_and_backtest_reach_a_labelled_result() {
             .expect("organization_id"),
     )
     .expect("organization_id parses");
-    let module_cfg = sniper_suite::trading_data_plane::config_store::read_module(
-        &db,
-        org_id,
-        "sniper",
-    )
-    .await
-    .expect("config read");
+    let module_cfg =
+        sniper_suite::trading_data_plane::config_store::read_module(&db, org_id, "sniper")
+            .await
+            .expect("config read");
     let module_cfg = module_cfg.expect("activation must have written the sniper config");
     assert_eq!(module_cfg["strategy"]["mode"], "paper");
-    assert_eq!(module_cfg["strategy"]["fenced"], true, "paper strategies stay fenced");
+    assert_eq!(
+        module_cfg["strategy"]["fenced"], true,
+        "paper strategies stay fenced"
+    );
 
     // ---- backtest: queue → worker → labelled result ----------------------
     let (status, queued) = request(
@@ -327,8 +341,35 @@ async fn strategy_lifecycle_and_backtest_reach_a_labelled_result() {
     let backtest_id = queued["id"].as_str().expect("backtest id").to_string();
 
     // Run the SAME worker main.rs spawns — in process.
+    // Fail closed first: with synthetic runs disabled the row stays queued and
+    // says why, instead of producing a made-up result.
+    std::env::remove_var(backtest_worker::ALLOW_SYNTHETIC_ENV);
     let worker = backtest_worker::BacktestWorker::new(db.clone(), Default::default());
+    let processed = worker
+        .run_once()
+        .await
+        .expect("worker run_once (gate closed)");
+    assert_eq!(processed, 0, "gate closed: nothing may be claimed");
+    let (status, waiting) = request(
+        state_with(saas.clone(), Some(db.clone()), Some(trading.clone())),
+        "GET",
+        &format!("/api/tenant/backtests/{backtest_id}"),
+        None,
+        Some(&scoped),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(waiting["status"], "queued", "{waiting}");
+    assert_eq!(
+        waiting["blocked_reason"], "no_recorded_dataset",
+        "{waiting}"
+    );
+    assert_eq!(waiting["authoritative"], false, "{waiting}");
+
+    // Explicit opt-in for the synthetic simulator, then the run completes.
+    std::env::set_var(backtest_worker::ALLOW_SYNTHETIC_ENV, "1");
     let processed = worker.run_once().await.expect("worker run_once");
+    std::env::remove_var(backtest_worker::ALLOW_SYNTHETIC_ENV);
     assert_eq!(processed, 1, "the queued run must be claimed and finished");
 
     let (status, done) = request(
@@ -341,7 +382,10 @@ async fn strategy_lifecycle_and_backtest_reach_a_labelled_result() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(done["status"], "completed", "{done}");
-    assert!(done["error"].is_null(), "completed run carries no error: {done}");
+    assert!(
+        done["error"].is_null(),
+        "completed run carries no error: {done}"
+    );
     // Metric keys the API surface promises are all present (null is fine
     // for sharpe — fabricating a number is not).
     for key in [
@@ -368,7 +412,10 @@ async fn strategy_lifecycle_and_backtest_reach_a_labelled_result() {
         result_json["label"], "synthetic",
         "backtest results must stay labelled synthetic: {result_json}"
     );
-    assert!(result_json["note"].as_str().unwrap_or("").contains("SYNTHETIC"));
+    assert!(result_json["note"]
+        .as_str()
+        .unwrap_or("")
+        .contains("SYNTHETIC"));
 
     // ---- archive ---------------------------------------------------------
     let (status, body) = request(

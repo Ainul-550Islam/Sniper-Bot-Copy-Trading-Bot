@@ -191,7 +191,13 @@ impl ExternalRiskClient {
             if let Ok(signal) = result {
                 let flagged = signal.flagged;
                 let mut cache = self.cache.lock().await;
-                cache.insert(*mint, CachedSignal { signal, fetched_at: now });
+                cache.insert(
+                    *mint,
+                    CachedSignal {
+                        signal,
+                        fetched_at: now,
+                    },
+                );
                 return Some(flagged);
             }
         }

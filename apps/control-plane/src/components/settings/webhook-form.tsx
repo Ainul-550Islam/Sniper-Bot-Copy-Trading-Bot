@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
+import { WebhookDeliveries } from "@/components/settings/webhook-deliveries";
 import { WebhookEndpoint, createWebhook, deleteWebhook, testWebhook } from "@/lib/api/webhook-api";
 
 interface WebhookFormProps {
@@ -174,7 +175,8 @@ export default function WebhookForm({ webhooks, onRefresh }: WebhookFormProps) {
             </thead>
             <tbody>
               {webhooks.map((w) => (
-                <tr key={w.id} style={{ borderTop: "1px solid var(--line)" }}>
+                <Fragment key={w.id}>
+                <tr style={{ borderTop: "1px solid var(--line)" }}>
                   <td style={{ padding: "0.75rem 1rem" }}>
                     <code style={{ fontSize: "0.85rem" }}>{w.url}</code>
                     {w.description && <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>{w.description}</div>}
@@ -212,6 +214,17 @@ export default function WebhookForm({ webhooks, onRefresh }: WebhookFormProps) {
                     </div>
                   </td>
                 </tr>
+                <tr>
+                  <td colSpan={4} style={{ padding: "0 1rem 0.75rem" }}>
+                    <details>
+                      <summary style={{ cursor: "pointer", fontSize: "0.8rem", color: "var(--muted)" }}>Delivery history</summary>
+                      <div style={{ marginTop: "0.5rem" }}>
+                        <WebhookDeliveries endpointId={w.id} />
+                      </div>
+                    </details>
+                  </td>
+                </tr>
+                </Fragment>
               ))}
             </tbody>
           </table>

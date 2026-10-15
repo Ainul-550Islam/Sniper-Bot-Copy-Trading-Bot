@@ -40,6 +40,8 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -116,10 +118,7 @@ impl FeedTasks {
     }
 }
 
-async fn abort_copy_task(
-    task: &mut tokio::task::JoinHandle<()>,
-    deadline: tokio::time::Instant,
-) {
+async fn abort_copy_task(task: &mut tokio::task::JoinHandle<()>, deadline: tokio::time::Instant) {
     task.abort();
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
@@ -146,6 +145,30 @@ impl Drop for FeedTasks {
     }
 }
 
+/// Point-in-time health snapshot of the copy feed.
+///
+/// `reconnects` is only reported for the `transaction_subscribe` feed: it
+/// counts websocket outage gaps that were recovered after a reconnect (this
+/// also includes queue-overflow gaps). The PumpPortal client reconnects
+/// internally and exposes no counter, so there it is `None`. `lag_ms` is the
+/// delay between the chain `block_time` and the consumer receiving the most
+/// recent trade. Unmeasured values are `None`, never fabricated.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FeedHealth {
+    /// Configured feed kind: `idle`, `pumpportal`, `transaction_subscribe`, or `logs_poll`.
+    pub source: &'static str,
+    /// Wall-clock time the consumer last received a leader trade via `recv()`.
+    pub last_event_at: Option<DateTime<Utc>>,
+    /// Trades currently queued and not yet consumed.
+    pub queued: usize,
+    /// True when feed tasks were started but all have finished (feed is down).
+    pub degraded: bool,
+    /// Recovered websocket gaps (reconnect recoveries); `transaction_subscribe` only.
+    pub reconnects: Option<u64>,
+    /// Chain-to-consumer delay of the most recent trade, in milliseconds.
+    pub lag_ms: Option<u64>,
+}
+
 /// Owns the merged copy stream and every task feeding it.
 #[derive(Debug)]
 pub struct CopyFeedHandle {
@@ -153,15 +176,56 @@ pub struct CopyFeedHandle {
     tasks: FeedTasks,
     /// Keeps an empty-wallet feed idle without a detached keepalive task.
     keepalive: Option<mpsc::Sender<WalletTrade>>,
+    source: &'static str,
+    last_event_at: Option<DateTime<Utc>>,
+    last_lag_ms: Option<u64>,
+    /// Incremented by the geyser task on every recovered websocket gap.
+    gap_count: Arc<AtomicU64>,
 }
 
 impl CopyFeedHandle {
+    /// Receive the next leader trade, or `None` once every feed has closed.
     pub async fn recv(&mut self) -> Option<WalletTrade> {
-        self.receiver.recv().await
+        let trade = self.receiver.recv().await;
+        if let Some(t) = &trade {
+            let now = Utc::now();
+            self.last_event_at = Some(now);
+            if let Some(block_time) = t.block_time {
+                self.last_lag_ms = Some((now - block_time).num_milliseconds().max(0) as u64);
+            }
+        }
+        trade
     }
 
+    /// Snapshot of feed health for status endpoints and monitoring.
+    pub fn health(&self) -> FeedHealth {
+        let degraded = match self.keepalive {
+            // Idle feed (no wallets): not degraded, it is intentionally inactive.
+            Some(_) => false,
+            None => {
+                !self.tasks.handles.is_empty() && self.tasks.handles.iter().all(|h| h.is_finished())
+            }
+        };
+        let reconnects = (self.source == "transaction_subscribe")
+            .then(|| self.gap_count.load(Ordering::Relaxed));
+        FeedHealth {
+            source: self.source,
+            last_event_at: self.last_event_at,
+            queued: self.len(),
+            degraded,
+            reconnects,
+            lag_ms: self.last_lag_ms,
+        }
+    }
+
+    /// Number of leader trades currently queued in the channel.
     pub fn len(&self) -> usize {
         self.receiver.len()
+    }
+
+    /// True when no leader trade is queued.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Close the stream and join every feed task within one bounded deadline.
@@ -188,6 +252,7 @@ impl CopyFeed {
             .collect();
 
         let (tx, rx) = mpsc::channel(OUT_BUFFER);
+        let gap_count = Arc::new(AtomicU64::new(0));
 
         if wallets.is_empty() {
             // Nothing tracked yet. Keep the channel open (so `run` stays alive
@@ -198,6 +263,10 @@ impl CopyFeed {
                 receiver: rx,
                 tasks: FeedTasks::default(),
                 keepalive: Some(tx),
+                source: "idle",
+                last_event_at: None,
+                last_lag_ms: None,
+                gap_count,
             });
         }
 
@@ -213,6 +282,7 @@ impl CopyFeed {
 
         let wallet_count = wallets.len();
         let mut started = 0;
+        let mut source: &'static str = "logs_poll";
         match feed.as_str() {
             "pumpportal" => {
                 let tx = tx.clone();
@@ -223,6 +293,7 @@ impl CopyFeed {
                     run_pumpportal(url, wallets, tx, state).await
                 }));
                 started += 1;
+                source = "pumpportal";
                 info!(
                     wallets = wallet_count,
                     "copy feed: pumpportal account-trades"
@@ -244,14 +315,22 @@ impl CopyFeed {
                 let state = state.clone();
                 let wallets = wallets.clone();
                 let rpc = rpc.clone();
+                let gaps = gap_count.clone();
                 match geyser {
                     Some(url) => {
                         tasks.push(tokio::spawn(async move {
                             run_transaction_subscribe(
-                                rpc, url, wallets, tx, state, poll_ms, sig_limit,
+                                rpc,
+                                url,
+                                wallets,
+                                tx,
+                                state,
+                                PollTuning { poll_ms, sig_limit },
+                                gaps,
                             )
                             .await
                         }));
+                        source = "transaction_subscribe";
                         info!(
                             wallets = wallet_count,
                             "copy feed: transaction_subscribe (geyser push)"
@@ -289,6 +368,10 @@ impl CopyFeed {
             receiver: rx,
             tasks,
             keepalive: None,
+            source,
+            last_event_at: None,
+            last_lag_ms: None,
+            gap_count,
         })
     }
 }
@@ -585,15 +668,23 @@ async fn backfill_after_gap(
 /// Failure policy: an endpoint that does not speak `transactionSubscribe`,
 /// or a stream that ends, degrades to [`run_poll`] — the copy feed must
 /// never silently die.
+/// Polling knobs shared by the poll loop and the geyser fallback.
+#[derive(Debug, Clone, Copy)]
+struct PollTuning {
+    poll_ms: u64,
+    sig_limit: usize,
+}
+
 async fn run_transaction_subscribe(
     rpc: Rpc,
     url: String,
     wallets: Vec<String>,
     out: mpsc::Sender<WalletTrade>,
     state: Shared,
-    poll_ms: u64,
-    sig_limit: usize,
+    tuning: PollTuning,
+    gaps: Arc<AtomicU64>,
 ) {
+    let PollTuning { poll_ms, sig_limit } = tuning;
     let tracked: Vec<(String, Pubkey)> = wallets
         .iter()
         .filter_map(|w| match Pubkey::from_str(w) {
@@ -717,6 +808,7 @@ async fn run_transaction_subscribe(
                 if !cfg.copy.enabled {
                     continue;
                 }
+                gaps.fetch_add(1, Ordering::Relaxed);
                 if dropped_messages > 0 {
                     warn!(
                         ?last_slot,
@@ -938,5 +1030,93 @@ mod tests {
         assert_eq!(trade.side, PositionSide::Short);
         assert!((trade.sol_amount - 1.5).abs() < 1e-9);
         assert_eq!(trade.venue, Venue::PumpSwap);
+    }
+}
+
+#[cfg(test)]
+mod feed_health_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn idle_feed_reports_idle_and_not_degraded() {
+        let (tx, rx) = mpsc::channel(4);
+        let mut handle = CopyFeedHandle {
+            receiver: rx,
+            tasks: FeedTasks::default(),
+            keepalive: Some(tx),
+            source: "idle",
+            last_event_at: None,
+            last_lag_ms: None,
+            gap_count: Arc::new(AtomicU64::new(0)),
+        };
+        let h = handle.health();
+        assert_eq!(h.source, "idle");
+        assert!(h.last_event_at.is_none());
+        assert_eq!(h.queued, 0);
+        assert!(!h.degraded);
+        assert!(h.reconnects.is_none() && h.lag_ms.is_none());
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn finished_tasks_mark_feed_degraded_and_recv_sets_last_event() {
+        let (tx, rx) = mpsc::channel(4);
+        let mut tasks = FeedTasks::default();
+        tasks.push(tokio::spawn(async {}));
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut handle = CopyFeedHandle {
+            receiver: rx,
+            tasks,
+            keepalive: None,
+            source: "logs_poll",
+            last_event_at: None,
+            last_lag_ms: None,
+            gap_count: Arc::new(AtomicU64::new(0)),
+        };
+        assert!(handle.health().degraded);
+        assert!(handle.health().last_event_at.is_none());
+        drop(tx);
+        assert!(handle.recv().await.is_none());
+        assert!(handle.health().last_event_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn recv_records_event_time_and_chain_lag() {
+        let (tx, rx) = mpsc::channel(4);
+        let mut handle = CopyFeedHandle {
+            receiver: rx,
+            tasks: FeedTasks::default(),
+            keepalive: None,
+            source: "transaction_subscribe",
+            last_event_at: None,
+            last_lag_ms: None,
+            gap_count: Arc::new(AtomicU64::new(3)),
+        };
+        let now = Utc::now();
+        tx.send(WalletTrade {
+            wallet: "w".into(),
+            signature: "s".into(),
+            slot: 1,
+            block_time: Some(now - chrono::Duration::seconds(2)),
+            side: PositionSide::Long,
+            mint: "m".into(),
+            symbol: None,
+            token_amount: 1.0,
+            sol_amount: 1.0,
+            venue: Venue::PumpFun,
+            fee_sol: 0.0,
+            discriminator: None,
+            observed_at: now,
+        })
+        .await
+        .unwrap();
+        assert!(handle.recv().await.is_some());
+        let h = handle.health();
+        assert!(h.last_event_at.is_some());
+        let lag = h.lag_ms.expect("lag measured from block_time");
+        assert!((2_000..5_000).contains(&lag), "lag was {lag}");
+        assert_eq!(h.reconnects, Some(3));
+        assert_eq!(h.source, "transaction_subscribe");
     }
 }

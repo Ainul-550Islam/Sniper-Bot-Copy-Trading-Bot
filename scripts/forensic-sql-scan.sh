@@ -36,8 +36,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-exec python3 - "$ROOT" "${FORENSIC_JSON:-}" <<'PY'
-import json
+exec python3 - "$ROOT" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -108,22 +107,6 @@ SANCTIONED_GLOBAL = [
      "retention housekeeping: deletes terminal states older than the retention horizon under the deployment-wide retention policy; no tenant-facing predicate applies"),
     ("store", "tenant_configs",
      "operator version scan (all_versions): enumerates every organization's config version for operator tooling; tenant-facing reads always resolve one org first"),
-    # --- identity and token flows reviewed 2026-10 (P1 tenant_auth_isolation) ---
-    # users has NO organization_id column (migration 0017): it is the platform-level
-    # identity. Organization membership lives in separate membership rows, so an
-    # identity lookup by email or id is global by design and never tenant-owned data.
-    ("email_verification", "users",
-     "email-verification request looks up the account by normalised email (unauthenticated; both outcomes answer identically); confirm flips email_verified for the user id bound to the verified single-use token row"),
-    ("password_reset", "users",
-     "password-reset request looks up the account by normalised email (unauthenticated; unknown and known addresses answer identically); the user id is then bound to the reset token"),
-    ("postgres", "users",
-     "identity persistence: INSERT of a new platform identity during registration or invitation acceptance; the row carries no tenant key by design"),
-    ("auth_flows", "users",
-     "invitation acceptance creates a new platform identity for the invited address; organization membership is written separately, bound to the invitation row"),
-    ("auth_flows", "invites",
-     "invitation acceptance resolves the invitation by SHA-256 of a single-use, high-entropy token; the organization_id, role and email are then taken FROM that row, so the token is the scope and no caller-supplied tenant is trusted"),
-    ("auth_flows", "saas_runtime_records",
-     "invitation acceptance reads the organization record by the organization id stored on the token-bound invitation (kind='organization'); the lookup key is the tenant itself, and the existing-user branch resolves the account by normalised email (kind='user', lookup_key)"),
 ]
 
 GROUPS = [
@@ -352,35 +335,6 @@ print("## Class summary")
 for c in (1, 2, 3, 4, 5):
     print(f"  class {c} ({CLASS_NAME[c]}): {counts.get(c, 0)}")
 class4 = [f for f in findings if f["class"] == 4]
-
-# Machine-readable report (optional): FORENSIC_JSON=<path> writes every finding
-# with its class, rationale and the verdict. The human report above is unchanged
-# and the exit code is the same as before.
-json_path = sys.argv[2] if len(sys.argv) > 2 else ""
-if json_path:
-    report = {
-        "schema": 1,
-        "verdict": "FAIL" if class4 else "PASS",
-        "class4_count": len(class4),
-        "class_counts": {str(c): counts.get(c, 0) for c in (1, 2, 3, 4, 5)},
-        "extraction_failures": list(extraction_failures),
-        "findings": [
-            {
-                "group": f["group"],
-                "class": f["class"],
-                "class_name": CLASS_NAME[f["class"]],
-                "file": f["file"],
-                "line": f["line"],
-                "table": f["table"],
-                "statement": f["sql"],
-                "rationale": f["why"],
-            }
-            for f in findings
-        ],
-    }
-    with open(json_path, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, indent=2)
-        fh.write("\n")
 
 if extraction_failures:
     print()

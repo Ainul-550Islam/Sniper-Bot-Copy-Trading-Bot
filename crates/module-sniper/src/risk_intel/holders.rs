@@ -16,7 +16,9 @@ use std::collections::HashSet;
 use solana_sdk::pubkey::Pubkey;
 
 use bot_core::error::BotResult;
-use solana_kit::holders::{self as kit, ConcentrationLimits, ConcentrationReport, ConcentrationVerdict};
+use solana_kit::holders::{
+    self as kit, ConcentrationLimits, ConcentrationReport, ConcentrationVerdict,
+};
 use solana_kit::rpc::Rpc;
 
 /// Basis-point denominator (mirrors the kit's).
@@ -60,7 +62,10 @@ pub async fn measure_concentration(
 /// `max_top_holder_pct` means. Top-5/top-10 clustering belongs to the
 /// richer [`kit::evaluate_concentration`] limits, which operators can wire
 /// through `ConcentrationLimits` when they want it.
-pub fn gate_single_holder(report: &ConcentrationReport, max_top_holder_pct: f64) -> ConcentrationVerdict {
+pub fn gate_single_holder(
+    report: &ConcentrationReport,
+    max_top_holder_pct: f64,
+) -> ConcentrationVerdict {
     let limit_bps = bps_from_pct(max_top_holder_pct);
     if limit_bps == 0 {
         return ConcentrationVerdict::Pass;
@@ -127,10 +132,7 @@ mod tests {
     #[test]
     fn disabled_threshold_always_passes() {
         let report = kit::concentration(&[holder(1, 9_000), holder(2, 1_000)], &HashSet::new());
-        assert_eq!(
-            gate_single_holder(&report, 0.0),
-            ConcentrationVerdict::Pass
-        );
+        assert_eq!(gate_single_holder(&report, 0.0), ConcentrationVerdict::Pass);
     }
 
     #[test]

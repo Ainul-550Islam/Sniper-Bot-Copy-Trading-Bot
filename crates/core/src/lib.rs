@@ -62,6 +62,7 @@ pub mod recovery;
 pub mod redis_kv;
 pub mod redis_ownership;
 pub mod risk;
+pub mod secret;
 pub mod session;
 pub mod state;
 pub mod storage;

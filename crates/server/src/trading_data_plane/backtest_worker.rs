@@ -12,9 +12,13 @@
 //!
 //! ## Honesty rules
 //!
-//! * **No historical dataset exists in this deployment**, so the simulator
-//!   runs over SYNTHETIC scenarios derived deterministically from the run
-//!   id (seeded PRNG). `result_json` carries `"label": "synthetic"` and a
+//! * **Synthetic runs are opt-in.** Without `BACKTEST_ALLOW_SYNTHETIC=1` no
+//!   queued run is claimed; each waits with `blocked_reason =
+//!   'no_recorded_dataset'`. Runs that name a launch dataset are refused with
+//!   `recorded_dataset_unavailable` until replay over recorded data exists.
+//! * With the opt-in set, the simulator runs over SYNTHETIC scenarios derived
+//!   deterministically from the run id (seeded PRNG). Results always carry
+//!   `data_source = "synthetic"` and `authoritative = false`. `result_json` carries `"label": "synthetic"` and a
 //!   note — the API surface and the UI must surface that label next to any
 //!   number. If a real recorded dataset pipeline lands later, it becomes a
 //!   new branch here; the synthetic path never pretends otherwise.
@@ -48,6 +52,17 @@ use module_sniper::backtest::{run_backtest, BacktestReport};
 pub const REFERENCE_PRICE_ENV: &str = "BACKTEST_SOL_USD_CENTS";
 /// Fallback reference price: $150 per SOL.
 pub const DEFAULT_REFERENCE_SOL_USD_CENTS: u64 = 15_000;
+
+/// Opt-in gate for synthetic runs. Unset or any value other than `1` means
+/// synthetic runs are refused: queued rows stay queued, marked
+/// `blocked_reason = 'no_recorded_dataset'`, and are never claimed.
+pub const ALLOW_SYNTHETIC_ENV: &str = "BACKTEST_ALLOW_SYNTHETIC";
+
+/// Block reason: no recorded dataset is attached and synthetic runs are off.
+pub const BLOCKED_NO_DATASET: &str = "no_recorded_dataset";
+/// Block reason: a dataset is attached, but replay over recorded data is not
+/// implemented yet, so the run is refused instead of silently synthesised.
+pub const BLOCKED_DATASET_UNSUPPORTED: &str = "recorded_dataset_unavailable";
 
 /// Fraction of the initial balance risked per synthetic entry.
 pub const PER_TRADE_BALANCE_FRACTION: f64 = 0.01;
@@ -137,6 +152,30 @@ impl BacktestWorker {
     /// Claim and process runs until the queue drains (bounded per call).
     /// Returns how many runs reached a terminal state.
     pub async fn run_once(&self) -> Result<usize, sqlx::Error> {
+        // Runs that name a dataset cannot be replayed yet: refuse them.
+        sqlx::query(
+            "UPDATE backtest_runs SET blocked_reason = $1
+              WHERE status = 'queued' AND dataset_id IS NOT NULL
+                AND blocked_reason IS DISTINCT FROM $1",
+        )
+        .bind(BLOCKED_DATASET_UNSUPPORTED)
+        .execute(self.db.pool())
+        .await?;
+
+        if !synthetic_runs_allowed() {
+            // Fail closed: leave every dataset-less queued row unclaimed and
+            // say exactly why it is waiting.
+            sqlx::query(
+                "UPDATE backtest_runs SET blocked_reason = $1
+                  WHERE status = 'queued' AND dataset_id IS NULL
+                    AND blocked_reason IS DISTINCT FROM $1",
+            )
+            .bind(BLOCKED_NO_DATASET)
+            .execute(self.db.pool())
+            .await?;
+            return Ok(0);
+        }
+
         let mut processed = 0usize;
         while let Some(run) = self.claim_one().await? {
             self.execute(run).await;
@@ -149,9 +188,9 @@ impl BacktestWorker {
     /// from ever taking the same row.
     async fn claim_one(&self) -> Result<Option<ClaimedRun>, sqlx::Error> {
         let row = sqlx::query(
-            "UPDATE backtest_runs SET status = 'running'
+            "UPDATE backtest_runs SET status = 'running', blocked_reason = NULL
               WHERE id = (SELECT id FROM backtest_runs
-                           WHERE status = 'queued'
+                           WHERE status = 'queued' AND dataset_id IS NULL
                            ORDER BY created_at ASC
                            LIMIT 1
                            FOR UPDATE SKIP LOCKED)
@@ -178,7 +217,8 @@ impl BacktestWorker {
         };
         let update = sqlx::query(
             "UPDATE backtest_runs
-                SET status = $2, result_json = $3, error = $4, completed_at = NOW()
+                SET status = $2, result_json = $3, error = $4, completed_at = NOW(),
+                    data_source = 'synthetic', authoritative = false
               WHERE id = $1",
         )
         .bind(run.id)
@@ -212,6 +252,9 @@ impl BacktestWorker {
             slippage_pct: (run.slippage_bps.max(0) as f64) / 100.0,
             tip_lamports: FillModelConfig::default().tip_lamports,
         };
+        let fill_cfg_latency_ms = fill_cfg.entry_latency_ms;
+        let fill_cfg_slippage_pct = fill_cfg.slippage_pct;
+        let fill_cfg_tip_lamports = fill_cfg.tip_lamports;
         let exit_cfg = ExitConfig {
             take_profit_pct: ExitConfig::default().take_profit_pct,
             stop_loss_pct: ExitConfig::default().stop_loss_pct,
@@ -224,6 +267,7 @@ impl BacktestWorker {
 
         // The simulator is pure and CPU-bound: keep it off the executor's
         // async threads.
+        let exit_cost_bps = exit_cfg.exit_cost_bps;
         let report: BacktestReport = tokio::task::spawn_blocking(move || {
             let scenarios = synthetic_scenarios(seed, scenarios);
             // Every scenario gets the same entry size: the run's per-trade
@@ -241,18 +285,37 @@ impl BacktestWorker {
         .await
         .map_err(|e| format!("backtest simulator panicked or was cancelled: {e}"))?;
 
-        Ok(result_json_for(run, &report, initial_usd, initial_sol, reference_cents))
+        let assumptions = json!({
+            "data": "seeded synthetic scenarios (no recorded market data)",
+            "entry_latency_ms": fill_cfg_latency_ms,
+            "entry_slippage_pct": fill_cfg_slippage_pct,
+            "entry_tip_lamports": fill_cfg_tip_lamports,
+            "exit_cost_bps": exit_cost_bps,
+            "fee_rate_bps": run.fee_rate_bps,
+            "slippage_bps": run.slippage_bps,
+            "per_trade_balance_fraction": PER_TRADE_BALANCE_FRACTION,
+            "usd_basis": "operator-pinned reference price",
+        });
+        Ok(result_json_for(
+            run,
+            &report,
+            initial_usd,
+            initial_sol,
+            reference_cents,
+            assumptions,
+        ))
     }
 }
 
 /// `result_json` exactly in the shape `backtests.rs::run_json` reads, plus
 /// the honesty fields (label, reference price, caveats).
 fn result_json_for(
-    run: &ClaimedRun,
+    _run: &ClaimedRun,
     report: &BacktestReport,
     initial_usd: f64,
     initial_sol: f64,
     reference_cents: u64,
+    assumptions: Value,
 ) -> Value {
     let sol_price_usd = reference_cents as f64 / 100.0;
     let net_pnl_sol = report.metrics.net_pnl_sol;
@@ -269,6 +332,9 @@ fn result_json_for(
     };
     json!({
         "label": "synthetic",
+        "data_source": "synthetic",
+        "authoritative": false,
+        "assumptions": assumptions,
         "note": "SYNTHETIC backtest: scenarios are generated from the run id by a seeded PRNG; no recorded market data exists for this period. The USD basis is an operator-pinned reference price, not a live market price.",
         "reference_sol_usd_cents": reference_cents,
         "final_balance_usd": initial_usd + net_pnl_usd,
@@ -285,6 +351,13 @@ fn result_json_for(
         "model_caveats": report.model_caveats,
         "simulated_scenarios": report.scenarios,
     })
+}
+
+/// Whether synthetic (non-recorded) runs are enabled for this process.
+pub fn synthetic_runs_allowed() -> bool {
+    std::env::var(ALLOW_SYNTHETIC_ENV)
+        .map(|raw| raw.trim() == "1")
+        .unwrap_or(false)
 }
 
 /// Deterministic seed from the run id — the same queued row always
@@ -338,13 +411,39 @@ mod tests {
         let cfg = BacktestWorkerConfig::default();
         let start = Utc::now();
         // One day → 4 scenarios, raised to the floor.
-        assert_eq!(scenario_budget(&cfg, start, start + chrono::Duration::days(1)), 8);
+        assert_eq!(
+            scenario_budget(&cfg, start, start + chrono::Duration::days(1)),
+            8
+        );
         // Thirty days → 120.
-        assert_eq!(scenario_budget(&cfg, start, start + chrono::Duration::days(30)), 120);
+        assert_eq!(
+            scenario_budget(&cfg, start, start + chrono::Duration::days(30)),
+            120
+        );
         // A decade clamps to the ceiling.
-        assert_eq!(scenario_budget(&cfg, start, start + chrono::Duration::days(3650)), 200);
+        assert_eq!(
+            scenario_budget(&cfg, start, start + chrono::Duration::days(3650)),
+            200
+        );
         // Inverted periods floor, never panic.
-        assert_eq!(scenario_budget(&cfg, start, start - chrono::Duration::days(5)), 8);
+        assert_eq!(
+            scenario_budget(&cfg, start, start - chrono::Duration::days(5)),
+            8
+        );
+    }
+
+    #[test]
+    fn synthetic_gate_is_closed_unless_exactly_one() {
+        // Serialised by a single test: env vars are process-global.
+        std::env::remove_var(ALLOW_SYNTHETIC_ENV);
+        assert!(!synthetic_runs_allowed());
+        std::env::set_var(ALLOW_SYNTHETIC_ENV, "0");
+        assert!(!synthetic_runs_allowed());
+        std::env::set_var(ALLOW_SYNTHETIC_ENV, "true");
+        assert!(!synthetic_runs_allowed());
+        std::env::set_var(ALLOW_SYNTHETIC_ENV, " 1 ");
+        assert!(synthetic_runs_allowed());
+        std::env::remove_var(ALLOW_SYNTHETIC_ENV);
     }
 
     #[test]
@@ -363,8 +462,18 @@ mod tests {
             fee_rate_bps: 25,
             slippage_bps: 50,
         };
-        let value = result_json_for(&run, &report, 1000.0, 1000.0 / 150.0, 15_000);
+        let value = result_json_for(
+            &run,
+            &report,
+            1000.0,
+            1000.0 / 150.0,
+            15_000,
+            json!({"data": "test"}),
+        );
         assert_eq!(value["label"], "synthetic");
+        assert_eq!(value["data_source"], "synthetic");
+        assert_eq!(value["authoritative"], false);
+        assert_eq!(value["assumptions"]["data"], "test");
         for key in [
             "final_balance_usd",
             "net_pnl_usd",

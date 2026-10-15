@@ -18,8 +18,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
-use tokio::net::TcpStream;
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 
 use super::{EmailError, EmailMessage, EmailProvider};
@@ -112,9 +110,7 @@ impl SmtpProvider {
         let _ = tcp.set_nodelay(true);
 
         let server_name = rustls::pki_types::ServerName::try_from(self.host.clone())
-            .map_err(|_| {
-                EmailError::Config(format!("invalid smtp hostname: {}", self.host))
-            })?;
+            .map_err(|_| EmailError::Config(format!("invalid smtp hostname: {}", self.host)))?;
 
         if self.implicit_tls {
             let tls = timeout(self.connector.connect(server_name, tcp))
@@ -127,13 +123,12 @@ impl SmtpProvider {
             let mut plain = SmtpSession::new(tcp);
             let greeting = plain.read_response().await?;
             require_2xx(&greeting, "greeting")?;
-            plain.write_line(&format!("EHLO sniper-suite")).await?;
+            plain.write_line("EHLO sniper-suite").await?;
             let ehlo = plain.read_response().await?;
             require_2xx(&ehlo, "ehlo")?;
             if !response_advertises(&ehlo, "STARTTLS") {
                 return Err(EmailError::TlsRequired(
-                    "server does not advertise STARTTLS; plaintext sending is disabled"
-                        .into(),
+                    "server does not advertise STARTTLS; plaintext sending is disabled".into(),
                 ));
             }
             plain.write_line("STARTTLS").await?;
@@ -170,7 +165,8 @@ impl SmtpProvider {
         let authed = s.read_response().await?;
         require_2xx(&authed, "auth-password")?;
 
-        s.write_line(&format!("MAIL FROM:<{}>", message.from)).await?;
+        s.write_line(&format!("MAIL FROM:<{}>", message.from))
+            .await?;
         let mail = s.read_response().await?;
         require_2xx(&mail, "mail-from")?;
         s.write_line(&format!("RCPT TO:<{}>", message.to)).await?;
@@ -187,7 +183,8 @@ impl SmtpProvider {
         payload.push_str(&format!("To: {}\r\n", message.to));
         payload.push_str(&format!("Subject: {}\r\n", message.rendered.subject));
         payload.push_str("MIME-Version: 1.0\r\n");
-        payload.push_str("Content-Type: multipart/alternative; boundary=\"snipersuite-boundary\"\r\n");
+        payload
+            .push_str("Content-Type: multipart/alternative; boundary=\"snipersuite-boundary\"\r\n");
         payload.push_str("\r\n");
         payload.push_str("--snipersuite-boundary\r\n");
         payload.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");
@@ -269,7 +266,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SmtpSession<S> {
                 .await?
                 .map_err(|e| EmailError::Transport(format!("read: {e}")))?;
             if n == 0 {
-                return Err(EmailError::Transport("connection closed mid-response".into()));
+                return Err(EmailError::Transport(
+                    "connection closed mid-response".into(),
+                ));
             }
             let trimmed = line.trim_end_matches(['\r', '\n']);
             full.push_str(trimmed);
@@ -324,7 +323,13 @@ fn leading_code(response: &str) -> Option<u16> {
 }
 
 fn first_line(response: &str) -> String {
-    response.lines().next().unwrap_or("").chars().take(200).collect()
+    response
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect()
 }
 
 fn response_advertises(ehlo_response: &str, capability: &str) -> bool {
@@ -341,11 +346,11 @@ fn response_advertises(ehlo_response: &str, capability: &str) -> bool {
 
 /// Common OS root bundle locations tried when no explicit path is set.
 const DEFAULT_CA_PATHS: &[&str] = &[
-    "/etc/ssl/certs/ca-certificates.crt",       // Debian/Ubuntu
-    "/etc/pki/tls/certs/ca-bundle.crt",         // RHEL/Fedora
-    "/etc/ssl/ca-bundle.pem",                   // SUSE
-    "/etc/ssl/cert.pem",                        // Alpine/macOS
-    "/usr/local/share/certs/ca-root-nss.crt",   // FreeBSD
+    "/etc/ssl/certs/ca-certificates.crt",     // Debian/Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",       // RHEL/Fedora
+    "/etc/ssl/ca-bundle.pem",                 // SUSE
+    "/etc/ssl/cert.pem",                      // Alpine/macOS
+    "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
 ];
 
 /// Load trusted roots from the configured PEM bundle (or OS defaults).
@@ -375,7 +380,8 @@ fn load_roots(ca_bundle_path: Option<&str>) -> Result<rustls::RootCertStore, Ema
     }
     let mut roots = rustls::RootCertStore::empty();
     let (added, _ignored) = roots.add_parsable_certificates(
-        ders.into_iter().map(rustls::pki_types::CertificateDer::from),
+        ders.into_iter()
+            .map(rustls::pki_types::CertificateDer::from),
     );
     if added == 0 {
         return Err(EmailError::Config(format!(
@@ -398,9 +404,7 @@ fn pem_to_der(pem: &str) -> Vec<Vec<u8>> {
             in_block = true;
         } else if line == "-----END CERTIFICATE-----" {
             if in_block {
-                if let Ok(der) =
-                    base64::engine::general_purpose::STANDARD.decode(current.trim())
-                {
+                if let Ok(der) = base64::engine::general_purpose::STANDARD.decode(current.trim()) {
                     out.push(der);
                 }
             }
@@ -446,14 +450,29 @@ mod tests {
     #[test]
     fn provider_construction_validates_inputs() {
         std::env::remove_var("TEST_SMTP_PW_ABSENT");
-        let e = SmtpProvider::new("mail.example.com", 587, false, "user", "TEST_SMTP_PW_ABSENT", None)
-            .unwrap_err();
+        let e = SmtpProvider::new(
+            "mail.example.com",
+            587,
+            false,
+            "user",
+            "TEST_SMTP_PW_ABSENT",
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(e, EmailError::Config(_)), "missing password env");
         std::env::set_var("TEST_SMTP_PW_PRESENT", "secret");
-        let e = SmtpProvider::new("", 587, false, "user", "TEST_SMTP_PW_PRESENT", None).unwrap_err();
+        let e =
+            SmtpProvider::new("", 587, false, "user", "TEST_SMTP_PW_PRESENT", None).unwrap_err();
         assert!(matches!(e, EmailError::Config(_)), "empty host");
-        let e = SmtpProvider::new("mail.example.com", 0, false, "user", "TEST_SMTP_PW_PRESENT", None)
-            .unwrap_err();
+        let e = SmtpProvider::new(
+            "mail.example.com",
+            0,
+            false,
+            "user",
+            "TEST_SMTP_PW_PRESENT",
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(e, EmailError::Config(_)), "zero port");
         // A nonexistent explicit CA path is a Config error at build time.
         let e = SmtpProvider::new(

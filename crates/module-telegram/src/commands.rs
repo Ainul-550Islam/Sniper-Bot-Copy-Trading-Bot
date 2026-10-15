@@ -46,10 +46,20 @@ pub enum Command {
     Config,
     /// `/buy <mint> <sol>` — request a buy (confirm via inline keyboard;
     /// never executed on the first tap).
-    Buy { mint: String, sol: String },
+    Buy {
+        /// Base58 token mint.
+        mint: String,
+        /// SOL amount as typed by the operator.
+        sol: String,
+    },
     /// `/sell <mint> <percent>` — request selling a fraction of the open
     /// position (confirm via inline keyboard).
-    Sell { mint: String, pct: String },
+    Sell {
+        /// Base58 token mint.
+        mint: String,
+        /// Percentage of the open position to sell, as typed by the operator.
+        pct: String,
+    },
     /// `/snipe on|off` — shortcut for enabling/disabling the sniper module.
     Snipe(bool),
     /// `/wallets` — configured trading wallets (public addresses) + balances.
@@ -527,7 +537,7 @@ async fn wallets_text(state: &Shared) -> String {
         for w in &cfg.copy.wallets {
             out.push_str(&format!(
                 "• {}{}\n",
-                &w.address,
+                w.address,
                 w.label
                     .as_ref()
                     .map(|l| format!(" ({l})"))
@@ -558,7 +568,7 @@ use tokio::sync::Mutex;
 
 use crate::callbacks::{CallbackAction, CallbackSecret};
 use crate::trade_session::{
-    ChatBinding, ChatLimits, TradeDeny, TradeExecutor, TradeIntent, TradeSession, TradeSide,
+    ChatBinding, ChatLimits, TradeExecutor, TradeIntent, TradeSession, TradeSide,
     UnconfiguredTradeExecutor,
 };
 
@@ -573,7 +583,10 @@ pub struct TradeReply {
 
 impl TradeReply {
     fn plain(text: impl Into<String>) -> Self {
-        Self { text: text.into(), keyboard: None }
+        Self {
+            text: text.into(),
+            keyboard: None,
+        }
     }
 }
 
@@ -589,7 +602,11 @@ pub struct TradeDesk {
 impl TradeDesk {
     /// Build a desk. With no executor wired, confirmations fail closed via
     /// [`UnconfiguredTradeExecutor`].
-    pub fn new(state: Shared, limits: ChatLimits, secret: CallbackSecret) -> bot_core::error::BotResult<Self> {
+    pub fn new(
+        state: Shared,
+        limits: ChatLimits,
+        secret: CallbackSecret,
+    ) -> bot_core::error::BotResult<Self> {
         Ok(Self {
             state,
             session: Mutex::new(TradeSession::new(limits)?),
@@ -674,7 +691,9 @@ impl TradeDesk {
     async fn prepare(&self, chat_id: i64, intent: TradeIntent, now: DateTime<Utc>) -> TradeReply {
         // Kill switch first: never even DRAW a money keyboard while it's on.
         if self.state.kill_switch() {
-            return TradeReply::plain("🛑 Kill switch is ENGAGED — trading commands are refused until /resume.");
+            return TradeReply::plain(
+                "🛑 Kill switch is ENGAGED — trading commands are refused until /resume.",
+            );
         }
         let mut session = self.session.lock().await;
         match session.prepare_confirmation(intent.clone(), now) {
@@ -738,8 +757,14 @@ impl TradeDesk {
                         );
                     }
                     match self.executor.execute(&intent).await {
-                        Ok(summary) => ("Confirmed".to_string(), Some(TradeReply::plain(format!("✅ {summary}")))),
-                        Err(e) => ("Rejected".to_string(), Some(TradeReply::plain(format!("⛔ Trade rejected: {e}")))),
+                        Ok(summary) => (
+                            "Confirmed".to_string(),
+                            Some(TradeReply::plain(format!("✅ {summary}"))),
+                        ),
+                        Err(e) => (
+                            "Rejected".to_string(),
+                            Some(TradeReply::plain(format!("⛔ Trade rejected: {e}"))),
+                        ),
                     }
                 }
                 Err(deny) => (deny.reply_text().to_string(), None),
@@ -784,8 +809,12 @@ pub async fn handle_trade_command(
         )));
     }
     match command {
-        Command::Buy { mint, sol } => Some(desk.request_buy(chat_id, user_id, &mint, &sol, now).await),
-        Command::Sell { mint, pct } => Some(desk.request_sell(chat_id, user_id, &mint, &pct, now).await),
+        Command::Buy { mint, sol } => {
+            Some(desk.request_buy(chat_id, user_id, &mint, &sol, now).await)
+        }
+        Command::Sell { mint, pct } => {
+            Some(desk.request_sell(chat_id, user_id, &mint, &pct, now).await)
+        }
         Command::Limit => Some(desk.limits_text(chat_id, now).await),
         Command::Wallets => Some(TradeReply::plain(wallets_text(state).await)),
         Command::Snipe(on) => Some(TradeReply::plain(

@@ -58,6 +58,7 @@ pub struct TradeIntent {
     pub user_id: i64,
     /// The bound tenant the trade executes for.
     pub organization_id: String,
+    /// Buy or sell.
     pub side: TradeSide,
     /// Base58 mint.
     pub mint: String,
@@ -219,13 +220,17 @@ impl ChatLimits {
     /// Validate the bounds themselves (config hygiene).
     pub fn validate(&self) -> BotResult<()> {
         if self.max_trades_per_window == 0 {
-            return Err(BotError::invalid("limits: max_trades_per_window must be > 0"));
+            return Err(BotError::invalid(
+                "limits: max_trades_per_window must be > 0",
+            ));
         }
         if self.window_secs == 0 {
             return Err(BotError::invalid("limits: window_secs must be > 0"));
         }
         if !self.max_sol_per_trade.is_finite() || self.max_sol_per_trade <= 0.0 {
-            return Err(BotError::invalid("limits: max_sol_per_trade must be positive"));
+            return Err(BotError::invalid(
+                "limits: max_sol_per_trade must be positive",
+            ));
         }
         if !self.max_daily_sol.is_finite() || self.max_daily_sol <= 0.0 {
             return Err(BotError::invalid("limits: max_daily_sol must be positive"));
@@ -243,8 +248,11 @@ pub struct PendingTrade {
     /// Random nonce — the confirmation handle (never guessable: 16 hex
     /// chars from the OS RNG).
     pub nonce: String,
+    /// The trade the operator asked for, frozen at request time.
     pub intent: TradeIntent,
+    /// When the request was created.
     pub created_at: DateTime<Utc>,
+    /// After this instant the confirmation is rejected.
     pub expires_at: DateTime<Utc>,
 }
 
@@ -377,18 +385,20 @@ impl TradeSession {
         let mut intent = intent;
         intent.organization_id = binding.organization_id.clone();
         if intent.validate().is_err() {
-            return Err(if intent.mint.trim().is_empty()
-                || intent.mint.len() < 32
-                || intent.mint.len() > 44
-                || !intent
-                    .mint
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() && !"0OIl".contains(c))
-            {
-                TradeDeny::InvalidMint
-            } else {
-                TradeDeny::InvalidAmount
-            });
+            return Err(
+                if intent.mint.trim().is_empty()
+                    || intent.mint.len() < 32
+                    || intent.mint.len() > 44
+                    || !intent
+                        .mint
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() && !"0OIl".contains(c))
+                {
+                    TradeDeny::InvalidMint
+                } else {
+                    TradeDeny::InvalidAmount
+                },
+            );
         }
         self.check_limits(&intent, now)?;
         let nonce = fresh_nonce();
@@ -477,8 +487,7 @@ impl TradeSession {
             if intent.amount_sol > self.limits.max_sol_per_trade {
                 return Err(TradeDeny::SolPerTradeExceeded);
             }
-            if self.sol_today(intent.chat_id, now) + intent.amount_sol > self.limits.max_daily_sol
-            {
+            if self.sol_today(intent.chat_id, now) + intent.amount_sol > self.limits.max_daily_sol {
                 return Err(TradeDeny::DailySolExceeded);
             }
         }
@@ -497,7 +506,10 @@ impl TradeSession {
             }
         }
         if intent.side == TradeSide::Buy {
-            let entry = self.daily_sol.entry((intent.chat_id, day_key(now))).or_insert(0.0);
+            let entry = self
+                .daily_sol
+                .entry((intent.chat_id, day_key(now)))
+                .or_insert(0.0);
             *entry += intent.amount_sol;
         }
     }
@@ -611,8 +623,14 @@ mod tests {
         assert_eq!(s.trades_in_window(100, t(5)), 1);
         assert!((s.sol_today(100, t(5)) - 2.0).abs() < 1e-9);
         // Replaying the same nonce never executes twice.
-        assert_eq!(s.confirm(&p.nonce, 1, t(6)).unwrap_err(), TradeDeny::AlreadyResolved);
-        assert_eq!(s.cancel(&p.nonce, 1).unwrap_err(), TradeDeny::AlreadyResolved);
+        assert_eq!(
+            s.confirm(&p.nonce, 1, t(6)).unwrap_err(),
+            TradeDeny::AlreadyResolved
+        );
+        assert_eq!(
+            s.cancel(&p.nonce, 1).unwrap_err(),
+            TradeDeny::AlreadyResolved
+        );
     }
 
     #[test]
@@ -620,7 +638,10 @@ mod tests {
         let mut s = session();
         bound(&mut s);
         let p = s.prepare_confirmation(buy(100, 1, 1.0), t(0)).unwrap();
-        assert_eq!(s.confirm(&p.nonce, 999, t(1)).unwrap_err(), TradeDeny::WrongUser);
+        assert_eq!(
+            s.confirm(&p.nonce, 999, t(1)).unwrap_err(),
+            TradeDeny::WrongUser
+        );
         assert_eq!(s.cancel(&p.nonce, 999).unwrap_err(), TradeDeny::WrongUser);
         // The rightful owner can still act after the foreign attempts.
         assert!(s.confirm(&p.nonce, 1, t(2)).is_ok());
@@ -659,9 +680,12 @@ mod tests {
         // Prepared while the budget still has room, confirmed later.
         let pc = s2.prepare_confirmation(buy(100, 1, 5.0), t(96)).unwrap();
         s2.confirm(&pb.nonce, 1, t(100)).unwrap(); // 10 SOL spent; new window
-        // Third tap at t=130: window has room (pa aged out), but the daily
-        // 10 SOL cap is already reached, so the tap must still be refused.
-        assert_eq!(s2.confirm(&pc.nonce, 1, t(130)).unwrap_err(), TradeDeny::DailySolExceeded);
+                                                   // Third tap at t=130: window has room (pa aged out), but the daily
+                                                   // 10 SOL cap is already reached, so the tap must still be refused.
+        assert_eq!(
+            s2.confirm(&pc.nonce, 1, t(130)).unwrap_err(),
+            TradeDeny::DailySolExceeded
+        );
     }
 
     #[test]
@@ -692,7 +716,10 @@ mod tests {
         let p = s.prepare_confirmation(buy(100, 1, 1.0), t(0)).unwrap();
         assert!(s.unbind(100));
         assert_eq!(s.pending_count(), 0);
-        assert_eq!(s.confirm(&p.nonce, 1, t(1)).unwrap_err(), TradeDeny::UnknownConfirmation);
+        assert_eq!(
+            s.confirm(&p.nonce, 1, t(1)).unwrap_err(),
+            TradeDeny::UnknownConfirmation
+        );
     }
 
     #[test]

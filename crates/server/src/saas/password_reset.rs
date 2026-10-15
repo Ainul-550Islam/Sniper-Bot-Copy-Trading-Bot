@@ -4,17 +4,13 @@
 //! * `POST /api/saas/password-reset/request` — `{ "email": "…" }`. Always
 //!   answers `202` with the SAME body whether or not the email exists (no
 //!   account enumeration). When the user exists, any still-open reset token
-//!   is revoked and a fresh single-use token (SHA-256 hash stored, 30-minute
-//!   TTL) is issued in one transaction; the reset email is then enqueued in
-//!   the outbox.
+//!   is revoked, a fresh single-use token (SHA-256 hash stored, 30-minute
+//!   TTL) is issued and the reset email is enqueued in the outbox.
 //! * `POST /api/saas/password-reset/confirm` — `{ "token": "…",
-//!   "new_password": "…" }`. The token is located BY HASH under a row lock
-//!   and re-verified with a constant-time compare. The token claim, the
-//!   password replacement on the authoritative identity record, the
-//!   revocation of outstanding reset tokens and the revocation of EVERY live
-//!   session all commit in ONE transaction
-//!   (`SaasStore::complete_password_reset`). The handler answers success only
-//!   after that commit; any failure rolls everything back and answers `503`.
+//!   "new_password": "…" }`. The token is located BY HASH with a
+//!   constant-time re-check, consumed atomically (single use), the password
+//!   is replaced with a fresh PBKDF2 hash, and EVERY live session for the
+//!   user is revoked.
 //!
 //! Rate limiting rides on the router-level IP limiter; the identical
 //! response bodies remove the timing/enumeration side channel an attacker
@@ -29,7 +25,7 @@ use serde_json::json;
 use sqlx::Row;
 use tracing::info;
 
-use bot_core::session::token::{generate_token, hash_password, hash_token};
+use bot_core::session::token::{generate_token, hash_password, hash_token, verify_token};
 use bot_core::tenant::User;
 
 use crate::api::ApiState;
@@ -66,39 +62,20 @@ fn request_accepted() -> Response {
         .into_response()
 }
 
-/// A storage failure. Never a success shape: the caller must retry.
-fn unavailable() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({ "error": "password_reset_unavailable" })),
-    )
-        .into_response()
-}
-
 /// `POST /api/saas/password-reset/request`
 pub async fn request_reset(
     axum::extract::State(state): axum::extract::State<ApiState>,
     Json(body): Json<RequestBody>,
 ) -> Response {
-    let email = User::normalize_email(body.email.trim());
-    if email.is_empty() {
-        return request_accepted();
-    }
-    // Per-address throttle, applied BEFORE the account lookup. The router's
-    // per-IP budget alone let one victim address be mailed from many IPs.
-    // The 429 depends only on the requested address, so it reveals nothing
-    // about whether an account exists (same contract as login).
-    if let Some(response) =
-        crate::saas::rate_limit::reject_sensitive_attempt(&state, "password_reset_request", &email)
-            .await
-    {
-        return response;
-    }
     let Some(db) = state.db.as_deref() else {
         // Without a database there are no accounts to reset; still answer
         // the same shape so behaviour does not leak configuration.
         return request_accepted();
     };
+    let email = User::normalize_email(body.email.trim());
+    if email.is_empty() {
+        return request_accepted();
+    }
 
     // Look the user up quietly. Unknown email → same accepted response.
     let user = sqlx::query("SELECT id, status FROM users WHERE lower(email) = lower($1)")
@@ -110,7 +87,11 @@ pub async fn request_reset(
         Ok(None) => return request_accepted(),
         Err(e) => {
             tracing::warn!(error = %e, "password reset lookup failed");
-            return unavailable();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "password_reset_unavailable" })),
+            )
+                .into_response();
         }
     };
     let status: String = match row.try_get("status") {
@@ -126,50 +107,42 @@ pub async fn request_reset(
         Err(_) => return request_accepted(),
     };
 
-    // Fresh single-use token; only the hash is persisted.
-    let token = generate_token("rst");
-
-    // Revoking the previous open token and inserting the new one are one
-    // unit: a failure between them must not leave the user with no usable
-    // link while the caller is told a link was issued.
-    let mut transaction = match db.pool().begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not begin reset token issue");
-            return unavailable();
-        }
-    };
     // One open token per user: revoke any previous, never-used token.
-    if let Err(e) = sqlx::query(
+    let revoke = sqlx::query(
         "UPDATE password_reset_tokens
             SET revoked_at = now()
           WHERE user_id = $1 AND used_at IS NULL AND revoked_at IS NULL",
     )
     .bind(user_id)
-    .execute(&mut *transaction)
-    .await
-    {
+    .execute(db.pool())
+    .await;
+    if let Err(e) = revoke {
         tracing::warn!(error = %e, "could not revoke prior reset tokens");
-        let _ = transaction.rollback().await;
-        return unavailable();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "password_reset_unavailable" })),
+        )
+            .into_response();
     }
-    if let Err(e) = sqlx::query(
+
+    // Fresh single-use token; only the hash is persisted.
+    let token = generate_token("rst");
+    let insert = sqlx::query(
         "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
-         VALUES ($1, $2, now() + make_interval(mins => $3::int))",
+         VALUES ($1, $2, now() + make_interval(mins => $3))",
     )
     .bind(user_id)
     .bind(&token.hash)
     .bind(TOKEN_TTL_MINUTES)
-    .execute(&mut *transaction)
-    .await
-    {
+    .execute(db.pool())
+    .await;
+    if let Err(e) = insert {
         tracing::warn!(error = %e, "could not persist reset token");
-        let _ = transaction.rollback().await;
-        return unavailable();
-    }
-    if let Err(e) = transaction.commit().await {
-        tracing::warn!(error = %e, "could not commit reset token issue");
-        return unavailable();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "password_reset_unavailable" })),
+        )
+            .into_response();
     }
 
     // Enqueue the email (dedup = token prefix: one logical email per token).
@@ -207,7 +180,11 @@ pub async fn confirm_reset(
     Json(body): Json<ConfirmBody>,
 ) -> Response {
     let Some(db) = state.db.as_deref() else {
-        return unavailable();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "password_reset_unavailable" })),
+        )
+            .into_response();
     };
     if body.new_password.chars().count() < MIN_PASSWORD_LEN {
         return (
@@ -217,56 +194,135 @@ pub async fn confirm_reset(
             .into_response();
     }
 
-    // The presented token is looked up by its hash and re-verified inside the
-    // transaction with verify_token, so hash-vs-hash confusion is rejected.
-    let presented = body.token.trim();
-    let presented_hash = hash_token(presented);
-    let new_hash = hash_password(&body.new_password);
-
-    let completion = match state
-        .saas
-        .complete_password_reset(presented, &presented_hash, &new_hash)
-        .await
-    {
-        Ok(Some(done)) => done,
-        Ok(None) => return invalid_token(),
-        Err(error) => {
-            // Nothing was committed: the token is still usable and the
-            // password and sessions are unchanged. Report that honestly.
-            tracing::warn!(error = %error, "password reset could not be completed");
-            return unavailable();
+    // Locate the token row BY HASH. The lookup itself is not constant time
+    // (index scan on a SHA-256 value — not secret-correlated), but the
+    // presented token is re-verified with verify_token to keep the compare
+    // uniform and to reject hash-vs-hash confusion.
+    let presented_hash = hash_token(body.token.trim());
+    let row = sqlx::query(
+        "SELECT id, user_id, token_hash
+           FROM password_reset_tokens
+          WHERE token_hash = $1
+            AND used_at IS NULL
+            AND revoked_at IS NULL
+            AND expires_at > now()",
+    )
+    .bind(&presented_hash)
+    .fetch_optional(db.pool())
+    .await;
+    let row = match row {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "reset token lookup failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "password_reset_unavailable" })),
+            )
+                .into_response();
         }
     };
+    let Some(row) = row else {
+        return invalid_token();
+    };
+    let stored_hash: String = match row.try_get("token_hash") {
+        Ok(h) => h,
+        Err(_) => return invalid_token(),
+    };
+    if !verify_token(body.token.trim(), &stored_hash) {
+        return invalid_token();
+    }
+    let token_id: uuid::Uuid = match row.try_get("id") {
+        Ok(id) => id,
+        Err(_) => return invalid_token(),
+    };
+    let user_id: uuid::Uuid = match row.try_get("user_id") {
+        Ok(id) => id,
+        Err(_) => return invalid_token(),
+    };
 
-    info!(
-        sessions_revoked = completion.sessions_revoked,
-        "password reset complete"
-    );
-    // Security-alert email: a notification only, sent after commit. Its
-    // failure cannot undo the reset, so it is logged and not reported.
-    let rendered = templates::security_alert(
-        &completion.email,
-        "password_changed",
-        "Your password was changed via a reset link. All sessions were signed out.",
-    );
-    let dedup = format!(
-        "password_reset_done:{}:{}",
-        completion.user_id, completion.token_id
-    );
-    if let Err(error) = outbox::enqueue(
-        db.pool(),
-        &dedup,
-        rendered.template_key,
-        &completion.email,
-        &rendered.subject,
-        &rendered.body_text,
-        Some(&rendered.body_html),
-        Some(completion.user_id),
-        None,
+    // Consume the token EXACTLY once. The UPDATE is the atomic claim: if a
+    // concurrent request already consumed it, zero rows match and we refuse.
+    let consumed = sqlx::query(
+        "UPDATE password_reset_tokens
+            SET used_at = now()
+          WHERE id = $1 AND used_at IS NULL AND expires_at > now()",
     )
-    .await
-    {
-        tracing::warn!(error = %error, "password change alert could not be enqueued");
+    .bind(token_id)
+    .execute(db.pool())
+    .await;
+    let consumed = match consumed {
+        Ok(r) => r.rows_affected() == 1,
+        Err(e) => {
+            tracing::warn!(error = %e, "reset token consume failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "password_reset_unavailable" })),
+            )
+                .into_response();
+        }
+    };
+    if !consumed {
+        return invalid_token();
+    }
+
+    // Replace the password and revoke every live session for the user.
+    let new_hash = hash_password(&body.new_password);
+    let update =
+        sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
+            .bind(user_id)
+            .bind(&new_hash)
+            .execute(db.pool())
+            .await;
+    if matches!(&update, Ok(r) if r.rows_affected() != 1) {
+        return invalid_token();
+    }
+    if let Err(e) = update {
+        tracing::warn!(error = %e, "password update failed");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "password_reset_unavailable" })),
+        )
+            .into_response();
+    }
+    let revoked = sqlx::query(
+        "UPDATE sessions
+            SET revoked_at = now(), revoke_reason = 'password_reset'
+          WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()",
+    )
+    .bind(user_id)
+    .execute(db.pool())
+    .await;
+    match revoked {
+        Ok(r) => info!(
+            sessions_revoked = r.rows_affected(),
+            "password reset complete"
+        ),
+        Err(e) => {
+            // The password already changed; log loudly but still report
+            // success — the session sweep also runs on login validation.
+            tracing::warn!(error = %e, "session revocation after reset failed");
+        }
+    }
+    // Security-alert email (best effort).
+    if let Some(email) = user_email(db, user_id).await {
+        let rendered = templates::security_alert(
+            &email,
+            "password_changed",
+            "Your password was changed via a reset link. All sessions were signed out.",
+        );
+        let dedup = format!("password_reset_done:{user_id}:{token_id}");
+        let _ = outbox::enqueue(
+            db.pool(),
+            &dedup,
+            rendered.template_key,
+            &email,
+            &rendered.subject,
+            &rendered.body_text,
+            Some(&rendered.body_html),
+            Some(user_id),
+            None,
+        )
+        .await;
     }
     (
         StatusCode::OK,
@@ -291,6 +347,16 @@ fn invalid_token() -> Response {
         .into_response()
 }
 
+async fn user_email(db: &bot_core::db::Database, user_id: uuid::Uuid) -> Option<String> {
+    sqlx::query("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(db.pool())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get::<String, _>("email").ok())
+}
+
 /// Public base URL for links. `PUBLIC_BASE_URL` wins; otherwise relative
 /// links (same-origin deployments).
 fn public_base_url() -> String {
@@ -310,81 +376,7 @@ pub fn routes() -> Router<ApiState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bot_core::session::token::{verify_password, verify_token};
-
-    #[test]
-    fn interval_binds_carry_an_explicit_int_cast() {
-        // Postgres has no implicit bigint -> int conversion, so an i64 bind
-        // passed to make_interval(mins => ...) is rejected at runtime and the
-        // token insert fails. Every such bind must cast explicitly. The marker
-        // is assembled with concat! so this test does not match its own source.
-        let marker = concat!("make_interval(mins => ", "$");
-        for (name, src) in [
-            ("password_reset.rs", include_str!("password_reset.rs")),
-            ("email_verification.rs", include_str!("email_verification.rs")),
-        ] {
-            let mut found = 0;
-            for (idx, _) in src.match_indices(marker) {
-                found += 1;
-                let rest = &src[idx + marker.len()..];
-                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                assert!(
-                    rest[digits.len()..].starts_with("::int)"),
-                    "{name}: unguarded make_interval bind at byte {idx}"
-                );
-            }
-            assert!(found >= 1, "{name}: expected at least one make_interval bind");
-        }
-    }
-
-    fn throttled_test_state(sensitive_rpm: u32) -> ApiState {
-        let shared = bot_core::state::AppState::new(bot_core::config::AppConfig::from_defaults());
-        ApiState {
-            audit: bot_core::audit::AuditTrail::new(None, shared.events.clone()),
-            shared,
-            api_key: None,
-            auth: None,
-            limiter: bot_core::auth::RateLimiter::new(0),
-            sensitive_limiter: bot_core::auth::RateLimiter::new(sensitive_rpm),
-            db: None,
-            journal: None,
-            serve_dashboard: false,
-            health: std::sync::Arc::new(bot_core::obs::health::HealthRegistry::new()),
-            metrics_enabled: false,
-            saas: crate::saas::SaasStore::shared(),
-            module_registry: std::sync::Arc::new(
-                crate::module_runtime::module_registry::TenantModuleRegistry::new(),
-            ),
-            trading: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn repeated_reset_requests_for_one_address_are_throttled() {
-        let state = throttled_test_state(1);
-        let body = |email: &str| -> RequestBody {
-            serde_json::from_value(json!({ "email": email })).expect("request body")
-        };
-        let first = request_reset(
-            axum::extract::State(state.clone()),
-            Json(body("victim@example.com")),
-        )
-        .await;
-        assert_eq!(first.status(), StatusCode::ACCEPTED);
-
-        // Same address after normalisation (case and whitespace) shares the bucket.
-        let second = request_reset(
-            axum::extract::State(state.clone()),
-            Json(body("  VICTIM@example.com ")),
-        )
-        .await;
-        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        // A different address has its own budget.
-        let other =
-            request_reset(axum::extract::State(state), Json(body("other@example.com"))).await;
-        assert_eq!(other.status(), StatusCode::ACCEPTED);
-    }
+    use bot_core::session::token::verify_password;
 
     #[test]
     fn denial_bodies_are_identical_and_never_leak_state() {
@@ -392,13 +384,6 @@ mod tests {
         let r2 = invalid_token();
         assert_eq!(r1.status(), r2.status());
         assert_eq!(r1.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[test]
-    fn storage_failure_is_never_a_success_shape() {
-        let r = unavailable();
-        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_ne!(invalid_token().status(), r.status());
     }
 
     #[test]

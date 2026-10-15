@@ -16,6 +16,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: read-only token for every job unless a job overrides it.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -33,6 +37,7 @@ jobs:
   app:
     name: App workspace (fmt / clippy / build / test)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     # Real Postgres + Redis so the gated integration tests
     # (crates/core/tests/{db,redis}_integration.rs) actually EXECUTE in CI
     # instead of skipping. The app itself treats both as optional; the tests
@@ -173,6 +178,7 @@ jobs:
   integrity-gates:
     name: Integrity gates (openapi / drift / stats / claims)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -205,6 +211,7 @@ jobs:
   deploy-config:
     name: Deployment config (TLS / env separation / image digests)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -429,6 +436,7 @@ jobs:
   program:
     name: Staking program (fmt / clippy / test / build-sbf)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: programs/staking-suite
@@ -461,9 +469,21 @@ jobs:
       # edition2024 manifests the 2.3 lock drift pulls in, and Agave 4.x
       # fails to compile solana-zk-token-sdk for BPF (`Pedersen` syscalls).
       - name: install Solana tools
+        id: solana_action
         uses: solana-foundation/actions/install-solana@v1
+        continue-on-error: true
         with:
           solana_version: '2.1.21'
+
+      # Fallback: if the pinned action cannot be fetched or run, install the
+      # same released version with the official installer and put its bin dir
+      # on PATH for the following steps.
+      - name: install Solana tools (official installer fallback)
+        if: steps.solana_action.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       - name: build-sbf
         run: cargo build-sbf
@@ -483,6 +503,7 @@ jobs:
   security:
     name: Security (cargo-audit + cargo-deny)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -511,6 +532,7 @@ jobs:
   docker:
     name: Docker image build
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -534,10 +556,14 @@ jobs:
       # degrades those to "unavailable" instead of crashing).
       - name: smoke-test container health endpoint
         run: |
-          docker run -d --name smoke -p 127.0.0.1:8080:8080 \
+          # The control API binds loopback by default and refuses a non-loopback
+          # bind without an API key (fail-closed, by design). A host port mapping
+          # would therefore never reach it, so probe from INSIDE the container
+          # (the same check as the image HEALTHCHECK) instead of weakening the bind.
+          docker run -d --name smoke \
             -e RUST_LOG=info sniper-suite:ci
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8080/api/health > /tmp/health.json; then
+            if docker exec smoke curl -fsS http://127.0.0.1:8080/api/health > /tmp/health.json; then
               cat /tmp/health.json; exit 0
             fi
             sleep 2
@@ -553,6 +579,7 @@ jobs:
   release:
     name: Release verification (secret/stale/manifest/buyer/SBOM/license/package)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [app, security]
     steps:
       - uses: actions/checkout@v4
@@ -620,6 +647,7 @@ jobs:
   external-gated:
     name: External provider validation (isolated, manual)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4

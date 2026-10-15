@@ -43,7 +43,7 @@ and the vendor evidence tree; per-claim mapping in `docs/EVIDENCE-INDEX.md`.
    re-run passes with 4 tracked docs (`evidence/phase7-identity-verify.log`).
 2. The post-`set-id` stale-reference sweep scans `*.json`, which would have
    flagged `release-manifest.json` — a delivery-time record that must keep
-   the as-delivered placeholder (like AUDIT.md). Left unfixed, `verify`
+   the as-delivered placeholder (like docs/archive/AUDIT.md). Left unfixed, `verify`
    would false-FAIL for every buyer after `set-id`. FIX: sweep excludes
    `release-manifest.json` with a documented rationale + operator NOTE.
 Both fixes were verified by execution (`bash -n`, `verify` exit 0, and a
@@ -79,7 +79,7 @@ review result — exact classes:
 | DESIGN (paper-mode demo seeds) | 7 code hits | `server/main.rs:86` ("Seed demo balances in paper mode"), `module-sniper/lib.rs:326` (paper-only fallback rule) | kept — fail-closed in live (executed tests; §D) |
 | TOOLING SELF-REFERENCE | 5 | `release-check.sh:96-102` (the marker gate's own grep pattern), `release-manifest.json:73` (gate description) | kept |
 | UNSUPPORTED FEATURE markers | 0 | `unreachable!` ×1 is a TEST assertion arm (`validator_e2e.rs:279`); no `todo!`/`unimplemented!` anywhere; 0 `unsafe` | nothing to fix |
-| HISTORICAL NARRATIVE | AUDIT.md hits incl. one "existing code" phrase in a 2026-09-17 phase heading (`AUDIT.md:275`, meaning "based on the existing codebase") and `roles(TODO)` in an early architecture sketch (`AUDIT.md:282`; roles were subsequently implemented — module RBAC tests executed) | append-only history preserved per policy | kept, labeled |
+| HISTORICAL NARRATIVE | docs/archive/AUDIT.md hits incl. one "existing code" phrase in a 2026-09-17 phase heading (`docs/archive/AUDIT.md:275`, meaning "based on the existing codebase") and `roles(TODO)` in an early architecture sketch (`docs/archive/AUDIT.md:282`; roles were subsequently implemented — module RBAC tests executed) | append-only history preserved per policy | kept, labeled |
 
 ## D. Money-path audit findings (Phase 6)
 

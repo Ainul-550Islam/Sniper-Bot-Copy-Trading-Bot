@@ -15,7 +15,7 @@
 #                  still the documented pre-deployment placeholder.
 #   2. `set-id`  — when the operator generates the FINAL program keypair, the
 #                  declaration and every buyer-facing document are updated
-#                  atomically and re-verified. Historical records (AUDIT.md)
+#                  atomically and re-verified. Historical records (docs/archive/AUDIT.md)
 #                  and the delivery-time release record (release-manifest.json)
 #                  are deliberately NOT rewritten — they document the past.
 #   3. `deploy`  — deploys target/deploy/staking_suite.so ONLY when the
@@ -49,7 +49,7 @@ PLACEHOLDER_ID="3vEEMMFmdA88n8ApgZ3b9L3BXEh75yCeMbHbmUjR9mfy"
 
 # Files that quote the program id and MUST track the declaration.
 # Intentionally absent (historical / delivery-time records, never rewritten):
-#   - AUDIT.md: append-only historical log; its §23/§28/§29 entries record the
+#   - docs/archive/AUDIT.md: append-only historical log; its §23/§28/§29 entries record the
 #     id as it was at the time of writing.
 #   - release-manifest.json: the vendor's 0.1.0 delivery-time release record;
 #     it documents the placeholder status AS DELIVERED and is excluded from
@@ -135,7 +135,7 @@ cmd_set_id() {
       info "updated $f"
     fi
   done
-  info "NOTE: AUDIT.md keeps the historical id by design (append-only log)."
+  info "NOTE: docs/archive/AUDIT.md keeps the historical id by design (append-only log)."
   info "NOTE: release-manifest.json keeps the delivery-time id by design (0.1.0 delivery record)."
   info "NOTE: the .so must be rebuilt for the new id (cargo build-sbf) — deploy does this automatically."
   cmd_verify

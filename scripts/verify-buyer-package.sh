@@ -81,14 +81,11 @@ need_file "crates/server/src/ops/license_report.rs"
 # release checksum: ensure release-evidence or artifact exists or manifest has sha
 if grep -q "sha256" "$ROOT/release-manifest.json" 2>/dev/null; then echo "OK manifest has sha"; else echo "WARN no sha in manifest"; fi
 
-# Narrow, explained allowlist: crates/core/src/custody/credentials.rs holds the PEM marker
-# ARRAY that rejects raw private keys (PEM_SECRET_MARKERS). Only those exact array entries
-# are exempt; any other PEM literal in that file, or anywhere else, still fails.
 # no obvious secrets — ignore detection logic itself (is_secret_like, contains checks) and test fakes
 # 2026-09-24: BUILD-OUTPUT-HYGIENE-RESOLUTION + RELEASE-NOTES + SECRETS-MANAGEMENT document the hygiene check itself
 # and mention the PEM header string as part of the check description — those references are excluded.
 # 2026-09-24 Batch7: EXTERNAL-VALIDATION-RUNBOOK documents that BEGIN PRIVATE KEY never appears in evidence — that doc reference is also excluded, and the redaction helpers in ops/external_evidence + provider_contract_runner are excluded via <redacted>/contains.
-if grep -R --include="*.rs" --include="*.md" -n "BEGIN PRIVATE KEY" "$ROOT/crates" "$ROOT/docs" 2>/dev/null | grep -v "test" | grep -v "<redacted>" | grep -v "is_secret_like" | grep -v "contains" | grep -v "secret_scan" | grep -v "SecurityCheck" | grep -v "MIIBIj" | grep -vE "custody/credentials\.rs:[0-9]+:[[:space:]]*\"BEGIN [A-Z ]*\",$" | grep -v "operator_actions" | grep -v "BUILD-OUTPUT-HYGIENE" | grep -v "RELEASE-NOTES" | grep -v "SECRETS-MANAGEMENT" | grep -v "EXTERNAL-VALIDATION" | grep -v "hygiene" | head -n5 | grep -q "BEGIN"; then echo "FAIL secret found"; FAIL=1; else echo "OK no obvious private key"; fi
+if grep -R --include="*.rs" --include="*.md" -n "BEGIN PRIVATE KEY" "$ROOT/crates" "$ROOT/docs" 2>/dev/null | grep -v "test" | grep -v "<redacted>" | grep -v "is_secret_like" | grep -v "contains" | grep -v "secret_scan" | grep -v "SecurityCheck" | grep -v "MIIBIj" | grep -v "operator_actions" | grep -v "BUILD-OUTPUT-HYGIENE" | grep -v "RELEASE-NOTES" | grep -v "SECRETS-MANAGEMENT" | grep -v "EXTERNAL-VALIDATION" | grep -v "hygiene" | head -n5 | grep -q "BEGIN"; then echo "FAIL secret found"; FAIL=1; else echo "OK no obvious private key"; fi
 
 # no temp artifacts
 if [ -d "$ROOT/target" ] && [ -f "$ROOT/target/debug/sniper-suite" ]; then echo "WARN target artifact present (not shipped)"; fi

@@ -241,8 +241,7 @@ pub struct AmmGlobalConfig {
 
 impl AmmGlobalConfig {
     pub fn parse(data: &[u8]) -> BotResult<Self> {
-        let required_len = (AGC_OFF_PROTOCOL_FEE_RECIPIENTS
-            + 32 * AGC_PROTOCOL_FEE_RECIPIENTS_LEN)
+        let required_len = (AGC_OFF_PROTOCOL_FEE_RECIPIENTS + 32 * AGC_PROTOCOL_FEE_RECIPIENTS_LEN)
             .max(AGC_OFF_COIN_CREATOR_FEE_BASIS_POINTS + 8);
         if data.len() < required_len {
             return Err(BotError::encoding(format!(
@@ -281,7 +280,9 @@ impl AmmGlobalConfig {
             .checked_add(protocol_fee_basis_points)
             .and_then(|fee| fee.checked_add(coin_creator_fee_basis_points));
         if admin == Pubkey::default()
-            || !recipients.iter().any(|recipient| *recipient != Pubkey::default())
+            || !recipients
+                .iter()
+                .any(|recipient| *recipient != Pubkey::default())
             || total_fee.is_none_or(|fee| fee >= maths::BPS_DENOM)
         {
             return Err(BotError::solana(
@@ -567,7 +568,9 @@ impl PumpSwapContext {
             Ok(info.amount)
         };
         let base_reserve = parse_reserve(
-            reserve_accounts.first().and_then(|account| account.as_ref()),
+            reserve_accounts
+                .first()
+                .and_then(|account| account.as_ref()),
             &base_token_program,
             base_mint,
             "base reserve",
@@ -851,7 +854,9 @@ pub fn build_buy_ix(
         return Err(BotError::solana("pumpswap global_config has buys disabled"));
     }
     if amount == 0 || limit == 0 {
-        return Err(BotError::invalid("pumpswap buy amount and limit must be > 0"));
+        return Err(BotError::invalid(
+            "pumpswap buy amount and limit must be > 0",
+        ));
     }
     let (discriminator, instruction) = match kind {
         BuyKind::ExactBaseOut => (PUMPSWAP_DISC_BUY, "buy"),
@@ -897,10 +902,14 @@ pub fn build_sell_ix(
     min_quote_amount_out: u64,
 ) -> BotResult<Instruction> {
     if ctx.config.sells_disabled() {
-        return Err(BotError::solana("pumpswap global_config has sells disabled"));
+        return Err(BotError::solana(
+            "pumpswap global_config has sells disabled",
+        ));
     }
     if base_amount_in == 0 || min_quote_amount_out == 0 {
-        return Err(BotError::invalid("pumpswap sell amount and minimum output must be > 0"));
+        return Err(BotError::invalid(
+            "pumpswap sell amount and minimum output must be > 0",
+        ));
     }
     let mut data = Vec::with_capacity(24);
     data.extend_from_slice(&PUMPSWAP_DISC_SELL);
@@ -1235,8 +1244,7 @@ mod tests {
     fn global_config_data(lp_bps: u64, proto_bps: u64, creator_bps: u64, flags: u8) -> Vec<u8> {
         let mut d = vec![0u8; AMM_GLOBAL_CONFIG_LEN];
         d[..8].copy_from_slice(&PUMPSWAP_ACC_DISC_GLOBAL_CONFIG);
-        d[AGC_OFF_ADMIN..AGC_OFF_ADMIN + 32]
-            .copy_from_slice(&Pubkey::new_unique().to_bytes());
+        d[AGC_OFF_ADMIN..AGC_OFF_ADMIN + 32].copy_from_slice(&Pubkey::new_unique().to_bytes());
         d[AGC_OFF_LP_FEE_BASIS_POINTS..AGC_OFF_LP_FEE_BASIS_POINTS + 8]
             .copy_from_slice(&lp_bps.to_le_bytes());
         d[AGC_OFF_PROTOCOL_FEE_BASIS_POINTS..AGC_OFF_PROTOCOL_FEE_BASIS_POINTS + 8]

@@ -120,7 +120,10 @@ impl OwnedTask {
                 self.handle.take();
             }
             Err(_) => {
-                warn!(task = self.label, "task did not stop before deadline; aborting it");
+                warn!(
+                    task = self.label,
+                    "task did not stop before deadline; aborting it"
+                );
                 if let Some(task) = &self.handle {
                     task.abort();
                 }
@@ -136,7 +139,10 @@ impl OwnedTask {
                         warn!(task = self.label, error = %error, "aborted task failed while joining");
                     }
                     Ok(Err(_)) => {}
-                    Err(_) => warn!(task = self.label, "task did not finish during abort join grace"),
+                    Err(_) => warn!(
+                        task = self.label,
+                        "task did not finish during abort join grace"
+                    ),
                 }
                 self.handle.take();
             }
@@ -477,9 +483,8 @@ impl Sniper {
             // The sweeper gets its OWN policy-engine instance (per-position
             // ladder cursors belong to the loop that evaluates them) and its
             // own subscription to the dev-sell bus when one is attached.
-            let sweeper_exit_policy = crate::exit_policy::engine_from_config(
-                sweeper_cfg.sniper.advanced_exit.as_ref(),
-            );
+            let sweeper_exit_policy =
+                crate::exit_policy::engine_from_config(sweeper_cfg.sniper.advanced_exit.as_ref());
             let sweeper_dev_sell_rx = self.dev_sell_tx.as_ref().map(|tx| tx.subscribe());
             let mut this = Sniper {
                 state: self.state.clone(),
@@ -505,23 +510,22 @@ impl Sniper {
         };
 
         // Launch detection produces a merged stream of normalised events.
-        let mut launches =
-            match LaunchDetector::spawn(self.state.clone(), self.rpc.clone()).await {
-                Ok(rx) => rx,
-                Err(e) => {
-                    error!(error = %e, "launch detection failed to start; sniper will idle");
-                    self.state
-                        .record_error(BotModule::Sniper, &format!("detection: {e}"))
-                        .await;
-                    // Keep the sweeper alive while the service is running,
-                    // then stop and join it on process shutdown.
-                    self.state.wait_shutdown().await;
-                    sweeper
-                        .join_with_timeout(std::time::Duration::from_secs(5))
-                        .await;
-                    return;
-                }
-            };
+        let mut launches = match LaunchDetector::spawn(self.state.clone(), self.rpc.clone()).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                error!(error = %e, "launch detection failed to start; sniper will idle");
+                self.state
+                    .record_error(BotModule::Sniper, &format!("detection: {e}"))
+                    .await;
+                // Keep the sweeper alive while the service is running,
+                // then stop and join it on process shutdown.
+                self.state.wait_shutdown().await;
+                sweeper
+                    .join_with_timeout(std::time::Duration::from_secs(5))
+                    .await;
+                return;
+            }
+        };
 
         self.state.set_running(BotModule::Sniper, true, true).await;
         self.state.events.publish(AppEvent::Info {

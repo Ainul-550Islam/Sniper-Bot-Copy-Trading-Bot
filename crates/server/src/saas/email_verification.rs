@@ -118,7 +118,7 @@ pub async fn request_verification(
     let token = generate_token("ver");
     let insert = sqlx::query(
         "INSERT INTO email_verifications (user_id, email, token_hash, expires_at)
-         VALUES ($1, $2, $3, now() + make_interval(mins => $4::int))",
+         VALUES ($1, $2, $3, now() + make_interval(mins => $4))",
     )
     .bind(user_id)
     .bind(&email)
@@ -248,7 +248,10 @@ pub async fn confirm_verification(
     .execute(db.pool())
     .await;
     match update {
-        Ok(r) => info!(newly_verified = r.rows_affected() == 1, "email verification complete"),
+        Ok(r) => info!(
+            newly_verified = r.rows_affected() == 1,
+            "email verification complete"
+        ),
         Err(e) => {
             tracing::warn!(error = %e, "email_verified flag update failed");
             return (

@@ -23,7 +23,7 @@ re-audit, and `PROMPT-3-RESULT.md`).
   embedded dashboard) plus a Next.js 16 tenant console
   (`apps/control-plane`). Evidence: `crates/`, `apps/`,
   `docs/ARCHITECTURE.md`.
-- PostgreSQL = durable financial truth (**<!-- stat:migrations -->54<!-- /stat --> forward-only migrations**, high water `<!-- stat:migrations_high_water -->0054<!-- /stat -->`); Redis = non-authoritative coordination/cache; JSONL intent
+- PostgreSQL = durable financial truth (**<!-- stat:migrations -->58<!-- /stat --> forward-only migrations**, high water `<!-- stat:migrations_high_water -->0058<!-- /stat -->`); Redis = non-authoritative coordination/cache; JSONL intent
   journal for crash recovery. Evidence: `crates/core/migrations/`,
   `docs/BACKUP-RESTORE.md`, `release-manifest.json`.
 - Tenant-scoped trading data plane: 17 trading-truth PK/arbiter surfaces are
@@ -37,7 +37,7 @@ re-audit, and `PROMPT-3-RESULT.md`).
   (now tenant-composite since migration 0028). Evidence:
   `crates/core/src/ownership.rs`, `docs/DISTRIBUTED.md`.
 - Current software tree (measured 2026-09-29): **744 files** (excluding
-  `target/`, `.git/`, `node_modules/`, `buyer-release/`), **<!-- stat:rust_files -->678<!-- /stat --> Rust files**
+  `target/`, `.git/`, `node_modules/`, `buyer-release/`), **512 Rust files**
   (506 under `crates/` + 6 under `programs/staking-suite/`), **~196,048 Rust
   LOC**, 101 Markdown docs under `docs/`. Evidence: `release-manifest.json`
   (counts verified by `release_manifest_counts_and_version_are_current`).
@@ -91,7 +91,7 @@ re-audit, and `PROMPT-3-RESULT.md`).
 
 ## Test evidence (facts; labels matter)
 
-- Static test inventory: <!-- stat:test_attrs_plain -->2072<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+- Static test inventory: <!-- stat:test_attrs_plain -->2074<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->892<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
 - No test-run logs ship in this repository. Earlier pass/fail figures
   (workspace, db_integration, saas-sdk, staking validator e2e) were quoted
   without logs and have been removed; run `cargo test --workspace` yourself

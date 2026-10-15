@@ -6759,6 +6759,43 @@
         ]
       }
     },
+    "/api/saas/webhooks/{id}/deliveries": {
+      "get": {
+        "operationId": "saas.listWebhookDeliveries",
+        "responses": {
+          "200": {
+            "description": "Delivery history returned"
+          },
+          "404": {
+            "description": "Webhook endpoint not found"
+          }
+        },
+        "summary": "List recent deliveries for a tenant webhook endpoint (newest first, max 100)",
+        "tags": [
+          "Webhooks"
+        ]
+      }
+    },
+    "/api/saas/webhooks/{id}/deliveries/{delivery_id}/redeliver": {
+      "post": {
+        "operationId": "saas.redeliverWebhookDelivery",
+        "responses": {
+          "202": {
+            "description": "Redelivery queued"
+          },
+          "404": {
+            "description": "Delivery not found"
+          },
+          "409": {
+            "description": "Delivery is not in a redeliverable state"
+          }
+        },
+        "summary": "Re-queue a dead or failed webhook delivery",
+        "tags": [
+          "Webhooks"
+        ]
+      }
+    },
     "/api/saas/webhooks/{id}/rotate": {
       "post": {
         "operationId": "saas.rotateWebhookSecret",

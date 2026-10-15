@@ -233,7 +233,9 @@ mod tests {
         assert!(build_fee_transfer_ix(&payer, 1_000_000_000, &cfg("", 100, 1)).is_none());
         assert!(build_fee_transfer_ix(&payer, 10, &cfg(VAULT, 100, 10_000)).is_none());
         // Unparseable vault: skip, never panic.
-        assert!(build_fee_transfer_ix(&payer, 1_000_000_000, &cfg("not-a-pubkey", 100, 1)).is_none());
+        assert!(
+            build_fee_transfer_ix(&payer, 1_000_000_000, &cfg("not-a-pubkey", 100, 1)).is_none()
+        );
     }
 
     #[test]

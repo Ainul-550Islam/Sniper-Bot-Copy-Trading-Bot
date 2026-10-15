@@ -6,11 +6,10 @@
 //! no sysvars) and run under plain `cargo test`.
 
 use proptest::prelude::*;
-use staking_suite::state::{
-    compute_fee, compute_reward, fits_under_cap, supply_headroom, StakeAccount, BPS,
-    SECS_PER_YEAR,
-};
 use solana_program::pubkey::Pubkey;
+use staking_suite::state::{
+    compute_fee, compute_reward, fits_under_cap, supply_headroom, StakeAccount, BPS, SECS_PER_YEAR,
+};
 
 fn stake_account(amount: u64, reward_from: i64, pending: u64) -> StakeAccount {
     StakeAccount {
@@ -68,17 +67,19 @@ proptest! {
         if elapsed <= 0 || amount == 0 || rate_bps == 0 {
             prop_assert_eq!(r, 0);
         } else {
-            // Independent model: exact 128-bit result, saturating to u64::MAX
-            // when the intermediate product overflows or the quotient does not
-            // fit in u64. Never wraps.
-            let expect: u128 = match (amount as u128)
+            // Independent u128 oracle: when the product fits in u128 the
+            // result is the exact quotient saturated at u64::MAX; when it
+            // overflows u128 the result must saturate to u64::MAX.
+            let product = (amount as u128)
                 .checked_mul(rate_bps as u128)
-                .and_then(|v| v.checked_mul(elapsed as u128))
-            {
-                Some(n) => (n / (BPS * SECS_PER_YEAR as u128)).min(u64::MAX as u128),
-                None => u64::MAX as u128,
-            };
-            prop_assert_eq!(r as u128, expect);
+                .and_then(|v| v.checked_mul(elapsed as u128));
+            match product {
+                Some(n) => {
+                    let exact = n / (BPS * SECS_PER_YEAR as u128);
+                    prop_assert_eq!(r as u128, exact.min(u64::MAX as u128));
+                }
+                None => prop_assert_eq!(r, u64::MAX),
+            }
         }
     }
 

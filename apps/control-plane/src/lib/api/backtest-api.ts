@@ -31,6 +31,15 @@ export interface BacktestRecord {
   created_at: string;
   completed_at: string | null;
   error: string | null;
+  /** "synthetic" for seeded simulations; null until a worker has produced a result. */
+  data_source: string | null;
+  /** True only for results computed over recorded market data. Always false today. */
+  authoritative: boolean;
+  /** Why a queued run is waiting instead of running; null when not blocked. */
+  blocked_reason: string | null;
+  dataset_id: string | null;
+  /** Assumptions the worker used (fees, slippage, latency); null before a result. */
+  assumptions: Record<string, unknown> | null;
 }
 
 export interface BacktestsResponse {

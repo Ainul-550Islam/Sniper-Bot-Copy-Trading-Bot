@@ -277,6 +277,6 @@ mod tests {
 
     #[test]
     fn attempt_ceiling_is_positive() {
-        assert!(MAX_ATTEMPTS > 0 && CLAIM_BATCH > 0);
+        const _: () = assert!(MAX_ATTEMPTS > 0 && CLAIM_BATCH > 0);
     }
 }

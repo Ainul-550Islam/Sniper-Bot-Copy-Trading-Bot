@@ -161,7 +161,7 @@ See `docs/BUYER-DEPLOYMENT.md §14` + `ops/release_readiness.rs` + `ops/health_r
 2. `cargo check --workspace` → 0 errors
 3. `cargo test --workspace -- --test-threads=1` with PostgreSQL 17.11 → PASS — **executed 2026-09-26: 70 suites / 2077 passed / 0 failed / 13 ignored**; hermetic subset `bot-core` 507 + `saas-sdk` 32 + `sniper-suite` 105; Redis-gated 10 remain `NOT_RUN` without `REDIS_URL`
 4. `npm ci && npm run typecheck && npm run build` → PASS
-5. `release-manifest.json` consistent with the current tree (<!-- stat:crates -->8<!-- /stat --> members, <!-- stat:migrations -->54<!-- /stat --> migrations, <!-- stat:rust_files -->678<!-- /stat --> Rust files)
+5. `release-manifest.json` consistent with the current tree (8 members, 43 migrations, 149 docs, 616 Rust files)
 6. `stale_claims` scan → 0 non-historical
 7. `secrets_scan` → PASS
 8. `health_report` overall `Healthy` (or `Degraded` with reason)

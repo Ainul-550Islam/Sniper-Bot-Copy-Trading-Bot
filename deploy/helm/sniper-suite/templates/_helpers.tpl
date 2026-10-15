@@ -72,16 +72,3 @@ Name of the ServiceAccount.
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
-
-{{/*
-Immutable application image reference (repository@sha256:...). The render
-FAILS unless image.digest is a real sha256 digest (sha256: + 64 lowercase hex).
-There is no tag fallback and no guessed default digest.
-*/}}
-{{- define "sniper-suite.image" -}}
-{{- $digest := required "image.digest is required: pass --set image.digest=sha256:<64 hex>" .Values.image.digest -}}
-{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $digest) -}}
-{{- fail (printf "image.digest must be sha256:<64 lowercase hex>, got %q" $digest) -}}
-{{- end -}}
-{{- printf "%s@%s" .Values.image.repository $digest -}}
-{{- end }}

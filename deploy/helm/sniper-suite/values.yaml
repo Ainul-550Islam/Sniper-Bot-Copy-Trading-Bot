@@ -3,13 +3,13 @@
 
 # --- Container image -------------------------------------------------------
 image:
-  # Replace with your registry. The image is ALWAYS referenced by digest
-  # (repository@sha256:...). Tags are not accepted: a mutable tag can change
-  # between staging verification and the production rollout.
+  # Replace with your registry. The demo stack builds sniper-suite:demo from
+  # the repo-root Dockerfile; production should pin a DIGEST, not a tag.
   repository: sniper-suite
-  # REQUIRED. Format: sha256:<64 lowercase hex characters>. There is no
-  # default on purpose: `helm template`/`install` fails until a real digest is
-  # supplied, e.g. --set image.digest=sha256:<digest of the release image>.
+  tag: "1.0.0"
+  # Immutable image digest (sha256:...). REQUIRED: the chart refuses to render
+  # without it, so a mutable tag can never reach a cluster. Set with
+  # --set image.digest=sha256:... or in your values file.
   digest: ""
   pullPolicy: IfNotPresent
 

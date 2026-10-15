@@ -63,9 +63,7 @@ impl TenantStreamHub {
     ) -> broadcast::Receiver<TenantEvent> {
         let mut channels = self.channels.write().await;
         // Same opportunistic reap as `publish` (keeps the map bounded).
-        channels.retain(|id, sender| {
-            sender.receiver_count() > 0 || *id == organization_id
-        });
+        channels.retain(|id, sender| sender.receiver_count() > 0 || *id == organization_id);
         channels
             .entry(organization_id)
             .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
@@ -95,7 +93,6 @@ impl TenantStreamHub {
             .map(|s| s.receiver_count())
             .unwrap_or(0)
     }
-
 }
 
 /// Share the hub.

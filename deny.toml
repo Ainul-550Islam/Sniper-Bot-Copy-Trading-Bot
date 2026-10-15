@@ -5,10 +5,8 @@
 #   * bans       — duplicate crate versions are reported (warn) so the tree
 #                  stays reviewable; wildcards are allowed (common in Solana).
 #   * sources    — only crates.io is trusted (no unknown registries / git deps).
-#   * licenses   — a permissive allow-list. NOTE: this is enforced
-#                  non-blockingly on the first runs until the exact transitive
-#                  licence set of the Solana dependency tree is confirmed; add
-#                  any unlisted SPDX id surfaced by CI to `allow` below.
+#   * licenses   — a permissive allow-list. BLOCKING in CI (hard gate). Add an
+#                  unlisted SPDX id to `allow` only after reviewing it.
 
 [graph]
 # Check every target/feature so nothing hides behind a cfg.
@@ -79,6 +77,22 @@ allow = [
 
     "Unlicense",
 ]
+
+# First-party crates are all `publish = false` and carry the non-SPDX
+# `LicenseRef-Proprietary` workspace license; they are not third-party code.
+# Only unpublished workspace crates are exempted; every external dependency is
+# still checked against the allow-list above.
+[licenses.private]
+ignore = true
+
+# Upstream github.com/solana-program/config is Apache-2.0; the published crate
+# metadata lacks the license field, so declare it explicitly. Never set
+# `unlicensed = "allow"` to get around a missing license.
+[[licenses.clarify]]
+name = "solana-config-program-client"
+expression = "Apache-2.0"
+license-files = []
+
 
 [bans]
 multiple-versions = "warn"

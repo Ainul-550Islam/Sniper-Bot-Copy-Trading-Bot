@@ -98,7 +98,13 @@ pub fn classify_sell_probe(
         return SellProbeOutcome::Sellable;
     }
     // Explicit honeypot levers.
-    for marker in ["frozen", "freeze", "sells disabled", "sell disabled", "trading disabled"] {
+    for marker in [
+        "frozen",
+        "freeze",
+        "sells disabled",
+        "sell disabled",
+        "trading disabled",
+    ] {
         if combined.contains(marker) {
             // Carry the program log lines too: they hold the venue's own words
             // (e.g. "account is frozen") and are what an operator needs to read.
@@ -302,11 +308,17 @@ mod tests {
             "Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]".into(),
             "Program log: Error processing Instruction 0: custom program error: 0x1".into(),
         ];
-        assert_eq!(classify_sell_probe(e.as_ref(), &logs), SellProbeOutcome::Sellable);
+        assert_eq!(
+            classify_sell_probe(e.as_ref(), &logs),
+            SellProbeOutcome::Sellable
+        );
 
         // Same signal via text form.
         let e = err(serde_json::json!({"SomeError": "InsufficientFunds"}));
-        assert_eq!(classify_sell_probe(e.as_ref(), &[]), SellProbeOutcome::Sellable);
+        assert_eq!(
+            classify_sell_probe(e.as_ref(), &[]),
+            SellProbeOutcome::Sellable
+        );
     }
 
     #[test]
@@ -322,13 +334,37 @@ mod tests {
     }
 
     #[test]
+    fn missing_account_is_never_sellable() {
+        // A missing wallet token account (File 3 §6.1). The classifier must
+        // not read a venue-side failure as the SPL balance check: a bare
+        // AccountNotFound and a custom 0x1 raised by the venue program both
+        // leave the answer Unknown or NotSellable, never Sellable.
+        let e = err(serde_json::json!("AccountNotFound"));
+        assert!(!matches!(
+            classify_sell_probe(e.as_ref(), &[]),
+            SellProbeOutcome::Sellable
+        ));
+        let logs = vec![
+            "Program 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8 invoke [1]".into(),
+            "Program log: account not found".into(),
+        ];
+        let e = err(serde_json::json!({"InstructionError": [0, {"Custom": 1}]}));
+        match classify_sell_probe(e.as_ref(), &logs) {
+            SellProbeOutcome::Unknown(_) => {}
+            other => panic!("venue-side 0x1 without a token-program frame must not pass, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unrecognised_program_errors_stay_unknown() {
         // We do not guess safety OR guilt from a message we cannot
         // attribute — the gate treats Unknown as a skip.
         let e = err(serde_json::json!({"InstructionError": [0, {"Custom": 4242}]}));
         let logs = vec!["Program log: mystery".into()];
         match classify_sell_probe(e.as_ref(), &logs) {
-            SellProbeOutcome::Unknown(d) => assert!(d.contains("4242") || d.contains("mystery") || !d.is_empty()),
+            SellProbeOutcome::Unknown(d) => {
+                assert!(d.contains("4242") || d.contains("mystery") || !d.is_empty())
+            }
             other => panic!("expected Unknown, got {other:?}"),
         }
     }

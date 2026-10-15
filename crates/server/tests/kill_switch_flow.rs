@@ -62,7 +62,12 @@ fn keyed_state() -> ApiState {
     state
 }
 
-async fn post(state: ApiState, path: &str, body: Option<&str>, api_key: Option<&str>) -> (StatusCode, Value) {
+async fn post(
+    state: ApiState,
+    path: &str,
+    body: Option<&str>,
+    api_key: Option<&str>,
+) -> (StatusCode, Value) {
     let app = router(state);
     let mut builder = Request::builder().method("POST").uri(path);
     if let Some(key) = api_key {
@@ -160,7 +165,9 @@ async fn emergency_stop_survives_a_plain_release_until_resume_clears_the_halt() 
     // Releasing the flag alone is NOT enough: the halt keeps the switch
     // engaged. This asymmetry is deliberate — an emergency stop must not be
     // undone by a flag flip.
-    shared.set_kill_switch(false, "test: release flag only").await;
+    shared
+        .set_kill_switch(false, "test: release flag only")
+        .await;
     assert!(
         shared.kill_switch(),
         "the halt must outlive the flag release"
@@ -182,7 +189,10 @@ async fn with_a_key_configured_the_kill_switch_is_unreachable_without_it() {
     // No key.
     let (status, _) = post(state.clone(), "/api/kill", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert!(!shared.kill_switch(), "a denied request must not engage the switch");
+    assert!(
+        !shared.kill_switch(),
+        "a denied request must not engage the switch"
+    );
 
     // Wrong key.
     let (status, _) = post(state.clone(), "/api/kill", None, Some("wrong-key")).await;

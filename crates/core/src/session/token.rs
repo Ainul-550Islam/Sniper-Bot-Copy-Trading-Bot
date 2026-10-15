@@ -316,7 +316,10 @@ mod tests {
             MAX_PBKDF2_ITERATIONS + 1
         );
         assert!(!verify_password("anything", &excessive_cost));
-        assert!(!verify_password("anything", &"x".repeat(MAX_ENCODED_PASSWORD_HASH_LEN + 1)));
+        assert!(!verify_password(
+            "anything",
+            &"x".repeat(MAX_ENCODED_PASSWORD_HASH_LEN + 1)
+        ));
     }
 
     #[test]

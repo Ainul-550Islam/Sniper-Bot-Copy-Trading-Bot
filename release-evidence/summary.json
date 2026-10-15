@@ -1,0 +1,99 @@
+{
+  "generated_at": "2026-10-09T12:13:17Z",
+  "version": "0.1.0",
+  "source_sha": "09bce9377562d759680281d924afef937788079b",
+  "uncommitted_entries": 3,
+  "verdict": "BLOCK",
+  "checks": [
+    {
+      "name": "format",
+      "status": "NOT_RUN",
+      "detail": "cargo not installed in this environment"
+    },
+    {
+      "name": "check",
+      "status": "NOT_RUN",
+      "detail": "cargo not installed in this environment"
+    },
+    {
+      "name": "clippy",
+      "status": "NOT_RUN",
+      "detail": "cargo not installed in this environment"
+    },
+    {
+      "name": "rust_test",
+      "status": "NOT_RUN",
+      "detail": "cargo not installed in this environment"
+    },
+    {
+      "name": "postgres_integration",
+      "status": "NOT_RUN",
+      "detail": "POSTGRES_URL is not set; integration suite not executed"
+    },
+    {
+      "name": "redis_integration",
+      "status": "NOT_RUN",
+      "detail": "REDIS_URL is not set; integration suite not executed"
+    },
+    {
+      "name": "frontend_ci",
+      "status": "PASS",
+      "detail": "exit 0: npm ci"
+    },
+    {
+      "name": "frontend_typecheck",
+      "status": "PASS",
+      "detail": "exit 0: npm run typecheck"
+    },
+    {
+      "name": "frontend_lint",
+      "status": "PASS",
+      "detail": "exit 0: npm run lint"
+    },
+    {
+      "name": "frontend_test",
+      "status": "PASS",
+      "detail": "exit 0: npm test"
+    },
+    {
+      "name": "frontend_build",
+      "status": "PASS",
+      "detail": "exit 0: npm run build"
+    },
+    {
+      "name": "secret_scan",
+      "status": "PASS",
+      "detail": "scripts/scan-secrets.sh exit 0"
+    },
+    {
+      "name": "claims",
+      "status": "PASS",
+      "detail": "exit 0: bash scripts/verify-marketing-claims.sh"
+    },
+    {
+      "name": "manifest_current",
+      "status": "PASS",
+      "detail": "exit 0: bash tests/release/manifest_current.sh"
+    },
+    {
+      "name": "stats_current",
+      "status": "PASS",
+      "detail": "exit 0: bash tests/release/stats_current.sh"
+    },
+    {
+      "name": "release_check",
+      "status": "FAIL",
+      "detail": "exit 1: bash scripts/release-check.sh"
+    },
+    {
+      "name": "buyer_package",
+      "status": "BLOCK",
+      "detail": "buyer-release/ does not exist; package not built (LICENSE placeholder blocks the build)"
+    },
+    {
+      "name": "release_integrity",
+      "status": "FAIL",
+      "detail": "exit 1: bash scripts/verify-release-integrity.sh"
+    }
+  ]
+}

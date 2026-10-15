@@ -329,9 +329,19 @@ pub fn evaluate(snapshot: &MarketSnapshot, cfg: &SniperConfig, now: DateTime<Utc
                 Some(SellProbeOutcome::NotSellable(detail)) => GateOutcome::Fail(format!(
                     "sell simulation says this token cannot be sold: {detail}"
                 )),
+                // File 3 §6.1: with `require_sell_probe` an inconclusive or
+                // missing probe is a refusal, never a skip.
+                Some(SellProbeOutcome::Unknown(detail)) if cfg.require_sell_probe => {
+                    GateOutcome::Fail(format!(
+                        "SELL_PROBE_UNKNOWN: sell simulation is required but inconclusive: {detail}"
+                    ))
+                }
                 Some(SellProbeOutcome::Unknown(detail)) => {
                     GateOutcome::Skip(format!("sell simulation inconclusive: {detail}"))
                 }
+                None if cfg.require_sell_probe => GateOutcome::Fail(
+                    "SELL_PROBE_UNKNOWN: sell simulation is required but no probe was run".into(),
+                ),
                 None => GateOutcome::Skip("sell simulation enabled but no probe was run".into()),
             }
         },
@@ -419,12 +429,12 @@ pub fn evaluate(snapshot: &MarketSnapshot, cfg: &SniperConfig, now: DateTime<Utc
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         });
                     match worst {
-                        Some(h) if h.pct_of_supply > cfg.max_top_holder_pct => GateOutcome::Fail(
-                            format!(
+                        Some(h) if h.pct_of_supply > cfg.max_top_holder_pct => {
+                            GateOutcome::Fail(format!(
                                 "holder {} controls {:.2}% of supply (max {:.2}%)",
                                 h.address, h.pct_of_supply, cfg.max_top_holder_pct
-                            ),
-                        ),
+                            ))
+                        }
                         Some(_) => GateOutcome::Pass,
                         // Table present but empty or all-infrastructure:
                         // nothing concentrates the supply.
@@ -648,7 +658,10 @@ mod tests {
         // Healthy probe passes.
         let s = snapshot();
         assert!(evaluate(&s, &cfg(), now).passed(true));
-        assert_eq!(reason_for_gate(GATE_SELL_SIMULATION), RejectReason::HoneypotRisk);
+        assert_eq!(
+            reason_for_gate(GATE_SELL_SIMULATION),
+            RejectReason::HoneypotRisk
+        );
 
         // A venue that refuses the sell is a honeypot: hard failure with
         // the HoneypotRisk reason.
@@ -675,7 +688,10 @@ mod tests {
         // Enabled gate with NO probe result is also a skip (strict fails).
         let mut s = snapshot();
         s.sell_probe = None;
-        assert_eq!(evaluate(&s, &cfg(), now).skipped(), vec![GATE_SELL_SIMULATION]);
+        assert_eq!(
+            evaluate(&s, &cfg(), now).skipped(),
+            vec![GATE_SELL_SIMULATION]
+        );
 
         // Gate switched off: silent pass, never a skip.
         let mut c = cfg();
@@ -683,7 +699,11 @@ mod tests {
         let mut s = snapshot();
         s.sell_probe = None;
         let r = evaluate(&s, &c, now);
-        assert!(r.passed(true), "disabled gate must not even skip: {}", r.summary());
+        assert!(
+            r.passed(true),
+            "disabled gate must not even skip: {}",
+            r.summary()
+        );
         assert!(r.skipped().is_empty());
     }
 

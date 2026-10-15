@@ -504,6 +504,23 @@ impl Jupiter {
     }
 }
 
+impl Jupiter {
+    /// Sell probe transaction (File 3 §6.1): quote `amount` raw units of
+    /// `mint` into WSOL and return the aggregator's own swap transaction for
+    /// `user`. Nothing is signed or sent here; the caller simulates it.
+    pub async fn build_sell_probe_tx(
+        &self,
+        mint: &Pubkey,
+        amount: u64,
+        slippage_bps: u64,
+        user: &Pubkey,
+    ) -> BotResult<VersionedTransaction> {
+        let quote = self.quote_sell_to_sol(mint, amount, slippage_bps).await?;
+        let response = self.swap_transaction(user, quote, None).await?;
+        Self::decode_transaction(&response, user)
+    }
+}
+
 impl Default for Jupiter {
     fn default() -> Self {
         Jupiter::new()

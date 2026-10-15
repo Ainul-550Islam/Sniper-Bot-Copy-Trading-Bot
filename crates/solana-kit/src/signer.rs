@@ -330,9 +330,7 @@ pub fn build_signer_registry(cfg: &Config, primary: Arc<Wallet>) -> BotResult<Si
             // survive in freed heap memory.
             let spec = zeroize::Zeroizing::new(std::env::var(env).map_err(|_| {
                 SignerError::SecretLoad {
-                    context: format!(
-                        "identity '{name}': environment variable {env} is not set"
-                    ),
+                    context: format!("identity '{name}': environment variable {env} is not set"),
                 }
             })?);
             if spec.trim().is_empty() {

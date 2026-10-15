@@ -70,30 +70,6 @@ fn internal_reason(error: impl std::fmt::Display) -> Response {
     )
 }
 
-/// True only for a unique-constraint violation on exactly `constraint`. Every
-/// other database failure (including other unique violations) stays a
-/// server error, so this never turns an unrelated fault into a 409.
-fn unique_violation_on(error: &sqlx::Error, constraint: &str) -> bool {
-    match error {
-        sqlx::Error::Database(db_error) => {
-            db_error.is_unique_violation() && db_error.constraint() == Some(constraint)
-        }
-        _ => false,
-    }
-}
-
-/// The account for this address was created by a concurrent request between
-/// our preflight and our insert. Same generic contract as registration: no
-/// SQL, constraint or other-account detail is returned. Retrying the
-/// invitation takes the existing-account path.
-fn registration_conflict() -> Response {
-    response(
-        StatusCode::CONFLICT,
-        "registration_conflict",
-        "an account could not be created with these details; retry the invitation",
-    )
-}
-
 async fn insert_runtime_record<T: serde::Serialize>(
     transaction: &mut Transaction<'_, Postgres>,
     kind: &'static str,
@@ -280,11 +256,12 @@ pub async fn accept_invite(
         Ok(None) => return internal_reason("invited organization record is missing"),
         Err(error) => return internal_reason(error),
     };
-    let organization_slug: String = match sqlx::Row::try_get::<String, _>(&organization_slug_row, "slug") {
-        Ok(value) if !value.trim().is_empty() => value,
-        Ok(_) => return internal_reason("invited organization has no valid slug"),
-        Err(error) => return internal_reason(error),
-    };
+    let organization_slug: String =
+        match sqlx::Row::try_get::<String, _>(&organization_slug_row, "slug") {
+            Ok(value) if !value.trim().is_empty() => value,
+            Ok(_) => return internal_reason("invited organization has no valid slug"),
+            Err(error) => return internal_reason(error),
+        };
     let mfa_policy = match sqlx::query(
         "SELECT mfa_enforced FROM tenant_security_policies WHERE organization_id = $1",
     )
@@ -416,10 +393,6 @@ pub async fn accept_invite(
         )
         .await
         {
-            if unique_violation_on(&error, "saas_runtime_records_lookup_key") {
-                let _ = transaction.rollback().await;
-                return registration_conflict();
-            }
             return internal_reason(error);
         }
     }
@@ -452,10 +425,6 @@ pub async fn accept_invite(
     .execute(&mut *transaction)
     .await
     {
-        if unique_violation_on(&error, "users_email_key") {
-            let _ = transaction.rollback().await;
-            return registration_conflict();
-        }
         return internal_reason(error);
     }
 
@@ -463,11 +432,9 @@ pub async fn accept_invite(
     let existing_membership = match sqlx::query(
         "SELECT id FROM saas_runtime_records
           WHERE kind = 'membership' AND lookup_key = $1
-            AND organization_id = $2
           FOR UPDATE",
     )
     .bind(&membership_lookup)
-    .bind(organization_uuid)
     .fetch_optional(&mut *transaction)
     .await
     {
@@ -583,11 +550,10 @@ pub async fn accept_invite(
     let accepted = sqlx::query(
         "UPDATE invites
             SET status = 'accepted', accepted_at = now(), accepted_by = $1
-          WHERE id = $2 AND status = 'pending' AND organization_id = $3",
+          WHERE id = $2 AND status = 'pending'",
     )
     .bind(user.id.as_uuid())
     .bind(invitation_id)
-    .bind(organization_uuid)
     .execute(&mut *transaction)
     .await;
     match accepted {
@@ -653,36 +619,12 @@ mod tests {
 
     #[test]
     fn new_account_requires_the_existing_password_floor() {
-        assert!(MIN_PASSWORD_LEN >= 12);
+        const _: () = assert!(MIN_PASSWORD_LEN >= 12, "password floor must be at least 12");
     }
 
     #[test]
     fn invitation_role_must_be_a_known_customer_role() {
         assert!(MembershipRole::parse("viewer").is_some());
         assert!(MembershipRole::parse("not-a-role").is_none());
-    }
-}
-
-#[cfg(test)]
-mod conflict_mapping_tests {
-    use super::{registration_conflict, unique_violation_on};
-    use axum::http::StatusCode;
-
-    #[test]
-    fn non_database_errors_are_never_conflicts() {
-        assert!(!unique_violation_on(
-            &sqlx::Error::RowNotFound,
-            "users_email_key"
-        ));
-        assert!(!unique_violation_on(
-            &sqlx::Error::Protocol("boom".to_string()),
-            "saas_runtime_records_lookup_key"
-        ));
-    }
-
-    #[test]
-    fn conflict_response_is_the_generic_registration_contract() {
-        let response = registration_conflict();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

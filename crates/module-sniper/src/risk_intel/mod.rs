@@ -75,9 +75,7 @@ impl RiskIntel {
     /// exists (the sweeper never attached) — the observation is dropped
     /// rather than buffered forever.
     pub fn publish_dev_sell(&self, obs: DevSellObservation) -> bool {
-        self.dev_sell_tx
-            .send((obs.mint, obs.observed_at))
-            .is_ok()
+        self.dev_sell_tx.send((obs.mint, obs.observed_at)).is_ok()
     }
 }
 

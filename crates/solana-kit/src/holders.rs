@@ -46,8 +46,9 @@ pub async fn fetch_largest_holders(rpc: &Rpc, mint: &Pubkey) -> BotResult<Vec<Ho
     let accounts = rpc.get_token_largest_accounts(mint).await?;
     let mut out = Vec::with_capacity(accounts.len());
     for entry in accounts {
-        let address = Pubkey::from_str(&entry.address)
-            .map_err(|e| BotError::encoding(format!("holders: bad address {}: {e}", entry.address)))?;
+        let address = Pubkey::from_str(&entry.address).map_err(|e| {
+            BotError::encoding(format!("holders: bad address {}: {e}", entry.address))
+        })?;
         let raw = entry.amount.amount;
         let amount: u64 = raw
             .parse()
@@ -114,7 +115,10 @@ fn share_bps(amount: u64, float: u64) -> u64 {
 /// Deterministic: holders are re-sorted by amount DESC, ties broken by
 /// address, so the same input set always yields the same report regardless
 /// of the RPC's ordering.
-pub fn concentration(holders: &[HolderSnapshot], excluded: &HashSet<Pubkey>) -> ConcentrationReport {
+pub fn concentration(
+    holders: &[HolderSnapshot],
+    excluded: &HashSet<Pubkey>,
+) -> ConcentrationReport {
     let mut considered: Vec<&HolderSnapshot> = holders
         .iter()
         .filter(|h| !excluded.contains(&h.address))
@@ -163,7 +167,10 @@ pub enum ConcentrationVerdict {
 ///
 /// Order matters for the label: an empty float is reported first (it is a
 /// data-condition, not a behaviour), then the most specific violation.
-pub fn evaluate_concentration(report: &ConcentrationReport, limits: &ConcentrationLimits) -> ConcentrationVerdict {
+pub fn evaluate_concentration(
+    report: &ConcentrationReport,
+    limits: &ConcentrationLimits,
+) -> ConcentrationVerdict {
     if report.float_amount == 0 {
         return ConcentrationVerdict::EmptyFloat;
     }
@@ -221,7 +228,10 @@ mod tests {
     fn concentration_is_independent_of_input_order() {
         let a = vec![holder(1, 100), holder(2, 900)];
         let b = vec![holder(2, 900), holder(1, 100)];
-        assert_eq!(concentration(&a, &HashSet::new()), concentration(&b, &HashSet::new()));
+        assert_eq!(
+            concentration(&a, &HashSet::new()),
+            concentration(&b, &HashSet::new())
+        );
     }
 
     #[test]
@@ -233,15 +243,24 @@ mod tests {
         };
         // One whale at 50%.
         let whale = concentration(&[holder(1, 500), holder(2, 500)], &HashSet::new());
-        assert_eq!(evaluate_concentration(&whale, &limits), ConcentrationVerdict::SingleWhale);
+        assert_eq!(
+            evaluate_concentration(&whale, &limits),
+            ConcentrationVerdict::SingleWhale
+        );
         // Five mid-size wallets at 15% each = 75% top5.
         let cluster: Vec<HolderSnapshot> = (1..=6).map(|i| holder(i, 150)).collect();
         let clustered = concentration(&cluster, &HashSet::new());
-        assert_eq!(evaluate_concentration(&clustered, &limits), ConcentrationVerdict::TopFiveCluster);
+        assert_eq!(
+            evaluate_concentration(&clustered, &limits),
+            ConcentrationVerdict::TopFiveCluster
+        );
         // Healthy spread.
         let healthy: Vec<HolderSnapshot> = (1..=20).map(|i| holder(i, 100)).collect();
         let spread = concentration(&healthy, &HashSet::new());
-        assert_eq!(evaluate_concentration(&spread, &limits), ConcentrationVerdict::Pass);
+        assert_eq!(
+            evaluate_concentration(&spread, &limits),
+            ConcentrationVerdict::Pass
+        );
     }
 
     #[test]
@@ -249,7 +268,10 @@ mod tests {
         let report = concentration(&[], &HashSet::new());
         assert_eq!(report.float_amount, 0);
         let limits = ConcentrationLimits::default();
-        assert_eq!(evaluate_concentration(&report, &limits), ConcentrationVerdict::EmptyFloat);
+        assert_eq!(
+            evaluate_concentration(&report, &limits),
+            ConcentrationVerdict::EmptyFloat
+        );
     }
 
     #[test]
@@ -275,6 +297,9 @@ mod tests {
         let exactly_half = concentration(&[holder(1, 500), holder(2, 500)], &HashSet::new());
         assert_eq!(exactly_half.top1_bps, 5_000);
         // The gate rejects only ABOVE the limit: == passes.
-        assert_eq!(evaluate_concentration(&exactly_half, &limits), ConcentrationVerdict::Pass);
+        assert_eq!(
+            evaluate_concentration(&exactly_half, &limits),
+            ConcentrationVerdict::Pass
+        );
     }
 }

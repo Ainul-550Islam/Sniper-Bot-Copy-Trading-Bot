@@ -51,27 +51,25 @@ fn rpc_at(url: String, fallbacks: Vec<String>) -> Rpc {
     .expect("rpc builds")
 }
 
-/// A real, initialized SPL mint (82 bytes). The cache serves mint reads through
-/// `token_program_of`, which validates the layout, so an empty fixture is not a
-/// valid mint and would be rejected (correctly) as malformed.
-fn mint_data() -> Vec<u8> {
-    use solana_program::program_pack::Pack;
-    use spl_token::state::Mint;
-    let mut data = vec![0u8; Mint::LEN];
-    Mint {
-        is_initialized: true,
-        decimals: 6,
-        supply: 1_000_000,
-        ..Mint::default()
-    }
-    .pack_into_slice(&mut data);
-    data
-}
-
 fn account(lamports: u64, owner: Pubkey) -> Account {
     Account {
         lamports,
-        data: mint_data(),
+        data: Vec::new(),
+        owner,
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+/// A well-formed, initialized SPL mint (82 bytes): the token-program lookup
+/// validates the mint layout, so a cached mint must carry real mint data.
+fn initialized_mint_account(lamports: u64, owner: Pubkey) -> Account {
+    let mut data = vec![0u8; 82];
+    data[44] = 9; // decimals
+    data[45] = 1; // is_initialized
+    Account {
+        lamports,
+        data,
         owner,
         executable: false,
         rent_epoch: 0,
@@ -101,7 +99,7 @@ async fn warm_cache_serves_hot_path_reads_offline() {
     let mint = Pubkey::new_unique();
     let user_ata = Pubkey::new_unique();
     rpc.account_cache()
-        .insert(mint, account(1_461_600, *TOKEN_PROGRAM))
+        .insert(mint, initialized_mint_account(1_461_600, *TOKEN_PROGRAM))
         .await;
     rpc.account_cache()
         .insert(user_ata, account(2_039_280, *TOKEN_PROGRAM))
@@ -132,15 +130,20 @@ async fn warm_cache_serves_hot_path_reads_offline() {
         *TOKEN_PROGRAM
     );
 
-    // An unknown key is a miss that falls through to the (dead) network and
-    // surfaces the transport error — no phantom cache hit.
+    // An unknown key is a miss that falls through to the (dead) network. The
+    // transport failure must surface as an error, never as "account absent":
+    // `get_account` keeps absence (`value: null`) and transport errors distinct.
+    // Also no phantom cache hit: the cold key is not cached afterwards.
     let cold = Pubkey::new_unique();
-    // A cold miss over a dead network is a transport error, never a phantom
-    // "not found": the cache must not report absence it cannot prove.
     assert!(
         rpc.get_account_cached(&cold).await.is_err(),
-        "cold read over a dead network must surface the transport error"
+        "a transport failure on a cold key must not be reported as an absent account"
     );
+    assert!(rpc
+        .account_cache()
+        .get(&cold, Duration::from_secs(30))
+        .await
+        .is_none());
 
     let (hits, _, _) = rpc.account_cache().stats();
     assert!(hits >= 3, "the three warm reads were counted as hits");

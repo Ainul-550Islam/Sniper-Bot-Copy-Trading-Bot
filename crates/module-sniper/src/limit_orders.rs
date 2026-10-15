@@ -136,7 +136,12 @@ pub trait LimitOrderStore: Send + Sync {
     /// All OPEN orders for one tenant.
     async fn list_active(&self, organization_id: &str) -> BotResult<Vec<LimitOrder>>;
     /// Move an order to a terminal status.
-    async fn set_status(&self, organization_id: &str, order_id: &str, status: OrderStatus) -> BotResult<()>;
+    async fn set_status(
+        &self,
+        organization_id: &str,
+        order_id: &str,
+        status: OrderStatus,
+    ) -> BotResult<()>;
 }
 
 /// Evaluate one order against a mark. Pure and total: a malformed mark
@@ -238,7 +243,12 @@ impl LimitOrderStore for InMemoryLimitOrderStore {
             .unwrap_or_default())
     }
 
-    async fn set_status(&self, organization_id: &str, order_id: &str, status: OrderStatus) -> BotResult<()> {
+    async fn set_status(
+        &self,
+        organization_id: &str,
+        order_id: &str,
+        status: OrderStatus,
+    ) -> BotResult<()> {
         let mut inner = self.inner.lock().await;
         let orders = inner
             .get_mut(organization_id)
@@ -273,12 +283,22 @@ mod tests {
 
     #[test]
     fn validation_rejects_degenerate_orders() {
-        assert!(order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.5, 1.0).validate().is_ok());
-        assert!(order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.0, 1.0).validate().is_err());
-        assert!(order(OrderSide::Buy, TriggerKind::AtOrBelow, f64::NAN, 1.0).validate().is_err());
-        assert!(order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.5, -1.0).validate().is_err());
+        assert!(order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.5, 1.0)
+            .validate()
+            .is_ok());
+        assert!(order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.0, 1.0)
+            .validate()
+            .is_err());
+        assert!(order(OrderSide::Buy, TriggerKind::AtOrBelow, f64::NAN, 1.0)
+            .validate()
+            .is_err());
+        assert!(order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.5, -1.0)
+            .validate()
+            .is_err());
         assert!(
-            order(OrderSide::Sell, TriggerKind::AtOrAbove, 0.5, 1.5).validate().is_err(),
+            order(OrderSide::Sell, TriggerKind::AtOrAbove, 0.5, 1.5)
+                .validate()
+                .is_err(),
             "sell fraction > 1 rejected"
         );
     }
@@ -300,8 +320,14 @@ mod tests {
     #[tokio::test]
     async fn run_once_triggers_satisfied_orders_and_marks_them() {
         let store = InMemoryLimitOrderStore::default();
-        let id1 = store.insert(&order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.5, 1.0)).await.unwrap();
-        let _id2 = store.insert(&order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.1, 1.0)).await.unwrap();
+        let id1 = store
+            .insert(&order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.5, 1.0))
+            .await
+            .unwrap();
+        let _id2 = store
+            .insert(&order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.1, 1.0))
+            .await
+            .unwrap();
         let fired = run_once(&store, "org-1", Utc::now(), |mint| {
             assert_eq!(mint, "MintX");
             Some(0.4)
@@ -318,10 +344,19 @@ mod tests {
     #[tokio::test]
     async fn unpriceable_mints_are_skipped_not_errored() {
         let store = InMemoryLimitOrderStore::default();
-        store.insert(&order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.5, 1.0)).await.unwrap();
-        let fired = run_once(&store, "org-1", Utc::now(), |_| None).await.unwrap();
+        store
+            .insert(&order(OrderSide::Buy, TriggerKind::AtOrBelow, 0.5, 1.0))
+            .await
+            .unwrap();
+        let fired = run_once(&store, "org-1", Utc::now(), |_| None)
+            .await
+            .unwrap();
         assert!(fired.is_empty());
-        assert_eq!(store.list_active("org-1").await.unwrap().len(), 1, "still waiting");
+        assert_eq!(
+            store.list_active("org-1").await.unwrap().len(),
+            1,
+            "still waiting"
+        );
     }
 
     #[tokio::test]
@@ -346,7 +381,10 @@ mod tests {
         assert!(store.list_active("org-B").await.unwrap().is_empty());
         assert_eq!(store.list_active("org-A").await.unwrap().len(), 1);
         assert!(
-            store.set_status("org-B", "whatever", OrderStatus::Cancelled).await.is_err(),
+            store
+                .set_status("org-B", "whatever", OrderStatus::Cancelled)
+                .await
+                .is_err(),
             "unknown org is an error, not a silent no-op"
         );
     }

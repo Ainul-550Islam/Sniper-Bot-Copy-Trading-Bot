@@ -478,6 +478,6 @@ mod tests {
 
     #[test]
     fn dead_letter_threshold_is_positive() {
-        assert!(MAX_HANDOFF_ATTEMPTS > 0);
+        const _: () = assert!(MAX_HANDOFF_ATTEMPTS > 0);
     }
 }

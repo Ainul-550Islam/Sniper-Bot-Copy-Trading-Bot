@@ -1,2 +1,4 @@
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "linker=clang", "-C", "link-arg=-fuse-ld=lld"]
+# Cargo build configuration for sniper-suite.
+# The default linker is the host GCC (no extra tools required).
+# For faster linking, copy config.fast-linker.toml.example to this file
+# only if `clang` and `ld.lld` are installed.

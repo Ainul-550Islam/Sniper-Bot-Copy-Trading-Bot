@@ -39,8 +39,8 @@ use uuid::Uuid;
 use bot_core::lifecycle::Shutdown;
 
 use super::webhooks::{
-    decrypt_webhook_secret, parse_https_url, resolve_public_socket, sign_payload,
-    DELIVERY_TIMEOUT, MAX_RESPONSE_BODY_BYTES, MAX_RESPONSE_BODY_DIGEST_BYTES,
+    decrypt_webhook_secret, parse_https_url, resolve_public_socket, sign_payload, DELIVERY_TIMEOUT,
+    MAX_RESPONSE_BODY_BYTES, MAX_RESPONSE_BODY_DIGEST_BYTES,
 };
 
 /// Total attempts per delivery (the initial one + retries). After this the
@@ -81,12 +81,7 @@ pub struct AttemptOutcome {
 /// Returns an [`AttemptOutcome`]; never panics. Transport-level failures
 /// and non-2xx responses are both `succeeded == false` with a short,
 /// log-safe `error` string.
-pub async fn deliver_once(
-    url: &str,
-    secret: &str,
-    event_id: &str,
-    body: &[u8],
-) -> AttemptOutcome {
+pub async fn deliver_once(url: &str, secret: &str, event_id: &str, body: &[u8]) -> AttemptOutcome {
     let parsed = match parse_https_url(url) {
         Ok(value) => value,
         Err(reason) => {
@@ -177,8 +172,8 @@ pub async fn deliver_once(
             } else {
                 None
             };
-            let digest = hex::encode(hasher.finalize())[..MAX_RESPONSE_BODY_DIGEST_BYTES]
-                .to_string();
+            let digest =
+                hex::encode(hasher.finalize())[..MAX_RESPONSE_BODY_DIGEST_BYTES].to_string();
             AttemptOutcome {
                 succeeded,
                 response_status: Some(code),
@@ -259,9 +254,7 @@ impl WebhookRetryDispatcher {
             let due = DueRow {
                 delivery_id: row.try_get("id").unwrap_or_default(),
                 endpoint_id: row.try_get("endpoint_id").unwrap_or_default(),
-                event_id: row
-                    .try_get::<String, _>("event_id")
-                    .unwrap_or_default(),
+                event_id: row.try_get::<String, _>("event_id").unwrap_or_default(),
                 attempt_count: row.try_get("attempt_count").unwrap_or(1),
                 payload: row
                     .try_get::<sqlx::types::Json<serde_json::Value>, _>("payload")
@@ -278,12 +271,11 @@ impl WebhookRetryDispatcher {
     /// end in a database update — a row is never left mid-flight without a
     /// recorded result.
     async fn process_one(&self, due: DueRow) {
-        let endpoint = sqlx::query(
-            "SELECT url, secret, status FROM webhook_endpoints WHERE id = $1",
-        )
-        .bind(due.endpoint_id)
-        .fetch_optional(&self.pool)
-        .await;
+        let endpoint =
+            sqlx::query("SELECT url, secret, status FROM webhook_endpoints WHERE id = $1")
+                .bind(due.endpoint_id)
+                .fetch_optional(&self.pool)
+                .await;
 
         let endpoint: Option<EndpointRow> = match endpoint {
             Ok(Some(row)) => Some(EndpointRow {
@@ -298,14 +290,16 @@ impl WebhookRetryDispatcher {
                     delivery = %due.delivery_id,
                     "webhook endpoint lookup failed; deferring retry"
                 );
-                self.defer(&due, attempt_error("endpoint lookup failed")).await;
+                self.defer(&due, attempt_error("endpoint lookup failed"))
+                    .await;
                 return;
             }
         };
 
         // Endpoint deleted or deactivated: dead-letter, do not keep trying.
         let Some(endpoint) = endpoint.filter(|e| e.status == "active") else {
-            self.mark_dead(&due, "endpoint is missing or inactive").await;
+            self.mark_dead(&due, "endpoint is missing or inactive")
+                .await;
             return;
         };
 
@@ -523,7 +517,7 @@ mod tests {
         let mut at = Utc::now();
         let mut seen = vec![at];
         for attempt in 1..MAX_ATTEMPTS {
-            at = at + retry_backoff(attempt);
+            at += retry_backoff(attempt);
             seen.push(at);
         }
         for pair in seen.windows(2) {

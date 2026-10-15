@@ -138,6 +138,54 @@ pub async fn authorize_request(
     authorize_request_mode(state, headers, request, false).await
 }
 
+/// Authenticate a plain user session that is not bound to any organization,
+/// for self-profile reads (`GET /api/saas/users/me`).
+///
+/// Returns `Ok(Some(user))` only when the presented credential is a valid,
+/// active, non-enrollment session with no organization header and no
+/// organization scope. Anything else (no credential, an API key, a
+/// tenant-scoped session, an enrollment session) returns `Ok(None)` so the
+/// caller falls back to the tenant-scoped gate, which keeps its own refusals.
+/// This grants no tenant data: the caller receives only their own user record.
+pub(crate) async fn authenticate_profile_session(
+    state: &ApiState,
+    headers: &HeaderMap,
+) -> Result<Option<User>, Decision> {
+    let now = Utc::now();
+    let Some(presented) = presented_credential(headers) else {
+        return Ok(None);
+    };
+    if requested_organization(headers).is_some() {
+        return Ok(None);
+    }
+    let record = state
+        .saas
+        .session_by_hash(&hash_token(&presented))
+        .await
+        .map_err(|_| Decision::unavailable("session records are temporarily unavailable"))?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let validated = session::validate(Some(&record), None, now)
+        .map_err(|r| Decision::unauthenticated(r.as_str()))?;
+    if record.mfa_enrollment_only || validated.organization_id.is_some() {
+        return Ok(None);
+    }
+    let user = match state.saas.user(validated.user_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return Err(Decision::unauthenticated("session user no longer exists")),
+        Err(_) => {
+            return Err(Decision::unavailable(
+                "session user records are temporarily unavailable",
+            ))
+        }
+    };
+    if !user.can_authenticate() {
+        return Err(Decision::unauthenticated("the account is not active"));
+    }
+    Ok(Some(user))
+}
+
 /// Authorize the self-service TOTP setup/verification endpoints. The only
 /// additional credential accepted is an invitation session explicitly marked
 /// enrollment-only; ordinary handlers always use `authorize_request` and
@@ -276,9 +324,7 @@ async fn authorize_request_mode(
                 ));
             };
             if requested_org.is_some_and(|requested| requested != scoped)
-                || request
-                    .resource_owner
-                    .is_some_and(|owner| owner != scoped)
+                || request.resource_owner.is_some_and(|owner| owner != scoped)
             {
                 return Err(Decision::resource(
                     "invitation enrollment session is bound to another organization",
@@ -332,7 +378,10 @@ async fn authorize_request_mode(
             .await
             {
                 Ok(()) => {}
-                Err(reason) if allow_mfa_enrollment_session && reason == "mfa_reauthentication_required" => {
+                Err(reason)
+                    if allow_mfa_enrollment_session
+                        && reason == "mfa_reauthentication_required" =>
+                {
                     enrollment_only = true;
                 }
                 Err(reason) => return Err(Decision::unauthenticated(reason)),

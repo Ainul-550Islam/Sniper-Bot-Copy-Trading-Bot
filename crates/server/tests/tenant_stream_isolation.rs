@@ -57,10 +57,11 @@ async fn a_tenant_receives_only_its_own_events_through_the_hub() {
     assert_eq!(seen_b.organization_id(), b);
 
     // An event for a tenant with NO subscribers is dropped, not
-    // fanned out globally (delivered = 0).
+    // fanned out globally (delivered = 0), and leaves no channel behind:
+    // only the two subscribed tenants remain.
     let c = OrganizationId::new();
     assert_eq!(hub.publish(decision(c)).await, 0);
-    assert_eq!(hub.channel_count().await, 3);
+    assert_eq!(hub.channel_count().await, 2);
 }
 
 #[tokio::test]

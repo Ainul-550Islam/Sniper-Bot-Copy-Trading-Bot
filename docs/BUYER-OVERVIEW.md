@@ -200,9 +200,9 @@ skip cleanly without their env vars and never run silently. Final freeze
 numbers: **521/521 workspace tests, 48 staking host tests + 2 gated e2e,
 release-check 20/20 gates PASS, 0 failures**; post-delivery audit pass on
 the current tree: **537/537 workspace tests, 71 staking host tests + 3
-gated e2e, 0 failures** (CHANGELOG [Unreleased], AUDIT.md §28);
+gated e2e, 0 failures** (CHANGELOG [Unreleased], docs/archive/AUDIT.md §28);
 buyer-hardening pass 2026-09-18: build-sbf EXECUTED and **all 3 validator
-e2e EXECUTED/PASSED** on solana-test-validator 2.1.21 (AUDIT.md §29,
+e2e EXECUTED/PASSED** on solana-test-validator 2.1.21 (docs/archive/AUDIT.md §29,
 docs/EVIDENCE-INDEX.md). Verification taxonomy
 (VERIFIED / PREVIOUSLY VERIFIED / GATED / NOT EXECUTED): `docs/HANDOVER.md` §3.
 

@@ -63,7 +63,7 @@ docs/FORENSIC-FILE-INVENTORY.md docs/SOURCE-OF-TRUTH.md docs/BUYER-HANDOVER.md
 #   docs/BUYER-RISK-REGISTER.md  -> docs/KNOWN-LIMITATIONS.md + docs/GLOBAL-RISK.md + docs/RISK-OPERATIONS.md
 #   docs/FINAL-DELIVERY.md       -> docs/BUYER-HANDOVER.md (the single human-readable starting point)
 #   docs/BUYER-QUICKSTART.md     -> docs/DEMO-RUNBOOK.md + docs/HANDOVER.md §2 (verify-from-zero)
-#   AUDIT.md                     -> moved to docs/archive/AUDIT.md (GAP-MAP v2 root hygiene,
+#   docs/archive/AUDIT.md                     -> moved to docs/archive/AUDIT.md (GAP-MAP v2 root hygiene,
 #                                   2026-10-08); seller's internal engineering log, archived
 #                                   alongside the AUDIT-* records
 #   docs/FINAL-RELEASE-AUDIT.md  -> RETIRED: superseded self-report of the 2026-09-19 handover pass;
@@ -145,7 +145,7 @@ build_info=""
 [ -d out ] && build_info="$build_info out/(generated)"
 [ -d dist ] && build_info="$build_info dist/(generated)"
 for pat in '*.log' '*.dump' 'dump.rdb' 'appendonly.aof' '*keypair*.json' '*.pem'; do
-  hits="$(find . -path ./.git -prune -o -path ./target -prune -o -path ./buyer-release -prune -o -path ./programs/staking-suite/target -prune -o -path ./apps/control-plane/.next -prune -o -path ./.next -prune -o -path ./out -prune -o -path ./dist -prune -o -type f -name "$pat" -print 2>/dev/null | head -3)"
+  hits="$(find . -path ./.git -prune -o -path ./target -prune -o -path ./buyer-release -prune -o -path ./programs/staking-suite/target -prune -o -path ./apps/control-plane/.next -prune -o -path ./.next -prune -o -path ./out -prune -o -path ./dist -prune -o -path ./node_modules -prune -o -path ./apps/control-plane/node_modules -prune -o -type f -name "$pat" -print 2>/dev/null | head -3)"
   [ -n "$hits" ] && dirty="$dirty $hits"
 done
 if [ -z "$dirty" ]; then
@@ -205,6 +205,18 @@ PY
     bad "invisible characters found:
 $zw"
   fi
+fi
+
+# ------------------------------------------------- 9. tracked junk (buyer-visible) --
+# Toolchain binaries, agent dumps, sandbox state and duplicate audit copies must
+# never be tracked. Any match is a FAIL (fail-closed).
+JUNK_RE='\.cargo/bin|\.cargo/env|rustup-init|^\.config/|^uploads/|P0-D-FULL-CODE|test-results|^AUDIT'
+junk_hits="$(git ls-files 2>/dev/null | grep -E "$JUNK_RE" || true)"
+if [ -z "$junk_hits" ]; then
+  ok "no tracked junk (toolchain, agent dumps, sandbox state, duplicate audits)"
+else
+  bad "tracked junk files present:
+$junk_hits"
 fi
 
 # ------------------------------------------------------------- summary ----

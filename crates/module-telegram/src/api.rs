@@ -174,7 +174,10 @@ impl TelegramApi {
             .query(&[
                 ("offset", offset.to_string()),
                 ("timeout", timeout_secs.to_string()),
-                ("allowed_updates", "[\"message\",\"callback_query\"]".to_string()),
+                (
+                    "allowed_updates",
+                    "[\"message\",\"callback_query\"]".to_string(),
+                ),
             ])
             .send()
             .await

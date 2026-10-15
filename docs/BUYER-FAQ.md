@@ -1,7 +1,7 @@
 # Technical FAQ (buyer edition)
 
 Every answer cites the source or document that backs it. If an answer says
-"not executed" or "recorded in an earlier session", that is the honest status per the
+"not executed" or "previously reported", that is the honest status per the
 taxonomy in `docs/HANDOVER.md` §3.
 
 **Is this paper-trading safe by default?**
@@ -55,7 +55,7 @@ aid, not the truth (`docs/BACKUP-RESTORE.md`, `docs/RECONCILIATION.md`).
 Money-relevant truth is unaffected — Redis holds no authoritative state.
 Dedup falls back to the Postgres/memory levels and claim coordination falls
 back to the Postgres claim store; readiness reports degradation. This is a
-design objective documented in `docs/BACKUP-RESTORE.md` and exercised by the
+design property documented in `docs/BACKUP-RESTORE.md` and exercised by the
 gated integration suites.
 
 **What happens if RPC dies?**
@@ -102,7 +102,7 @@ THREE validator e2e tests were EXECUTED and PASSED against a real
 incl. funded stake→reward→unstake and the max-supply/metadata e2e against
 the real mainnet-cloned mpl-token-metadata program). Executing them found
 and fixed two real defects (mpl CPI discriminant 19→33; validator
-`--clone-upgradeable-program` harness flag) — see AUDIT.md §29. Mainnet deployment is
+`--clone-upgradeable-program` harness flag) — see docs/archive/AUDIT.md §29. Mainnet deployment is
 documentation-blocked until an independent audit passes (root `SECURITY.md`,
 `docs/STAKING.md`).
 

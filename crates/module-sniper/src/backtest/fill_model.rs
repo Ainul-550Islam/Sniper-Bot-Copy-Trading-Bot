@@ -156,8 +156,10 @@ mod tests {
     fn zero_congestion_always_lands() {
         let mut s = scenario();
         s.congestion = 0.0;
-        let mut cfg = FillModelConfig::default();
-        cfg.tip_lamports = 0;
+        let cfg = FillModelConfig {
+            tip_lamports: 0,
+            ..Default::default()
+        };
         assert!(matches!(simulate_fill(&s, &cfg), FillOutcome::Filled(_)));
     }
 
@@ -165,8 +167,10 @@ mod tests {
     fn congestion_requires_a_matching_tip() {
         let mut s = scenario();
         s.congestion = 1.0; // needs the full 0.005 SOL tip
-        let mut cfg = FillModelConfig::default();
-        cfg.tip_lamports = 4_999_999;
+        let mut cfg = FillModelConfig {
+            tip_lamports: 4_999_999,
+            ..Default::default()
+        };
         assert_eq!(
             simulate_fill(&s, &cfg),
             FillOutcome::Rejected(FillReject::OutbidInCongestion)
@@ -177,9 +181,11 @@ mod tests {
 
     #[test]
     fn latency_beyond_the_path_is_a_miss() {
-        let mut s = scenario();
-        let mut cfg = FillModelConfig::default();
-        cfg.entry_latency_ms = s.ticks.last().unwrap().t_ms + 1;
+        let s = scenario();
+        let cfg = FillModelConfig {
+            entry_latency_ms: s.ticks.last().unwrap().t_ms + 1,
+            ..Default::default()
+        };
         assert_eq!(
             simulate_fill(&s, &cfg),
             FillOutcome::Rejected(FillReject::NoTickAfterLatency)

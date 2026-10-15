@@ -283,6 +283,13 @@ pub(crate) async fn verify_login_mfa(
     code: Option<&str>,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
     let Some(db) = state.db.as_deref() else {
+        // Policies are persisted only in PostgreSQL. An explicitly enabled
+        // in-memory identity store has no persisted policy, so no MFA policy
+        // can apply to it. A durable store without a database handle is an
+        // inconsistent wiring and must still fail closed.
+        if !state.saas.is_durable() && state.saas.allows_identity_writes() {
+            return Ok(None);
+        }
         return Err("MFA policy requires an attached PostgreSQL database".to_string());
     };
     let policy = sqlx::query(
@@ -652,12 +659,11 @@ pub async fn rotate_tokens(State(state): State<ApiState>, headers: HeaderMap) ->
 }
 
 pub async fn setup_totp(State(state): State<ApiState>, headers: HeaderMap) -> Response {
-    let ctx = match crate::saas::middleware::authorize_mfa_enrollment_request(&state, &headers)
-        .await
-    {
-        Ok(c) => c,
-        Err(d) => return deny_response(&state, &d).await,
-    };
+    let ctx =
+        match crate::saas::middleware::authorize_mfa_enrollment_request(&state, &headers).await {
+            Ok(c) => c,
+            Err(d) => return deny_response(&state, &d).await,
+        };
     let Some(user_id) = ctx.authorization.user_id else {
         return (
             StatusCode::FORBIDDEN,
@@ -858,12 +864,11 @@ pub async fn verify_totp(
     headers: HeaderMap,
     Json(body): Json<VerifyTotpBody>,
 ) -> Response {
-    let ctx = match crate::saas::middleware::authorize_mfa_enrollment_request(&state, &headers)
-        .await
-    {
-        Ok(c) => c,
-        Err(d) => return deny_response(&state, &d).await,
-    };
+    let ctx =
+        match crate::saas::middleware::authorize_mfa_enrollment_request(&state, &headers).await {
+            Ok(c) => c,
+            Err(d) => return deny_response(&state, &d).await,
+        };
     let Some(user_id) = ctx.authorization.user_id else {
         return (
             StatusCode::FORBIDDEN,
@@ -1269,10 +1274,7 @@ mod tests {
     fn adjacent_steps_are_accepted_and_identified() {
         let secret = b"12345678901234567890";
         // now sits on step 2 of the RFC timeline.
-        let now = Utc
-            .timestamp_opt(60, 0)
-            .single()
-            .expect("valid timestamp");
+        let now = Utc.timestamp_opt(60, 0).single().expect("valid timestamp");
 
         let previous = totp_code(secret, 1); // step 1: code for T = 59
         let current = totp_code(secret, 2);
@@ -1337,16 +1339,23 @@ mod tests {
     #[test]
     fn malformed_codes_are_rejected_before_any_crypto() {
         let secret = b"12345678901234567890";
-        let now = Utc
-            .timestamp_opt(59, 0)
-            .single()
-            .expect("valid timestamp");
+        let now = Utc.timestamp_opt(59, 0).single().expect("valid timestamp");
         for bad in [
-            "", "28708", "2870823", "28708x", "28 708", "28708\n", "-87082",
+            "",
+            "28708",
+            "2870823",
+            "28708x",
+            "28 708",
+            "28708\n",
+            "-87082",
             "２８７０８２", // fullwidth digits: bytes() sees multi-byte UTF-8
             "287082\r",
         ] {
-            assert_eq!(matching_totp_counter(secret, bad, now), None, "input {bad:?}");
+            assert_eq!(
+                matching_totp_counter(secret, bad, now),
+                None,
+                "input {bad:?}"
+            );
         }
     }
 

@@ -100,6 +100,198 @@ pub fn routes() -> Router<ApiState> {
             "/api/saas/webhooks/:id/test",
             axum::routing::post(test_webhook),
         )
+        .route(
+            "/api/saas/webhooks/:id/deliveries",
+            axum::routing::get(list_deliveries),
+        )
+        .route(
+            "/api/saas/webhooks/:id/deliveries/:delivery_id/redeliver",
+            axum::routing::post(redeliver_delivery),
+        )
+}
+
+/// Delivery history for one endpoint, newest first. Scoped to the caller's
+/// organization on both the endpoint and the delivery rows.
+async fn list_deliveries(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(webhook_id): Path<String>,
+) -> Response {
+    let ctx = match authorize_request(
+        &state,
+        &headers,
+        AccessRequest::read_only(Permission::ApiKeyRead),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(d) => return deny_response(&state, &d).await,
+    };
+    let db = match database(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(endpoint_id) = Uuid::parse_str(&webhook_id) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "webhook_not_found",
+            "webhook endpoint was not found",
+        );
+    };
+
+    let rows = match sqlx::query(
+        "SELECT d.id, d.event_id, d.event_type, d.status, d.response_status,
+                d.attempt_count, d.error, d.next_retry_at, d.created_at
+           FROM webhook_deliveries d
+           JOIN webhook_endpoints e ON e.id = d.endpoint_id
+          WHERE e.id = $1 AND e.organization_id = $2 AND d.organization_id = $2
+          ORDER BY d.created_at DESC, d.id DESC
+          LIMIT 100",
+    )
+    .bind(endpoint_id)
+    .bind(ctx.organization.id.as_uuid())
+    .fetch_all(db.pool())
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list webhook deliveries");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "webhook_storage_error",
+                "webhook deliveries could not be loaded",
+            );
+        }
+    };
+
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<Uuid, _>("id"),
+                "event_id": row.get::<String, _>("event_id"),
+                "event_type": row.get::<String, _>("event_type"),
+                "status": row.get::<String, _>("status"),
+                "response_code": row.try_get::<Option<i32>, _>("response_status").ok().flatten(),
+                "attempts": row.try_get::<i32, _>("attempt_count").unwrap_or(0),
+                "last_error": row.try_get::<Option<String>, _>("error").ok().flatten(),
+                "next_retry_at": row.try_get::<Option<DateTime<Utc>>, _>("next_retry_at").ok().flatten(),
+                "created_at": row.get::<DateTime<Utc>, _>("created_at"),
+            })
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "endpoint_id": endpoint_id,
+            "items": items,
+            "count": items.len(),
+        })),
+    )
+        .into_response()
+}
+
+/// Re-queue a `dead` or `failed` delivery. The dispatcher picks it up on its
+/// next tick. Succeeded or in-flight deliveries are refused, so a redelivery
+/// can never duplicate a successful one by accident.
+async fn redeliver_delivery(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path((webhook_id, delivery_id)): Path<(String, String)>,
+) -> Response {
+    let ctx = match authorize_request(
+        &state,
+        &headers,
+        AccessRequest::manage(Permission::ApiKeyWrite),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(d) => return deny_response(&state, &d).await,
+    };
+    let db = match database(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let (Ok(endpoint_id), Ok(delivery_uuid)) =
+        (Uuid::parse_str(&webhook_id), Uuid::parse_str(&delivery_id))
+    else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "webhook_delivery_not_found",
+            "webhook delivery was not found",
+        );
+    };
+
+    let current = match sqlx::query(
+        "SELECT d.status
+           FROM webhook_deliveries d
+           JOIN webhook_endpoints e ON e.id = d.endpoint_id
+          WHERE d.id = $1 AND e.id = $2 AND e.organization_id = $3 AND d.organization_id = $3",
+    )
+    .bind(delivery_uuid)
+    .bind(endpoint_id)
+    .bind(ctx.organization.id.as_uuid())
+    .fetch_optional(db.pool())
+    .await
+    {
+        Ok(Some(row)) => row.get::<String, _>("status"),
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "webhook_delivery_not_found",
+                "webhook delivery was not found",
+            )
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "failed to load webhook delivery for redelivery");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "webhook_storage_error",
+                "webhook delivery could not be loaded",
+            );
+        }
+    };
+    if current != "dead" && current != "failed" {
+        return error_response(
+            StatusCode::CONFLICT,
+            "webhook_delivery_not_redeliverable",
+            format!("delivery status '{current}' cannot be redelivered"),
+        );
+    }
+
+    let result = sqlx::query(
+        "UPDATE webhook_deliveries
+            SET status = 'failed', next_retry_at = NOW(), attempt_count = 0, error = NULL
+          WHERE id = $1 AND status IN ('dead', 'failed')",
+    )
+    .bind(delivery_uuid)
+    .execute(db.pool())
+    .await;
+    match result {
+        Ok(done) if done.rows_affected() == 1 => (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "id": delivery_uuid,
+                "status": "queued",
+            })),
+        )
+            .into_response(),
+        Ok(_) => error_response(
+            StatusCode::CONFLICT,
+            "webhook_delivery_not_redeliverable",
+            "delivery changed state; retry the request",
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to queue webhook redelivery");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "webhook_storage_error",
+                "redelivery could not be queued",
+            )
+        }
+    }
 }
 
 fn error_response(status: StatusCode, error: &'static str, reason: impl Into<String>) -> Response {

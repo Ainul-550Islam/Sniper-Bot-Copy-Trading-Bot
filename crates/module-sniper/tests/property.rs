@@ -225,11 +225,11 @@ fn snapshot(rng: &mut Rng) -> MarketSnapshot {
                 bundled_wallets: 0,
             }),
             _ => {
-                let buyers = 1 + rng.below(40) as u64;
+                let buyers = 1 + rng.below(40);
                 Some(module_sniper::gates::BundlingSignal {
                     first_slot_buyers: buyers,
                     // Deliberately allow over-counts: the gate clamps.
-                    bundled_wallets: rng.below(buyers + 5) as u64,
+                    bundled_wallets: rng.below(buyers + 5),
                 })
             }
         },

@@ -453,7 +453,11 @@ async fn request_close(
         .execute(db.pool())
         .await
         {
-            tracing::warn!("session revocation durable update failed (org {}): {}", org_id, error);
+            tracing::warn!(
+                "session revocation durable update failed (org {}): {}",
+                org_id,
+                error
+            );
         }
         // Revoke API keys in the authoritative runtime-record store.
         if let Err(error) = sqlx::query("UPDATE saas_runtime_records SET record = jsonb_set(jsonb_set(record, '{revoked_at}', to_jsonb(now()), true), '{revoke_reason}', to_jsonb('tenant_closed'::text), true), updated_at = now() WHERE kind='api_key' AND organization_id=$1 AND (record->>'revoked_at' IS NULL OR record->>'revoked_at' = '')")

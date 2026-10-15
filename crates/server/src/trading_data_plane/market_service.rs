@@ -307,9 +307,7 @@ fn gamma_market_to_ticker(market: &PolyMarket, now: DateTime<Utc>) -> Option<Mar
     let name = non_blank(&market.question).unwrap_or_else(|| id.clone());
     // The YES share price in [0, 1] → probability cents. A market without a
     // YES outcome (or with a non-finite price) is dropped, never priced by guess.
-    let yes = market
-        .outcome("Yes")
-        .or_else(|| market.outcomes.first())?;
+    let yes = market.outcome("Yes").or_else(|| market.outcomes.first())?;
     let yes_price = yes.price;
     if !yes_price.is_finite() || !(0.0..=1.0).contains(&yes_price) {
         return None;
@@ -349,7 +347,13 @@ mod tests {
     use super::*;
     use bot_core::models::PolyOutcome;
 
-    fn market(condition_id: &str, slug: &str, yes_price: f64, volume: f64, liquidity: f64) -> PolyMarket {
+    fn market(
+        condition_id: &str,
+        slug: &str,
+        yes_price: f64,
+        volume: f64,
+        liquidity: f64,
+    ) -> PolyMarket {
         PolyMarket {
             condition_id: condition_id.into(),
             question: "Will it work?".into(),

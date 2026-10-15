@@ -53,8 +53,10 @@ mod tests {
         let good = serde_json::to_value(SniperStrategyParams::default()).unwrap();
         assert!(validate_strategy_params(crate::models::BotModule::Sniper, &good).is_ok());
 
-        let mut bad_params = SniperStrategyParams::default();
-        bad_params.entry_amount_lamports = 0;
+        let bad_params = SniperStrategyParams {
+            entry_amount_lamports: 0,
+            ..Default::default()
+        };
         let bad = serde_json::to_value(bad_params).unwrap();
         assert!(validate_strategy_params(crate::models::BotModule::Sniper, &bad).is_err());
     }

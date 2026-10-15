@@ -67,6 +67,9 @@ const FACTORY_ACTOR: &str = "tenant-module-factory";
 /// A built tenant engine: exactly one module's tenant-bound executor.
 /// The enum is closed — there is no "generic" engine and no path that
 /// builds an engine without its tenant binding.
+// Each engine is built once per tenant runtime and held in place; boxing the sniper
+// variant would add an indirection on every dispatch for no measurable gain.
+#[allow(clippy::large_enum_variant)]
 pub enum ModuleEngine {
     /// Module 1 — the tenant's sniper executor (guarded, sink-persisted).
     Sniper(module_sniper::tenant_executor::TenantSniperExecutor),

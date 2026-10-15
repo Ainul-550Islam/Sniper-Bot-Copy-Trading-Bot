@@ -129,20 +129,19 @@ pub(crate) async fn enforce(
         return Ok(());
     };
 
-    let row = sqlx::query(
-        "SELECT ip_allowlist FROM tenant_security_policies WHERE organization_id = $1",
-    )
-    .bind(organization_id.as_uuid())
-    .fetch_optional(db.pool())
-    .await
-    .map_err(|error| {
-        tracing::error!(
-            error = %error,
-            organization = %organization_id,
-            "IP allowlist policy could not be loaded; refusing the request (fail-closed)"
-        );
-        Decision::unavailable("the organization's IP allowlist could not be loaded")
-    })?;
+    let row =
+        sqlx::query("SELECT ip_allowlist FROM tenant_security_policies WHERE organization_id = $1")
+            .bind(organization_id.as_uuid())
+            .fetch_optional(db.pool())
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    organization = %organization_id,
+                    "IP allowlist policy could not be loaded; refusing the request (fail-closed)"
+                );
+                Decision::unavailable("the organization's IP allowlist could not be loaded")
+            })?;
 
     let Some(row) = row else {
         // No policy row: the tenant never configured the control.
@@ -225,27 +224,15 @@ mod tests {
     #[test]
     fn matching_respects_prefixes_and_families() {
         let net: IpAddr = "10.20.30.0".parse().unwrap();
-        assert!(ip_matches_cidr(
-            "10.20.30.77".parse().unwrap(),
-            net,
-            24
-        ));
-        assert!(!ip_matches_cidr(
-            "10.20.31.1".parse().unwrap(),
-            net,
-            24
-        ));
+        assert!(ip_matches_cidr("10.20.30.77".parse().unwrap(), net, 24));
+        assert!(!ip_matches_cidr("10.20.31.1".parse().unwrap(), net, 24));
         assert!(ip_matches_cidr(
             "10.255.0.1".parse().unwrap(),
             "10.0.0.0".parse().unwrap(),
             8
         ));
         assert!(
-            ip_matches_cidr(
-                "1.2.3.4".parse().unwrap(),
-                "0.0.0.0".parse().unwrap(),
-                0
-            ),
+            ip_matches_cidr("1.2.3.4".parse().unwrap(), "0.0.0.0".parse().unwrap(), 0),
             "a /0 matches everything of its family"
         );
         assert!(
@@ -295,12 +282,12 @@ mod tests {
         );
 
         let h = headers(&[("x-real-ip", "192.0.2.9")]);
-        assert_eq!(client_ip_from_headers(&h), Some("192.0.2.9".parse().unwrap()));
+        assert_eq!(
+            client_ip_from_headers(&h),
+            Some("192.0.2.9".parse().unwrap())
+        );
 
-        let h = headers(&[
-            ("x-forwarded-for", "garbage"),
-            ("x-real-ip", "192.0.2.10"),
-        ]);
+        let h = headers(&[("x-forwarded-for", "garbage"), ("x-real-ip", "192.0.2.10")]);
         assert_eq!(
             client_ip_from_headers(&h),
             Some("192.0.2.10".parse().unwrap()),

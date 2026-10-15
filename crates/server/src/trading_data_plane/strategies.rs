@@ -502,8 +502,9 @@ pub async fn update(
         let mut candidate = current.clone();
         candidate.status = status;
         candidate.config_json = config.clone();
-        let funded =
-            super::strategy_runtime::funded_mode_from_deployment(&state.shared.config_snapshot().await);
+        let funded = super::strategy_runtime::funded_mode_from_deployment(
+            &state.shared.config_snapshot().await,
+        );
         match super::strategy_runtime::plan_activation(&candidate, &funded) {
             Ok(plan) => Some(RuntimeHook::Activate(plan)),
             Err(refusal) => {
@@ -514,9 +515,7 @@ pub async fn update(
                 )
             }
         }
-    } else if current.status == StrategyStatus::Active
-        && status != StrategyStatus::Active
-    {
+    } else if current.status == StrategyStatus::Active && status != StrategyStatus::Active {
         match super::strategy_runtime::plan_deactivation(&current) {
             Ok(plan) => Some(RuntimeHook::Deactivate(plan)),
             // Deactivation of an unwired module is a no-op, not an error:
@@ -575,13 +574,13 @@ pub async fn update(
                 }
             }
             match fetch_one(db, org, strategy_id).await {
-            Ok(Some(record)) => (StatusCode::OK, Json(record)).into_response(),
-            Ok(None) => error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "strategy_storage_error",
-                "updated strategy could not be reloaded",
-            ),
-            Err(response) => response,
+                Ok(Some(record)) => (StatusCode::OK, Json(record)).into_response(),
+                Ok(None) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "strategy_storage_error",
+                    "updated strategy could not be reloaded",
+                ),
+                Err(response) => response,
             }
         }
         Ok(_) => error_response(

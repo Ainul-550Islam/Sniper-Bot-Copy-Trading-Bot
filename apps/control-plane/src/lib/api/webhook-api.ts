@@ -82,3 +82,41 @@ export async function testWebhook(
     },
   );
 }
+
+/** One delivery attempt history row (File 3 §7). */
+export interface WebhookDelivery {
+  id: string;
+  event_id: string;
+  event_type: string;
+  status: "pending" | "failed" | "succeeded" | "dead" | string;
+  response_code: number | null;
+  attempts: number;
+  last_error: string | null;
+  next_retry_at: string | null;
+  created_at: string;
+}
+
+export interface WebhookDeliveriesResponse {
+  endpoint_id: string;
+  items: WebhookDelivery[];
+  count: number;
+}
+
+/** Recent deliveries for one endpoint, newest first. */
+export async function listWebhookDeliveries(endpointId: string): Promise<WebhookDelivery[]> {
+  const res = await request<WebhookDeliveriesResponse>(
+    `/api/saas/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
+  );
+  return res.items;
+}
+
+/** Re-queue a dead or failed delivery. Server refuses succeeded/pending rows. */
+export async function redeliverWebhookDelivery(
+  endpointId: string,
+  deliveryId: string,
+): Promise<{ id: string; status: string }> {
+  return request<{ id: string; status: string }>(
+    `/api/saas/webhooks/${encodeURIComponent(endpointId)}/deliveries/${encodeURIComponent(deliveryId)}/redeliver`,
+    { method: "POST" },
+  );
+}

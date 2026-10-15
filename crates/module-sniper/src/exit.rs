@@ -195,13 +195,8 @@ impl Sniper {
         // Draining is non-blocking: a lagged/empty channel is normal and
         // must never stall the sweep.
         if let Some(rx) = self.dev_sell_rx.as_mut() {
-            loop {
-                match rx.try_recv() {
-                    Ok((mint, observed_at)) => {
-                        self.exit_policy.observe_dev_sell(&mint, observed_at);
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((mint, observed_at)) = rx.try_recv() {
+                self.exit_policy.observe_dev_sell(&mint, observed_at);
             }
         }
         self.exit_policy.retain(&live, Utc::now());
@@ -807,7 +802,10 @@ impl Sniper {
             min_sol_output,
             &cfg.platform_fee,
         ) {
-            debug!(fee_lamports = decision.lamports, "platform fee appended to exit");
+            debug!(
+                fee_lamports = decision.lamports,
+                "platform fee appended to exit"
+            );
             req = req.with_instruction(fee_ix);
         }
         let result = self
@@ -852,7 +850,10 @@ impl Sniper {
             min_quote_out,
             &cfg.platform_fee,
         ) {
-            debug!(fee_lamports = decision.lamports, "platform fee appended to pumpswap exit");
+            debug!(
+                fee_lamports = decision.lamports,
+                "platform fee appended to pumpswap exit"
+            );
             req = req.after_unwrap(fee_ix);
         }
         let result = self
@@ -904,7 +905,10 @@ impl Sniper {
             min_out,
             &cfg.platform_fee,
         ) {
-            debug!(fee_lamports = decision.lamports, "platform fee appended to raydium exit");
+            debug!(
+                fee_lamports = decision.lamports,
+                "platform fee appended to raydium exit"
+            );
             req = req.after_unwrap(fee_ix);
         }
         let result = self

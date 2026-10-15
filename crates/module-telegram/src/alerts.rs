@@ -257,7 +257,6 @@ fn classify(
     }
 }
 
-
 #[cfg(test)]
 mod gate_tests {
     use super::*;
@@ -265,30 +264,40 @@ mod gate_tests {
 
     #[test]
     fn config_gate_maps_flags_to_categories() {
-        let mut tg = TelegramConfig::default();
-        tg.alert_on_fill = true;
-        tg.alert_on_risk_reject = false;
-        tg.alert_on_disconnect = true;
-        tg.alert_on_loss_limit = false;
-        tg.hourly_summary = false;
+        let tg = TelegramConfig {
+            alert_on_fill: true,
+            alert_on_risk_reject: false,
+            alert_on_disconnect: true,
+            alert_on_loss_limit: false,
+            hourly_summary: false,
+            ..Default::default()
+        };
         let gate = ConfigAlertGate(&tg);
         assert!(gate.allow(AlertKind::Fill));
-        assert!(gate.allow(AlertKind::Exit), "exit rides the fill flag (historical)");
+        assert!(
+            gate.allow(AlertKind::Exit),
+            "exit rides the fill flag (historical)"
+        );
         assert!(!gate.allow(AlertKind::RiskRejected));
         assert!(gate.allow(AlertKind::Disconnect));
         assert!(!gate.allow(AlertKind::LossLimit));
         assert!(!gate.allow(AlertKind::HourlySummary));
-        assert!(gate.allow(AlertKind::FatalError), "fatal errors are never silenable");
+        assert!(
+            gate.allow(AlertKind::FatalError),
+            "fatal errors are never silenable"
+        );
     }
 
     #[test]
     fn everything_off_still_delivers_fatal_errors() {
-        let mut tg = TelegramConfig::default();
-        tg.alert_on_fill = false;
-        tg.alert_on_risk_reject = false;
-        tg.alert_on_disconnect = false;
-        tg.alert_on_loss_limit = false;
-        tg.hourly_summary = false;
+        let tg = TelegramConfig {
+            alert_on_fill: false,
+            alert_on_risk_reject: false,
+            alert_on_disconnect: false,
+            alert_on_loss_limit: false,
+            hourly_summary: false,
+            ..Default::default()
+        };
         let gate = ConfigAlertGate(&tg);
         assert!(gate.allow(AlertKind::FatalError));
         assert!(!gate.allow(AlertKind::Fill));

@@ -46,7 +46,7 @@ COPY crates ./crates
 
 # The release profile enables LTO/overflow-checks (see root Cargo.toml).
 # `--offline` is intentionally NOT used: the builder fetches crates normally.
-RUN cargo build --release --bin sniper-suite
+RUN cargo build --release -p sniper-suite --bin sniper-suite
 
 # ---- runtime ----------------------------------------------------------------
 # debian:bookworm-slim — digest-pinned, see the note on the builder stage.
@@ -66,7 +66,7 @@ COPY config.toml.example /app/config.example.toml
 
 # Persistent data (trades/positions/events JSONL) lives here; mount a volume.
 RUN mkdir -p /app/data && chown -R sniper:sniper /app
-USER sniper
+USER 10001:10001
 
 # Control-plane API + dashboard.
 EXPOSE 8080

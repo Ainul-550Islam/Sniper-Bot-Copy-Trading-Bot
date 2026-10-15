@@ -2,6 +2,7 @@
 
 import { BacktestRecord } from "@/lib/api/backtest-api";
 import { formatPercentage, formatUsdCents } from "@/lib/formatters/financial";
+import { BacktestTruthBanner } from "@/components/backtest/BacktestTruthBanner";
 
 interface BacktestMetricsProps {
   backtest: BacktestRecord;
@@ -14,6 +15,8 @@ export function BacktestMetrics({ backtest }: BacktestMetricsProps) {
   const metricColor = isUnavailable ? "var(--muted)" : isProfitable ? "var(--ok)" : "var(--bad)";
 
   return (
+    <>
+    <BacktestTruthBanner backtest={backtest} />
     <div
       style={{
         display: "grid",
@@ -66,6 +69,7 @@ export function BacktestMetrics({ backtest }: BacktestMetricsProps) {
         </div>
       </div>
     </div>
+    </>
   );
 }
 

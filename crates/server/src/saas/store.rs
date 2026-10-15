@@ -32,8 +32,8 @@ use bot_core::tenant::{Organization, OrganizationId, User, UserId};
 
 use super::api_keys::SaasApiKey;
 use super::postgres::{
-    PasswordResetCompletion, PostgresSaasRepo, API_KEY, ENTITLEMENT, JOB, MEMBERSHIP, ORGANIZATION,
-    PAYMENT, PLAN, SESSION, SUBSCRIPTION, USAGE, USER,
+    PostgresSaasRepo, API_KEY, ENTITLEMENT, JOB, MEMBERSHIP, ORGANIZATION, PAYMENT, PLAN, SESSION,
+    SUBSCRIPTION, USAGE, USER,
 };
 
 /// Everything the control plane persists.
@@ -62,6 +62,12 @@ struct Inner {
 pub struct SaasStore {
     inner: RwLock<Inner>,
     repo: Option<Arc<PostgresSaasRepo>>,
+    /// Whether identity writes (registration, login, invitations) may use the
+    /// in-memory mirror without PostgreSQL. Off by default: a deployment
+    /// without a database must answer 503 rather than report a success that
+    /// vanishes on restart. Opt-in only via `SAAS_ALLOW_IN_MEMORY_IDENTITY=1`
+    /// (local development) or [`SaasStore::new_in_memory_identity`] (tests).
+    identity_in_memory: bool,
 }
 
 impl Default for SaasStore {
@@ -76,6 +82,7 @@ impl SaasStore {
         let store = SaasStore {
             inner: RwLock::new(Inner::default()),
             repo: None,
+            identity_in_memory: false,
         };
         let now = Utc::now();
         {
@@ -94,6 +101,8 @@ impl SaasStore {
     pub async fn with_database(db: Option<Arc<Database>>) -> BotResult<Self> {
         let mut store = Self::new();
         let Some(db) = db else {
+            store.identity_in_memory =
+                std::env::var("SAAS_ALLOW_IN_MEMORY_IDENTITY").as_deref() == Ok("1");
             return Ok(store);
         };
         let repo = Arc::new(PostgresSaasRepo::new(db));
@@ -138,6 +147,21 @@ impl SaasStore {
     /// Whether PostgreSQL is authoritative for this store.
     pub fn is_durable(&self) -> bool {
         self.repo.is_some()
+    }
+
+    /// An in-memory store that accepts identity writes without PostgreSQL.
+    /// For tests and explicit local development only; production deployments
+    /// without a database refuse identity writes (see `identity_in_memory`).
+    pub fn new_in_memory_identity() -> Self {
+        let mut store = Self::new();
+        store.identity_in_memory = true;
+        store
+    }
+
+    /// Whether identity writes and logins may proceed: PostgreSQL is attached,
+    /// or in-memory identity was explicitly enabled.
+    pub fn allows_identity_writes(&self) -> bool {
+        self.is_durable() || self.identity_in_memory
     }
 
     /// Shared in-memory handle for tests and API router fixtures.
@@ -201,29 +225,6 @@ impl SaasStore {
         Ok(inner.users.get(id).cloned())
     }
 
-    /// Complete a password reset atomically against the authoritative
-    /// PostgreSQL identity store (see `PostgresSaasRepo::complete_password_reset`).
-    ///
-    /// Fails closed when PostgreSQL is not authoritative: an in-memory mirror
-    /// cannot share a transaction with the reset-token row, so it must never
-    /// report a reset as complete.
-    pub async fn complete_password_reset(
-        &self,
-        presented_token: &str,
-        token_hash: &str,
-        new_password_hash: &str,
-    ) -> BotResult<Option<PasswordResetCompletion>> {
-        match &self.repo {
-            Some(repo) => {
-                repo.complete_password_reset(presented_token, token_hash, new_password_hash)
-                    .await
-            }
-            None => Err(BotError::db(
-                "password reset requires the authoritative PostgreSQL identity store",
-            )),
-        }
-    }
-
     /// Persist a changed user.
     pub async fn update_user(&self, user: &User) -> BotResult<()> {
         let email = User::normalize_email(&user.email);
@@ -262,7 +263,8 @@ impl SaasStore {
     ) -> BotResult<usize> {
         let email = User::normalize_email(&user.email);
         let revoked = if let Some(repo) = &self.repo {
-            repo.update_user_and_revoke_sessions(user, reason, now).await?
+            repo.update_user_and_revoke_sessions(user, reason, now)
+                .await?
         } else {
             let mut inner = self.inner.write().await;
             if !inner.users.contains_key(&user.id) {

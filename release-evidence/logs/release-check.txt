@@ -1,0 +1,88 @@
+
+=== required release files present ===
+[PASS] required release files present
+
+=== version consistency (VERSION == workspace == staking) ===
+VERSION=0.1.0 workspace=0.1.0 staking=0.1.0 manifest=0.1.0
+[PASS] version consistency (VERSION == workspace == staking)
+
+=== toolchain pin consistency (rust-toolchain == Dockerfile == CI program job) ===
+pin=1.98.1 dockerfile=1.98.1 ci-explicit=[1.98.1 ]
+[PASS] toolchain pin consistency (rust-toolchain == Dockerfile == CI program job)
+
+=== migrations monotonic + uniquely versioned ===
+54 migrations, contiguous 0001..0054
+[PASS] migrations monotonic + uniquely versioned
+
+=== no TODO/FIXME/stub markers in code or config ===
+TODO/FIXME/todo!/unimplemented! in code/config files: 0
+[PASS] no TODO/FIXME/stub markers in code or config
+
+=== no secret-looking literals committed ===
+[PASS] no secret-looking literals committed
+
+=== cargo fmt --all --check ===
+scripts/release-check.sh: line 25: cargo: command not found
+[FAIL] cargo fmt --all --check
+
+=== cargo check --workspace ===
+scripts/release-check.sh: line 25: cargo: command not found
+[FAIL] cargo check --workspace
+
+=== cargo clippy --workspace --all-targets -- -D warnings ===
+scripts/release-check.sh: line 25: cargo: command not found
+[FAIL] cargo clippy --workspace --all-targets -- -D warnings
+
+=== cargo test --workspace (gated suites run iff env present) ===
+scripts/release-check.sh: line 25: cargo: command not found
+[FAIL] cargo test --workspace (gated suites run iff env present)
+
+=== db_integration ===
+[SKIP] db_integration — POSTGRES_URL not set
+
+=== redis_integration ===
+[SKIP] redis_integration — REDIS_URL not set
+
+=== distributed_integration ===
+[SKIP] distributed_integration — POSTGRES_URL and/or REDIS_URL not set
+
+=== two_replica_mirror ===
+[SKIP] two_replica_mirror — POSTGRES_URL not set
+
+=== staking: cargo fmt --check ===
+scripts/release-check.sh: line 165: cargo: command not found
+[FAIL] staking: cargo fmt --check
+
+=== staking: cargo clippy --all-targets -- -D warnings ===
+scripts/release-check.sh: line 166: cargo: command not found
+[FAIL] staking: cargo clippy --all-targets -- -D warnings
+
+=== staking: cargo test (host; validator e2e gated on STAKING_E2E) ===
+scripts/release-check.sh: line 167: cargo: command not found
+[FAIL] staking: cargo test (host; validator e2e gated on STAKING_E2E)
+
+=== cargo audit (app lockfile) ===
+scripts/release-check.sh: line 25: cargo: command not found
+[FAIL] cargo audit (app lockfile)
+
+=== cargo audit (staking lockfile) ===
+scripts/release-check.sh: line 174: cargo: command not found
+[FAIL] cargo audit (staking lockfile)
+
+=== cargo deny check ===
+scripts/release-check.sh: line 25: cargo: command not found
+[FAIL] cargo deny check
+
+============================================================
+release-check summary: 6 PASS, 10 FAIL, 4 SKIP
+FAILED steps:
+  - cargo fmt --all --check
+  - cargo check --workspace
+  - cargo clippy --workspace --all-targets -- -D warnings
+  - cargo test --workspace (gated suites run iff env present)
+  - staking: cargo fmt --check
+  - staking: cargo clippy --all-targets -- -D warnings
+  - staking: cargo test (host; validator e2e gated on STAKING_E2E)
+  - cargo audit (app lockfile)
+  - cargo audit (staking lockfile)
+  - cargo deny check

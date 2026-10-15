@@ -271,9 +271,7 @@ impl WalletPoolSelector {
             }
             match best {
                 None => best = Some(i),
-                Some(b) if member.current_weight > self.members[b].current_weight => {
-                    best = Some(i)
-                }
+                Some(b) if member.current_weight > self.members[b].current_weight => best = Some(i),
                 _ => {}
             }
         }
@@ -761,7 +759,11 @@ mod tests {
 
     // ---------------- wallet pool selector ----------------
 
-    fn pool(allocation: PoolAllocation, members: &[(&str, u32)], cap: Option<u32>) -> WalletPoolSelector {
+    fn pool(
+        allocation: PoolAllocation,
+        members: &[(&str, u32)],
+        cap: Option<u32>,
+    ) -> WalletPoolSelector {
         WalletPoolSelector::new(
             allocation,
             members.iter().map(|(a, w)| (a.to_string(), *w)).collect(),
@@ -788,19 +790,22 @@ mod tests {
             None,
         )
         .is_err());
-        assert!(WalletPoolSelector::new(
-            PoolAllocation::RoundRobin,
-            vec![("".into(), 1)],
-            0,
-            None,
-        )
-        .is_err());
+        assert!(
+            WalletPoolSelector::new(PoolAllocation::RoundRobin, vec![("".into(), 1)], 0, None,)
+                .is_err()
+        );
     }
 
     #[test]
     fn allocation_column_round_trips_and_fails_closed() {
-        assert_eq!(PoolAllocation::from_column("round_robin").unwrap(), PoolAllocation::RoundRobin);
-        assert_eq!(PoolAllocation::from_column("weighted_split").unwrap(), PoolAllocation::WeightedSplit);
+        assert_eq!(
+            PoolAllocation::from_column("round_robin").unwrap(),
+            PoolAllocation::RoundRobin
+        );
+        assert_eq!(
+            PoolAllocation::from_column("weighted_split").unwrap(),
+            PoolAllocation::WeightedSplit
+        );
         assert!(PoolAllocation::from_column("random").is_err());
         assert_eq!(PoolAllocation::RoundRobin.as_str(), "round_robin");
         assert_eq!(PoolAllocation::WeightedSplit.as_str(), "weighted_split");
@@ -871,7 +876,11 @@ mod tests {
     fn weighted_split_never_starves_a_small_weight() {
         // Smooth round-robin interleaves instead of front-loading the big
         // member: the first three picks of a 2/1 pool must contain both.
-        let mut sel = pool(PoolAllocation::WeightedSplit, &[("BIG", 2), ("small", 1)], None);
+        let mut sel = pool(
+            PoolAllocation::WeightedSplit,
+            &[("BIG", 2), ("small", 1)],
+            None,
+        );
         let picks: Vec<String> = (0..3)
             .map(|_| sel.select_for_buy().unwrap().wallet_address)
             .collect();
@@ -881,11 +890,7 @@ mod tests {
 
     #[test]
     fn remove_member_is_immediate_for_new_orders_only() {
-        let mut sel = pool(
-            PoolAllocation::RoundRobin,
-            &[("A", 1), ("B", 1)],
-            None,
-        );
+        let mut sel = pool(PoolAllocation::RoundRobin, &[("A", 1), ("B", 1)], None);
         let pick = sel.select_for_buy().unwrap();
         assert_eq!(pick.wallet_address, "A");
         assert_eq!(sel.open_positions("A"), 1);
@@ -898,11 +903,7 @@ mod tests {
 
     #[test]
     fn open_position_bookkeeping_tracks_open_and_close() {
-        let mut sel = pool(
-            PoolAllocation::RoundRobin,
-            &[("A", 1), ("B", 1)],
-            None,
-        );
+        let mut sel = pool(PoolAllocation::RoundRobin, &[("A", 1), ("B", 1)], None);
         sel.note_open("A"); // recovered position after restart
         sel.note_open("A");
         assert_eq!(sel.open_positions("A"), 2);
@@ -941,7 +942,13 @@ mod tests {
             &[("W1", 1), ("W2", 1)],
             None,
         ));
-        assert_eq!(executor.select_wallet_for_buy().unwrap().wallet_address, "W1");
-        assert_eq!(executor.select_wallet_for_buy().unwrap().wallet_address, "W2");
+        assert_eq!(
+            executor.select_wallet_for_buy().unwrap().wallet_address,
+            "W1"
+        );
+        assert_eq!(
+            executor.select_wallet_for_buy().unwrap().wallet_address,
+            "W2"
+        );
     }
 }

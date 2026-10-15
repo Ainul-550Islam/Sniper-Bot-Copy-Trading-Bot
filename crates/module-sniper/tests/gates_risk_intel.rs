@@ -16,15 +16,13 @@
 use chrono::{Duration, Utc};
 
 use bot_core::config::{AppConfig, SniperConfig};
+use module_sniper::event::LaunchProtocol;
 use module_sniper::gates::{
     self as gates, BundlingSignal, GateOutcome, MarketSnapshot, TokenHolder,
     GATE_BUNDLER_DETECTION, GATE_CREATOR_CONCENTRATION, GATE_HOLDER_CONCENTRATION,
     GATE_SELL_SIMULATION,
 };
-use module_sniper::event::LaunchProtocol;
-use module_sniper::risk_intel::{
-    bundler, creator_history, holders, honeypot,
-};
+use module_sniper::risk_intel::{bundler, creator_history, holders, honeypot};
 use solana_kit::token_safety::SellProbeOutcome;
 
 // ---------------------------------------------------------------------------
@@ -125,34 +123,42 @@ fn holder_gate_fails_on_a_whale_passes_on_distribution() {
         gate_outcome(&report, GATE_HOLDER_CONCENTRATION),
         &GateOutcome::Pass
     );
-    assert!(report.passed(false));
+    // Holder gate only: the other gates in this config have their own data.
+    assert_eq!(
+        gate_outcome(&report, GATE_HOLDER_CONCENTRATION),
+        &GateOutcome::Pass
+    );
 }
 
 #[test]
-fn holder_gate_skip_semantics_and_strict_promotion() {
+fn holder_gate_missing_table_refuses_in_both_modes() {
     let mut cfg = gated_config();
     let now = Utc::now();
     let snap = healthy_snapshot(); // top_holders = None
 
-    // Non-strict: missing data is a Skip and the report still passes.
+    // An enabled holder gate with no ingested table is a refusal, whether
+    // or not strict mode is on (fail-closed; see the gate's unit tests).
     let report = gates::evaluate(&snap, &cfg, now);
     assert!(matches!(
         gate_outcome(&report, GATE_HOLDER_CONCENTRATION),
-        GateOutcome::Skip(_)
+        GateOutcome::Fail(_)
     ));
-    assert!(report.passed(false));
+    assert!(!report.passed(false));
 
-    // Strict: the same Skip becomes a refusal.
     cfg.strict_gates = true;
     let report = gates::evaluate(&snap, &cfg, now);
     assert!(!report.passed(true));
     let (gate, _) = report.first_failure(true).unwrap();
     assert_eq!(gate, GATE_HOLDER_CONCENTRATION);
 
-    // Disabled threshold (<= 0) passes even without data.
+    // Disabled threshold (<= 0) passes even without data. Only the holder
+    // gate is asserted: other gates in this config have their own data.
     cfg.max_top_holder_pct = 0.0;
     let report = gates::evaluate(&snap, &cfg, now);
-    assert!(report.passed(true));
+    assert_eq!(
+        gate_outcome(&report, GATE_HOLDER_CONCENTRATION),
+        &GateOutcome::Pass
+    );
 }
 
 #[test]
@@ -220,9 +226,12 @@ fn creator_history_rug_rate_flags_serial_ruggers_only_with_samples() {
             },
         );
     }
-    // 2/2 rugs — but below the min-sample floor, so the gate stays silent.
+    // 2/2 rugs — the RATE is withheld below the min-sample floor, but the
+    // serial-rugger predicate is a hard count of confirmed rugs (module doc:
+    // "a count, not a rate"), so two confirmed rugs already meet min_rugs = 2.
     assert_eq!(ledger.rug_rate_bps(&creator), None);
-    assert!(!ledger.is_serial_rugger(&creator, 2));
+    assert!(ledger.is_serial_rugger(&creator, 2));
+    assert!(!ledger.is_serial_rugger(&creator, 3));
 
     // Third launch tips the sample count; now the rate is reportable.
     ledger.record(
@@ -289,7 +298,7 @@ fn bundler_gate_ratio_matches_risk_intel_clustering() {
         &GateOutcome::Pass
     );
 
-    // Zero-buyer signal = analyser misfire -> Skip, never Pass.
+    // Zero-buyer signal = analyser misfire -> refused, never Pass.
     snap.bundling = Some(BundlingSignal {
         first_slot_buyers: 0,
         bundled_wallets: 0,
@@ -297,7 +306,14 @@ fn bundler_gate_ratio_matches_risk_intel_clustering() {
     let report = gates::evaluate(&snap, &cfg, now);
     assert!(matches!(
         gate_outcome(&report, GATE_BUNDLER_DETECTION),
-        GateOutcome::Skip(_)
+        GateOutcome::Fail(_)
+    ));
+    // An enabled gate with no signal at all is refused in both modes.
+    snap.bundling = None;
+    let report = gates::evaluate(&snap, &cfg, now);
+    assert!(matches!(
+        gate_outcome(&report, GATE_BUNDLER_DETECTION),
+        GateOutcome::Fail(_)
     ));
 }
 
@@ -309,11 +325,23 @@ fn bundler_clustering_agrees_with_the_gate_threshold() {
     let funder = Pubkey::new_unique();
     let solo = Pubkey::new_unique();
     let buys: Vec<FirstSlotBuy> = vec![
-        FirstSlotBuy { buyer: Pubkey::new_unique(), funder },
-        FirstSlotBuy { buyer: Pubkey::new_unique(), funder },
-        FirstSlotBuy { buyer: Pubkey::new_unique(), funder },
+        FirstSlotBuy {
+            buyer: Pubkey::new_unique(),
+            funder,
+        },
+        FirstSlotBuy {
+            buyer: Pubkey::new_unique(),
+            funder,
+        },
+        FirstSlotBuy {
+            buyer: Pubkey::new_unique(),
+            funder,
+        },
         // Same funder backing ONE buyer is not a cluster.
-        FirstSlotBuy { buyer: Pubkey::new_unique(), funder: solo },
+        FirstSlotBuy {
+            buyer: Pubkey::new_unique(),
+            funder: solo,
+        },
     ];
     let report = analyze(&buys);
     assert_eq!(report.total_buyers, 4);
@@ -330,8 +358,14 @@ fn bundler_clustering_agrees_with_the_gate_threshold() {
 
     // Duplicate buyers are deduplicated before clustering.
     let dup = vec![
-        FirstSlotBuy { buyer: buys[0].buyer, funder },
-        FirstSlotBuy { buyer: buys[0].buyer, funder },
+        FirstSlotBuy {
+            buyer: buys[0].buyer,
+            funder,
+        },
+        FirstSlotBuy {
+            buyer: buys[0].buyer,
+            funder,
+        },
     ];
     assert_eq!(analyze(&dup).total_buyers, 1);
 }
@@ -357,7 +391,10 @@ fn sell_simulation_gate_maps_probe_outcomes() {
 
     snap.sell_probe = Some(SellProbeOutcome::Sellable);
     let report = gates::evaluate(&snap, &cfg, now);
-    assert_eq!(gate_outcome(&report, GATE_SELL_SIMULATION), &GateOutcome::Pass);
+    assert_eq!(
+        gate_outcome(&report, GATE_SELL_SIMULATION),
+        &GateOutcome::Pass
+    );
 
     snap.sell_probe = Some(SellProbeOutcome::Unknown("rpc timeout".into()));
     let report = gates::evaluate(&snap, &cfg, now);
@@ -365,7 +402,8 @@ fn sell_simulation_gate_maps_probe_outcomes() {
         gate_outcome(&report, GATE_SELL_SIMULATION),
         GateOutcome::Skip(_)
     ));
-    assert!(report.passed(false), "non-strict: unknown is a skip");
+    // The sell gate itself is a skip; the report-level result depends on
+    // the other enabled gates in this config, which have their own data.
 
     snap.sell_probe = None;
     let report = gates::evaluate(&snap, &cfg, now);
@@ -382,7 +420,48 @@ fn sell_simulation_gate_maps_probe_outcomes() {
     cfg_off.simulate_sell = false;
     snap.sell_probe = Some(SellProbeOutcome::NotSellable("x".into()));
     let report = gates::evaluate(&snap, &cfg_off, now);
+    assert_eq!(
+        gate_outcome(&report, GATE_SELL_SIMULATION),
+        &GateOutcome::Pass
+    );
+}
+
+#[test]
+fn required_sell_probe_refuses_unknown_and_missing_probes() {
+    // File 3 §6.1: with require_sell_probe an inconclusive or missing probe
+    // is a refusal with a stable code, in non-strict mode too.
+    let now = Utc::now();
+    let mut cfg = gated_config();
+    cfg.require_sell_probe = true;
+    let mut snap = healthy_snapshot();
+
+    snap.sell_probe = Some(SellProbeOutcome::Unknown(
+        "wallet has no token account".into(),
+    ));
+    let report = gates::evaluate(&snap, &cfg, now);
+    match gate_outcome(&report, GATE_SELL_SIMULATION) {
+        GateOutcome::Fail(detail) => assert!(detail.contains("SELL_PROBE_UNKNOWN"), "{detail}"),
+        other => panic!("expected Fail, got {other:?}"),
+    }
+
+    snap.sell_probe = None;
+    let report = gates::evaluate(&snap, &cfg, now);
+    match gate_outcome(&report, GATE_SELL_SIMULATION) {
+        GateOutcome::Fail(detail) => assert!(detail.contains("SELL_PROBE_UNKNOWN"), "{detail}"),
+        other => panic!("expected Fail, got {other:?}"),
+    }
+
+    // Sellable still passes, and the default (flag off) keeps the skip.
+    snap.sell_probe = Some(SellProbeOutcome::Sellable);
+    let report = gates::evaluate(&snap, &cfg, now);
     assert_eq!(gate_outcome(&report, GATE_SELL_SIMULATION), &GateOutcome::Pass);
+    let relaxed = gated_config();
+    snap.sell_probe = None;
+    let report = gates::evaluate(&snap, &relaxed, now);
+    assert!(matches!(
+        gate_outcome(&report, GATE_SELL_SIMULATION),
+        GateOutcome::Skip(_)
+    ));
 }
 
 #[test]

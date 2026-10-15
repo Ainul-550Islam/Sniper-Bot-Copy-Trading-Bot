@@ -84,6 +84,10 @@ code changed. Machine-readable facts:
 - For building Module 4 only: the **Solana CLI / cargo-build-sbf** toolchain.
 - Optional native deps for Solana builds: `pkg-config`, `libudev-dev`,
   `protobuf-compiler`, `cmake`, a C toolchain.
+- **Linker:** the default host linker (GCC) works with no extra tools. `clang`
+  and `ld.lld` are optional: for faster linking, copy
+  `.cargo/config.fast-linker.toml.example` to `.cargo/config.toml` only if both
+  are installed.
 
 The workspace uses a committed `Cargo.lock`; a normal `cargo build` will fetch
 the pinned crates.
@@ -601,7 +605,7 @@ sniper-suite/
 ├─ SECURITY.md                  vulnerability-reporting policy
 ├─ scripts/                     release-check.sh (scripted release validation)
 │                               + verify-delivery.sh (bundle integrity check)
-├─ docs/                        <!-- stat:docs_canonical -->154<!-- /stat --> current documents covering engineering,
+├─ docs/                        <!-- stat:docs_canonical -->155<!-- /stat --> current documents covering engineering,
 │                               SaaS, buyer handover, evidence, release and
 │                               operations (index: docs/DELIVERY-MANIFEST.md;
 │                               start: docs/BUYER-HANDOVER.md)

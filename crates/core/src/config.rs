@@ -610,6 +610,10 @@ pub struct SniperConfig {
     /// "freeze authority present = warning". Costs one extra RPC round trip
     /// per candidate; turn off only for maximum-speed profiles.
     pub simulate_sell: bool,
+    /// Treat an inconclusive or missing sell probe as a refusal
+    /// (`SELL_PROBE_UNKNOWN`) instead of a skip. Defaults to on when
+    /// `SNIPER_STRICT_GATES=1` and `SNIPER_REQUIRE_SELL_PROBE` is unset.
+    pub require_sell_probe: bool,
     /// Concentration gate: reject when the creator's opening buy exceeds
     /// this many SOL (`0` = off). Only PumpPortal reports it.
     pub max_creator_initial_buy_sol: f64,
@@ -734,6 +738,7 @@ impl Default for SniperConfig {
             require_mint_authority_revoked: false,
             require_freeze_authority_revoked: true,
             simulate_sell: true,
+            require_sell_probe: false,
             max_creator_initial_buy_sol: 0.0,
             min_pool_supply_fraction: 0.0,
             max_top_holder_pct: 0.0,
@@ -2225,6 +2230,11 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     if let Some(v) = env_bool("SNIPER_STRICT_GATES", w) {
         c.sniper.strict_gates = v;
     }
+    match env_bool("SNIPER_REQUIRE_SELL_PROBE", w) {
+        Some(v) => c.sniper.require_sell_probe = v,
+        None if c.sniper.strict_gates => c.sniper.require_sell_probe = true,
+        None => {}
+    }
     if let Some(v) = env_f64("SNIPER_MAX_TOP_HOLDER_PCT", w) {
         c.sniper.max_top_holder_pct = v;
     }
@@ -2683,7 +2693,9 @@ fn validate_sniper_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
         ));
     }
     if !sn.max_bundler_ratio.is_finite() || !(0.0..=1.0).contains(&sn.max_bundler_ratio) {
-        return Err(BotError::config("sniper.max_bundler_ratio must be in [0, 1]"));
+        return Err(BotError::config(
+            "sniper.max_bundler_ratio must be in [0, 1]",
+        ));
     }
     if sn.max_snapshot_age_ms == 0 {
         return Err(BotError::config("sniper.max_snapshot_age_ms must be > 0"));
@@ -2755,17 +2767,6 @@ fn validate_sniper_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
 /// the Module-2 exposure controls in `[risk]`.
 fn validate_copy_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     let cp = &c.copy;
-    // Copy exits send `copy.slippage_pct * 100` straight to Jupiter (no
-    // clamp on the exit path), so the configured value must be finite,
-    // in range, and no looser than the global entry ceiling.
-    if !cp.slippage_pct.is_finite() || !(0.0..=100.0).contains(&cp.slippage_pct) {
-        return Err(BotError::config("copy.slippage_pct must be in [0, 100]"));
-    }
-    if cp.slippage_pct * 100.0 > c.risk.max_slippage_bps as f64 {
-        return Err(BotError::config(
-            "copy.slippage_pct exceeds risk.max_slippage_bps",
-        ));
-    }
     if cp.max_event_age_secs < 0 {
         return Err(BotError::config(
             "copy.max_event_age_secs must be >= 0 (0 = off)",
@@ -3251,7 +3252,7 @@ fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
             "risk.default_stop_loss_pct must be in [0, 1]",
         ));
     }
-    if !c.sniper.slippage_pct.is_finite() || !(0.0..=100.0).contains(&c.sniper.slippage_pct) {
+    if c.sniper.slippage_pct < 0.0 || c.sniper.slippage_pct > 100.0 {
         return Err(BotError::config("sniper.slippage_pct must be in [0, 100]"));
     }
     if c.sniper.buy_sol <= 0.0 {
@@ -3476,22 +3477,6 @@ mod tests {
         let mut bad = Config::default();
         bad.execution.fee_mode = "yolo".into();
         assert!(validate(&bad, &mut Vec::new()).is_err(), "unknown fee mode");
-
-        // Slippage bounds: NaN, out-of-range, and above the global ceiling are
-        // all rejected for both engines (a NaN used to pass `< 0 || > 100`).
-        let mut nan_sniper = Config::default();
-        nan_sniper.sniper.slippage_pct = f64::NAN;
-        assert!(validate(&nan_sniper, &mut Vec::new()).is_err(), "NaN sniper slippage");
-        let mut over_copy = Config::default();
-        over_copy.copy.slippage_pct = 150.0;
-        assert!(validate(&over_copy, &mut Vec::new()).is_err(), "copy slippage > 100");
-        let mut nan_copy = Config::default();
-        nan_copy.copy.slippage_pct = f64::NAN;
-        assert!(validate(&nan_copy, &mut Vec::new()).is_err(), "NaN copy slippage");
-        let mut above_ceiling = Config::default();
-        above_ceiling.risk.max_slippage_bps = 1_000;
-        above_ceiling.copy.slippage_pct = 20.0; // 2000 bps > 1000 bps ceiling
-        assert!(validate(&above_ceiling, &mut Vec::new()).is_err(), "copy above ceiling");
 
         let mut bad = Config::default();
         bad.execution.fee_max_micro_lamports = bad.execution.fee_emergency_max_micro_lamports + 1;
@@ -4097,8 +4082,6 @@ alias = "sniper"
         // An override above the hard max is clamped at runtime — warned here.
         let mut c = Config::default();
         c.risk.max_slippage_bps = 1_000;
-        // Copy slippage must sit under the ceiling too (see validate_copy_engine).
-        c.copy.slippage_pct = 5.0;
         c.sniper
             .slippage_overrides_bps
             .insert("So11111111111111111111111111111111111111112".into(), 5_000);

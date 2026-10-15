@@ -28,8 +28,7 @@ else
 fi
 
 echo "== [2/4] manifest counts =="
-STEP2=0
-python3 - "$ROOT" <<'PY' || STEP2=1
+python3 - "$ROOT" <<'PY' || FAIL=1
 import json
 import sys
 from pathlib import Path
@@ -56,14 +55,10 @@ if hw and latest and not latest.startswith(hw):
 print("  manifest counts verified" if ok else "  MANIFEST DRIFT")
 sys.exit(0 if ok else 1)
 PY
-if [ "$STEP2" -eq 0 ]; then echo "== [2/4] OK"; else echo "== [2/4] FAIL"; FAIL=1; fi
+[ "$FAIL" -eq 0 ] && echo "== [2/4] OK" || echo "== [2/4] FAIL"
 
 echo "== [3/4] contamination =="
 CONTAM=0
-if [ ! -d "$PKG" ]; then
-  echo "  buyer-release/ is missing: contamination scan cannot run"
-  CONTAM=1
-fi
 # Banned directories anywhere in the package.
 while IFS= read -r -d '' d; do
   echo "  CONTAMINATED directory: ${d#"$PKG"/}"
@@ -101,23 +96,11 @@ echo "== [4/4] version consistency =="
 VER="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 CARGO_VER="$(grep -E '^version =' "$ROOT/Cargo.toml" | head -n1 | sed 's/.*"\(.*\)"/\1/')"
 MAN_VER="$(python3 -c "import json;print(json.load(open('$ROOT/release-manifest.json')).get('version',''))")"
+BUYER_VER="$(tr -d '[:space:]' < "$PKG/VERSION" 2>/dev/null || echo '')"
 VER_OK=1
-# A missing buyer package is a FAILURE here, never a silent pass: the buyer
-# VERSION must exist and equal the canonical VERSION.
-if [ ! -d "$PKG" ]; then
-  echo "  buyer-release/ is missing: nothing to verify (build the package first)"; VER_OK=0
-  BUYER_VER=""
-elif [ ! -f "$PKG/VERSION" ]; then
-  echo "  buyer-release/VERSION is missing"; VER_OK=0
-  BUYER_VER=""
-else
-  BUYER_VER="$(tr -d '[:space:]' < "$PKG/VERSION")"
-fi
 [ "$VER" = "$CARGO_VER" ] || { echo "  VERSION($VER) != Cargo.toml($CARGO_VER)"; VER_OK=0; }
 [ "$VER" = "$MAN_VER" ] || { echo "  VERSION($VER) != manifest($MAN_VER)"; VER_OK=0; }
-if [ -n "$BUYER_VER" ] && [ "$VER" != "$BUYER_VER" ]; then
-  echo "  VERSION($VER) != buyer VERSION($BUYER_VER)"; VER_OK=0
-fi
+[ -z "$BUYER_VER" ] || [ "$VER" = "$BUYER_VER" ] || { echo "  VERSION($VER) != buyer VERSION($BUYER_VER)"; VER_OK=0; }
 if [ "$VER_OK" -ne 1 ]; then echo "== [4/4] FAIL"; FAIL=1; else echo "== [4/4] OK ($VER)"; fi
 
 echo

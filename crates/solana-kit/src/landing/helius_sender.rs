@@ -88,7 +88,9 @@ impl LandingProvider for HeliusSender {
             return Err(BotError::invalid("landing helius: empty transaction bytes"));
         }
         if self.endpoint.is_empty() {
-            return Err(BotError::config("landing helius: endpoint is not configured"));
+            return Err(BotError::config(
+                "landing helius: endpoint is not configured",
+            ));
         }
         let body = json!({
             "jsonrpc": "2.0",
@@ -170,7 +172,10 @@ mod tests {
         let sender = HeliusSender::new("https://example.invalid/rpc")
             .with_header("x-route", "staked")
             .with_preflight("confirmed");
-        assert_eq!(sender.extra_headers.get("x-route").map(String::as_str), Some("staked"));
+        assert_eq!(
+            sender.extra_headers.get("x-route").map(String::as_str),
+            Some("staked")
+        );
         assert!(!sender.skip_preflight);
         assert_eq!(sender.preflight_commitment, "confirmed");
     }

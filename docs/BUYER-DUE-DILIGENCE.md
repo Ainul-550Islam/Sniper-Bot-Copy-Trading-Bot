@@ -23,7 +23,7 @@ document: every check is reproducible from the source tree.
 |---|---|---|
 | Toolchain pin | `rust-toolchain.toml` (1.98.1 + rustfmt + clippy); Dockerfile base `rust:1.98.1-bookworm`; CI `dtolnay/rust-toolchain@1.98.1`; MSRV `rust-version = 1.82` (app) / `1.79` (program, for agave platform-tools resolver) | Three-way pin consistency is a release-check gate |
 | Lockfiles | `Cargo.lock` (707 packages) and `programs/staking-suite/Cargo.lock` (580 packages), both committed | `cargo build --locked` reproducible dependency graph |
-| Build from zero | Fresh machine: rustup → `cargo build --release`; full procedure in `docs/HANDOVER.md` §2 | RECORDED, NOT RE-RUN FOR THIS RELEASE — an earlier session reported a rebuild from source on a wiped machine (PostgreSQL 16.4, Redis 7.2.10); see `docs/archive/AUDIT.md`. The current build is gated by `.github/workflows/ci.yml` on a pull request. |
+| Build from zero | Fresh machine: rustup → `cargo build --release`; full procedure in `docs/HANDOVER.md` §2 | NOT EVIDENCED in this repository — an earlier session described a clean rebuild (fresh rustup, PostgreSQL 16.4, Redis 7.2.10); no PASSED evidence file exists yet, so this is a claim, not a result |
 | Reproducibility caveats | `docs/RELEASE.md` §reproducible-build analysis: no build timestamps embedded; `release-manifest.json` deliberately omits timestamps and its own commit hash | Bit-for-bit binary reproducibility NOT claimed (rustc/OS toolchain variance); source-level reproducibility is what is verified |
 | On-chain build | `cd programs/staking-suite && cargo build-sbf` | EXECUTED on the audit-pass source (hardening pass 2026-09-18, agave 2.1.21 / platform-tools v1.43): 187,504-byte `staking_suite.so`, SHA-256 `57a890fae273f2c569fc814c43f0645311b6983dd30782126a9844ee193b5564`; all 3 validator e2e EXECUTED and PASSED against this exact binary. (The freeze-era 5,440-byte figure refers to the superseded freeze source.) |
 
@@ -43,7 +43,7 @@ document: every check is reproducible from the source tree.
 |---|---|---|
 | Authentication | API key (`x-api-key`) on mutating routes; server refuses non-loopback bind without auth; Telegram deny-by-default allow-lists | `docs/API.md`, `docs/SECURITY.md`; authz tests part of the 521 |
 | Authorization / RBAC | Roles: API key holders; Telegram `owner` / `operator` / `readonly`; `/mode live` and key/journal mutations owner-only; readonly cannot mutate; operator ≠ owner | `crates/core/src/auth.rs`, `crates/module-telegram/src/commands.rs`; regression tests in suite |
-| Signer boundary | Design: modules are meant to request signatures through `TransactionSigner` + `SignerRegistry` rather than hold key material; an undeclared or unresolvable extra signer is a structured build failure. Not independently tested or audited for this release. | `crates/solana-kit/src/signer.rs`; `docs/SECURITY.md` |
+| Signer boundary | Design intent: modules do not take key material as input; `TransactionSigner` + `SignerRegistry`; undeclared/unresolvable extra signer = structured build failure; `vault`, `kms` and hardware-key providers fail startup | `crates/solana-kit/src/signer.rs`; `docs/SECURITY.md` |
 | Secret handling | Env-var indirection (`*_env` fields), no secrets in repo (release-check secret scan), redacted `/api/config`, bounded metric labels exclude secrets, Telegram token stripped from all error strings (`Error::without_url()` × 10 sites + regression test) | Freeze-pass defect found & fixed; see CHANGELOG "Fixed (engineering-freeze pass)" |
 | Audit chain | Append-only from all app APIs; hash-chained; `GET /api/audit/verify`; advisory-lock serialized appends | Tamper detection + 8-appender concurrency tests VERIFIED vs real PG |
 | External audit status | **None exists.** No external security audit, penetration test, or formal verification of any component. Staking program mainnet deployment is documentation-blocked until an independent audit passes | Root `SECURITY.md`, `docs/SECURITY.md`, `docs/STAKING.md` |
@@ -66,7 +66,7 @@ document: every check is reproducible from the source tree.
 | Startup / shutdown | Ordered module supervision, readiness gating, graceful shutdown | `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`; lifecycle tests in suite |
 | Recovery | Intent journal replay + reconciliation before new work; handoff grace for ambiguous outcomes | `docs/RECONCILIATION.md`; restart-recovery tests VERIFIED; `recon_crash_e2e` PREVIOUSLY VERIFIED |
 | Backup / restore | pg_dump/restore procedure + journal file handling; Redis is disposable | pg_dump→restore→full-suite-green VERIFIED; `docs/BACKUP-RESTORE.md` |
-| Monitoring | `/health` (liveness), `/ready` (readiness), `/metrics` (Prometheus), request-ID correlated JSON logs | `docs/OPERATIONS.md` runbook; metric names as listed in the runbook; a source-match check from an earlier session is not re-run for this release |
+| Monitoring | `/health` (liveness), `/ready` (readiness), `/metrics` (Prometheus), request-ID correlated JSON logs | `docs/OPERATIONS.md` runbook; metric names cross-checked against source by grep (11/11 names listed); no PASSED evidence file yet |
 
 ## G. Ownership / IP
 

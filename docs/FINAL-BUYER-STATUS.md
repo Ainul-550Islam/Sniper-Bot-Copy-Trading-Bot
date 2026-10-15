@@ -30,10 +30,10 @@
 
 ## VERIFIED (buyer package — regenerated 2026-09-29)
 
-* `bash scripts/build-release-package.sh` → **VERIFIED** PASS (package rebuilt from the canonical current tree, including the 2026-09-29 re-audit `AUDIT.md`, `PROMPT-3-RESULT.md`, all PROMPT-3 sources and tests)
+* `bash scripts/build-release-package.sh` → **VERIFIED** PASS (package rebuilt from the canonical current tree, including the 2026-09-29 re-audit `docs/archive/AUDIT.md`, `PROMPT-3-RESULT.md`, all PROMPT-3 sources and tests)
 * `bash scripts/verify-buyer-package.sh` → **VERIFIED** PASS (byte-identical source mirror, checksums, docs parity 101, evidence records, source-tree digest `1e42ca12…`; the single `WARN manifest migration count 34 != 24` is the verifier's own hardcoded pre-0025 baseline, informational only)
 * `bash scripts/verify-delivery.sh` → **VERIFIED** 7/7 PASS
-* The 2026-09-29 external re-audit (`AUDIT.md` §4) had correctly flagged the previously shipped package as STALE (manifest DIFFERS, 23 tenant files missing, 15 files differing, `PROMPT-2-RESULT.md` DIFFERS); the 2026-09-29 regeneration closes that P0-1 finding
+* The 2026-09-29 external re-audit (`docs/archive/AUDIT.md` §4) had correctly flagged the previously shipped package as STALE (manifest DIFFERS, 23 tenant files missing, 15 files differing, `PROMPT-2-RESULT.md` DIFFERS); the 2026-09-29 regeneration closes that P0-1 finding
 
 ## CODE-READY (implemented, hermetic tests, no live env needed)
 
@@ -59,7 +59,7 @@
 * **GAP-004 Funded trading** `EXTERNAL-REQUIRED` — GUARD READY, `NOT_RUN` (needs funded wallet + `execution_mode=live`)
 * **GAP-005 Staking E2E** `EXTERNAL-REQUIRED / BLOCKED` — HARNESS READY, `NOT_RUN` (needs `STAKING_E2E=1 + solana-test-validator` + `set-id`)
 * **GAP-006 External security audit** `NOT DONE` — internal `cargo audit/deny` only — `EXTERNAL-REQUIRED`
-* **GAP-007 Tenant runtime wiring into trading modules** `EXTERNAL-REQUIRED (design ready, code not started)` — the tenant data plane and repositories are tenant-scoped, but the five module crates (`module-sniper`, `module-copy`, `module-polymarket`, `module-telegram`, `solana-kit`) are not yet tenant-context-wired; module startup remains process-level (see `AUDIT.md` §11). This is the largest remaining engineering gap for a true multi-tenant SaaS claim.
+* **GAP-007 Tenant runtime wiring into trading modules** `EXTERNAL-REQUIRED (design ready, code not started)` — the tenant data plane and repositories are tenant-scoped, but the five module crates (`module-sniper`, `module-copy`, `module-polymarket`, `module-telegram`, `solana-kit`) are not yet tenant-context-wired; module startup remains process-level (see `docs/archive/AUDIT.md` §11). This is the largest remaining engineering gap for a true multi-tenant SaaS claim.
 
 ## BUYER-ACTION (must be done post-transfer)
 
@@ -80,4 +80,4 @@
 * `docs/IP-OWNERSHIP-REGISTER.md` per-component origin, not `100% seller-owned` — **LEGAL-REVIEW** where unclear
 
 > Overall: **CODE COMPLETE FOR CURRENT SCOPE**, **TENANT DATA PLANE VERIFIED AGAINST LIVE POSTGRESQL**, **FULL TOOLCHAIN RE-VERIFICATION GREEN 2026-09-29**, **RELEASE PACKAGE REGENERATED AND VERIFIED 2026-09-29**, **EXTERNAL NOT YET VERIFIED**, **LEGAL REVIEW WHERE DOCUMENTED**.
-> Standing buyer-audit reference: `AUDIT.md` (2026-09-29 re-audit) — its §26 scorecard remains the honest gap map; its §12 tenant-DB finding is closed by the PROMPT-3 work recorded in `PROMPT-3-RESULT.md`, its §4 package finding is closed by the 2026-09-29 regeneration, its §11 tenant-runtime-wiring finding remains OPEN.
+> Standing buyer-audit reference: `docs/archive/AUDIT.md` (2026-09-29 re-audit) — its §26 scorecard remains the honest gap map; its §12 tenant-DB finding is closed by the PROMPT-3 work recorded in `PROMPT-3-RESULT.md`, its §4 package finding is closed by the 2026-09-29 regeneration, its §11 tenant-runtime-wiring finding remains OPEN.

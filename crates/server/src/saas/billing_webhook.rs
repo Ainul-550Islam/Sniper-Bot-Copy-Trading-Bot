@@ -199,7 +199,9 @@ async fn claim_event(
         };
     }
 
-    let mut seen = memory_markers().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut seen = memory_markers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if seen.contains(&event.event_id) {
         return Ok(true);
     }

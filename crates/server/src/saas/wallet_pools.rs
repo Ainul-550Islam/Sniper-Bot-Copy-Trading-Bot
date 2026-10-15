@@ -40,7 +40,10 @@ pub fn routes() -> Router<ApiState> {
         .route("/api/saas/wallet-pools", axum::routing::post(create_pool))
         .route("/api/saas/wallet-pools", axum::routing::get(list_pools))
         .route("/api/saas/wallet-pools/:id", axum::routing::get(get_pool))
-        .route("/api/saas/wallet-pools/:id", axum::routing::patch(update_pool))
+        .route(
+            "/api/saas/wallet-pools/:id",
+            axum::routing::patch(update_pool),
+        )
         .route(
             "/api/saas/wallet-pools/:id/members",
             axum::routing::post(add_member),
@@ -477,11 +480,12 @@ pub async fn add_member(
     };
 
     // Confirm the pool belongs to the caller (org-scope before mutation).
-    let pool = sqlx::query("SELECT status FROM wallet_pools WHERE id = $1 AND organization_id = $2")
-        .bind(pool_id)
-        .bind(ctx.organization.id.as_uuid())
-        .fetch_optional(db.pool())
-        .await;
+    let pool =
+        sqlx::query("SELECT status FROM wallet_pools WHERE id = $1 AND organization_id = $2")
+            .bind(pool_id)
+            .bind(ctx.organization.id.as_uuid())
+            .fetch_optional(db.pool())
+            .await;
     let pool = match pool {
         Ok(Some(p)) => p,
         Ok(None) => return not_found(),
@@ -497,13 +501,12 @@ pub async fn add_member(
     // Confirm the signer is an ACTIVE custody signer of the SAME org. The
     // Postgres trigger repeats this; doing it in Rust returns a clean 400
     // instead of a raw constraint error.
-    let signer = sqlx::query(
-        "SELECT status FROM custody_signers WHERE id = $1 AND organization_id = $2",
-    )
-    .bind(signer_id)
-    .bind(ctx.organization.id.as_uuid())
-    .fetch_optional(db.pool())
-    .await;
+    let signer =
+        sqlx::query("SELECT status FROM custody_signers WHERE id = $1 AND organization_id = $2")
+            .bind(signer_id)
+            .bind(ctx.organization.id.as_uuid())
+            .fetch_optional(db.pool())
+            .await;
     let signer = match signer {
         Ok(s) => s,
         Err(error) => {

@@ -138,7 +138,10 @@ async fn the_published_contract_is_served_and_current() {
         "/api/saas/email-verification/request",
         "/api/saas/email-verification/confirm",
     ] {
-        assert!(paths.contains_key(required), "missing contract path {required}");
+        assert!(
+            paths.contains_key(required),
+            "missing contract path {required}"
+        );
     }
     // No secret material may ever appear in the public contract.
     let rendered = doc.to_string();
@@ -174,7 +177,13 @@ async fn kill_switch_is_off_and_mode_is_not_live_by_default() {
 
 #[tokio::test]
 async fn status_module_and_positions_answer_without_fabricating_data() {
-    for path in ["/api/status", "/api/modules", "/api/positions", "/api/orders", "/api/trades"] {
+    for path in [
+        "/api/status",
+        "/api/modules",
+        "/api/positions",
+        "/api/orders",
+        "/api/trades",
+    ] {
         let (status, _, body) = get(path).await;
         assert_eq!(
             status,
@@ -255,11 +264,14 @@ async fn token_confirms_never_succeed_without_the_supporting_state() {
         let (status, _) =
             post_json(path, r#"{"token":"rst_totally_bogus","new_password":"x"}"#).await;
         assert!(
-            status == StatusCode::UNPROCESSABLE_ENTITY
-                || status == StatusCode::SERVICE_UNAVAILABLE,
+            status == StatusCode::UNPROCESSABLE_ENTITY || status == StatusCode::SERVICE_UNAVAILABLE,
             "{path}: got {status}"
         );
-        assert_ne!(status, StatusCode::OK, "{path} must never confirm a bogus token");
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "{path} must never confirm a bogus token"
+        );
     }
 }
 

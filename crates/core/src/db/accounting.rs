@@ -510,7 +510,8 @@ fn stored_from_row_inner(r: &PgRow) -> Option<StoredEvent> {
     let module: BotModule = r.try_get::<String, _>("module").ok()?.parse().ok()?;
     let venue = Venue::parse(&r.try_get::<String, _>("venue").ok()?)?;
     let mode: ExecutionMode = r.try_get::<String, _>("mode").ok()?.parse().ok()?;
-    let side = opt_string(r, "side").and_then(|s| EventSide::parse(&s));    Some(StoredEvent {
+    let side = opt_string(r, "side").and_then(|s| EventSide::parse(&s));
+    Some(StoredEvent {
         event_id: r.try_get("event_id").ok()?,
         event: AccountingEvent {
             kind,

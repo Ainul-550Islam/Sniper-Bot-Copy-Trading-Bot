@@ -1,0 +1,4 @@
+# Opt-in fast linker. Copy to `.cargo/config.toml` ONLY if `clang` and `ld.lld` are installed.
+# Without them the default GCC linker is used and this file is not needed.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "linker=clang", "-C", "link-arg=-fuse-ld=lld"]

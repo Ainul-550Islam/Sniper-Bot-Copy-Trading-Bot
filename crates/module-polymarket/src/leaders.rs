@@ -33,6 +33,7 @@ pub struct LeaderTradeRecord {
 /// Aggregated stats for one wallet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaderStats {
+    /// Wallet address the stats belong to.
     pub wallet: String,
     /// Closed trades counted.
     pub trades: u32,
@@ -74,9 +75,7 @@ impl LeaderStats {
         } else if record.pnl_micro_usd < 0 {
             self.losses += 1;
         }
-        self.pnl_micro_usd = self
-            .pnl_micro_usd
-            .saturating_add(record.pnl_micro_usd);
+        self.pnl_micro_usd = self.pnl_micro_usd.saturating_add(record.pnl_micro_usd);
         self.volume_micro_usd = self
             .volume_micro_usd
             .saturating_add(record.stake_micro_usd.max(0));
@@ -102,6 +101,7 @@ impl LeaderStats {
 /// One ranked leaderboard entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaderboardEntry {
+    /// Aggregated stats for the ranked wallet.
     pub stats: LeaderStats,
     /// 1-based rank in the returned ordering.
     pub rank: u32,
@@ -171,10 +171,10 @@ mod tests {
     #[test]
     fn stats_aggregate_wins_losses_and_rates() {
         let records = vec![
-            rec("0xa", 500_000, 1_000_000, 100),   // win +0.5
-            rec("0xa", -200_000, 1_000_000, 300),  // loss -0.2
-            rec("0xa", 0, 1_000_000, 200),         // breakeven: neither
-            rec("0xb", 100_000, 400_000, 50),      // one win
+            rec("0xa", 500_000, 1_000_000, 100),  // win +0.5
+            rec("0xa", -200_000, 1_000_000, 300), // loss -0.2
+            rec("0xa", 0, 1_000_000, 200),        // breakeven: neither
+            rec("0xb", 100_000, 400_000, 50),     // one win
         ];
         let stats = compute_stats(&records);
         assert_eq!(stats.len(), 2);
@@ -223,7 +223,10 @@ mod tests {
         let board = leaderboard(&records, 1);
         let order: Vec<&str> = board.iter().map(|e| e.stats.wallet.as_str()).collect();
         assert_eq!(order, vec!["0xc", "0xb", "0xa"]);
-        assert_eq!(board.iter().map(|e| e.rank).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            board.iter().map(|e| e.rank).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]

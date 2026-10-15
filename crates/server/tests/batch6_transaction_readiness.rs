@@ -294,11 +294,13 @@ fn all_25_batch6_docs_exist() {
     // CURRENT-BUYER-STATE.md). 2026-10-01: 109 -> 122 (PROMPT 6 §K
     // current-status family x9 + FORENSIC-SQL-RESEARCH +
     // BUSINESS-MATRIX + BUYER-PACKAGE-CONTENTS + FINAL-16-SECTION-RESULT).
+    // 2026-10-10: 122 -> 155 (measured `ls docs/*.md` on the tree at 0e28a0d;
+    // the release-manifest docs_files value was re-measured with it).
     // Bumping this pin is the deliberate act of acknowledging the new
     // document set.
     assert_eq!(
-        count, 122,
-        "docs/*.md should equal the current document count (122)"
+        count, 155,
+        "docs/*.md should equal the current document count (155)"
     );
 }
 

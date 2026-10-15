@@ -107,31 +107,31 @@ impl Wallet {
         let path = Path::new(spec);
         if path.exists() {
             let text = zeroize::Zeroizing::new(
-                std::fs::read_to_string(path).map_err(|e| {
-                    BotError::config(format!("cannot read keypair file: {e}"))
-                })?,
+                std::fs::read_to_string(path)
+                    .map_err(|e| BotError::config(format!("cannot read keypair file: {e}")))?,
             );
             let text = text.trim();
             let source = format!("file {}", path.display());
             if text.starts_with('[') {
                 let bytes = zeroize::Zeroizing::new(parse_json_array(text).map_err(|e| {
-                    BotError::config(format!(
-                        "keypair file is not a valid JSON byte array: {e}"
-                    ))
+                    BotError::config(format!("keypair file is not a valid JSON byte array: {e}"))
                 })?);
                 return Self::from_bytes(&bytes, &source);
             }
             // Otherwise treat the file contents as a base58 secret key.
-            let bytes = zeroize::Zeroizing::new(bs58::decode(text).into_vec().map_err(|e| {
-                BotError::config(format!("keypair file is not valid base58: {e}"))
-            })?);
+            let bytes =
+                zeroize::Zeroizing::new(bs58::decode(text).into_vec().map_err(|e| {
+                    BotError::config(format!("keypair file is not valid base58: {e}"))
+                })?);
             return Self::from_bytes(&bytes, &source);
         }
 
         // 3. Inline base58.
-        let bytes = zeroize::Zeroizing::new(bs58::decode(spec).into_vec().map_err(|e| {
-            BotError::config(format!("keypair is not valid base58: {e}"))
-        })?);
+        let bytes = zeroize::Zeroizing::new(
+            bs58::decode(spec)
+                .into_vec()
+                .map_err(|e| BotError::config(format!("keypair is not valid base58: {e}")))?,
+        );
         Self::from_bytes(&bytes, "inline base58")
     }
 

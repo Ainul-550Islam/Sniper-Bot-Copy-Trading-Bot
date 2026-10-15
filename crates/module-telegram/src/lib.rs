@@ -249,7 +249,9 @@ impl TelegramBot {
 impl TelegramBot {
     /// Resolve one inline-keyboard tap through the trade desk.
     async fn handle_callback_query(&self, query: &api::CallbackQuery) {
-        let Some(data) = query.data.clone() else { return };
+        let Some(data) = query.data.clone() else {
+            return;
+        };
         let user_id = query.from.as_ref().map(|u| u.id).unwrap_or(0);
         let Some(desk) = &self.trade_desk else {
             // Keyboard from a desk that no longer exists (restart): ack it
@@ -260,7 +262,9 @@ impl TelegramBot {
                 .await;
             return;
         };
-        let (toast, follow_up) = desk.resolve_callback(&data, user_id, chrono::Utc::now()).await;
+        let (toast, follow_up) = desk
+            .resolve_callback(&data, user_id, chrono::Utc::now())
+            .await;
         if let Err(e) = self.api.answer_callback_query(&query.id, &toast).await {
             warn!(error = %e, "answerCallbackQuery failed");
         }
@@ -268,7 +272,8 @@ impl TelegramBot {
             let chat_id = query.message.as_ref().map(|m| m.chat.id);
             if let Some(chat_id) = chat_id {
                 let cfg = self.state.config_snapshot().await;
-                self.send_trade_reply(chat_id, &reply, &cfg.telegram.parse_mode).await;
+                self.send_trade_reply(chat_id, &reply, &cfg.telegram.parse_mode)
+                    .await;
             }
         }
     }
@@ -281,7 +286,11 @@ impl TelegramBot {
                     .send_message_with_keyboard(chat_id, &reply.text, Some(parse_mode), kb)
                     .await
             }
-            None => self.api.send_message(chat_id, &reply.text, Some(parse_mode)).await,
+            None => {
+                self.api
+                    .send_message(chat_id, &reply.text, Some(parse_mode))
+                    .await
+            }
         };
         if let Err(e) = result {
             warn!(error = %e, "failed to send trade reply");
@@ -388,8 +397,8 @@ mod tests {
         let cmds = menu();
         let names: Vec<&str> = cmds.iter().map(|c| c.command.as_str()).collect();
         for expected in [
-            "status", "on", "off", "kill", "resume", "mode", "help", "buy", "sell",
-            "snipe", "wallets", "limit",
+            "status", "on", "off", "kill", "resume", "mode", "help", "buy", "sell", "snipe",
+            "wallets", "limit",
         ] {
             assert!(names.contains(&expected), "menu missing {expected}");
         }

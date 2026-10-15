@@ -133,7 +133,10 @@ async fn org_scoped_session(saas: Arc<SaasStore>, db: Option<Arc<Database>>, nam
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "org creation: {body}");
-    let slug = body["organization"]["slug"].as_str().expect("slug").to_string();
+    let slug = body["organization"]["slug"]
+        .as_str()
+        .expect("slug")
+        .to_string();
     let (status, body) = request(
         state_with(saas, db),
         "POST",
@@ -161,7 +164,7 @@ async fn invites_require_authentication() {
         state.clone(),
         "POST",
         "/api/saas/team/invites",
-        Some(serde_json::json!({ "email": MEMBER_EMAIL, "role": "member" })),
+        Some(serde_json::json!({ "email": MEMBER_EMAIL, "role": "viewer" })),
         None,
     )
     .await;
@@ -172,7 +175,7 @@ async fn invites_require_authentication() {
 
 #[tokio::test]
 async fn role_and_email_validation_run_before_storage() {
-    let saas = Arc::new(SaasStore::new());
+    let saas = Arc::new(SaasStore::new_in_memory_identity());
     let scoped = org_scoped_session(saas.clone(), None, "Acme Validation").await;
 
     // Org-owner is NOT assignable through the tenant invite surface —
@@ -188,7 +191,7 @@ async fn role_and_email_validation_run_before_storage() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body.to_string().contains("role_not_assignable_by_tenant"));
 
-    let (status, body) = request(
+    let (status, _body) = request(
         state_with(saas.clone(), None),
         "POST",
         "/api/saas/team/invites",
@@ -203,7 +206,7 @@ async fn role_and_email_validation_run_before_storage() {
         state_with(saas, None),
         "POST",
         "/api/saas/team/invites",
-        Some(serde_json::json!({ "email": "not-an-email", "role": "member" })),
+        Some(serde_json::json!({ "email": "not-an-email", "role": "viewer" })),
         Some(&scoped),
     )
     .await;
@@ -212,13 +215,13 @@ async fn role_and_email_validation_run_before_storage() {
 
 #[tokio::test]
 async fn without_a_database_the_invite_is_an_honest_503() {
-    let saas = Arc::new(SaasStore::new());
+    let saas = Arc::new(SaasStore::new_in_memory_identity());
     let scoped = org_scoped_session(saas.clone(), None, "Acme No Db").await;
     let (status, body) = request(
         state_with(saas, None),
         "POST",
         "/api/saas/team/invites",
-        Some(serde_json::json!({ "email": MEMBER_EMAIL, "role": "member" })),
+        Some(serde_json::json!({ "email": MEMBER_EMAIL, "role": "viewer" })),
         Some(&scoped),
     )
     .await;
@@ -258,7 +261,7 @@ async fn invite_lifecycle_create_list_resend_revoke() {
         eprintln!("NOT_RUN: invite lifecycle — POSTGRES_URL missing");
         return;
     };
-    let saas = Arc::new(SaasStore::new());
+    let saas = Arc::new(SaasStore::new_in_memory_identity());
     let scoped = org_scoped_session(saas.clone(), Some(db.clone()), "Acme Invites").await;
 
     // CREATE — the token is returned exactly once, here.
@@ -266,7 +269,7 @@ async fn invite_lifecycle_create_list_resend_revoke() {
         state_with(saas.clone(), Some(db.clone())),
         "POST",
         "/api/saas/team/invites",
-        Some(serde_json::json!({ "email": MEMBER_EMAIL, "role": "member" })),
+        Some(serde_json::json!({ "email": MEMBER_EMAIL, "role": "viewer" })),
         Some(&scoped),
     )
     .await;
@@ -294,9 +297,9 @@ async fn invite_lifecycle_create_list_resend_revoke() {
         "created invite must be listed: {listed}"
     );
     // The plaintext token is never re-served by the list endpoint.
-    assert!(!listed.to_string().contains(
-        created["invitation_token"].as_str().unwrap()
-    ));
+    assert!(!listed
+        .to_string()
+        .contains(created["invitation_token"].as_str().unwrap()));
 
     // RESEND — rotates the token (a new one is returned, once).
     let (status, resent) = request(

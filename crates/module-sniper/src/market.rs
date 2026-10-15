@@ -21,11 +21,11 @@ use bot_core::config::SniperConfig;
 use bot_core::error::BotError;
 use bot_core::maths;
 
-use solana_kit::consts::WSOL_MINT;
+use solana_kit::consts::{TOKEN_PROGRAM, WSOL_MINT};
 use solana_kit::holders::{fetch_largest_holders, HolderSnapshot};
 use solana_kit::jupiter::{Jupiter, JupiterQuote, QuoteRequest};
 use solana_kit::layout::LayoutStore;
-use solana_kit::pump::{self, BuildOptions, PumpContext};
+use solana_kit::pump::{self, BuildOptions, CurveRefusal, PumpContext};
 use solana_kit::pumpswap::{self, PumpSwapContext};
 use solana_kit::raydium::{PoolSide, RaydiumPool};
 use solana_kit::rpc::Rpc;
@@ -80,12 +80,20 @@ fn safety_report(mint: &Pubkey, mint_info: Option<MintInfo>) -> Option<TokenSafe
 /// never checks the signature — the probe needs no wallet and can never
 /// land on chain (it is only simulated).
 async fn simulate_probe(rpc: &Rpc, ix: Instruction, payer: &Pubkey) -> SellProbeOutcome {
-    let message = Message::new_with_blockhash(std::slice::from_ref(&ix), Some(payer), &Hash::default());
+    let message =
+        Message::new_with_blockhash(std::slice::from_ref(&ix), Some(payer), &Hash::default());
     let tx = VersionedTransaction {
         signatures: vec![Signature::default()],
         message: VersionedMessage::Legacy(message),
     };
-    match rpc.simulate(&tx).await {
+    simulate_tx_probe(rpc, &tx).await
+}
+
+/// Simulate a prepared probe transaction and classify the answer. Only an
+/// RPC transport failure is `Unknown` for transport reasons; a simulation
+/// error goes through [`classify_sell_probe`].
+async fn simulate_tx_probe(rpc: &Rpc, tx: &VersionedTransaction) -> SellProbeOutcome {
+    match rpc.simulate(tx).await {
         Ok(resp) => {
             let logs = resp.value.logs.clone().unwrap_or_default();
             match resp.value.err.as_ref() {
@@ -94,9 +102,7 @@ async fn simulate_probe(rpc: &Rpc, ix: Instruction, payer: &Pubkey) -> SellProbe
                     Ok(value) => classify_sell_probe(Some(&value), &logs),
                     // Not serialisable: report the debug shape verbatim and
                     // stay inconclusive rather than guess.
-                    Err(_) => SellProbeOutcome::Unknown(format!(
-                        "sell simulation failed: {err:?}"
-                    )),
+                    Err(_) => SellProbeOutcome::Unknown(format!("sell simulation failed: {err:?}")),
                 },
             }
         }
@@ -170,6 +176,68 @@ impl std::fmt::Display for MarketError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.reason, self.detail)
     }
+}
+
+/// Honeypot probe for a Raydium AMM v4 pool (File 3 §6.1): the pool's own
+/// reverse swap, sized at one raw token unit. A missing wallet token account
+/// means the venue cannot be exercised, so the answer is `Unknown` (never a
+/// pass) and the gate decides what that means.
+pub async fn probe_raydium_sell(
+    rpc: &Rpc,
+    pool: &RaydiumPool,
+    mint: &Pubkey,
+    user: &Pubkey,
+) -> SellProbeOutcome {
+    let token_source = pump::associated_user(mint, user, &TOKEN_PROGRAM);
+    let wsol_destination = pump::associated_user(&WSOL_MINT, user, &TOKEN_PROGRAM);
+    // Precondition, checked before simulating: a missing account makes the
+    // venue fail for reasons unrelated to honeypot logic, and that failure
+    // could look like the SPL "insufficient funds" signal. Missing means
+    // `Unknown`, never `Sellable`.
+    for (label, ata) in [("token", &token_source), ("WSOL", &wsol_destination)] {
+        match rpc.account_exists(ata).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return SellProbeOutcome::Unknown(format!(
+                    "wallet has no {label} token account ({ata}); create it to enable the raydium sell probe"
+                ));
+            }
+            Err(e) => {
+                return SellProbeOutcome::Unknown(format!("token account lookup failed: {e}"));
+            }
+        }
+    }
+    let ix = match pool.build_sell_ix(user, &token_source, &wsol_destination, 1) {
+        Ok(ix) => ix,
+        Err(e) => {
+            return SellProbeOutcome::Unknown(format!("could not build raydium probe sell: {e}"));
+        }
+    };
+    simulate_probe(rpc, ix, user).await
+}
+
+/// Honeypot probe for an aggregator (Jupiter) route (File 3 §6.1): quote a
+/// sell of one whole token and simulate the aggregator's own transaction.
+/// Quote or build failures are `Unknown`, never a pass.
+pub async fn probe_jupiter_sell(
+    rpc: &Rpc,
+    mint: &Pubkey,
+    user: &Pubkey,
+    decimals: u8,
+) -> SellProbeOutcome {
+    let amount = 10u64.saturating_pow(u32::from(decimals)).max(1);
+    // 5% slippage: the probe asks whether the route can sell at all, not for
+    // the price the position would really get.
+    let tx = match Jupiter::new()
+        .build_sell_probe_tx(mint, amount, 500, user)
+        .await
+    {
+        Ok(tx) => tx,
+        Err(e) => {
+            return SellProbeOutcome::Unknown(format!("jupiter sell quote/build failed: {e}"));
+        }
+    };
+    simulate_tx_probe(rpc, &tx).await
 }
 
 /// Read the mint account. A missing/unparseable mint is reported as `None`
@@ -277,7 +345,11 @@ pub async fn load_market(
 
     match event.protocol {
         LaunchProtocol::PumpFun => {
-            let ctx = match PumpContext::load_for_routing(rpc, &mint, user, None).await {
+            // Observe the curve even when it is graduated or has empty reserves:
+            // a refusal is a typed market state, and the entry gates must still
+            // run so the rejection carries the gate's own reason. Trading
+            // callers keep the strict `PumpContext::load`.
+            let ctx = match PumpContext::load_observed(rpc, &mint, user, None).await {
                 Ok(ctx) => ctx,
                 Err(BotError::NotFound(m)) => return Err(MarketError::not_ready(m)),
                 Err(e) if e.to_string().contains("not found") => {
@@ -285,8 +357,11 @@ pub async fn load_market(
                 }
                 Err(e) => return Err(MarketError::unavailable(format!("pump curve: {e}"))),
             };
-            let route = select_route(event.protocol, cfg, ctx.curve.complete)
-                .map_err(MarketError::route)?;
+            // Graduated curves (completed, or both reserves zeroed) trade on
+            // PumpSwap or not at all. They take the route path, which yields
+            // INVALID_ROUTE when no alternative is enabled.
+            let graduated = matches!(ctx.curve.refusal(), Some(CurveRefusal::Graduated));
+            let route = select_route(event.protocol, cfg, graduated).map_err(MarketError::route)?;
             match route {
                 EntryRoute::PumpCurve => {
                     let curve = &ctx.curve;
@@ -320,8 +395,8 @@ pub async fn load_market(
                             + curve
                                 .creator_fee_bps
                                 .unwrap_or(ctx.global_state.creator_fee_basis_points),
-                        tradable: !curve.complete,
-                        tradable_detail: if curve.complete {
+                        tradable: !graduated,
+                        tradable_detail: if graduated {
                             "bonding curve is complete (token graduated)".into()
                         } else {
                             String::new()
@@ -349,11 +424,33 @@ pub async fn load_market(
                     })
                 }
                 EntryRoute::PumpSwapDirect => {
-                    load_pumpswap(rpc, user, event, &mint, None, cfg, mint_info, creator_buy, now)
-                        .await
+                    load_pumpswap(
+                        rpc,
+                        user,
+                        event,
+                        &mint,
+                        None,
+                        cfg,
+                        mint_info,
+                        creator_buy,
+                        now,
+                    )
+                    .await
                 }
                 EntryRoute::Jupiter => {
-                    load_jupiter(event, &mint, trade_lamports, cfg, &platform_fee_cfg, mint_info, creator_buy, now).await
+                    load_jupiter(
+                        rpc,
+                        user,
+                        event,
+                        &mint,
+                        trade_lamports,
+                        cfg,
+                        platform_fee_cfg,
+                        mint_info,
+                        creator_buy,
+                        now,
+                    )
+                    .await
                 }
                 EntryRoute::RaydiumV4Direct => Err(MarketError::route(
                     "pump.fun launches never route to Raydium directly",
@@ -378,7 +475,19 @@ pub async fn load_market(
                     .await
                 }
                 EntryRoute::Jupiter => {
-                    load_jupiter(event, &mint, trade_lamports, cfg, &platform_fee_cfg, mint_info, creator_buy, now).await
+                    load_jupiter(
+                        rpc,
+                        user,
+                        event,
+                        &mint,
+                        trade_lamports,
+                        cfg,
+                        platform_fee_cfg,
+                        mint_info,
+                        creator_buy,
+                        now,
+                    )
+                    .await
                 }
                 other => Err(MarketError::route(format!(
                     "pump_swap launches cannot execute on {other}"
@@ -392,10 +501,23 @@ pub async fn load_market(
                     let amm_id = event.pool_pubkey().ok_or_else(|| {
                         MarketError::unavailable("raydium event carries no pool address")
                     })?;
-                    load_raydium(rpc, &amm_id, &mint, event, cfg, mint_info, creator_buy, now).await
+                    load_raydium(rpc, user, &amm_id, &mint, event, cfg, mint_info, creator_buy, now)
+                        .await
                 }
                 EntryRoute::Jupiter => {
-                    load_jupiter(event, &mint, trade_lamports, cfg, &platform_fee_cfg, mint_info, creator_buy, now).await
+                    load_jupiter(
+                        rpc,
+                        user,
+                        event,
+                        &mint,
+                        trade_lamports,
+                        cfg,
+                        platform_fee_cfg,
+                        mint_info,
+                        creator_buy,
+                        now,
+                    )
+                    .await
                 }
                 other => Err(MarketError::route(format!(
                     "raydium_amm_v4 launches cannot execute on {other}"
@@ -480,28 +602,10 @@ async fn load_pumpswap(
     })
 }
 
-/// Reason returned when a Raydium AMM v4 entry is requested with
-/// `simulate_sell = true`. Raydium has no sell simulation in this codebase, so
-/// the honeypot check cannot run; the entry is refused instead of letting the
-/// `Unknown` probe reach the gate as a skip.
-pub const RAYDIUM_SELL_SIM_UNSUPPORTED: &str = "sell simulation is not implemented for raydium_amm_v4; \
-     set simulate_sell=false to route raydium entries without a sell probe, \
-     or use a route that has one";
-
-/// Narrow Raydium guard (FIRST.md Part G). Refuses before any RPC call when the
-/// operator requires a sell simulation the venue cannot provide. It does not
-/// alter `Unknown` semantics in the gate pipeline and returns `Ok` when
-/// `simulate_sell` is off, leaving that configured behaviour unchanged.
-pub(crate) fn raydium_sell_probe_guard(cfg: &SniperConfig) -> Result<(), MarketError> {
-    if cfg.simulate_sell {
-        Err(MarketError::route(RAYDIUM_SELL_SIM_UNSUPPORTED))
-    } else {
-        Ok(())
-    }
-}
-
+#[allow(clippy::too_many_arguments)] // mirrors the eight call-site inputs; a params struct would churn every caller
 async fn load_raydium(
     rpc: &Rpc,
+    user: &Pubkey,
     amm_id: &Pubkey,
     mint: &Pubkey,
     event: &LaunchEvent,
@@ -510,7 +614,6 @@ async fn load_raydium(
     creator_buy: Option<f64>,
     now: DateTime<Utc>,
 ) -> Result<MarketData, MarketError> {
-    raydium_sell_probe_guard(cfg)?;
     let pool = match RaydiumPool::load(rpc, amm_id, true).await {
         Ok(p) => p,
         Err(BotError::NotFound(m)) => return Err(MarketError::not_ready(m)),
@@ -546,14 +649,13 @@ async fn load_raydium(
         }
     };
     let swappable = amm.is_swappable();
-    // Raydium AMM v4 has no simulated sell probe. With `simulate_sell` on, the
-    // guard above has already refused this market, so this Unknown is only
-    // reached when simulation is off (the gate is then a silent pass by
-    // config). The AMM-status gate (`tradable`) covers the venue side only; it
-    // does not prove sellability.
-    let sell_probe = Some(SellProbeOutcome::Unknown(
-        "sell simulation is not implemented for raydium_amm_v4".into(),
-    ));
+    // Honeypot probe (File 3 §6.1): simulate the pool's own reverse swap.
+    // Off when `simulate_sell` is off, same as the curve venues.
+    let sell_probe = if cfg.simulate_sell {
+        Some(probe_raydium_sell(rpc, &pool, mint, user).await)
+    } else {
+        None
+    };
     let snapshot = MarketSnapshot {
         protocol: event.protocol,
         pool: Some(amm_id.to_string()),
@@ -596,7 +698,10 @@ async fn load_raydium(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the eight call-site inputs; a params struct would churn every caller
 async fn load_jupiter(
+    rpc: &Rpc,
+    user: &Pubkey,
     event: &LaunchEvent,
     mint: &Pubkey,
     trade_lamports: u64,
@@ -676,11 +781,13 @@ async fn load_jupiter(
         pool_open_time: None,
         mint_authority_revoked: mint_info.map(|m| m.mint_authority_revoked()),
         freeze_authority_revoked: mint_info.map(|m| m.freeze_authority_revoked()),
-        // The aggregator route is venue-neutral: there is no single venue
-        // instruction to probe, so the gate sees an honest Unknown.
-        sell_probe: Some(SellProbeOutcome::Unknown(
-            "sell simulation is not implemented for jupiter routes".into(),
-        )),
+        // Aggregator route: the probe simulates the aggregator's own sell
+        // transaction for this wallet (File 3 §6.1).
+        sell_probe: if cfg.simulate_sell {
+            Some(probe_jupiter_sell(rpc, mint, user, decimals).await)
+        } else {
+            None
+        },
         creator_initial_buy_sol: creator_buy,
         // The aggregator route does not expose the venue's vault accounts, so
         // holder concentration cannot exclude the pool. It stays None: an enabled
@@ -710,8 +817,14 @@ mod holder_wiring_tests {
     #[test]
     fn percentages_are_share_of_total_supply() {
         let holders = vec![
-            HolderSnapshot { address: key(1), amount: 300 },
-            HolderSnapshot { address: key(2), amount: 50 },
+            HolderSnapshot {
+                address: key(1),
+                amount: 300,
+            },
+            HolderSnapshot {
+                address: key(2),
+                amount: 50,
+            },
         ];
         let out = to_gate_holders(&holders, 1_000, &[]).expect("supply is known");
         assert_eq!(out.len(), 2);
@@ -724,19 +837,34 @@ mod holder_wiring_tests {
     fn venue_accounts_and_burn_are_marked_infrastructure() {
         let burn = Pubkey::from_str(BURN_ADDRESS).expect("burn constant parses");
         let holders = vec![
-            HolderSnapshot { address: key(1), amount: 900 },
-            HolderSnapshot { address: burn, amount: 80 },
-            HolderSnapshot { address: key(2), amount: 10 },
+            HolderSnapshot {
+                address: key(1),
+                amount: 900,
+            },
+            HolderSnapshot {
+                address: burn,
+                amount: 80,
+            },
+            HolderSnapshot {
+                address: key(2),
+                amount: 10,
+            },
         ];
         let out = to_gate_holders(&holders, 1_000, &[key(1)]).expect("supply is known");
         assert!(out[0].is_infrastructure, "venue vault is infrastructure");
         assert!(out[1].is_infrastructure, "burn address is infrastructure");
-        assert!(!out[2].is_infrastructure, "a real holder is not infrastructure");
+        assert!(
+            !out[2].is_infrastructure,
+            "a real holder is not infrastructure"
+        );
     }
 
     #[test]
     fn unknown_supply_yields_no_table_so_the_gate_fails_closed() {
-        let holders = vec![HolderSnapshot { address: key(1), amount: 1 }];
+        let holders = vec![HolderSnapshot {
+            address: key(1),
+            amount: 1,
+        }];
         assert!(to_gate_holders(&holders, 0, &[]).is_none());
     }
 
@@ -744,31 +872,5 @@ mod holder_wiring_tests {
     fn empty_holder_table_is_an_honest_empty_table() {
         let out = to_gate_holders(&[], 1_000, &[]).expect("supply is known");
         assert!(out.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod raydium_sell_guard_tests {
-    use super::*;
-    use bot_core::config::AppConfig;
-
-    #[test]
-    fn raydium_is_refused_when_sell_simulation_is_requested() {
-        let mut cfg = AppConfig::from_defaults().raw.sniper;
-        cfg.simulate_sell = true;
-        let err = raydium_sell_probe_guard(&cfg).expect_err("simulate_sell must refuse raydium");
-        assert_eq!(err.reason, RejectReason::InvalidRoute);
-        assert!(
-            err.detail.contains("sell simulation is not implemented for raydium_amm_v4"),
-            "{}",
-            err.detail
-        );
-    }
-
-    #[test]
-    fn raydium_guard_is_silent_when_simulation_is_off() {
-        let mut cfg = AppConfig::from_defaults().raw.sniper;
-        cfg.simulate_sell = false;
-        assert!(raydium_sell_probe_guard(&cfg).is_ok());
     }
 }

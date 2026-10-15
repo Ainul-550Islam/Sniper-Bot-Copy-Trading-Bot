@@ -35,6 +35,11 @@ pub struct CreateBacktestBody {
     pub initial_balance_usd: f64,
     pub fee_rate_bps: u32,
     pub slippage_bps: u32,
+    /// Optional recorded launch dataset (`launch_datasets.id`). Must belong to
+    /// the caller's organization. Replay over recorded data is not implemented
+    /// yet, so such a run is reported as `blocked_reason = recorded_dataset_unavailable`.
+    #[serde(default)]
+    pub dataset_id: Option<String>,
 }
 
 fn error_response(status: StatusCode, error: &'static str, reason: impl Into<String>) -> Response {
@@ -152,6 +157,15 @@ fn run_json(row: &sqlx::postgres::PgRow) -> Value {
         .ok()
         .flatten();
     let initial_cents: i64 = row.get("initial_balance_usd_cents");
+    let data_source = row
+        .try_get::<Option<String>, _>("data_source")
+        .ok()
+        .flatten();
+    let authoritative = row.try_get::<bool, _>("authoritative").unwrap_or(false);
+    let assumptions = result
+        .as_ref()
+        .and_then(|value| value.get("assumptions").cloned())
+        .unwrap_or(Value::Null);
     json!({
         "id": row.get::<Uuid, _>("id"),
         "organization_id": row.get::<Uuid, _>("organization_id"),
@@ -173,6 +187,11 @@ fn run_json(row: &sqlx::postgres::PgRow) -> Value {
         "slippage_bps": row.get::<i32, _>("slippage_bps"),
         "status": row.get::<String, _>("status"),
         "error": row.try_get::<Option<String>, _>("error").ok().flatten(),
+        "data_source": data_source,
+        "authoritative": authoritative,
+        "blocked_reason": row.try_get::<Option<String>, _>("blocked_reason").ok().flatten(),
+        "dataset_id": row.try_get::<Option<Uuid>, _>("dataset_id").ok().flatten(),
+        "assumptions": assumptions,
         "created_at": row.get::<DateTime<Utc>, _>("created_at"),
         "completed_at": row.try_get::<Option<DateTime<Utc>>, _>("completed_at").ok().flatten(),
     })
@@ -182,7 +201,9 @@ const SELECT_RUN: &str = "SELECT b.id, b.organization_id, b.strategy_id, s.name 
                                   s.module, b.venue, b.period_start, b.period_end,
                                   b.initial_balance_usd_cents, b.fee_rate_bps,
                                   b.slippage_bps, b.status, b.result_json, b.error,
-                                  b.created_at, b.completed_at
+                                  b.created_at, b.completed_at,
+                                  b.data_source, b.authoritative, b.blocked_reason,
+                                  b.dataset_id
                              FROM backtest_runs b
                              JOIN tenant_strategies s ON s.id = b.strategy_id
                             WHERE b.organization_id = $1";
@@ -342,13 +363,51 @@ pub async fn create(
         }
     }
 
+    let dataset_id = match body.dataset_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => {
+            let Ok(parsed) = Uuid::parse_str(raw) else {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_dataset_id",
+                    "dataset_id must be a UUID",
+                );
+            };
+            let owned =
+                sqlx::query("SELECT 1 FROM launch_datasets WHERE id = $1 AND organization_id = $2")
+                    .bind(parsed)
+                    .bind(auth.organization_id().as_uuid())
+                    .fetch_optional(db.pool())
+                    .await;
+            match owned {
+                Ok(Some(_)) => Some(parsed),
+                Ok(None) => {
+                    return error_response(
+                        StatusCode::NOT_FOUND,
+                        "dataset_not_found",
+                        "dataset does not belong to this organization",
+                    )
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to verify backtest dataset ownership");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "backtest_storage_error",
+                        "dataset ownership could not be verified",
+                    );
+                }
+            }
+        }
+    };
+
     let run_id = Uuid::new_v4();
     let now = Utc::now();
     let insert = sqlx::query(
         "INSERT INTO backtest_runs
              (id, organization_id, strategy_id, venue, period_start, period_end,
-              initial_balance_usd_cents, fee_rate_bps, slippage_bps, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10)",
+              initial_balance_usd_cents, fee_rate_bps, slippage_bps, status, created_at,
+              dataset_id, authoritative)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, $11, $12)",
     )
     .bind(run_id)
     .bind(auth.organization_id().as_uuid())
@@ -360,6 +419,10 @@ pub async fn create(
     .bind(body.fee_rate_bps as i32)
     .bind(body.slippage_bps as i32)
     .bind(now)
+    .bind(dataset_id)
+    // A dataset-backed run may become authoritative once replay exists; until
+    // then nothing is authoritative at queue time.
+    .bind(false)
     .execute(db.pool())
     .await;
     if let Err(error) = insert {

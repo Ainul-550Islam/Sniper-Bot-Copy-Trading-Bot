@@ -69,7 +69,13 @@ impl SellProbeCache {
 
     /// Store a fresh verdict.
     pub fn insert(&mut self, mint: Pubkey, outcome: SellProbeOutcome, at: DateTime<Utc>) {
-        self.entries.insert(mint, CachedProbe { outcome, probed_at: at });
+        self.entries.insert(
+            mint,
+            CachedProbe {
+                outcome,
+                probed_at: at,
+            },
+        );
     }
 
     /// Forget every expired entry (call periodically; cheap).
@@ -173,7 +179,10 @@ mod tests {
 
     #[test]
     fn decision_mapping_is_total() {
-        assert_eq!(decide(&SellProbeOutcome::Sellable), HoneypotVerdict::Sellable);
+        assert_eq!(
+            decide(&SellProbeOutcome::Sellable),
+            HoneypotVerdict::Sellable
+        );
         assert_eq!(
             decide(&SellProbeOutcome::NotSellable("frozen".into())),
             HoneypotVerdict::Honeypot
@@ -186,10 +195,22 @@ mod tests {
 
     #[test]
     fn strictness_controls_unknown() {
-        assert!(!rejects_with(HoneypotVerdict::Unknown, false), "lenient skips");
-        assert!(rejects_with(HoneypotVerdict::Unknown, true), "strict rejects");
-        assert!(rejects_with(HoneypotVerdict::Honeypot, false), "honeypot always rejects");
-        assert!(!rejects_with(HoneypotVerdict::Sellable, true), "sellable never rejects");
+        assert!(
+            !rejects_with(HoneypotVerdict::Unknown, false),
+            "lenient skips"
+        );
+        assert!(
+            rejects_with(HoneypotVerdict::Unknown, true),
+            "strict rejects"
+        );
+        assert!(
+            rejects_with(HoneypotVerdict::Honeypot, false),
+            "honeypot always rejects"
+        );
+        assert!(
+            !rejects_with(HoneypotVerdict::Sellable, true),
+            "sellable never rejects"
+        );
     }
 
     #[test]
@@ -197,7 +218,10 @@ mod tests {
         let mut cache = SellProbeCache::new(Duration::from_secs(60));
         let mint = Pubkey::new_unique();
         cache.insert(mint, SellProbeOutcome::Sellable, t(1_000));
-        assert_eq!(cache.get(&mint, t(1_030)), Some(&SellProbeOutcome::Sellable));
+        assert_eq!(
+            cache.get(&mint, t(1_030)),
+            Some(&SellProbeOutcome::Sellable)
+        );
     }
 
     #[test]
@@ -226,7 +250,10 @@ mod tests {
         cache.insert(stale, SellProbeOutcome::Sellable, t(900));
         cache.prune(t(1_050)); // stale is 150s old, fresh is 50s
         assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(&fresh, t(1_050)), Some(&SellProbeOutcome::Sellable));
+        assert_eq!(
+            cache.get(&fresh, t(1_050)),
+            Some(&SellProbeOutcome::Sellable)
+        );
         assert_eq!(cache.get(&stale, t(1_050)), None);
     }
 

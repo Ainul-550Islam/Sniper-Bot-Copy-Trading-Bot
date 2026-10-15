@@ -47,9 +47,15 @@ const CANCEL_PREFIX: &str = "sx";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallbackAction {
     /// The requester tapped ✅ Confirm.
-    Confirm { nonce: String },
+    Confirm {
+        /// Confirmation nonce of the pending trade.
+        nonce: String,
+    },
     /// The requester tapped ❌ Cancel.
-    Cancel { nonce: String },
+    Cancel {
+        /// Confirmation nonce of the pending trade.
+        nonce: String,
+    },
 }
 
 impl CallbackAction {
@@ -129,8 +135,7 @@ impl CallbackSecret {
 
     /// Sign a `<prefix>:<version>:<nonce>` payload.
     fn sign(&self, body: &str) -> String {
-        let mut mac = HmacSha256::new_from_slice(&self.0)
-            .expect("hmac accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(&self.0).expect("hmac accepts any key length");
         mac.update(body.as_bytes());
         let full = mac.finalize().into_bytes();
         hex::encode(&full[..16])
@@ -138,7 +143,11 @@ impl CallbackSecret {
 
     /// Encode the callback_data for one button.
     pub fn encode(&self, confirm: bool, nonce: &str) -> String {
-        let prefix = if confirm { CONFIRM_PREFIX } else { CANCEL_PREFIX };
+        let prefix = if confirm {
+            CONFIRM_PREFIX
+        } else {
+            CANCEL_PREFIX
+        };
         let body = format!("{prefix}:{VERSION}:{nonce}");
         let sig = self.sign(&body);
         format!("{body}:{sig}")
@@ -153,11 +162,13 @@ impl CallbackSecret {
         if parts.len() != 4 {
             // Foreign keyboards: Telegram delivers ANY bot's callbacks we
             // were attached to; four fields is ours, anything else is not.
-            return Err(if parts.len() >= 2 && (parts[0] == CONFIRM_PREFIX || parts[0] == CANCEL_PREFIX) {
-                CallbackDeny::Malformed
-            } else {
-                CallbackDeny::NotOurs
-            });
+            return Err(
+                if parts.len() >= 2 && (parts[0] == CONFIRM_PREFIX || parts[0] == CANCEL_PREFIX) {
+                    CallbackDeny::Malformed
+                } else {
+                    CallbackDeny::NotOurs
+                },
+            );
         }
         let (prefix, version, nonce, sig) = (parts[0], parts[1], parts[2], parts[3]);
         if prefix != CONFIRM_PREFIX && prefix != CANCEL_PREFIX {
@@ -184,9 +195,13 @@ impl CallbackSecret {
             return Err(CallbackDeny::BadSignature);
         }
         Ok(if prefix == CONFIRM_PREFIX {
-            CallbackAction::Confirm { nonce: nonce.to_string() }
+            CallbackAction::Confirm {
+                nonce: nonce.to_string(),
+            }
         } else {
-            CallbackAction::Cancel { nonce: nonce.to_string() }
+            CallbackAction::Cancel {
+                nonce: nonce.to_string(),
+            }
         })
     }
 
@@ -214,7 +229,11 @@ mod tests {
     fn payload_round_trips_and_fits_telegram_cap() {
         let s = secret();
         let data = s.encode(true, "0123456789abcdef");
-        assert!(data.len() <= 64, "Telegram caps callback_data at 64 bytes: {}", data.len());
+        assert!(
+            data.len() <= 64,
+            "Telegram caps callback_data at 64 bytes: {}",
+            data.len()
+        );
         assert_eq!(data.len(), 55);
         match s.verify(&data).unwrap() {
             CallbackAction::Confirm { nonce } => assert_eq!(nonce, "0123456789abcdef"),
@@ -244,7 +263,10 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] = if bytes[last] == b'0' { b'1' } else { b'0' };
         let tampered_sig = String::from_utf8(bytes).unwrap();
-        assert_eq!(s.verify(&tampered_sig).unwrap_err(), CallbackDeny::BadSignature);
+        assert_eq!(
+            s.verify(&tampered_sig).unwrap_err(),
+            CallbackDeny::BadSignature
+        );
     }
 
     #[test]
@@ -261,13 +283,18 @@ mod tests {
         assert_eq!(s.verify("menu:open:42").unwrap_err(), CallbackDeny::NotOurs);
         assert_eq!(s.verify("").unwrap_err(), CallbackDeny::NotOurs);
         // Right prefix, wrong shape -> malformed, not foreign.
-        assert_eq!(s.verify("sc:only-two").unwrap_err(), CallbackDeny::Malformed);
         assert_eq!(
-            s.verify("sc:v9:0123456789abcdef:00000000000000000000000000000000").unwrap_err(),
+            s.verify("sc:only-two").unwrap_err(),
+            CallbackDeny::Malformed
+        );
+        assert_eq!(
+            s.verify("sc:v9:0123456789abcdef:00000000000000000000000000000000")
+                .unwrap_err(),
             CallbackDeny::BadVersion
         );
         assert_eq!(
-            s.verify("sc:v1:zzzz:00000000000000000000000000000000").unwrap_err(),
+            s.verify("sc:v1:zzzz:00000000000000000000000000000000")
+                .unwrap_err(),
             CallbackDeny::Malformed
         );
     }

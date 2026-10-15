@@ -32,14 +32,14 @@ Jupiter exit routing, wallet copy trading, Polymarket CLOB trading with
 EIP-712 v2 order signing, a native Solana staking/reward program, and
 deny-by-default Telegram remote control) behind a single Axum control plane
 with REST, WebSocket, dashboard, Prometheus metrics, and liveness/readiness
-probes. Financial truth lives in PostgreSQL (<!-- stat:migrations -->54<!-- /stat --> forward-only migrations);
+probes. Financial truth lives in PostgreSQL (<!-- stat:migrations -->58<!-- /stat --> forward-only migrations);
 Redis is non-authoritative. Money paths follow one invariant pipeline —
 risk → ownership claim → idempotency → intent journal → execution →
 persistence → reconciliation → append-only hash-chained audit — and
 multi-process deployments enforce "one logical execution, at most one owner,
 at most one money-moving submission" via claims, leases, epochs and fencing
 tokens. The system defaults to paper trading and requires two explicit
-configuration gates plus real keys before anything broadcasts. Static test inventory: <!-- stat:test_attrs_plain -->2072<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN. Release tooling includes a scripted release check, cargo-audit/deny configuration, and a complete buyer due-diligence documentation package. No external security
+configuration gates plus real keys before anything broadcasts. Static test inventory: <!-- stat:test_attrs_plain -->2074<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->892<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN. Release tooling includes a scripted release check, cargo-audit/deny configuration, and a complete buyer due-diligence documentation package. No external security
 audit exists and the staking program is undeployed — both are documented,
 not hidden.
 
@@ -85,7 +85,7 @@ not hidden.
 
 ## Testing facts
 
-- Static test inventory: <!-- stat:test_attrs_plain -->2072<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->907<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN. No test-run logs ship in this repository; earlier pass/fail figures have been removed rather than quoted without logs.
+- Static test inventory: <!-- stat:test_attrs_plain -->2074<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->892<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN. No test-run logs ship in this repository; earlier pass/fail figures have been removed rather than quoted without logs.
 - Test harnesses exist for gated integration vs real services (PostgreSQL,
   Redis, distributed ownership, two-replica mirroring) and for the staking
   program (host + validator e2e); their runs are NOT_RUN here (see evidence/).

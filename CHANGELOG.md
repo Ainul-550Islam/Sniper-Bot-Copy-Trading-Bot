@@ -81,7 +81,7 @@ fails the release if they ever disagree.
   regression test; evidence docs (`CUSTODY-STATUS-2026`,
   `CURRENT-BUYER-STATE`, …); final acceptance audit A–T all PASS
   (criterion I and P fixed); full workspace 3312 passed / 0 failed /
-  14 ignored; stale-documentation sweep + dated `AUDIT.md` remediation
+  14 ignored; stale-documentation sweep + dated `docs/archive/AUDIT.md` remediation
   notes (§13.8, §14.6, §15.5, §16).
 
 #### PROMPT 4 — the tenant execution boundary (2026-09-29/30)
@@ -328,7 +328,7 @@ public path, type or behaviour was changed.
 
 #### Fixed
 - Restored six files omitted from the canonical `sniper-suite/` tree:
-  `AUDIT.md`, `docs/{DELIVERY-MANIFEST,EVIDENCE-INDEX,FINAL-DELIVERY,
+  `docs/archive/AUDIT.md`, `docs/{DELIVERY-MANIFEST,EVIDENCE-INDEX,FINAL-DELIVERY,
   FINAL-RELEASE-AUDIT,FORENSIC-FILE-INVENTORY}.md`. This repairs every
   broken handover path and brings the manifest's 63-document count back in
   sync with the tree.
@@ -1400,7 +1400,7 @@ Full design notes: `docs/EXECUTION-RELIABILITY.md`.
   `docs/BUYER-ACCEPTANCE-TEST.md` (it quotes the declared program id), so a
   post-`set-id` tree would have kept a stale placeholder in a buyer-facing
   doc; the verify stale-sweep also now excludes `release-manifest.json`
-  (delivery-time record, like AUDIT.md) so post-set-id verification cannot
+  (delivery-time record, like docs/archive/AUDIT.md) so post-set-id verification cannot
   false-FAIL. Re-verified: `verify` passes with 4 tracked docs
   (`evidence/phase7-identity-verify.log`).
 - Added docs (8): FEATURE-TRACEABILITY (symbol-verified feature→code→test
@@ -1557,7 +1557,7 @@ Full design notes: `docs/EXECUTION-RELIABILITY.md`.
 ## [0.1.0] — initial handover release
 
 First complete, internally verified release of the suite. Delivered state
-(full evidence trail in `AUDIT.md`, test inventory in `docs/TESTING.md`):
+(full evidence trail in `docs/archive/AUDIT.md`, test inventory in `docs/TESTING.md`):
 
 ### Added
 

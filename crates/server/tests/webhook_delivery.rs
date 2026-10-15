@@ -20,7 +20,9 @@ use uuid::Uuid;
 use bot_core::config::DatabaseConfig;
 use bot_core::db::Database;
 
-use sniper_suite::saas::webhook_delivery::{deliver_once, retry_backoff, WebhookRetryDispatcher, MAX_ATTEMPTS};
+use sniper_suite::saas::webhook_delivery::{
+    deliver_once, retry_backoff, WebhookRetryDispatcher, MAX_ATTEMPTS,
+};
 
 // ---------------------------------------------------------------------
 // Hermetic: backoff schedule + URL classification
@@ -30,20 +32,31 @@ use sniper_suite::saas::webhook_delivery::{deliver_once, retry_backoff, WebhookR
 fn backoff_schedule_is_exponential_capped_and_bounded() {
     // 60s * 2^n, capped at 30 minutes, for attempts 1..=MAX.
     let first = retry_backoff(1).num_seconds();
-    assert!(first >= 30 && first <= 120, "first retry ~1 minute, got {first}");
+    assert!(
+        (30..=120).contains(&first),
+        "first retry ~1 minute, got {first}"
+    );
     let second = retry_backoff(2).num_seconds();
     assert!(second > first, "backoff must grow");
-    assert_eq!(retry_backoff(MAX_ATTEMPTS).num_seconds(), 1800, "cap = 30 min");
+    assert_eq!(
+        retry_backoff(MAX_ATTEMPTS).num_seconds(),
+        1800,
+        "cap = 30 min"
+    );
     // Degenerate inputs must not panic and stay within the cap.
     for attempt in [-5, 0, i32::MAX / 2, i32::MAX] {
         let d = retry_backoff(attempt).num_seconds();
-        assert!(d >= 0 && d <= 1800, "attempt {attempt} → {d}s");
+        assert!((0..=1800).contains(&d), "attempt {attempt} → {d}s");
     }
 }
 
 #[tokio::test]
 async fn malformed_and_non_https_urls_are_rejected_before_any_io() {
-    for url in ["not a url", "http://insecure.example.com/hook", "ftp://example.com"] {
+    for url in [
+        "not a url",
+        "http://insecure.example.com/hook",
+        "ftp://example.com",
+    ] {
         let outcome = deliver_once(url, "whsec_test", "evt_1", b"{}").await;
         assert!(!outcome.succeeded, "{url} must never deliver");
         assert!(outcome.response_status.is_none());
@@ -166,14 +179,8 @@ async fn dispatcher_ignores_pending_future_and_exhausted_rows() {
     // touch them.
     let (_, _, pending) = seed_delivery(&db, "pend", "pending", 1, "now()").await;
     // Future-dated retry: not due yet.
-    let (_, _, future) = seed_delivery(
-        &db,
-        "future",
-        "failed",
-        2,
-        "now() + interval '1 hour'",
-    )
-    .await;
+    let (_, _, future) =
+        seed_delivery(&db, "future", "failed", 2, "now() + interval '1 hour'").await;
     // Already at the attempt cap: the claim's WHERE clause excludes it
     // (it can only become dead through a claimed attempt).
     let (_, _, capped) = seed_delivery(
@@ -191,7 +198,10 @@ async fn dispatcher_ignores_pending_future_and_exhausted_rows() {
 
     assert_eq!(delivery_state(&db, pending).await, ("pending".into(), 1));
     assert_eq!(delivery_state(&db, future).await, ("failed".into(), 2));
-    assert_eq!(delivery_state(&db, capped).await, ("failed".into(), MAX_ATTEMPTS));
+    assert_eq!(
+        delivery_state(&db, capped).await,
+        ("failed".into(), MAX_ATTEMPTS)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -202,14 +212,8 @@ async fn a_failed_retry_reschedules_with_backoff_until_exhausted() {
     };
     // Early in the retry ladder: a failed attempt must schedule the next
     // one (not die, not succeed).
-    let (_, _, delivery) = seed_delivery(
-        &db,
-        "retry",
-        "failed",
-        1,
-        "now() - interval '1 second'",
-    )
-    .await;
+    let (_, _, delivery) =
+        seed_delivery(&db, "retry", "failed", 1, "now() - interval '1 second'").await;
     let dispatcher = WebhookRetryDispatcher::new(db.pool().clone());
     let processed = dispatcher.run_once().await.expect("run_once");
     assert_eq!(processed, 1);

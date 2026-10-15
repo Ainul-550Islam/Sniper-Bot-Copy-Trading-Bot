@@ -71,7 +71,10 @@ impl BuilderCode {
                 "builder code: empty value — use disabled() for no attribution",
             ));
         }
-        if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+        {
             if hex.len() != 64 {
                 return Err(PolyError::invalid(format!(
                     "builder code: 0x form must be exactly 32 bytes (64 hex chars), got {}",
@@ -100,10 +103,7 @@ impl BuilderCode {
                 trimmed.len()
             )));
         }
-        if !trimmed
-            .chars()
-            .all(|c| c.is_ascii_graphic())
-        {
+        if !trimmed.chars().all(|c| c.is_ascii_graphic()) {
             return Err(PolyError::invalid(
                 "builder code: ASCII form must be printable, non-space characters",
             ));
@@ -117,7 +117,9 @@ impl BuilderCode {
     /// Kept as a distinct constructor so "off" is a visible, intentional
     /// state in config — never an accident of parsing.
     pub fn disabled() -> Self {
-        Self { bytes: ZERO_BUILDER }
+        Self {
+            bytes: ZERO_BUILDER,
+        }
     }
 
     /// Load from the environment: unset/blank → [`Self::disabled`];
@@ -215,11 +217,24 @@ mod tests {
     fn rejects_malformed_inputs() {
         assert!(BuilderCode::parse("").is_err(), "empty");
         assert!(BuilderCode::parse("0x1234").is_err(), "short hex");
-        assert!(BuilderCode::parse("0xzz111111111111111111111111111111111111111111111111111111111111").is_err(), "non-hex");
-        assert!(BuilderCode::parse("0x0000000000000000000000000000000000000000000000000000000000000000").is_err(), "zero sentinel as code");
+        assert!(
+            BuilderCode::parse("0xzz111111111111111111111111111111111111111111111111111111111111")
+                .is_err(),
+            "non-hex"
+        );
+        assert!(
+            BuilderCode::parse(
+                "0x0000000000000000000000000000000000000000000000000000000000000000"
+            )
+            .is_err(),
+            "zero sentinel as code"
+        );
         let too_long = "a".repeat(33);
         assert!(BuilderCode::parse(&too_long).is_err(), "33-char ascii");
-        assert!(BuilderCode::parse("has space").is_err(), "space in ascii form");
+        assert!(
+            BuilderCode::parse("has space").is_err(),
+            "space in ascii form"
+        );
     }
 
     #[test]
@@ -235,7 +250,10 @@ mod tests {
 
     #[test]
     fn attribution_policy_never_emits_garbage() {
-        assert_eq!(BuilderAttribution::from_code(None).field_bytes(), ZERO_BUILDER);
+        assert_eq!(
+            BuilderAttribution::from_code(None).field_bytes(),
+            ZERO_BUILDER
+        );
         assert_eq!(
             BuilderAttribution::from_code(Some(BuilderCode::disabled())).field_bytes(),
             ZERO_BUILDER

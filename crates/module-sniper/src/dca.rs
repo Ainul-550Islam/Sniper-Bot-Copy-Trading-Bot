@@ -152,9 +152,20 @@ pub trait DcaStore: Send + Sync {
     /// Record one executed run: adds `amount_sol` to `spent_sol`, advances
     /// `next_run_at`, and — when the budget is now exhausted — flips the
     /// status to `Completed`.
-    async fn record_run(&self, organization_id: &str, schedule_id: &str, amount_sol: f64, now: DateTime<Utc>) -> BotResult<()>;
+    async fn record_run(
+        &self,
+        organization_id: &str,
+        schedule_id: &str,
+        amount_sol: f64,
+        now: DateTime<Utc>,
+    ) -> BotResult<()>;
     /// Set a terminal/paused status.
-    async fn set_status(&self, organization_id: &str, schedule_id: &str, status: DcaStatus) -> BotResult<()>;
+    async fn set_status(
+        &self,
+        organization_id: &str,
+        schedule_id: &str,
+        status: DcaStatus,
+    ) -> BotResult<()>;
 }
 
 /// One scheduler pass for one tenant. Releases at most one run per due
@@ -209,7 +220,10 @@ impl DcaStore for InMemoryDcaStore {
             format!("dca-{}-{}", schedules.len() + 1, schedule.mint)
         } else {
             if schedules.iter().any(|s| s.id == schedule.id) {
-                return Err(BotError::invalid(format!("dca id {} already exists", schedule.id)));
+                return Err(BotError::invalid(format!(
+                    "dca id {} already exists",
+                    schedule.id
+                )));
             }
             schedule.id.clone()
         };
@@ -233,7 +247,13 @@ impl DcaStore for InMemoryDcaStore {
             .unwrap_or_default())
     }
 
-    async fn record_run(&self, organization_id: &str, schedule_id: &str, amount_sol: f64, now: DateTime<Utc>) -> BotResult<()> {
+    async fn record_run(
+        &self,
+        organization_id: &str,
+        schedule_id: &str,
+        amount_sol: f64,
+        now: DateTime<Utc>,
+    ) -> BotResult<()> {
         let mut inner = self.inner.lock().await;
         let schedules = inner
             .get_mut(organization_id)
@@ -263,7 +283,12 @@ impl DcaStore for InMemoryDcaStore {
         Ok(())
     }
 
-    async fn set_status(&self, organization_id: &str, schedule_id: &str, status: DcaStatus) -> BotResult<()> {
+    async fn set_status(
+        &self,
+        organization_id: &str,
+        schedule_id: &str,
+        status: DcaStatus,
+    ) -> BotResult<()> {
         let mut inner = self.inner.lock().await;
         let schedules = inner
             .get_mut(organization_id)
@@ -303,9 +328,18 @@ mod tests {
     #[test]
     fn validation_rejects_unsafe_schedules() {
         assert!(schedule(0.1, 60, 1.0, t(0)).validate().is_ok());
-        assert!(schedule(0.1, 0, 1.0, t(0)).validate().is_err(), "zero interval");
-        assert!(schedule(0.1, 60, 0.0, t(0)).validate().is_err(), "zero budget");
-        assert!(schedule(2.0, 60, 1.0, t(0)).validate().is_err(), "budget < one run");
+        assert!(
+            schedule(0.1, 0, 1.0, t(0)).validate().is_err(),
+            "zero interval"
+        );
+        assert!(
+            schedule(0.1, 60, 0.0, t(0)).validate().is_err(),
+            "zero budget"
+        );
+        assert!(
+            schedule(2.0, 60, 1.0, t(0)).validate().is_err(),
+            "budget < one run"
+        );
         assert!(schedule(f64::NAN, 60, 1.0, t(0)).validate().is_err());
     }
 
@@ -314,7 +348,10 @@ mod tests {
         let mut s = schedule(0.3, 60, 1.0, t(0));
         s.spent_sol = 0.9;
         assert!((s.remaining_budget_sol() - 0.1).abs() < 1e-12);
-        assert!((s.next_run_amount_sol() - 0.1).abs() < 1e-12, "final run clamps");
+        assert!(
+            (s.next_run_amount_sol() - 0.1).abs() < 1e-12,
+            "final run clamps"
+        );
         s.spent_sol = 1.5; // overspend recorded by a bug elsewhere
         assert_eq!(s.remaining_budget_sol(), 0.0, "never negative");
         assert!(s.budget_exhausted());
@@ -359,17 +396,31 @@ mod tests {
         assert!(!third[0].final_run);
         let last = run_once(&store, "org-1", t(280)).await.unwrap();
         assert_eq!(last.len(), 1);
-        assert!((last[0].amount_sol - 0.1).abs() < 1e-9, "final run clamps to remaining budget");
+        assert!(
+            (last[0].amount_sol - 0.1).abs() < 1e-9,
+            "final run clamps to remaining budget"
+        );
         assert!(last[0].final_run);
         // Schedule completed: no further runs, ever.
-        assert!(run_once(&store, "org-1", t(1_000)).await.unwrap().is_empty());
-        assert!(store.list_open("org-1").await.unwrap().iter().all(|s| s.id != id));
+        assert!(run_once(&store, "org-1", t(1_000))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_open("org-1")
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.id != id));
     }
 
     #[tokio::test]
     async fn missed_windows_do_not_burst() {
         let store = InMemoryDcaStore::default();
-        store.insert(&schedule(0.1, 60, 10.0, t(100))).await.unwrap();
+        store
+            .insert(&schedule(0.1, 60, 10.0, t(100)))
+            .await
+            .unwrap();
         // A full hour of missed windows -> exactly ONE run this pass.
         let runs = run_once(&store, "org-1", t(3_700)).await.unwrap();
         assert_eq!(runs.len(), 1, "at most one run per pass");
@@ -393,9 +444,15 @@ mod tests {
     async fn paused_schedule_skips_and_resumes_cleanly() {
         let store = InMemoryDcaStore::default();
         let id = store.insert(&schedule(0.1, 60, 1.0, t(100))).await.unwrap();
-        store.set_status("org-1", &id, DcaStatus::Paused).await.unwrap();
+        store
+            .set_status("org-1", &id, DcaStatus::Paused)
+            .await
+            .unwrap();
         assert!(run_once(&store, "org-1", t(500)).await.unwrap().is_empty());
-        store.set_status("org-1", &id, DcaStatus::Active).await.unwrap();
+        store
+            .set_status("org-1", &id, DcaStatus::Active)
+            .await
+            .unwrap();
         let runs = run_once(&store, "org-1", t(501)).await.unwrap();
         assert_eq!(runs.len(), 1, "resume fires the due run");
     }

@@ -483,8 +483,10 @@ impl Rpc {
         &self,
         mint: &Pubkey,
     ) -> BotResult<Vec<RpcTokenAccountBalance>> {
-        self.retry("getTokenLargestAccounts", |c| c.get_token_largest_accounts(mint))
-            .await
+        self.retry("getTokenLargestAccounts", |c| {
+            c.get_token_largest_accounts(mint)
+        })
+        .await
     }
 
     pub async fn get_account(&self, pubkey: &Pubkey) -> BotResult<Option<Account>> {
@@ -493,7 +495,9 @@ impl Rpc {
         // Keeping that distinction here is important: transport/provider errors
         // must never be mistaken for a missing account.
         let response = self
-            .retry("getAccountInfo", |c| c.get_account_with_commitment(pubkey, self.commitment))
+            .retry("getAccountInfo", |c| {
+                c.get_account_with_commitment(pubkey, self.commitment)
+            })
             .await?;
         if response.value.is_none() {
             debug!(%pubkey, "account not found");
@@ -972,7 +976,9 @@ impl Rpc {
             .and_then(serde_json::Value::as_array)
             .and_then(|parts| parts.first())
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| BotError::encoding(format!("mint {mint} response has no base64 data")))?;
+            .ok_or_else(|| {
+                BotError::encoding(format!("mint {mint} response has no base64 data"))
+            })?;
         let data = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map_err(|e| BotError::encoding(format!("mint {mint} base64 data is invalid: {e}")))?;

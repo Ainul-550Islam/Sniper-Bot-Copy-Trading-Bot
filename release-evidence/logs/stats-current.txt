@@ -1,0 +1,3 @@
+[stats-current] docs/STATS.md matches the tree
+[stats-current] 93 stat markers checked, all current
+[stats-current] PASS — STATS.md and all markers match the tree

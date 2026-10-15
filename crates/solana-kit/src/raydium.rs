@@ -30,7 +30,7 @@ use bot_core::maths;
 use crate::consts::*;
 use crate::layout::{AccountLayout, LayoutStore};
 use crate::rpc::Rpc;
-use crate::tokens::{MintInfo, TokenAccountInfo};
+use crate::tokens::TokenAccountInfo;
 
 /// The parsed `AmmInfo` pool-state account (784 bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,7 +284,9 @@ impl RaydiumPool {
             let market_account = accounts
                 .first()
                 .and_then(|account| account.as_ref())
-                .ok_or_else(|| BotError::NotFound(format!("Raydium market {} not found", amm.market)))?;
+                .ok_or_else(|| {
+                    BotError::NotFound(format!("Raydium market {} not found", amm.market))
+                })?;
             if market_account.owner != amm.market_program {
                 return Err(BotError::solana(format!(
                     "Raydium market {} is owned by {}, expected market program {}",
@@ -312,11 +314,15 @@ impl RaydiumPool {
             let coin_vault = accounts
                 .get(1)
                 .and_then(|account| account.as_ref())
-                .ok_or_else(|| BotError::NotFound(format!("Raydium coin vault {} not found", amm.coin_vault)))?;
+                .ok_or_else(|| {
+                    BotError::NotFound(format!("Raydium coin vault {} not found", amm.coin_vault))
+                })?;
             let pc_vault = accounts
                 .get(2)
                 .and_then(|account| account.as_ref())
-                .ok_or_else(|| BotError::NotFound(format!("Raydium pc vault {} not found", amm.pc_vault)))?;
+                .ok_or_else(|| {
+                    BotError::NotFound(format!("Raydium pc vault {} not found", amm.pc_vault))
+                })?;
             for (label, account, expected_mint) in [
                 ("coin", coin_vault, amm.coin_mint),
                 ("pc", pc_vault, amm.pc_mint),
@@ -328,7 +334,8 @@ impl RaydiumPool {
                     )));
                 }
                 let info = TokenAccountInfo::parse(&account.data)?;
-                if info.mint != expected_mint || info.authority != amm_authority || info.state != 1 {
+                if info.mint != expected_mint || info.authority != amm_authority || info.state != 1
+                {
                     return Err(BotError::solana(format!(
                         "Raydium {label} vault has the wrong mint, authority, or account state"
                     )));
@@ -533,6 +540,21 @@ impl RaydiumPool {
         })
     }
 
+    /// Reverse leg of a buy (File 3 §6.1): sell `amount_in` base tokens held
+    /// in `token_source` back into WSOL at `wsol_destination`. Raydium AMM v4
+    /// takes the direction from the source account's mint, so this is the
+    /// buy instruction with source and destination swapped. Requires the
+    /// market to be loaded, like every full `SwapBaseIn`.
+    pub fn build_sell_ix(
+        &self,
+        user: &Pubkey,
+        token_source: &Pubkey,
+        wsol_destination: &Pubkey,
+        amount_in: u64,
+    ) -> BotResult<Instruction> {
+        self.swap_base_in(user, token_source, wsol_destination, amount_in, 0, false)
+    }
+
     /// Pick the right swap form.
     pub fn swap_base_in(
         &self,
@@ -710,7 +732,9 @@ impl RaydiumPool {
 /// valid one-byte PDA bump. Reject out-of-range values instead of truncating.
 pub fn amm_authority_pda(nonce: u64) -> BotResult<Pubkey> {
     let bump = [u8::try_from(nonce).map_err(|_| {
-        BotError::solana(format!("Raydium AMM nonce {nonce} does not fit in a PDA bump byte"))
+        BotError::solana(format!(
+            "Raydium AMM nonce {nonce} does not fit in a PDA bump byte"
+        ))
     })?];
     Pubkey::create_program_address(&[RAYDIUM_AMM_AUTHORITY_SEED, &bump], &RAYDIUM_AMM_V4)
         .map_err(|e| BotError::solana(format!("derive amm authority (nonce {nonce}): {e}")))

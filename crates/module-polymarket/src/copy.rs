@@ -47,7 +47,10 @@ pub enum CopySizing {
     FixedUsd(f64),
     /// Mirror the leader's stake times a multiplier (0.5 = half size).
     /// The result is still clamped by the config's min/max stake.
-    MirrorLeader { multiplier: f64 },
+    MirrorLeader {
+        /// Multiplier applied to the leader's stake.
+        multiplier: f64,
+    },
 }
 
 /// Tenant-facing copy configuration (server maps this from the SaaS
@@ -56,9 +59,11 @@ pub enum CopySizing {
 pub struct CopyFollowConfig {
     /// Only trades from these wallets are ever considered.
     pub followed_wallets: Vec<String>,
+    /// How the stake for one mirrored trade is computed.
     pub sizing: CopySizing,
     /// Hard bounds on the USDC stake of ONE mirrored trade.
     pub min_stake_usd: f64,
+    /// Upper bound on the USDC stake of ONE mirrored trade.
     pub max_stake_usd: f64,
     /// Never pay more than this for one outcome token (the chase cap).
     /// Leaders moving a thin book must not drag followers into 0.98s.
@@ -67,6 +72,7 @@ pub struct CopyFollowConfig {
     pub slippage_tolerance_bps: u32,
     /// Market filters (mirrors the strategy gates).
     pub min_liquidity_usd: f64,
+    /// Maximum acceptable bid/ask spread (fraction of mid).
     pub max_spread: f64,
     /// Quotes older than this are not trusted.
     pub quote_max_age_secs: i64,
@@ -201,6 +207,9 @@ impl CopySkipReason {
 
 /// The engine's verdict for one leader trade.
 #[derive(Debug, Clone, PartialEq)]
+// One verdict is built per leader trade and dropped right after dispatch; boxing
+// `OrderSignal` would churn all seven match sites for no measurable gain.
+#[allow(clippy::large_enum_variant)]
 pub enum CopyVerdict {
     /// Mirror this trade; the signal is frozen and carries the copy
     /// strategy label into the pipeline.
@@ -370,7 +379,6 @@ impl CopyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn cfg() -> CopyFollowConfig {
         CopyFollowConfig {
@@ -458,7 +466,12 @@ mod tests {
         ));
         let mut foreign = trade("t3", 0.5, 40.0, true);
         foreign.wallet = "0xstranger".into();
-        match engine.evaluate(&foreign, Some(&fresh_quote(0.51, now)), now, ExecutionMode::Paper) {
+        match engine.evaluate(
+            &foreign,
+            Some(&fresh_quote(0.51, now)),
+            now,
+            ExecutionMode::Paper,
+        ) {
             CopyVerdict::Skip(r) => assert_eq!(r, CopySkipReason::NotFollowedWallet),
             other => panic!("expected skip, got {other:?}"),
         }
@@ -544,7 +557,12 @@ mod tests {
         let mut engine = CopyEngine::new(cfg()).unwrap();
         let mut thin = trade("t8", 0.5, 40.0, true);
         thin.liquidity_usd = 10.0;
-        match engine.evaluate(&thin, Some(&fresh_quote(0.51, now)), now, ExecutionMode::Paper) {
+        match engine.evaluate(
+            &thin,
+            Some(&fresh_quote(0.51, now)),
+            now,
+            ExecutionMode::Paper,
+        ) {
             CopyVerdict::Skip(r) => assert_eq!(r, CopySkipReason::LowLiquidity),
             other => panic!("expected liquidity skip, got {other:?}"),
         }
@@ -574,7 +592,12 @@ mod tests {
         }
         // No quote at all.
         let mut engine = CopyEngine::new(cfg()).unwrap();
-        match engine.evaluate(&trade("t12", 0.5, 40.0, true), None, now, ExecutionMode::Paper) {
+        match engine.evaluate(
+            &trade("t12", 0.5, 40.0, true),
+            None,
+            now,
+            ExecutionMode::Paper,
+        ) {
             CopyVerdict::Skip(r) => assert_eq!(r, CopySkipReason::NoQuote),
             other => panic!("expected no-quote skip, got {other:?}"),
         }
@@ -615,6 +638,8 @@ mod tests {
         // The earliest id was evicted and can be re-seen (bounded memory
         // beats an unbounded set; replay protection for RECENT ids holds).
         assert!(!engine.seen.contains("bulk-0"));
-        assert!(engine.seen.contains(&format!("bulk-{}", SEEN_TRADE_CAP + 49)));
+        assert!(engine
+            .seen
+            .contains(&format!("bulk-{}", SEEN_TRADE_CAP + 49)));
     }
 }

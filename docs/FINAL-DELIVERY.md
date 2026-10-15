@@ -5,10 +5,10 @@ is a fact recorded in this repository; pointers are given inline. Status
 labels used throughout (taxonomy defined in `docs/HANDOVER.md` §3):
 
 - **VERIFIED** — executed successfully in the final engineering-freeze gate
-  on the frozen tree (2026-09-18; evidence: `AUDIT.md` §27,
+  on the frozen tree (2026-09-18; evidence: `docs/archive/AUDIT.md` §27,
   `release-manifest.json`).
-- **RECORDED IN AN EARLIER SESSION** — reported as executed in an earlier session on
-  identical source (2026-09-17 era; evidence: `AUDIT.md` §26 and earlier
+- **PREVIOUSLY REPORTED** — stated as executed successfully in an earlier session on
+  identical source (2026-09-17 era; evidence: `docs/archive/AUDIT.md` §26 and earlier
   sections); not re-executed in the final freeze sandbox.
 - **BUYER ACTION REQUIRED** — human/legal/operator step after transfer; not
   a software defect.
@@ -25,11 +25,11 @@ labels used throughout (taxonomy defined in `docs/HANDOVER.md` §3):
   against real PostgreSQL/Redis), 48 staking host tests + 2 gated validator
   e2e tests, all protocol-mock harnesses. (Post-delivery audit pass on the
   current tree: 537 workspace tests, 71 staking host tests + 3 gated e2e —
-  see CHANGELOG [Unreleased] and AUDIT.md §28. Buyer-hardening pass
+  see CHANGELOG [Unreleased] and docs/archive/AUDIT.md §28. Buyer-hardening pass
   2026-09-18: `cargo build-sbf` EXECUTED (187,504-byte `staking_suite.so`,
   SHA-256 57a890fa…) and ALL 3 validator e2e EXECUTED/PASSED on
   solana-test-validator 2.1.21 against the real mainnet-cloned mpl program
-  — see AUDIT.md §29 and docs/EVIDENCE-INDEX.md.)
+  — see docs/archive/AUDIT.md §29 and docs/EVIDENCE-INDEX.md.)
 - Release engineering: `scripts/release-check.sh` (20-gate local release
   validation), `scripts/verify-delivery.sh` (bundle integrity check, no
   toolchain required), `release-manifest.json` (machine-readable delivery
@@ -37,7 +37,7 @@ labels used throughout (taxonomy defined in `docs/HANDOVER.md` §3):
 - Deployment assets: `Dockerfile`, `docker-compose.yml`, `.dockerignore`,
   `.env.template`, `config.toml.example`, `.github/workflows/ci.yml`.
 - Documentation: 13 engineering docs + 23 buyer/delivery docs under `docs/`
-  (map in §10), plus README, CHANGELOG, AUDIT.md (evidence trail), root
+  (map in §10), plus README, CHANGELOG, docs/archive/AUDIT.md (evidence trail), root
   SECURITY.md, LICENSE (MIT), VERSION.
 - **Not included:** compiled binaries, Docker images, a deployed on-chain
   program, populated databases, `.git` objects (the authoritative repository
@@ -96,7 +96,7 @@ any point.
 | GitHub Actions CI run | not executed (no runner; equivalent steps VERIFIED locally) | NOT EXECUTED |
 | Funded live trading / mainnet landing rate | never executed (needs funded keys + explicit approval) | NOT EXECUTED |
 
-Evidence trail: `AUDIT.md` §26–27 (dated sections), `docs/TESTING.md`
+Evidence trail: `docs/archive/AUDIT.md` §26–27 (dated sections), `docs/TESTING.md`
 (per-suite detail), `release-manifest.json` → `test_counts` /
 `verification_status`, `docs/EVIDENCE-INDEX.md` (claim → evidence map).
 
@@ -143,8 +143,8 @@ EXECUTED item to VERIFIED without a new execution.
 
 ## 8. Infrastructure requirements (EXTERNAL INFRASTRUCTURE REQUIRED)
 
-- PostgreSQL ≥ 16 (recorded as tested against 16.4 in an earlier session) — durable financial truth.
-- Redis 7 (recorded as tested against 7.2.10 in an earlier session) — non-authoritative coordination/cache.
+- PostgreSQL ≥ 16 (target version 16.4; not yet evidenced in this repository) — durable financial truth.
+- Redis 7 (target version 7.2.10; not yet evidenced in this repository) — non-authoritative coordination/cache.
 - Solana RPC + WebSocket provider(s); optional Yellowstone-compatible Geyser
   provider; optional PumpPortal access.
 - Polymarket API access + Polygon key (buyer satisfies Polymarket ToS and
@@ -178,7 +178,7 @@ Full boundary: `docs/SCOPE-BOUNDARY.md`. Deployment sequence:
 |---|---|
 | Start here | **this file** → `docs/BUYER-QUICKSTART.md` → `docs/DELIVERY-MANIFEST.md` (index of everything) |
 | Understand the system | `docs/BUYER-OVERVIEW.md`, `docs/TECHNICAL-FACT-SHEET.md`, `docs/ARCHITECTURE.md`, `docs/MODULES.md` |
-| Verify claims | `docs/CAPABILITY-MATRIX.md`, `docs/EVIDENCE-INDEX.md`, `docs/BUYER-DUE-DILIGENCE.md`, `docs/TESTING.md`, `AUDIT.md` |
+| Verify claims | `docs/CAPABILITY-MATRIX.md`, `docs/EVIDENCE-INDEX.md`, `docs/BUYER-DUE-DILIGENCE.md`, `docs/TESTING.md`, `docs/archive/AUDIT.md` |
 | Deploy & operate | `docs/BUYER-DEPLOYMENT.md`, `docs/DEPLOYMENT.md`, `docs/OPERATIONS.md`, `docs/BACKUP-RESTORE.md`, `docs/RECONCILIATION.md`, `docs/DISTRIBUTED.md`, `docs/DEMO-RUNBOOK.md` |
 | Commercial/transfer | `docs/ACCEPTANCE-CHECKLIST.md`, `docs/SCOPE-BOUNDARY.md`, `docs/SUPPORT-HANDOVER.md`, `docs/IP-COMPONENTS.md`, `docs/THIRD-PARTY.md`, `docs/BUYER-RISK-REGISTER.md`, `docs/SELLER-FACT-SHEET.md`, `docs/SELLING-LISTING-SOURCE.md` |
 | Release/engineering | `README.md`, `CHANGELOG.md`, `docs/RELEASE.md`, `docs/HANDOVER.md`, `docs/API.md`, `docs/SECURITY.md`, `docs/STAKING.md`, `SECURITY.md`, `release-manifest.json` |

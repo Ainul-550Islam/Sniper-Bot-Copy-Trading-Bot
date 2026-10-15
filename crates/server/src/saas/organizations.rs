@@ -195,20 +195,9 @@ async fn run_provisioning(
                             now,
                         );
                         if let Err(e) = state.saas.create_organization(&o).await {
-                            // Persist only a generic reason; driver text stays in the log.
-                            tracing::error!(
-                                error = %e,
-                                slug,
-                                "provisioning organization create failed"
-                            );
-                            job.record_failure("organization storage unavailable", now);
+                            job.record_failure(e.to_string(), now);
                             let _ = state.saas.update_job(job).await;
-                            return Err(match &e {
-                                bot_core::error::BotError::Db(_) => {
-                                    crate::saas::users::internal_store_failure(&e)
-                                }
-                                other => (StatusCode::CONFLICT, other.to_string()).into_response(),
-                            });
+                            return Err((StatusCode::CONFLICT, e.to_string()).into_response());
                         }
                         o
                     }
@@ -322,10 +311,11 @@ async fn run_provisioning(
                 };
                 if subscription.is_none() {
                     if let Err(e) = state.saas.assign_plan(org_id, plan, now).await {
-                        tracing::error!(error = %e, "provisioning plan assignment failed");
-                        job.record_failure("plan assignment unavailable", now);
+                        job.record_failure(e.to_string(), now);
                         let _ = state.saas.update_job(job).await;
-                        return Err(crate::saas::users::internal_store_failure(&e));
+                        return Err(
+                            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+                        );
                     }
                 }
                 job.complete_step(step, now);
@@ -493,7 +483,7 @@ pub async fn update_organization(
     org.name = body.name.trim().to_string();
     org.updated_at = Utc::now();
     if let Err(e) = state.saas.update_organization(&org).await {
-        return crate::saas::users::internal_store_failure(&e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     state
         .audit
@@ -652,7 +642,7 @@ pub async fn suspend_organization(
     }
     org.updated_at = now;
     if let Err(e) = state.saas.update_organization(&org).await {
-        return crate::saas::users::internal_store_failure(&e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     state
         .audit

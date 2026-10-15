@@ -131,11 +131,16 @@ mod tests {
             amount_in: 42,
             min_out: 1,
         };
-        for adapter in [&MeteoraDlmm::new() as &dyn VenueAdapter, &MeteoraDammV1::new()] {
+        for adapter in [
+            &MeteoraDlmm::new() as &dyn VenueAdapter,
+            &MeteoraDammV1::new(),
+        ] {
             let err = adapter.build_swap(&req).unwrap_err();
             assert!(err.to_string().contains("unverified"));
             assert_eq!(
-                VenueError::LayoutUnverified.into_bot_error(adapter.id()).to_string(),
+                VenueError::LayoutUnverified
+                    .into_bot_error(adapter.id())
+                    .to_string(),
                 err.to_string()
             );
         }

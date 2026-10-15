@@ -64,7 +64,7 @@ fn state_with(saas: Arc<SaasStore>) -> ApiState {
 }
 
 fn test_state() -> ApiState {
-    state_with(Arc::new(SaasStore::new()))
+    state_with(Arc::new(SaasStore::new_in_memory_identity()))
 }
 
 async fn request(
@@ -83,9 +83,7 @@ async fn request(
         builder = builder.header("content-type", "application/json");
     }
     let request = builder
-        .body(Body::from(
-            body.map(|v| v.to_string()).unwrap_or_default(),
-        ))
+        .body(Body::from(body.map(|v| v.to_string()).unwrap_or_default()))
         .expect("build request");
     let response = app.oneshot(request).await.expect("oneshot");
     let status = response.status();
@@ -95,9 +93,8 @@ async fn request(
     let value: Value = if bytes.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(&bytes).unwrap_or(Value::String(
-            String::from_utf8_lossy(&bytes).into_owned(),
-        ))
+        serde_json::from_slice(&bytes)
+            .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
     };
     (status, value)
 }
@@ -232,7 +229,7 @@ async fn login_never_enumerates_accounts() {
 
 #[tokio::test]
 async fn session_token_is_returned_once_and_authenticates() {
-    let saas = Arc::new(SaasStore::new());
+    let saas = Arc::new(SaasStore::new_in_memory_identity());
     let token = register_and_login(saas.clone()).await;
 
     // The token authenticates the profile endpoint.
@@ -272,7 +269,7 @@ async fn session_token_is_returned_once_and_authenticates() {
 
 #[tokio::test]
 async fn organization_scoped_login_requires_membership() {
-    let saas = Arc::new(SaasStore::new());
+    let saas = Arc::new(SaasStore::new_in_memory_identity());
     let _token = register_and_login(saas.clone()).await;
 
     // Scoping into an organization the user does not belong to is a hard
@@ -350,12 +347,21 @@ async fn mfa_code_without_organization_upgrades_nothing() {
 #[tokio::test]
 async fn security_surface_refuses_unauthenticated_callers() {
     let state = test_state();
-    for (method, path) in [
-        ("GET", "/api/saas/security/status"),
-        ("POST", "/api/saas/security/totp/setup"),
-        ("POST", "/api/saas/security/totp/verify"),
-    ] {
-        let (status, _) = request(state.clone(), method, path, None, None).await;
+    // Each request carries the body its endpoint requires (a well-formed
+    // payload), so it reaches the authentication check rather than failing
+    // body extraction first.
+    let cases: [(&str, &str, Option<serde_json::Value>); 3] = [
+        ("GET", "/api/saas/security/status", None),
+        ("POST", "/api/saas/security/totp/setup", None),
+        (
+            "POST",
+            "/api/saas/security/totp/verify",
+            Some(serde_json::json!({ "code": "000000" })),
+        ),
+    ];
+    for (method, path, body) in cases {
+        let (status, _) = request(state.clone(), method, path, body, None).await;
+
         assert!(
             status == StatusCode::UNAUTHORIZED || status == StatusCode::BAD_REQUEST,
             "{method} {path} must refuse unauthenticated callers, got {status}"

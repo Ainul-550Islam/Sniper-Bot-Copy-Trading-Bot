@@ -1,0 +1,44 @@
+
+> control-plane@0.1.0 test
+> node --test tests
+
+TAP version 13
+# Subtest: frontend truthfulness gate rejects fake-data regressions
+ok 1 - frontend truthfulness gate rejects fake-data regressions
+  ---
+  duration_ms: 2935.914473
+  ...
+# Subtest: customer trading client is tenant-only and fail-closed
+ok 2 - customer trading client is tenant-only and fail-closed
+  ---
+  duration_ms: 2.340072
+  ...
+# Subtest: shared API client keeps credentials out of URLs, cookies, and storage
+ok 3 - shared API client keeps credentials out of URLs, cookies, and storage
+  ---
+  duration_ms: 0.735146
+  ...
+# Subtest: kill-switch contract remains confirmed, POST-only, and refreshes server truth
+ok 4 - kill-switch contract remains confirmed, POST-only, and refreshes server truth
+  ---
+  duration_ms: 0.464098
+  ...
+# Subtest: MFA login and invite enrollment remain limited until server promotion
+ok 5 - MFA login and invite enrollment remain limited until server promotion
+  ---
+  duration_ms: 0.81756
+  ...
+# Subtest: all frontend source files avoid obvious synthetic-data primitives
+ok 6 - all frontend source files avoid obvious synthetic-data primitives
+  ---
+  duration_ms: 11.096918
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3015.828065

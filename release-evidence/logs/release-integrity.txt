@@ -1,0 +1,17 @@
+== [1/4] source parity ==
+[compare] MISSING buyer source tree: /home/user/Sniper-Bot-Copy-Trading-Bot/buyer-release/source
+== [1/4] FAIL
+== [2/4] manifest counts ==
+  manifest counts verified
+== [2/4] OK
+== [3/4] contamination ==
+  buyer-release/ is missing: contamination scan cannot run
+find: '/home/user/Sniper-Bot-Copy-Trading-Bot/buyer-release': No such file or directory
+find: '/home/user/Sniper-Bot-Copy-Trading-Bot/buyer-release': No such file or directory
+find: '/home/user/Sniper-Bot-Copy-Trading-Bot/buyer-release': No such file or directory
+== [3/4] FAIL
+== [4/4] version consistency ==
+  buyer-release/ is missing: nothing to verify (build the package first)
+== [4/4] FAIL
+
+RESULT: RELEASE INTEGRITY FAILED

@@ -168,7 +168,10 @@ async fn fresh_migrations_apply_and_keep_operator_and_tenant_tables_separate() {
     let strategy_a = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
     let mut transaction = pool.begin().await.expect("test transaction must start");
-    for (id, slug) in [(organization_a, "migration-a"), (organization_b, "migration-b")] {
+    for (id, slug) in [
+        (organization_a, "migration-a"),
+        (organization_b, "migration-b"),
+    ] {
         sqlx::query("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $3)")
             .bind(id)
             .bind(slug)
@@ -443,7 +446,10 @@ async fn fresh_migrations_apply_and_keep_operator_and_tenant_tables_separate() {
             .fetch_optional(&mut *transaction)
             .await
             .expect("backfilled session projection must be queryable");
-    assert_eq!(projected_session.as_deref(), Some(backfill_token_hash.as_str()));
+    assert_eq!(
+        projected_session.as_deref(),
+        Some(backfill_token_hash.as_str())
+    );
 
     transaction
         .rollback()

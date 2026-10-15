@@ -60,9 +60,7 @@ impl LandingProvider for JitoLanding {
 
     async fn send(&self, signed_tx_base64: &str, signature: &str) -> BotResult<SendReceipt> {
         if signed_tx_base64.is_empty() {
-            return Err(BotError::invalid(
-                "landing jito: empty transaction bytes",
-            ));
+            return Err(BotError::invalid("landing jito: empty transaction bytes"));
         }
         let body = json!({
             "jsonrpc": "2.0",

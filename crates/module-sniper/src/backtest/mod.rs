@@ -86,7 +86,8 @@ pub fn run_backtest(
         per_scenario,
         model_caveats: vec![
             "all bundled scenarios are SYNTHETIC (seeded PRNG), not real launch data".into(),
-            "fill model is price-taker at the post-latency tick; no queue-position or MEV model".into(),
+            "fill model is price-taker at the post-latency tick; no queue-position or MEV model"
+                .into(),
             "landing uses a congestion threshold, not leader/block-engine simulation".into(),
         ],
     }

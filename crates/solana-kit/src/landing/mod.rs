@@ -153,7 +153,10 @@ impl<P: LandingProvider> CircuitBreaker<P> {
         match inner.state {
             BreakerState::Closed => Ok(BreakerState::Closed),
             BreakerState::Open => {
-                let due = inner.open_until.map(|t| Instant::now() >= t).unwrap_or(true);
+                let due = inner
+                    .open_until
+                    .map(|t| Instant::now() >= t)
+                    .unwrap_or(true);
                 if due {
                     // Transition now so exactly ONE caller probes.
                     inner.state = BreakerState::HalfOpen;
@@ -245,9 +248,7 @@ impl LandingRouter {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| {
-            BotError::rpc("landing: every route refused".to_string())
-        }))
+        Err(last.unwrap_or_else(|| BotError::rpc("landing: every route refused".to_string())))
     }
 }
 
@@ -324,7 +325,11 @@ mod tests {
         // The next call is SHED: the underlying provider sees no new call.
         let err = breaker.send("tx", "sig").await.unwrap_err();
         assert!(err.to_string().contains("circuit open"));
-        assert_eq!(breaker.provider.calls(), 3, "shed call must not reach the provider");
+        assert_eq!(
+            breaker.provider.calls(),
+            3,
+            "shed call must not reach the provider"
+        );
         assert_eq!(breaker.stats().await.total_shed, 1);
     }
 
@@ -388,7 +393,10 @@ mod tests {
         let b = Arc::new(FakeLanding::new("b", u32::MAX));
         let router = LandingRouter::new(vec![a, b]);
         let err = router.send("tx", "sig").await.unwrap_err();
-        assert!(err.to_string().contains("fake:0"), "last refusal surfaces: {err}");
+        assert!(
+            err.to_string().contains("fake:0"),
+            "last refusal surfaces: {err}"
+        );
     }
 
     #[tokio::test]
@@ -410,7 +418,10 @@ mod tests {
         let _ = flaky.send("tx", "sig").await;
         assert_eq!(flaky.stats().await.state, BreakerState::Open);
         let router = LandingRouter::new(vec![flaky.clone(), steady.clone()]);
-        let receipt = router.send("tx", "sig-2").await.expect("accepts via steady");
+        let receipt = router
+            .send("tx", "sig-2")
+            .await
+            .expect("accepts via steady");
         assert_eq!(receipt.provider, "steady");
         // The flaky provider itself saw only the 1 original (tripping) call.
         assert_eq!(flaky.stats().await.total_shed, 1);

@@ -98,12 +98,15 @@ pub async fn mint_code(State(state): State<ApiState>, headers: HeaderMap) -> Res
     };
 
     for _ in 0..MINT_ATTEMPTS {
-        let code = match mint_code_value() {
-            Ok(c) => c,
-            Err(reason) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "referral_mint_failed", "reason": reason.to_string() }))).into_response()
-            }
-        };
+        let code =
+            match mint_code_value() {
+                Ok(c) => c,
+                Err(reason) => return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "referral_mint_failed", "reason": reason.to_string() })),
+                )
+                    .into_response(),
+            };
         let result = sqlx::query(
             "INSERT INTO referral_codes (code, organization_id, created_by, status) VALUES ($1, $2, $3, 'active')",
         )
@@ -253,7 +256,11 @@ pub async fn disable_code(
                     Some(&ctx.organization.id.to_string()),
                 )
                 .await;
-            (StatusCode::OK, Json(json!({ "code": code, "status": "disabled" }))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({ "code": code, "status": "disabled" })),
+            )
+                .into_response()
         }
         Ok(_) => (
             StatusCode::NOT_FOUND,
@@ -386,12 +393,11 @@ pub async fn redeem(
     let code = body.code.trim().to_ascii_uppercase();
 
     // Already attributed? Surface the fact instead of an opaque conflict.
-    let existing = sqlx::query(
-        "SELECT 1 FROM referral_attributions WHERE referred_organization_id = $1",
-    )
-    .bind(ctx.organization.id.as_uuid())
-    .fetch_optional(db.pool())
-    .await;
+    let existing =
+        sqlx::query("SELECT 1 FROM referral_attributions WHERE referred_organization_id = $1")
+            .bind(ctx.organization.id.as_uuid())
+            .fetch_optional(db.pool())
+            .await;
     match existing {
         Ok(Some(_)) => {
             return (
@@ -499,9 +505,7 @@ mod tests {
         for _ in 0..50 {
             let code = mint_code_value().unwrap();
             assert_eq!(code.len(), CODE_LEN);
-            assert!(code
-                .chars()
-                .all(|c| CODE_ALPHABET.contains(&(c as u8))));
+            assert!(code.chars().all(|c| CODE_ALPHABET.contains(&(c as u8))));
         }
     }
 

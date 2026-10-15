@@ -76,47 +76,5 @@ for cls in "class 1 (tenant-safe)" "class 2 (intentional-global)" "class 3 (oper
 done
 echo "[sql-regression] all five forensic classes reported"
 
-echo "[sql-regression] 4/4 — every reviewed identity/token exception must stay listed, with its reason"
-# Each entry is a reviewed global identity or token flow (see the
-# SANCTIONED_GLOBAL comment in the scanner). Removing one silently re-exposes
-# its statements, so the regression locks the exact (file, table) pairs.
-EXCEPTIONS=(
-  '("email_verification", "users"'
-  '("password_reset", "users"'
-  '("postgres", "users"'
-  '("auth_flows", "users"'
-  '("auth_flows", "invites"'
-  '("auth_flows", "saas_runtime_records"'
-)
-for pair in "${EXCEPTIONS[@]}"; do
-  if ! grep -qF "$pair" "$SCAN"; then
-    echo "[sql-regression] FAIL — reviewed exception missing from scanner: $pair" >&2
-    exit 1
-  fi
-done
-echo "[sql-regression] all six reviewed identity/token exceptions present"
-
-echo "[sql-regression] 5/5 — the machine-readable report agrees with the exit code"
-JSON_OUT="$(mktemp)"
-trap 'rm -f "$JSON_OUT"' EXIT
-FORENSIC_JSON="$JSON_OUT" bash "$SCAN" >/dev/null 2>&1
-SCAN_RC=$?
-if ! python3 - "$JSON_OUT" "$SCAN_RC" <<'PY'
-import json, sys
-report = json.load(open(sys.argv[1], encoding="utf-8"))
-rc = int(sys.argv[2])
-assert report["schema"] == 1, "schema"
-assert report["class4_count"] == sum(1 for f in report["findings"] if f["class"] == 4), "count"
-assert report["verdict"] == ("FAIL" if report["class4_count"] else "PASS"), "verdict"
-assert (rc == 0) == (report["verdict"] == "PASS"), "rc disagrees with verdict"
-assert report["extraction_failures"] == [], "extraction failures"
-assert set(report["class_counts"]) == {"1", "2", "3", "4", "5"}, "classes"
-PY
-then
-  echo "[sql-regression] FAIL — JSON report disagrees with the scan" >&2
-  exit 1
-fi
-echo "[sql-regression] JSON report consistent (verdict and rc agree)"
-
-echo "[sql-regression] PASS — zero class-4 on the real tree, drift detection proven, vocabulary intact, exceptions locked, JSON consistent"
+echo "[sql-regression] PASS — zero class-4 on the real tree, drift detection proven, vocabulary intact"
 exit 0

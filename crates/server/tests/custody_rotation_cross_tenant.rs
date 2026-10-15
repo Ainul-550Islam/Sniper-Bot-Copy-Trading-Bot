@@ -47,7 +47,7 @@ fn test_state() -> ApiState {
         serve_dashboard: false,
         health: Arc::new(HealthRegistry::new()),
         metrics_enabled: false,
-        saas: Arc::new(SaasStore::new()),
+        saas: Arc::new(SaasStore::new_in_memory_identity()),
         trading: None,
         module_registry: Arc::new(
             sniper_suite::module_runtime::module_registry::TenantModuleRegistry::new(),

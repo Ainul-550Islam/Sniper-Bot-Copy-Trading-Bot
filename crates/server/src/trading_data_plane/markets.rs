@@ -48,10 +48,7 @@ fn plane_unavailable() -> Response {
         .into_response()
 }
 
-fn matches_query(
-    ticker: &bot_core::market_data::MarketTicker,
-    query: &MarketQuery,
-) -> bool {
+fn matches_query(ticker: &bot_core::market_data::MarketTicker, query: &MarketQuery) -> bool {
     if let Some(venue) = query.venue.as_deref() {
         let venue = venue.trim().to_ascii_lowercase();
         if !venue.is_empty() {

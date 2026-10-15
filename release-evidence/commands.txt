@@ -1,0 +1,16 @@
+# release-evidence commands
+date_utc: 2026-10-09T12:12:36Z
+version: 0.1.0
+source_sha: 09bce9377562d759680281d924afef937788079b
+uncommitted_entries: 3
+(cd apps/control-plane && npm ci)
+(cd apps/control-plane && npm run typecheck)
+(cd apps/control-plane && npm run lint)
+(cd apps/control-plane && npm test)
+(cd apps/control-plane && npm run build)
+bash scripts/scan-secrets.sh
+bash scripts/verify-marketing-claims.sh
+bash tests/release/manifest_current.sh
+bash tests/release/stats_current.sh
+bash scripts/release-check.sh
+bash scripts/verify-release-integrity.sh

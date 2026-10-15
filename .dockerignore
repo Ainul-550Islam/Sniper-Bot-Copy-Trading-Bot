@@ -25,19 +25,18 @@ id.json
 README.md
 docs
 
-# Release-hygiene additions: the root image copies only Cargo manifests and
-# crates/. Frontend build output, test output, session uploads, the buyer
-# package and local toolchain state must never enter the build context.
-**/node_modules
-**/.next
-**/.turbo
-**/.vercel
-**/dist
-**/out
-**/build
-**/test-results
-**/playwright-report
-uploads
-release-evidence
-buyer-release
-.cargo
+# Toolchain shims, sandbox/Solana CLI state and agent-only trees never enter
+# the build context (also asserted by scripts/verify-delivery.sh).
+.cargo/bin
+.cargo/env
+.config/
+uploads/
+docs/archive/
+evidence/
+legal/
+target/
+apps/control-plane/node_modules
+apps/control-plane/.next
+apps/control-plane/test-results
+*.md
+!README.md

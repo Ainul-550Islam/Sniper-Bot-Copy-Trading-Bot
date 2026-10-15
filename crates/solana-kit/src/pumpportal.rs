@@ -34,8 +34,8 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tracing::{debug, info, warn};
 
-use bot_core::error::{BotError, BotResult};
 use crate::ws::redact_ws_url;
+use bot_core::error::{BotError, BotResult};
 use bot_core::maths;
 
 use crate::consts::{PUMPPORTAL_TRADE_API, PUMPPORTAL_WS_URL};
@@ -297,7 +297,10 @@ impl AbortOnDropJoin {
                 self.handle.take();
             }
             Err(_) => {
-                warn!(task = self.label, "task did not stop before deadline; aborting it");
+                warn!(
+                    task = self.label,
+                    "task did not stop before deadline; aborting it"
+                );
                 if let Some(task) = self.handle.as_ref() {
                     task.abort();
                 }
@@ -407,8 +410,11 @@ impl PumpPortalFeed {
                 .join_with_timeout(STOP_TIMEOUT)
                 .await;
         }
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|error| BotError::config(format!("pumpportal start requires a Tokio runtime: {error}")))?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            BotError::config(format!(
+                "pumpportal start requires a Tokio runtime: {error}"
+            ))
+        })?;
         let url = self.url.clone();
         let frames = self.subscription.frames();
         let tx = self.tx.clone();

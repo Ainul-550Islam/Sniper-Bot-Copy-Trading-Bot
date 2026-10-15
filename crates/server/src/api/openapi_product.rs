@@ -60,6 +60,5 @@ pub fn product_schemas() -> Value {
 
 /// Generates OpenAPI v3 paths documentation for product endpoints.
 pub fn product_paths() -> Value {
-    json!({
-    })
+    json!({})
 }

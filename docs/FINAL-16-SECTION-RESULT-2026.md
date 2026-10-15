@@ -412,7 +412,7 @@ an evidence level above what exists in this repository
 
 **Final measured state:**
 
-* Buyer-release parity: **PASS** — byte-exact, 857 files (the manifest's product_files 856 excludes the root release-manifest.json itself to avoid self-reference; the compare counts it — both views documented). (2026-10-01: +1 file vs the PROMPT 6 close — the root census `AUDIT-OPEN-ITEMS-2026-10-01.md`; all release gates re-run green after the standard refresh cycle.)
+* Buyer-release parity: **PASS** — byte-exact, 857 files (the manifest's product_files 856 excludes the root release-manifest.json itself to avoid self-reference; the compare counts it — both views documented). (2026-10-01: +1 file vs the PROMPT 6 close — the root census `docs/archive/AUDIT-OPEN-ITEMS-2026-10-01.md`; all release gates re-run green after the standard refresh cycle.)
 * Manifest: **CURRENT** — product_files 856, rust_files 564,
   docs_files 122, migrations 35 (high-water 0035), test_count 1740
   (recomputed from the tree), version 0.1.0 coherent.

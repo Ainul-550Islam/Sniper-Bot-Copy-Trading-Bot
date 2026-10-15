@@ -257,6 +257,6 @@ mod tests {
         assert_eq!(format_money(0, "usd"), "0.00 USD");
         assert_eq!(format_money(5, "eur"), "0.05 EUR");
         assert_eq!(format_money(-1999, "usd"), "-19.99 USD");
-        assert_eq!(format_money(i64::MIN, "usd").starts_with('-'), true);
+        assert!(format_money(i64::MIN, "usd").starts_with('-'));
     }
 }

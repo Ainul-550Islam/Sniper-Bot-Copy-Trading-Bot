@@ -41,7 +41,7 @@ use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
 use solana_system_interface::program as system_program;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use bot_core::error::{BotError, BotResult};
 use bot_core::maths;
@@ -193,8 +193,7 @@ impl GlobalState {
         let fee_recipient = read_pubkey(data, GLOBAL_OFF_FEE_RECIPIENT);
         let initial_virtual_token_reserves =
             read_u64(data, GLOBAL_OFF_INITIAL_VIRTUAL_TOKEN_RESERVES);
-        let initial_virtual_sol_reserves =
-            read_u64(data, GLOBAL_OFF_INITIAL_VIRTUAL_SOL_RESERVES);
+        let initial_virtual_sol_reserves = read_u64(data, GLOBAL_OFF_INITIAL_VIRTUAL_SOL_RESERVES);
         let initial_real_token_reserves = read_u64(data, GLOBAL_OFF_INITIAL_REAL_TOKEN_RESERVES);
         let token_total_supply = read_u64(data, GLOBAL_OFF_TOKEN_TOTAL_SUPPLY);
         let fee_basis_points = read_u64(data, GLOBAL_OFF_FEE_BASIS_POINTS);
@@ -264,8 +263,14 @@ impl GlobalState {
             creator_fee_basis_points,
             fee_recipients,
             create_v2_enabled: optional_bool(GLOBAL_OFF_CREATE_V2_ENABLED, "create_v2_enabled")?,
-            mayhem_mode_enabled: optional_bool(GLOBAL_OFF_MAYHEM_MODE_ENABLED, "mayhem_mode_enabled")?,
-            is_cashback_enabled: optional_bool(GLOBAL_OFF_IS_CASHBACK_ENABLED, "is_cashback_enabled")?,
+            mayhem_mode_enabled: optional_bool(
+                GLOBAL_OFF_MAYHEM_MODE_ENABLED,
+                "mayhem_mode_enabled",
+            )?,
+            is_cashback_enabled: optional_bool(
+                GLOBAL_OFF_IS_CASHBACK_ENABLED,
+                "is_cashback_enabled",
+            )?,
             buyback_basis_points: optional_u64(GLOBAL_OFF_BUYBACK_BASIS_POINTS),
             initial_virtual_quote_reserves: optional_u64(GLOBAL_OFF_INITIAL_VIRTUAL_QUOTE_RESERVES),
             is_holder_reward_enabled: optional_bool(
@@ -416,6 +421,21 @@ impl BondingCurveState {
         self.complete || (self.virtual_token_reserves == 0 && self.virtual_sol_reserves == 0)
     }
 
+    /// Why this curve must not be traded, or `None` when it is live.
+    ///
+    /// `Graduated` covers a completed curve and a curve with both reserves
+    /// zeroed. `EmptyReserves` covers a live-flagged curve with one virtual
+    /// reserve at zero, which has nothing to price against.
+    pub fn refusal(&self) -> Option<CurveRefusal> {
+        if self.is_graduated() {
+            Some(CurveRefusal::Graduated)
+        } else if self.virtual_token_reserves == 0 || self.virtual_sol_reserves == 0 {
+            Some(CurveRefusal::EmptyReserves)
+        } else {
+            None
+        }
+    }
+
     /// True when the account still needs `extend_account` before trading
     /// (accounts created before the cashback upgrade are shorter than 83 B).
     pub fn needs_extend(&self) -> bool {
@@ -444,6 +464,25 @@ fn read_pubkey(data: &[u8], off: usize) -> Pubkey {
 // --------------------------------------------------------------------------
 // Context: everything needed to build instructions for one mint
 // --------------------------------------------------------------------------
+
+/// Why a bonding curve is refused for trading. Typed so the market loader can
+/// report it without matching on error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveRefusal {
+    /// The curve completed (or both reserves are zeroed): trade on PumpSwap.
+    Graduated,
+    /// A virtual reserve is zero: there is no price to trade against.
+    EmptyReserves,
+}
+
+impl CurveRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CurveRefusal::Graduated => "graduated",
+            CurveRefusal::EmptyReserves => "empty_reserves",
+        }
+    }
+}
 
 /// All the accounts a pump buy/sell needs for one (mint, user) pair.
 #[derive(Debug, Clone)]
@@ -596,20 +635,24 @@ impl PumpContext {
         user: &Pubkey,
         fee_recipient_override: Option<Pubkey>,
     ) -> BotResult<Self> {
-        Self::load_inner(rpc, mint, user, fee_recipient_override, false).await
+        Self::load_inner(rpc, mint, user, fee_recipient_override, true).await
     }
 
-    /// Like [`PumpContext::load`], but a graduated (complete) curve is returned
-    /// instead of rejected, so the caller's route selection can route it to
-    /// PumpSwap/Raydium/Jupiter or report INVALID_ROUTE. Used by the sniper's
-    /// market loader only; trading paths keep the strict `load`.
-    pub async fn load_for_routing(
+    /// Like [`PumpContext::load`], but a graduated or empty-reserve curve is
+    /// returned as observed instead of refused, so the market loader can
+    /// classify it (see [`CurveRefusal`]) and let the entry gates reject it
+    /// with a typed reason.
+    ///
+    /// Trading callers must use [`PumpContext::load`]. A context returned
+    /// here must never be used to build a transaction without checking
+    /// `ctx.curve.refusal()` first.
+    pub async fn load_observed(
         rpc: &Rpc,
         mint: &Pubkey,
         user: &Pubkey,
         fee_recipient_override: Option<Pubkey>,
     ) -> BotResult<Self> {
-        Self::load_inner(rpc, mint, user, fee_recipient_override, true).await
+        Self::load_inner(rpc, mint, user, fee_recipient_override, false).await
     }
 
     async fn load_inner(
@@ -617,7 +660,7 @@ impl PumpContext {
         mint: &Pubkey,
         user: &Pubkey,
         fee_recipient_override: Option<Pubkey>,
-        allow_graduated: bool,
+        strict: bool,
     ) -> BotResult<Self> {
         let bonding_curve = bonding_curve_pda(mint);
         let global = *PUMP_GLOBAL;
@@ -677,14 +720,9 @@ impl PumpContext {
                 "bonding curve {bonding_curve} has an invalid creator or zero token supply"
             )));
         }
-        // A graduated curve is refused by trading callers (they must use
-        // PumpSwap). Routing callers may load it so route selection decides.
-        // A curve with empty virtual reserves is loaded by both: the sniper's
-        // `min_liquidity` / `price_sane` gates reject it as
-        // INSUFFICIENT_LIQUIDITY, and `plan_buy` refuses to build a trade.
-        if curve.complete && !allow_graduated {
+        if strict && curve.refusal().is_some() {
             return Err(BotError::solana(format!(
-                "bonding curve {bonding_curve} is graduated; use PumpSwap"
+                "bonding curve {bonding_curve} is graduated or has empty virtual reserves; use PumpSwap"
             )));
         }
 
@@ -1122,12 +1160,6 @@ pub fn plan_buy(
     if curve.complete {
         return Err(BotError::solana(
             "bonding curve is complete — token has graduated, use PumpSwap/Raydium",
-        ));
-    }
-    // Defence in depth: an empty curve must never be priced into a buy.
-    if curve.virtual_token_reserves == 0 || curve.virtual_sol_reserves == 0 {
-        return Err(BotError::solana(
-            "bonding curve has empty virtual reserves — no liquidity to buy against",
         ));
     }
     // Deduct the protocol fee from the SOL budget to get the curve amount.

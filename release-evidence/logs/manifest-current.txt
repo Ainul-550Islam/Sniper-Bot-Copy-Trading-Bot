@@ -1,0 +1,6 @@
+[manifest-current] docs_files: OK (155)
+[manifest-current] rust_files: OK (678)
+[manifest-current] migrations: OK (54)
+[manifest-current] migration high-water: OK (0054)
+[manifest-current] version: OK (0.1.0)
+[manifest-current] PASS — manifest matches the tree

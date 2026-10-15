@@ -78,7 +78,11 @@ fn mark(tokens: f64, price: f64, exit_cost_bps: f64) -> (f64, f64) {
 /// Rule order per tick (deliberate: risk rules outrank profit rules):
 /// stop-loss → take-profit → max-hold. When no tick triggers, the final
 /// tick of the path closes the position as `EndOfData`.
-pub fn simulate_exit(scenario: &BacktestScenario, cfg: &ExitConfig, fill: &FilledEntry) -> ExitOutcome {
+pub fn simulate_exit(
+    scenario: &BacktestScenario,
+    cfg: &ExitConfig,
+    fill: &FilledEntry,
+) -> ExitOutcome {
     let cost = fill.cost_sol;
     // Ticks at or after the fill landed. simulate_fill guarantees at least
     // one exists (it filled against one), but stay defensive: fall back to
@@ -152,7 +156,7 @@ mod tests {
             seed: 0,
             entry_t_ms: 0,
             entry_quote_lamports: 1_000_000, // 0.001 SOL
-            initial_reserve_sol: 100.0, // big reserve → tiny impact/fraction effects
+            initial_reserve_sol: 100.0,      // big reserve → tiny impact/fraction effects
             congestion: 0.0,
             ticks: prices
                 .iter()
@@ -167,8 +171,10 @@ mod tests {
     }
 
     fn filled(s: &BacktestScenario) -> FilledEntry {
-        let mut cfg = FillModelConfig::default();
-        cfg.entry_latency_ms = 0;
+        let cfg = FillModelConfig {
+            entry_latency_ms: 0,
+            ..Default::default()
+        };
         match simulate_fill(s, &cfg) {
             crate::backtest::fill_model::FillOutcome::Filled(f) => f,
             other => panic!("expected fill: {other:?}"),
@@ -231,8 +237,22 @@ mod tests {
     fn exit_costs_reduce_net_proceeds() {
         let s = crafted(&[1e-6, 10e-6]);
         let fill = filled(&s);
-        let free = simulate_exit(&s, &ExitConfig { exit_cost_bps: 0.0, ..ExitConfig::default() }, &fill);
-        let paid = simulate_exit(&s, &ExitConfig { exit_cost_bps: 200.0, ..ExitConfig::default() }, &fill);
+        let free = simulate_exit(
+            &s,
+            &ExitConfig {
+                exit_cost_bps: 0.0,
+                ..ExitConfig::default()
+            },
+            &fill,
+        );
+        let paid = simulate_exit(
+            &s,
+            &ExitConfig {
+                exit_cost_bps: 200.0,
+                ..ExitConfig::default()
+            },
+            &fill,
+        );
         assert!((paid.net_sol - free.net_sol * (1.0 - 200.0 / 10_000.0)).abs() < 1e-12);
     }
 }

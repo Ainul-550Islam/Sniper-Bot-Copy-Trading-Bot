@@ -77,7 +77,11 @@ fn corpus_has_at_least_fifty_synthetic_fixtures() {
         let scenario: BacktestScenario = serde_json::from_value(v["scenario"].clone())
             .unwrap_or_else(|e| panic!("{name}: scenario parse: {e}"));
         assert_eq!(scenario.label, DatasetLabel::Synthetic);
-        assert!(scenario.defects().is_empty(), "{name}: {:?}", scenario.defects());
+        assert!(
+            scenario.defects().is_empty(),
+            "{name}: {:?}",
+            scenario.defects()
+        );
     }
 }
 
@@ -121,7 +125,10 @@ fn rust_simulator_matches_the_python_reference_outcomes() {
                     "{name}: fill tick"
                 );
                 assert!(
-                    close(fill.fill_price_sol, expected["fill_price_sol"].as_f64().unwrap()),
+                    close(
+                        fill.fill_price_sol,
+                        expected["fill_price_sol"].as_f64().unwrap()
+                    ),
                     "{name}: fill price {} vs {}",
                     fill.fill_price_sol,
                     expected["fill_price_sol"]
@@ -133,11 +140,17 @@ fn rust_simulator_matches_the_python_reference_outcomes() {
                     expected["cost_sol"]
                 );
                 assert!(
-                    close(fill.tokens_bought, expected["tokens_bought"].as_f64().unwrap()),
+                    close(
+                        fill.tokens_bought,
+                        expected["tokens_bought"].as_f64().unwrap()
+                    ),
                     "{name}: tokens"
                 );
                 assert!(
-                    close(fill.filled_fraction, expected["filled_fraction"].as_f64().unwrap()),
+                    close(
+                        fill.filled_fraction,
+                        expected["filled_fraction"].as_f64().unwrap()
+                    ),
                     "{name}: filled fraction"
                 );
                 assert!(
@@ -155,7 +168,10 @@ fn rust_simulator_matches_the_python_reference_outcomes() {
                     "{name}: exit tick"
                 );
                 assert!(
-                    close(exit.exit_price_sol, expected["exit_price_sol"].as_f64().unwrap()),
+                    close(
+                        exit.exit_price_sol,
+                        expected["exit_price_sol"].as_f64().unwrap()
+                    ),
                     "{name}: exit price"
                 );
                 assert!(
@@ -197,7 +213,10 @@ fn corpus_run_is_deterministic_and_labelled() {
     assert_eq!(report_a.label, DatasetLabel::Synthetic);
     assert_eq!(report_a.scenarios, scenarios.len() as u64);
     assert_eq!(report_a.traded + report_a.missed, scenarios.len() as u64);
-    assert!(report_a.model_caveats.iter().any(|c| c.contains("SYNTHETIC")));
+    assert!(report_a
+        .model_caveats
+        .iter()
+        .any(|c| c.contains("SYNTHETIC")));
     // Aggregate sanity against the reference outcomes: net PnL over the
     // default-config run must equal the sum of the per-scenario pnls the
     // same run reports (no hidden rounding between layers).

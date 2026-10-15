@@ -304,6 +304,29 @@ pub fn team_security_paths() -> Value {
                 }
             }
         },
+        "/api/saas/webhooks/{id}/deliveries": {
+            "get": {
+                "operationId": "saas.listWebhookDeliveries",
+                "summary": "List recent deliveries for a tenant webhook endpoint (newest first, max 100)",
+                "tags": ["Webhooks"],
+                "responses": {
+                    "200": { "description": "Delivery history returned" },
+                    "404": { "description": "Webhook endpoint not found" }
+                }
+            }
+        },
+        "/api/saas/webhooks/{id}/deliveries/{delivery_id}/redeliver": {
+            "post": {
+                "operationId": "saas.redeliverWebhookDelivery",
+                "summary": "Re-queue a dead or failed webhook delivery",
+                "tags": ["Webhooks"],
+                "responses": {
+                    "202": { "description": "Redelivery queued" },
+                    "404": { "description": "Delivery not found" },
+                    "409": { "description": "Delivery is not in a redeliverable state" }
+                }
+            }
+        },
         "/api/saas/webhooks/{id}": {
             "delete": {
                 "operationId": "saas.deleteWebhook",

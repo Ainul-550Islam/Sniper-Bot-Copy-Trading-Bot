@@ -150,11 +150,10 @@ pub fn plan_activation(
             status: strategy.status.as_str().to_string(),
         });
     }
-    let module_key = module_key(strategy.module).ok_or_else(|| {
-        ActivationRefusal::ModuleNotWired {
+    let module_key =
+        module_key(strategy.module).ok_or_else(|| ActivationRefusal::ModuleNotWired {
             module: format!("{:?}", strategy.module),
-        }
-    })?;
+        })?;
     validate_strategy_params(strategy.module, &strategy.config_json).map_err(|e| {
         ActivationRefusal::InvalidParams {
             reason: e.to_string(),
@@ -174,9 +173,7 @@ pub fn plan_activation(
                     ),
                 })
             }
-            Err(reason) => {
-                return Err(ActivationRefusal::LiveNotAllowed { reason })
-            }
+            Err(reason) => return Err(ActivationRefusal::LiveNotAllowed { reason }),
         }
     }
 
@@ -210,11 +207,10 @@ pub fn plan_activation(
 /// Pure deactivation decision: removes the strategy binding from the
 /// module config (the runtime reads `strategy == null` as "no engine").
 pub fn plan_deactivation(strategy: &StrategyRecord) -> Result<DeactivationPlan, ActivationRefusal> {
-    let module_key = module_key(strategy.module).ok_or_else(|| {
-        ActivationRefusal::ModuleNotWired {
+    let module_key =
+        module_key(strategy.module).ok_or_else(|| ActivationRefusal::ModuleNotWired {
             module: format!("{:?}", strategy.module),
-        }
-    })?;
+        })?;
     let mut config_patch = Map::new();
     config_patch.insert(
         "strategy".into(),
@@ -240,9 +236,15 @@ pub async fn apply_activation(
     plan: &ActivationPlan,
     actor: &str,
 ) -> BotResult<Value> {
-    config_store::write_module(db, plan.organization_id, plan.module_key, &plan.config_patch, actor)
-        .await
-        .map_err(|e| BotError::db(format!("strategy activation config write: {e}")))
+    config_store::write_module(
+        db,
+        plan.organization_id,
+        plan.module_key,
+        &plan.config_patch,
+        actor,
+    )
+    .await
+    .map_err(|e| BotError::db(format!("strategy activation config write: {e}")))
 }
 
 /// Execute a deactivation plan (same versioned mechanism).
@@ -251,9 +253,15 @@ pub async fn apply_deactivation(
     plan: &DeactivationPlan,
     actor: &str,
 ) -> BotResult<Value> {
-    config_store::write_module(db, plan.organization_id, plan.module_key, &plan.config_patch, actor)
-        .await
-        .map_err(|e| BotError::db(format!("strategy deactivation config write: {e}")))
+    config_store::write_module(
+        db,
+        plan.organization_id,
+        plan.module_key,
+        &plan.config_patch,
+        actor,
+    )
+    .await
+    .map_err(|e| BotError::db(format!("strategy deactivation config write: {e}")))
 }
 
 /// The active runtime bridge for an applied activation. Kept for the
