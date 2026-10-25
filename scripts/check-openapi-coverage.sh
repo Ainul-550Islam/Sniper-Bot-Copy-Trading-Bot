@@ -69,7 +69,23 @@ documented_scoped = {p.rstrip("/") for p in documented if in_scope(p)}
 # 3. Bidirectional comparison.
 # ---------------------------------------------------------------------------
 missing_from_spec = sorted(registered_scoped - documented_scoped)
-ghost_paths = sorted(documented_scoped - registered_scoped)
+# A documented literal alias (e.g. organizations/current/members) is served
+# by its existing parameterized route. Match segments, not a prefix or a
+# hand-maintained alias exemption, while retaining both directions of the gate.
+def is_registered(path: str) -> bool:
+    actual = path.split("/")
+    for template in registered_scoped:
+        segments = template.split("/")
+        if len(actual) == len(segments) and all(
+            expected == value or (
+                re.fullmatch(r"\{[A-Za-z0-9_]+\}", expected) and bool(value)
+            )
+            for expected, value in zip(segments, actual)
+        ):
+            return True
+    return False
+
+ghost_paths = sorted(p for p in documented_scoped if not is_registered(p))
 
 print(f"check-openapi-coverage: scope = /api/saas/** + /api/tenant/**")
 print(f"  registered scoped routes : {len(registered_scoped)}")

@@ -237,7 +237,7 @@ async fn authorize_request_mode(
         }
         // Tenant IP allowlist — refuse origins outside the configured CIDRs
         // (fail-closed; see `ip_allowlist`).
-        super::ip_allowlist::enforce(state, org.id, headers).await?;
+        super::ip_allowlist::enforce(state, org.id, headers, super::request_peer()).await?;
         // A caller-supplied organization may only CONFIRM the key's tenant.
         if let Some(req) = requested_org {
             if req != org.id {
@@ -363,7 +363,7 @@ async fn authorize_request_mode(
         // Tenant IP allowlist — refuse origins outside the configured CIDRs
         // (fail-closed; see `ip_allowlist`). Applies to enrollment-only
         // sessions exactly like full sessions.
-        super::ip_allowlist::enforce(state, org.id, headers).await?;
+        super::ip_allowlist::enforce(state, org.id, headers, super::request_peer()).await?;
         // A regular session whose MFA proof predates an enforcement change
         // may enter only the dedicated TOTP setup/verification handlers. This
         // supports enrolling existing members without granting any ordinary
@@ -477,7 +477,7 @@ async fn authorize_request_mode(
             }
             // Tenant IP allowlist — the deployment organization can carry
             // the same policy as any tenant; enforce it identically.
-            super::ip_allowlist::enforce(state, org.id, headers).await?;
+            super::ip_allowlist::enforce(state, org.id, headers, super::request_peer()).await?;
             let role = SaasStore::legacy_role(principal.role);
             let ctx = AuthorizationContext::from_api_key(
                 Principal::LegacyDeploymentKey {

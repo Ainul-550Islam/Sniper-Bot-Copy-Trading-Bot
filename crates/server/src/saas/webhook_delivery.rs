@@ -62,7 +62,7 @@ const DEFAULT_POLL: StdDuration = StdDuration::from_secs(15);
 /// Exponential backoff for the retry AFTER attempt `attempt` failed
 /// (1-based). Monotone, capped, and safe for large inputs.
 pub fn retry_backoff(attempt: i32) -> chrono::Duration {
-    let exponent = (attempt - 1).clamp(0, 30);
+    let exponent = attempt.saturating_sub(1).clamp(0, 30);
     let seconds = BACKOFF_BASE_SECS.saturating_mul(1i64 << exponent.min(20));
     let capped = seconds.min(BACKOFF_CAP_SECS);
     chrono::Duration::seconds(capped)
@@ -204,6 +204,7 @@ pub struct WebhookRetryDispatcher {
 /// One due delivery row as claimed from the scan.
 struct DueRow {
     delivery_id: Uuid,
+    organization_id: Uuid,
     endpoint_id: Uuid,
     event_id: String,
     attempt_count: i32,
@@ -233,8 +234,12 @@ impl WebhookRetryDispatcher {
     /// One full pass: claim due rows, deliver, record. Returns the number
     /// of rows processed (0 is a normal idle tick).
     pub async fn run_once(&self) -> Result<usize, sqlx::Error> {
+        // SKIP LOCKED only protects a claim while its transaction is alive.
+        // Keep those row locks through delivery and persistence, so another
+        // dispatcher cannot send the same attempt concurrently.
+        let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query(
-            "SELECT id, endpoint_id, event_id, attempt_count, payload
+            "SELECT id, organization_id, endpoint_id, event_id, attempt_count, payload
                FROM webhook_deliveries
               WHERE status = 'failed'
                 AND attempt_count < $2
@@ -246,197 +251,128 @@ impl WebhookRetryDispatcher {
         )
         .bind(BATCH_LIMIT)
         .bind(MAX_ATTEMPTS)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
 
         let mut processed = 0usize;
         for row in rows {
             let due = DueRow {
-                delivery_id: row.try_get("id").unwrap_or_default(),
-                endpoint_id: row.try_get("endpoint_id").unwrap_or_default(),
-                event_id: row.try_get::<String, _>("event_id").unwrap_or_default(),
-                attempt_count: row.try_get("attempt_count").unwrap_or(1),
+                delivery_id: row.try_get("id")?,
+                organization_id: row.try_get("organization_id")?,
+                endpoint_id: row.try_get("endpoint_id")?,
+                event_id: row.try_get("event_id")?,
+                attempt_count: row.try_get("attempt_count")?,
                 payload: row
-                    .try_get::<sqlx::types::Json<serde_json::Value>, _>("payload")
-                    .map(|json| json.0)
-                    .unwrap_or(serde_json::Value::Null),
+                    .try_get::<sqlx::types::Json<serde_json::Value>, _>("payload")?
+                    .0,
             };
-            self.process_one(due).await;
+            self.process_one(&mut transaction, due).await?;
             processed += 1;
         }
+        transaction.commit().await?;
         Ok(processed)
     }
 
-    /// Deliver one claimed row and persist the outcome. All failure modes
-    /// end in a database update — a row is never left mid-flight without a
-    /// recorded result.
-    async fn process_one(&self, due: DueRow) {
-        let endpoint =
-            sqlx::query("SELECT url, secret, status FROM webhook_endpoints WHERE id = $1")
-                .bind(due.endpoint_id)
-                .fetch_optional(&self.pool)
+    /// Deliver and persist under the same claim lock. Database failures are
+    /// returned to the caller, not counted as successfully processed rows.
+    async fn process_one(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        mut due: DueRow,
+    ) -> Result<(), sqlx::Error> {
+        let endpoint = sqlx::query(
+            "SELECT url, secret, status FROM webhook_endpoints WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(due.endpoint_id)
+        .bind(due.organization_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let endpoint = endpoint
+            .map(|row| -> Result<EndpointRow, sqlx::Error> {
+                Ok(EndpointRow {
+                    url: row.try_get("url")?,
+                    encrypted_secret: row.try_get("secret")?,
+                    status: row.try_get("status")?,
+                })
+            })
+            .transpose()?;
+        let Some(endpoint) = endpoint.filter(|endpoint| endpoint.status == "active") else {
+            return self
+                .mark_dead(transaction, &due, "endpoint is missing or inactive")
                 .await;
-
-        let endpoint: Option<EndpointRow> = match endpoint {
-            Ok(Some(row)) => Some(EndpointRow {
-                url: row.try_get("url").unwrap_or_default(),
-                encrypted_secret: row.try_get("secret").unwrap_or_default(),
-                status: row.try_get("status").unwrap_or_default(),
-            }),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    delivery = %due.delivery_id,
-                    "webhook endpoint lookup failed; deferring retry"
-                );
-                self.defer(&due, attempt_error("endpoint lookup failed"))
-                    .await;
-                return;
-            }
         };
-
-        // Endpoint deleted or deactivated: dead-letter, do not keep trying.
-        let Some(endpoint) = endpoint.filter(|e| e.status == "active") else {
-            self.mark_dead(&due, "endpoint is missing or inactive")
-                .await;
-            return;
-        };
-
         let secret = match decrypt_webhook_secret(&endpoint.encrypted_secret) {
-            Ok(value) => value,
+            Ok(secret) => secret,
             Err(error) => {
-                // Undecryptable secret = misconfiguration; dead-letter rather
-                // than retry the same failure forever.
-                tracing::warn!(
-                    error = %error,
-                    delivery = %due.delivery_id,
-                    "webhook secret could not be decrypted; dead-lettering"
-                );
-                self.mark_dead(&due, "endpoint secret could not be decrypted")
+                tracing::warn!(error = %error, delivery = %due.delivery_id,
+                    "webhook secret could not be decrypted; dead-lettering");
+                return self
+                    .mark_dead(transaction, &due, "endpoint secret could not be decrypted")
                     .await;
-                return;
             }
         };
-
         let body = match serde_json::to_vec(&due.payload) {
-            Ok(value) => value,
+            Ok(body) => body,
             Err(_) => {
-                self.mark_dead(&due, "stored payload could not be re-encoded")
-                    .await;
-                return;
+                return self
+                    .mark_dead(transaction, &due, "stored payload could not be re-encoded")
+                    .await
             }
         };
-
         let outcome = deliver_once(&endpoint.url, &secret, &due.event_id, &body).await;
-        let attempts_after = due.attempt_count.saturating_add(1);
-
-        if outcome.succeeded {
-            let update = sqlx::query(
-                "UPDATE webhook_deliveries
-                    SET status = 'succeeded',
-                        attempt_count = $2,
-                        response_status = $3,
-                        response_body_digest = $4,
-                        error = NULL,
-                        next_retry_at = NULL
-                  WHERE id = $1",
-            )
-            .bind(due.delivery_id)
-            .bind(attempts_after)
-            .bind(outcome.response_status)
-            .bind(outcome.response_digest.as_deref())
-            .execute(&self.pool)
-            .await;
-            if let Err(error) = update {
-                tracing::error!(
-                    error = %error,
-                    delivery = %due.delivery_id,
-                    "webhook retry succeeded but the row could not be updated"
-                );
-            }
-            return;
-        }
-
-        if attempts_after >= MAX_ATTEMPTS {
-            self.mark_dead(&due, &attempt_error_with(&outcome, attempts_after))
-                .await;
-            return;
-        }
-        self.schedule_next(&due, attempts_after, &outcome).await;
-    }
-
-    /// Failed attempt with retries remaining: bump the counter, keep the
-    /// failure recorded, push `next_retry_at` out on the backoff schedule.
-    async fn schedule_next(&self, due: &DueRow, attempts_after: i32, outcome: &AttemptOutcome) {
-        let next_at = Utc::now() + retry_backoff(attempts_after);
-        let update = sqlx::query(
+        due.attempt_count = due.attempt_count.saturating_add(1);
+        let status = if outcome.succeeded {
+            "succeeded"
+        } else if due.attempt_count >= MAX_ATTEMPTS {
+            "dead"
+        } else {
+            "failed"
+        };
+        let next_at = (status == "failed").then(|| Utc::now() + retry_backoff(due.attempt_count));
+        let error = if status == "dead" {
+            Some(attempt_error_with(&outcome, due.attempt_count))
+        } else {
+            outcome.error
+        };
+        // The final failed attempt counts too; dead-lettering must not leave
+        // an exhausted row at MAX_ATTEMPTS - 1.
+        sqlx::query(
             "UPDATE webhook_deliveries
-                SET attempt_count = $2,
-                    response_status = $3,
-                    response_body_digest = $4,
-                    error = $5,
-                    next_retry_at = $6
-              WHERE id = $1",
+                SET status = $3, attempt_count = $4, response_status = $5,
+                    response_body_digest = $6, error = $7, next_retry_at = $8
+              WHERE id = $1 AND organization_id = $2",
         )
         .bind(due.delivery_id)
-        .bind(attempts_after)
+        .bind(due.organization_id)
+        .bind(status)
+        .bind(due.attempt_count)
         .bind(outcome.response_status)
         .bind(outcome.response_digest.as_deref())
-        .bind(outcome.error.as_deref())
+        .bind(error.as_deref())
         .bind(next_at)
-        .execute(&self.pool)
-        .await;
-        if let Err(error) = update {
-            tracing::error!(
-                error = %error,
-                delivery = %due.delivery_id,
-                "webhook retry scheduling failed"
-            );
-        }
+        .execute(&mut **transaction)
+        .await?;
+        Ok(())
     }
 
-    /// Transient infrastructure error before any delivery happened: do not
-    /// burn an attempt, just push the row out a little.
-    async fn defer(&self, due: &DueRow, error: String) {
-        let next_at = Utc::now() + chrono::Duration::seconds(BACKOFF_BASE_SECS);
-        let update = sqlx::query(
-            "UPDATE webhook_deliveries
-                SET error = $2, next_retry_at = $3
-              WHERE id = $1",
+    /// Configuration failures before a send are terminal, but do not claim
+    /// that a network attempt happened. Plaintext secrets are never accepted.
+    async fn mark_dead(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        due: &DueRow,
+        error: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE webhook_deliveries SET status = 'dead', error = $3, next_retry_at = NULL
+              WHERE id = $1 AND organization_id = $2",
         )
         .bind(due.delivery_id)
+        .bind(due.organization_id)
         .bind(error)
-        .bind(next_at)
-        .execute(&self.pool)
-        .await;
-        if let Err(error) = update {
-            tracing::error!(
-                error = %error,
-                delivery = %due.delivery_id,
-                "webhook defer update failed"
-            );
-        }
-    }
-
-    /// Terminal failure: nothing will touch this row again.
-    async fn mark_dead(&self, due: &DueRow, error: &str) {
-        let update = sqlx::query(
-            "UPDATE webhook_deliveries
-                SET status = 'dead', error = $2, next_retry_at = NULL
-              WHERE id = $1",
-        )
-        .bind(due.delivery_id)
-        .bind(error)
-        .execute(&self.pool)
-        .await;
-        if let Err(error) = update {
-            tracing::error!(
-                error = %error,
-                delivery = %due.delivery_id,
-                "webhook dead-letter update failed"
-            );
-        }
+        .execute(&mut **transaction)
+        .await?;
+        Ok(())
     }
 
     /// Run until shutdown. Never panics; a failing tick logs and retries on
@@ -460,10 +396,6 @@ impl WebhookRetryDispatcher {
         }
         tracing::info!("webhook retry dispatcher stopped");
     }
-}
-
-fn attempt_error(reason: &str) -> String {
-    format!("retry deferred: {reason}")
 }
 
 fn attempt_error_with(outcome: &AttemptOutcome, attempts_after: i32) -> String {

@@ -120,3 +120,16 @@ test("all frontend source files avoid obvious synthetic-data primitives", () => 
   }
   assert.deepEqual(violations, []);
 });
+
+test("team members path is owned by the shared client and explicitly documented", () => {
+  const client = read("apps/control-plane/src/lib/commercial.ts");
+  const page = read("apps/control-plane/src/app/settings/team/page.tsx");
+  const match = client.match(/export const TEAM_MEMBERS_PATH = "([^"]+)"/);
+  assert.ok(match, "shared members path constant must exist");
+  const spec = JSON.parse(read("openapi/openapi.json"));
+  assert.ok(spec.paths[match[1]]?.get, "literal alias must have an OpenAPI GET contract");
+  assert.match(client, /request<TeamListResponse>\(TEAM_MEMBERS_PATH\)/);
+  assert.match(page, /await commercial\.members\(\)/);
+  assert.match(page, /res\.members/);
+  assert.doesNotMatch(page, /\/api\/saas\/organizations|\brequest\s*</);
+});

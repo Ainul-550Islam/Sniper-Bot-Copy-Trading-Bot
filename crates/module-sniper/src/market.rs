@@ -501,8 +501,18 @@ pub async fn load_market(
                     let amm_id = event.pool_pubkey().ok_or_else(|| {
                         MarketError::unavailable("raydium event carries no pool address")
                     })?;
-                    load_raydium(rpc, user, &amm_id, &mint, event, cfg, mint_info, creator_buy, now)
-                        .await
+                    load_raydium(
+                        rpc,
+                        user,
+                        &amm_id,
+                        &mint,
+                        event,
+                        cfg,
+                        mint_info,
+                        creator_buy,
+                        now,
+                    )
+                    .await
                 }
                 EntryRoute::Jupiter => {
                     load_jupiter(

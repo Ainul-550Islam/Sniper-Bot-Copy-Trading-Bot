@@ -50,6 +50,7 @@ fn state_with(saas: Arc<SaasStore>) -> ApiState {
         auth: None,
         limiter: RateLimiter::new(0),
         sensitive_limiter: RateLimiter::new(0),
+        trusted_proxies: Default::default(),
         db: None,
         journal: None,
         serve_dashboard: false,

@@ -97,16 +97,30 @@ use solana_kit::tokens::Wallet;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ---- config (loaded first so it can drive log level/format) ----------
-    let app = match AppConfig::load() {
-        Ok(a) => a,
-        Err(e) => {
-            // Tracing is not initialised yet; stderr is the only channel.
-            eprintln!("failed to load config; falling back to defaults: {e}");
-            AppConfig::from_defaults()
-        }
-    };
+    // Configuration errors must never reset security settings to defaults.
+    let app = AppConfig::load()?;
     let cfg = app.raw.clone();
     init_tracing(&cfg.observability);
+    let environment = std::env::var("SNIPER_ENVIRONMENT").unwrap_or_else(|_| "development".into());
+    let live_billing = std::env::var("LIVE_BILLING").is_ok_and(|value| value == "1");
+    let webhook_key = std::env::var("WEBHOOK_SECRET_ENCRYPTION_KEY").ok();
+    for check in ops::deployment_preflight::startup_security_checks(
+        &cfg,
+        &environment,
+        live_billing,
+        webhook_key.as_deref(),
+    ) {
+        match check.status {
+            ops::deployment_preflight::PreflightStatus::Block => {
+                anyhow::bail!("startup preflight failed: {}: {}", check.name, check.detail);
+            }
+            ops::deployment_preflight::PreflightStatus::Warn => {
+                warn!(check = %check.name, detail = %check.detail, "startup preflight");
+            }
+            ops::deployment_preflight::PreflightStatus::Pass => {}
+        }
+    }
+
     for w in &app.warnings {
         warn!(warning = %w, "config");
     }
@@ -1018,13 +1032,7 @@ async fn spawn_modules(
     handles
 }
 
-/// Is this bind host loopback-only (not reachable from other machines)?
-fn is_loopback(host: &str) -> bool {
-    matches!(
-        host.trim(),
-        "127.0.0.1" | "localhost" | "::1" | "[::1]" | ""
-    )
-}
+use bot_core::config::is_loopback_host as is_loopback;
 
 /// Build and serve the Axum control plane. Returns the server handle; the
 /// caller awaits it during the ordered shutdown (it stops on the
@@ -1072,6 +1080,9 @@ fn serve_api(
         auth,
         limiter,
         sensitive_limiter: RateLimiter::new(10),
+        trusted_proxies: saas::trusted_proxy::TrustedProxies::from_config(
+            &cfg.api.trusted_proxies,
+        )?,
         audit,
         db,
         journal,

@@ -22,14 +22,9 @@
 //!
 //! # Client address source
 //!
-//! The middleware only sees headers, so the address comes from
-//! `x-forwarded-for` (leftmost entry = originating client) or `x-real-ip`.
-//! That is trustworthy only when the deployment's edge terminates TLS and
-//! either OVERWRITES the forwarded header or sets `x-real-ip` itself — the
-//! standard trusted-proxy arrangement. An allowlist configured behind an
-//! edge that blindly forwards client-supplied headers is spoofable, which
-//! is a property of the deployment, not of this check; the readiness
-//! documentation says so.
+//! The socket peer and explicitly trusted proxies determine the client IP.
+//! Forwarded headers from any other peer are ignored. All IP resolution is
+//! owned by `trusted_proxy`; a missing peer cannot authenticate a header.
 
 use std::net::IpAddr;
 
@@ -41,18 +36,9 @@ use bot_core::tenant::OrganizationId;
 
 use crate::api::ApiState;
 
-/// Parse one `address/prefix` entry. Rejects mismatched families and
-/// out-of-range prefixes rather than ever storing a nonsense rule.
-pub fn parse_cidr(value: &str) -> Option<(IpAddr, u8)> {
-    let (address, prefix) = value.trim().split_once('/')?;
-    let address: IpAddr = address.parse().ok()?;
-    let prefix: u8 = prefix.parse().ok()?;
-    let max = if address.is_ipv4() { 32 } else { 128 };
-    if prefix > max {
-        return None;
-    }
-    Some((address, prefix))
-}
+pub use bot_core::config::parse_cidr;
+
+use super::trusted_proxy::resolve_client_ip;
 
 /// Is `ip` inside the network `network/prefix`? Address families must
 /// match; a v4 client can never match a v6 rule or vice versa.
@@ -85,32 +71,6 @@ pub fn ip_matches_cidr(ip: IpAddr, network: IpAddr, prefix: u8) -> bool {
     }
 }
 
-/// The originating client address as presented by the trusted edge.
-///
-/// `x-forwarded-for` wins (leftmost entry is the client); `x-real-ip` is
-/// the fallback when no forwarded chain is present or its first entry is
-/// not a valid address. Returns `None` when neither header yields an
-/// address — callers must treat that as fail-closed when an allowlist is
-/// configured.
-pub fn client_ip_from_headers(headers: &HeaderMap) -> Option<IpAddr> {
-    if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = value
-            .split(',')
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if let Ok(ip) = first.parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<IpAddr>().ok())
-}
-
 /// Enforce the organization's IP allowlist for one request.
 ///
 /// Returns `Ok(())` when the request may proceed (no policy, empty
@@ -121,6 +81,7 @@ pub(crate) async fn enforce(
     state: &ApiState,
     organization_id: OrganizationId,
     headers: &HeaderMap,
+    peer: Option<IpAddr>,
 ) -> Result<(), Decision> {
     let Some(db) = state.db.as_deref() else {
         // Without an attached database no allowlist can have been written
@@ -161,7 +122,7 @@ pub(crate) async fn enforce(
         return Ok(());
     }
 
-    let Some(client_ip) = client_ip_from_headers(headers) else {
+    let Some(client_ip) = resolve_client_ip(peer, headers, &state.trusted_proxies) else {
         // Configured restriction + unverifiable origin = refuse. Silently
         // admitting the request would silently disable the control.
         tracing::warn!(
@@ -274,28 +235,37 @@ mod tests {
 
     #[test]
     fn client_ip_prefers_the_forwarded_origin_and_falls_back_to_real_ip() {
-        let h = headers(&[("x-forwarded-for", "192.0.2.7, 10.0.0.1, 10.0.0.2")]);
+        let trusted =
+            super::super::trusted_proxy::TrustedProxies::from_config(&["10.0.0.0/8".into()])
+                .unwrap();
+        let peer = Some("10.0.0.3".parse().unwrap());
+        let h = headers(&[("x-forwarded-for", "192.0.2.7, 192.0.3.7, 10.0.0.2")]);
         assert_eq!(
-            client_ip_from_headers(&h),
-            Some("192.0.2.7".parse().unwrap()),
-            "leftmost entry is the originating client"
+            resolve_client_ip(peer, &h, &trusted),
+            Some("192.0.3.7".parse().unwrap()),
+            "rightmost untrusted entry is the originating client"
         );
-
         let h = headers(&[("x-real-ip", "192.0.2.9")]);
         assert_eq!(
-            client_ip_from_headers(&h),
+            resolve_client_ip(peer, &h, &trusted),
             Some("192.0.2.9".parse().unwrap())
         );
-
         let h = headers(&[("x-forwarded-for", "garbage"), ("x-real-ip", "192.0.2.10")]);
         assert_eq!(
-            client_ip_from_headers(&h),
+            resolve_client_ip(peer, &h, &trusted),
             Some("192.0.2.10".parse().unwrap()),
-            "an unparsable forwarded chain falls back to x-real-ip"
+            "an unparsable forwarded chain falls back to x-real-ip only behind a trusted peer"
         );
-
         let h = headers(&[("x-forwarded-for", "  ")]);
-        assert_eq!(client_ip_from_headers(&h), None);
-        assert_eq!(client_ip_from_headers(&HeaderMap::new()), None);
+        assert_eq!(resolve_client_ip(peer, &h, &trusted), None);
+        assert_eq!(resolve_client_ip(peer, &HeaderMap::new(), &trusted), None);
+    }
+
+    #[test]
+    fn spoofed_headers_never_choose_an_untrusted_peers_allowlist_identity() {
+        let h = headers(&[("x-forwarded-for", "192.0.2.7"), ("x-real-ip", "192.0.2.7")]);
+        let peer = Some("192.0.3.4".parse().unwrap());
+        assert_eq!(resolve_client_ip(peer, &h, &Default::default()), peer);
+        assert_eq!(resolve_client_ip(None, &h, &Default::default()), None);
     }
 }

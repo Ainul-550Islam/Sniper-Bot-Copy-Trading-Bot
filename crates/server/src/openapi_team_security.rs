@@ -84,7 +84,54 @@ pub fn team_security_schemas() -> Value {
 /// Generates OpenAPI v3 paths documentation for Team, Security, Webhooks & Reports endpoints.
 pub fn team_security_paths() -> Value {
     json!({
+        "/api/saas/organizations/current/members": {
+            "get": {
+                "operationId": "saas.listCurrentOrganizationMembers",
+                "summary": "List members of the authenticated caller's current organization",
+                "description": "Alias of /api/saas/organizations/{id}/members. The server resolves current through tenant authorization, never a caller-selected arbitrary organization.",
+                "tags": ["organizations"],
+                "security": [{ "bearerAuth": [] }],
+                "responses": {
+                    "200": {
+                        "description": "Organization members and their public user profiles",
+                        "content": { "application/json": { "schema": {
+                            "type": "object",
+                            "required": ["count", "members", "items"],
+                            "properties": {
+                                "count": { "type": "integer", "minimum": 0 },
+                                "members": { "type": "array", "items": { "type": "object" } },
+                                "items": { "type": "array", "items": { "type": "object" }, "description": "Compatibility alias of members" }
+                            }
+                        } } }
+                    },
+                    "401": { "description": "Credential not recognized" },
+                    "403": { "description": "Tenant context or users.read permission denied" },
+                    "429": { "description": "Rate limited" },
+                    "503": { "description": "Membership, profile or security policy storage unavailable" }
+                }
+            }
+        },
         "/api/saas/team/invites": {
+            "get": {
+                "operationId": "saas.listInvites",
+                "summary": "List pending, unexpired invitations for the caller's organization",
+                "description": "Revoked and accepted invitations remain in durable storage but are not returned in the active invitation list. Plaintext tokens are never returned by this endpoint.",
+                "tags": ["Team & Access"],
+                "responses": {
+                    "200": { "description": "Active invitation list", "content": { "application/json": { "schema": {
+                        "type": "object",
+                        "required": ["organization_id", "items", "count"],
+                        "properties": {
+                            "organization_id": { "type": "string", "format": "uuid" },
+                            "items": { "type": "array", "items": { "$ref": "#/components/schemas/TeamInvite" } },
+                            "count": { "type": "integer", "minimum": 0 }
+                        }
+                    } } } },
+                    "401": { "description": "Unauthorized" },
+                    "403": { "description": "Tenant context or users.read permission denied" },
+                    "503": { "description": "Team storage unavailable" }
+                }
+            },
             "post": {
                 "operationId": "saas.createInvite",
                 "summary": "Invite member to tenant organization",

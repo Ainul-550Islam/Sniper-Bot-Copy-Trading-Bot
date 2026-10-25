@@ -142,6 +142,7 @@ fn submitted_result(signature: &str) -> ExecutionResult {
     ExecutionResult {
         signature: signature.to_string(),
         status: ExecStatus::Sent,
+        attempts: 1,
         paper: false,
         ..ExecutionResult::empty("pg-test", "intent-pg", false)
     }
@@ -246,7 +247,7 @@ async fn sniper_sink_writes_only_the_bound_tenants_rows() {
         "sniper",
         Some("intent-pg-1"),
     );
-    let signature = format!("sig-sniper-{run}");
+    let signature = solana_sdk::signature::Signature::new_unique().to_string();
     let tx = TenantTransaction::new(meta, &submitted_result(&signature));
     executor_sniper_record(&executor, &tx)
         .await

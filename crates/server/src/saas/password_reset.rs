@@ -28,14 +28,13 @@ use tracing::info;
 use bot_core::session::token::{generate_token, hash_password, hash_token, verify_token};
 use bot_core::tenant::User;
 
+use super::postgres::PostgresSaasRepo;
+use super::users::{MAX_PASSWORD_LEN, MIN_PASSWORD_LEN};
 use crate::api::ApiState;
 use crate::email::{outbox, templates};
 
 /// How long a reset token lives.
-const TOKEN_TTL_MINUTES: i64 = 30;
-
-/// Minimum acceptable new password length (matches the signup policy).
-const MIN_PASSWORD_LEN: usize = 12;
+const TOKEN_TTL_MINUTES: i32 = 30;
 
 #[derive(Debug, Deserialize)]
 pub struct RequestBody {
@@ -194,115 +193,98 @@ pub async fn confirm_reset(
             .into_response();
     }
 
-    // Locate the token row BY HASH. The lookup itself is not constant time
-    // (index scan on a SHA-256 value — not secret-correlated), but the
-    // presented token is re-verified with verify_token to keep the compare
-    // uniform and to reject hash-vs-hash confusion.
+    if body.new_password.len() > MAX_PASSWORD_LEN * 4
+        || body.new_password.chars().count() > MAX_PASSWORD_LEN
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "password_too_long", "max_length": MAX_PASSWORD_LEN })),
+        )
+            .into_response();
+    }
+
+    // Keep the single-use token, canonical password, relational projection and
+    // session revocations in ONE transaction. A storage failure rolls back all
+    // four; a concurrent confirm waits on the token row and then cleanly loses.
+    let mut transaction = match db.pool().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return unavailable(error),
+    };
     let presented_hash = hash_token(body.token.trim());
-    let row = sqlx::query(
+    let row = match sqlx::query(
         "SELECT id, user_id, token_hash
            FROM password_reset_tokens
           WHERE token_hash = $1
             AND used_at IS NULL
             AND revoked_at IS NULL
-            AND expires_at > now()",
+            AND expires_at > now()
+          FOR UPDATE",
     )
     .bind(&presented_hash)
-    .fetch_optional(db.pool())
-    .await;
-    let row = match row {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "reset token lookup failed");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "password_reset_unavailable" })),
-            )
-                .into_response();
-        }
-    };
-    let Some(row) = row else {
-        return invalid_token();
+    .fetch_optional(&mut *transaction)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return invalid_token(),
+        Err(error) => return unavailable(error),
     };
     let stored_hash: String = match row.try_get("token_hash") {
-        Ok(h) => h,
-        Err(_) => return invalid_token(),
+        Ok(hash) => hash,
+        Err(error) => return unavailable(error),
     };
     if !verify_token(body.token.trim(), &stored_hash) {
         return invalid_token();
     }
     let token_id: uuid::Uuid = match row.try_get("id") {
         Ok(id) => id,
-        Err(_) => return invalid_token(),
+        Err(error) => return unavailable(error),
     };
     let user_id: uuid::Uuid = match row.try_get("user_id") {
         Ok(id) => id,
-        Err(_) => return invalid_token(),
+        Err(error) => return unavailable(error),
     };
-
-    // Consume the token EXACTLY once. The UPDATE is the atomic claim: if a
-    // concurrent request already consumed it, zero rows match and we refuse.
-    let consumed = sqlx::query(
-        "UPDATE password_reset_tokens
-            SET used_at = now()
-          WHERE id = $1 AND used_at IS NULL AND expires_at > now()",
+    let mut user = match PostgresSaasRepo::user_for_update(&mut transaction, user_id.into()).await {
+        Ok(Some(user)) if user.status == bot_core::tenant::UserStatus::Active => user,
+        Ok(_) => return invalid_token(),
+        Err(error) => return unavailable(error),
+    };
+    let consumed = match sqlx::query(
+        "UPDATE password_reset_tokens SET used_at = now()
+          WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now()",
     )
     .bind(token_id)
-    .execute(db.pool())
-    .await;
-    let consumed = match consumed {
-        Ok(r) => r.rows_affected() == 1,
-        Err(e) => {
-            tracing::warn!(error = %e, "reset token consume failed");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "password_reset_unavailable" })),
-            )
-                .into_response();
-        }
+    .execute(&mut *transaction)
+    .await
+    {
+        Ok(result) => result.rows_affected() == 1,
+        Err(error) => return unavailable(error),
     };
     if !consumed {
         return invalid_token();
     }
-
-    // Replace the password and revoke every live session for the user.
-    let new_hash = hash_password(&body.new_password);
-    let update =
-        sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
-            .bind(user_id)
-            .bind(&new_hash)
-            .execute(db.pool())
-            .await;
-    if matches!(&update, Ok(r) if r.rows_affected() != 1) {
-        return invalid_token();
+    let now = chrono::Utc::now();
+    user.password_hash = hash_password(&body.new_password);
+    user.updated_at = now;
+    if let Err(error) =
+        PostgresSaasRepo::update_user_in_transaction(&mut transaction, &user, now).await
+    {
+        return unavailable(error);
     }
-    if let Err(e) = update {
-        tracing::warn!(error = %e, "password update failed");
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "password_reset_unavailable" })),
-        )
-            .into_response();
-    }
-    let revoked = sqlx::query(
-        "UPDATE sessions
-            SET revoked_at = now(), revoke_reason = 'password_reset'
-          WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()",
+    let revoked = match PostgresSaasRepo::revoke_user_sessions_in_transaction(
+        &mut transaction,
+        user.id,
+        "password_reset",
+        now,
     )
-    .bind(user_id)
-    .execute(db.pool())
-    .await;
-    match revoked {
-        Ok(r) => info!(
-            sessions_revoked = r.rows_affected(),
-            "password reset complete"
-        ),
-        Err(e) => {
-            // The password already changed; log loudly but still report
-            // success — the session sweep also runs on login validation.
-            tracing::warn!(error = %e, "session revocation after reset failed");
-        }
+    .await
+    {
+        Ok(count) => count,
+        Err(error) => return unavailable(error),
+    };
+    if let Err(error) = transaction.commit().await {
+        return unavailable(error);
     }
+    info!(sessions_revoked = revoked, "password reset complete");
     // Security-alert email (best effort).
     if let Some(email) = user_email(db, user_id).await {
         let rendered = templates::security_alert(
@@ -330,6 +312,15 @@ pub async fn confirm_reset(
             "status": "reset_complete",
             "message": "Your password was changed and all sessions were signed out."
         })),
+    )
+        .into_response()
+}
+
+fn unavailable(error: impl std::fmt::Display) -> Response {
+    tracing::warn!(error = %error, "password reset transaction failed");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "password_reset_unavailable" })),
     )
         .into_response()
 }

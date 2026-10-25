@@ -223,6 +223,9 @@ enabled = true
 bind_host = "0.0.0.0"
 bind_port = 8080
 api_key_env = "API_KEY"                       # env var NAME for the x-api-key on mutating routes + event WS
+# Only these proxy socket-peer CIDRs may supply client-IP headers.
+# TRUSTED_PROXIES overrides this with comma-separated CIDRs; empty trusts none.
+trusted_proxies = []
 cors_origins = ["*"]                          # lock this down to your dashboard origin in production
 serve_dashboard = true
 

@@ -25,12 +25,13 @@ use tracing::info;
 use bot_core::session::token::{generate_token, hash_token, verify_token};
 use bot_core::tenant::User;
 
+use super::postgres::PostgresSaasRepo;
 use crate::api::ApiState;
 use crate::email::{outbox, templates};
 
 /// Verification links live longer than password resets (24 h) because they
 /// are lower risk and users often sit on them.
-const TOKEN_TTL_MINUTES: i64 = 24 * 60;
+const TOKEN_TTL_MINUTES: i32 = 24 * 60;
 
 #[derive(Debug, Deserialize)]
 pub struct RequestBody {
@@ -173,100 +174,99 @@ pub async fn confirm_verification(
         )
             .into_response();
     };
+    let mut transaction = match db.pool().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return unavailable(error),
+    };
     let presented_hash = hash_token(body.token.trim());
     let row = match sqlx::query(
-        "SELECT id, user_id, token_hash
+        "SELECT id, user_id, email, token_hash
            FROM email_verifications
           WHERE token_hash = $1
             AND verified_at IS NULL
             AND revoked_at IS NULL
-            AND expires_at > now()",
+            AND expires_at > now()
+          FOR UPDATE",
     )
     .bind(&presented_hash)
-    .fetch_optional(db.pool())
+    .fetch_optional(&mut *transaction)
     .await
     {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "verification token lookup failed");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "email_verification_unavailable" })),
-            )
-                .into_response();
-        }
-    };
-    let Some(row) = row else {
-        return invalid_token();
+        Ok(Some(row)) => row,
+        Ok(None) => return invalid_token(),
+        Err(error) => return unavailable(error),
     };
     let stored_hash: String = match row.try_get("token_hash") {
-        Ok(h) => h,
-        Err(_) => return invalid_token(),
+        Ok(hash) => hash,
+        Err(error) => return unavailable(error),
     };
     if !verify_token(body.token.trim(), &stored_hash) {
         return invalid_token();
     }
     let token_id: uuid::Uuid = match row.try_get("id") {
         Ok(id) => id,
-        Err(_) => return invalid_token(),
+        Err(error) => return unavailable(error),
     };
     let user_id: uuid::Uuid = match row.try_get("user_id") {
         Ok(id) => id,
-        Err(_) => return invalid_token(),
+        Err(error) => return unavailable(error),
     };
-
-    // Atomic single-use claim.
+    let email: String = match row.try_get("email") {
+        Ok(email) => email,
+        Err(error) => return unavailable(error),
+    };
+    let mut user = match PostgresSaasRepo::user_for_update(&mut transaction, user_id.into()).await {
+        Ok(Some(user))
+            if user.status == bot_core::tenant::UserStatus::Active
+                && User::normalize_email(&user.email) == User::normalize_email(&email) =>
+        {
+            user
+        }
+        Ok(_) => return invalid_token(),
+        Err(error) => return unavailable(error),
+    };
     let consumed = match sqlx::query(
-        "UPDATE email_verifications
-            SET verified_at = now()
-          WHERE id = $1 AND verified_at IS NULL AND expires_at > now()",
+        "UPDATE email_verifications SET verified_at = now()
+          WHERE id = $1 AND verified_at IS NULL AND revoked_at IS NULL AND expires_at > now()",
     )
     .bind(token_id)
-    .execute(db.pool())
+    .execute(&mut *transaction)
     .await
     {
-        Ok(r) => r.rows_affected() == 1,
-        Err(e) => {
-            tracing::warn!(error = %e, "verification token consume failed");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "email_verification_unavailable" })),
-            )
-                .into_response();
-        }
+        Ok(result) => result.rows_affected() == 1,
+        Err(error) => return unavailable(error),
     };
     if !consumed {
         return invalid_token();
     }
-
-    // Flip the flag (idempotent).
-    let update = sqlx::query(
-        "UPDATE users SET email_verified = true, updated_at = now()
-          WHERE id = $1 AND email_verified = false",
-    )
-    .bind(user_id)
-    .execute(db.pool())
-    .await;
-    match update {
-        Ok(r) => info!(
-            newly_verified = r.rows_affected() == 1,
-            "email verification complete"
-        ),
-        Err(e) => {
-            tracing::warn!(error = %e, "email_verified flag update failed");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "email_verification_unavailable" })),
-            )
-                .into_response();
-        }
+    let newly_verified = !user.email_verified;
+    let now = chrono::Utc::now();
+    user.email_verified = true;
+    user.updated_at = now;
+    if let Err(error) =
+        PostgresSaasRepo::update_user_in_transaction(&mut transaction, &user, now).await
+    {
+        return unavailable(error);
     }
+    if let Err(error) = transaction.commit().await {
+        return unavailable(error);
+    }
+    info!(newly_verified, "email verification complete");
     (
         StatusCode::OK,
         Json(json!({
             "status": "verified",
             "message": "Your email address is confirmed."
         })),
+    )
+        .into_response()
+}
+
+fn unavailable(error: impl std::fmt::Display) -> Response {
+    tracing::warn!(error = %error, "email verification transaction failed");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "email_verification_unavailable" })),
     )
         .into_response()
 }

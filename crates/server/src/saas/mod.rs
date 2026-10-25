@@ -70,6 +70,7 @@ pub mod store;
 pub mod support;
 pub mod team;
 pub mod tenant_lifecycle;
+pub mod trusted_proxy;
 pub mod usage_limits;
 pub mod users;
 pub mod wallet_access;
@@ -324,4 +325,30 @@ pub async fn attach_owner(
     );
     store.create_membership(&m).await?;
     Ok(Some(m))
+}
+
+// Existing authorization helpers take HeaderMap rather than Request parts.
+// Scope the transport peer around the entire request future, preserving their
+// API without inventing a trusted internal HTTP header or widening every
+// handler signature. Tokio task-local scope follows polling across workers,
+// isolates concurrent requests, and is NOT inherited by spawned tasks. An
+// out-of-request authorization call therefore has no peer and fails closed
+// when its tenant has an allowlist.
+tokio::task_local! {
+    static REQUEST_PEER: Option<std::net::IpAddr>;
+}
+
+pub(crate) fn request_peer() -> Option<std::net::IpAddr> {
+    REQUEST_PEER.try_with(|peer| *peer).ok().flatten()
+}
+
+pub(crate) async fn scope_request_peer(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|peer| peer.0.ip());
+    REQUEST_PEER.scope(peer, next.run(req)).await
 }

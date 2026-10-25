@@ -351,7 +351,9 @@ mod tests {
         let e = err(serde_json::json!({"InstructionError": [0, {"Custom": 1}]}));
         match classify_sell_probe(e.as_ref(), &logs) {
             SellProbeOutcome::Unknown(_) => {}
-            other => panic!("venue-side 0x1 without a token-program frame must not pass, got {other:?}"),
+            other => {
+                panic!("venue-side 0x1 without a token-program frame must not pass, got {other:?}")
+            }
         }
     }
 

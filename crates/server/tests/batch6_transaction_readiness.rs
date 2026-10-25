@@ -298,9 +298,11 @@ fn all_25_batch6_docs_exist() {
     // the release-manifest docs_files value was re-measured with it).
     // Bumping this pin is the deliberate act of acknowledging the new
     // document set.
+    // Include the generated STATS.md in this total, as docs_files in the
+    // release manifest does; the canonical count excluding it remains 155.
     assert_eq!(
-        count, 155,
-        "docs/*.md should equal the current document count (155)"
+        count, 156,
+        "docs/*.md should equal the current document count (156)"
     );
 }
 

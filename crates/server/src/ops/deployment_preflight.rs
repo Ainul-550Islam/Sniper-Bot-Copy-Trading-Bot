@@ -66,10 +66,85 @@ pub struct PreflightInput {
     pub live_trading_requested: bool,
     pub live_trading_allowed: bool,
     pub telemetry_enabled: bool,
+    pub bind_host: String,
+    pub trusted_proxies: Vec<String>,
+    /// Webhook storage is enabled whenever the durable database is enabled,
+    /// or live billing is requested. Never infer this from key presence.
+    pub secret_storage_enabled: bool,
+    /// Result of webhooks::decode_webhook_secret_key, not secret material.
+    pub webhook_key_valid: bool,
+}
+
+/// The same security checks drive process startup and the deployment report.
+/// Block is the existing report format's FAIL status.
+pub fn security_checks(
+    bind_host: &str,
+    trusted_proxies: &[String],
+    secret_storage_enabled: bool,
+    env_mode: &str,
+    live_trading_requested: bool,
+    webhook_key_valid: bool,
+) -> Vec<PreflightCheck> {
+    let loopback = bot_core::config::is_loopback_host(bind_host);
+    let proxy_status =
+        match crate::saas::trusted_proxy::TrustedProxies::from_config(trusted_proxies) {
+            Err(_) => PreflightStatus::Block,
+            Ok(proxies) if !loopback && proxies.is_empty() => PreflightStatus::Warn,
+            Ok(_) => PreflightStatus::Pass,
+        };
+    let local_paper_dev = loopback
+        && !live_trading_requested
+        && matches!(env_mode, "development" | "dev" | "local" | "test");
+    let key_required = secret_storage_enabled && !local_paper_dev;
+    vec![
+        PreflightCheck {
+            name: "trusted_proxies".into(),
+            status: proxy_status,
+            detail: "Configure only actual proxy CIDRs; empty trust on a reachable bind ignores all client-IP headers".into(),
+        },
+        PreflightCheck {
+            name: "webhook_secret_encryption_key".into(),
+            status: if webhook_key_valid || !secret_storage_enabled {
+                PreflightStatus::Pass
+            } else if key_required {
+                PreflightStatus::Block
+            } else {
+                PreflightStatus::Warn
+            },
+            detail: "Secret storage requires a base64-encoded 32-byte WEBHOOK_SECRET_ENCRYPTION_KEY; local paper development keeps request-time refusal when unset".into(),
+        },
+    ]
+}
+
+/// Validate before opening databases, spawning workers, or serving HTTP.
+/// Secret values never enter the report, errors or logs.
+pub fn startup_security_checks(
+    cfg: &bot_core::config::Config,
+    env_mode: &str,
+    live_billing: bool,
+    encoded_webhook_key: Option<&str>,
+) -> Vec<PreflightCheck> {
+    security_checks(
+        &cfg.api.bind_host,
+        &cfg.api.trusted_proxies,
+        cfg.database.enabled || live_billing,
+        env_mode,
+        cfg.execution.mode.is_live() || live_billing,
+        encoded_webhook_key
+            .is_some_and(|value| crate::saas::webhooks::decode_webhook_secret_key(value).is_ok()),
+    )
 }
 
 pub fn evaluate(input: PreflightInput) -> PreflightReport {
     let mut checks = Vec::new();
+    checks.extend(security_checks(
+        &input.bind_host,
+        &input.trusted_proxies,
+        input.secret_storage_enabled,
+        &input.env_mode,
+        input.live_trading_requested,
+        input.webhook_key_valid,
+    ));
     let mode = input.env_mode.clone();
     let is_prod = mode == "production";
 
@@ -228,7 +303,7 @@ pub fn evaluate(input: PreflightInput) -> PreflightReport {
 mod tests {
     use super::*;
 
-    fn base() -> PreflightInput {
+    pub(super) fn base() -> PreflightInput {
         PreflightInput {
             env_mode: "production".into(),
             database_url_present: true,
@@ -244,6 +319,10 @@ mod tests {
             live_trading_requested: false,
             live_trading_allowed: false,
             telemetry_enabled: true,
+            bind_host: "0.0.0.0".into(),
+            trusted_proxies: vec!["10.0.0.0/8".into()],
+            secret_storage_enabled: true,
+            webhook_key_valid: true,
         }
     }
     #[test]
@@ -286,5 +365,66 @@ mod tests {
         assert_eq!(d, "<redacted>");
         let ok = redacted("origins=[https://example.com]");
         assert!(ok.contains("example.com"));
+    }
+}
+
+#[cfg(test)]
+mod startup_security_tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn reachable_bind_without_proxy_trust_warns() {
+        let mut cfg = bot_core::config::Config::default();
+        cfg.api.bind_host = "0.0.0.0".into();
+        let checks = startup_security_checks(&cfg, "production", false, None);
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "trusted_proxies" && c.status == PreflightStatus::Warn));
+    }
+
+    #[test]
+    fn secret_storage_refuses_empty_short_invalid_keys_and_accepts_32_bytes() {
+        let mut cfg = bot_core::config::Config::default();
+        cfg.api.bind_host = "0.0.0.0".into();
+        cfg.database.enabled = true;
+        let base64 = base64::engine::general_purpose::STANDARD;
+        for key in [
+            None,
+            Some(String::new()),
+            Some("invalid!".into()),
+            Some(base64.encode([1; 31])),
+        ] {
+            let checks = startup_security_checks(&cfg, "production", false, key.as_deref());
+            assert!(checks
+                .iter()
+                .any(|c| c.name == "webhook_secret_encryption_key"
+                    && c.status == PreflightStatus::Block));
+        }
+        let key = base64.encode([1; 32]);
+        let checks = startup_security_checks(&cfg, "production", false, Some(&key));
+        assert!(checks.iter().any(
+            |c| c.name == "webhook_secret_encryption_key" && c.status == PreflightStatus::Pass
+        ));
+        cfg.api.bind_host = "127.0.0.1".into();
+        let checks = startup_security_checks(&cfg, "development", false, None);
+        assert!(checks.iter().all(|c| c.status != PreflightStatus::Block));
+        let checks = startup_security_checks(&cfg, "production", false, None);
+        assert!(checks.iter().any(|c| c.status == PreflightStatus::Block));
+        let checks = startup_security_checks(&cfg, "development", true, None);
+        assert!(checks.iter().any(|c| c.status == PreflightStatus::Block));
+    }
+
+    #[test]
+    fn deployment_report_blocks_weak_webhook_key_and_invalid_proxy_cidr() {
+        let mut input = super::tests::base();
+        input.webhook_key_valid = false;
+        let report = evaluate(input);
+        assert!(report.checks.iter().any(
+            |c| c.name == "webhook_secret_encryption_key" && c.status == PreflightStatus::Block
+        ));
+        let mut input = super::tests::base();
+        input.trusted_proxies = vec!["not-a-cidr".into()];
+        assert_eq!(evaluate(input).overall, PreflightStatus::Block);
     }
 }

@@ -71,7 +71,7 @@ pub async fn list_invites(State(state): State<ApiState>, headers: HeaderMap) -> 
         return storage_error("team invitations require an attached PostgreSQL database");
     };
     let rows = match sqlx::query(
-        "SELECT id, organization_id, email, role, status, created_at, expires_at FROM invites WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 200",
+        "SELECT id, organization_id, email, role, status, created_at, expires_at FROM invites WHERE organization_id = $1 AND status = 'pending' AND expires_at > now() ORDER BY created_at DESC LIMIT 200",
     )
     .bind(ctx.organization.id.as_uuid())
     .fetch_all(db.pool())

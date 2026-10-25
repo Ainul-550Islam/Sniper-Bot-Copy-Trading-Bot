@@ -53,6 +53,7 @@ fn state_with(
         auth: None,
         limiter: RateLimiter::new(0),
         sensitive_limiter: RateLimiter::new(0),
+        trusted_proxies: Default::default(),
         db,
         journal: None,
         serve_dashboard: false,
@@ -229,7 +230,11 @@ async fn strategy_lifecycle_and_backtest_reach_a_labelled_result() {
         eprintln!("NOT_RUN: strategy lifecycle — POSTGRES_URL missing");
         return;
     };
-    let saas = Arc::new(SaasStore::new());
+    let saas = Arc::new(
+        SaasStore::with_database(Some(db.clone()))
+            .await
+            .expect("durable identity store"),
+    );
     let trading = Arc::new(TenantTradingDataPlane::new(
         db.clone(),
         &bot_core::config::Config::default(),

@@ -46,6 +46,7 @@ fn state_with(saas: Arc<SaasStore>, db: Option<Arc<Database>>) -> ApiState {
         auth: None,
         limiter: RateLimiter::new(0),
         sensitive_limiter: RateLimiter::new(0),
+        trusted_proxies: Default::default(),
         db,
         journal: None,
         serve_dashboard: false,
@@ -261,7 +262,11 @@ async fn invite_lifecycle_create_list_resend_revoke() {
         eprintln!("NOT_RUN: invite lifecycle — POSTGRES_URL missing");
         return;
     };
-    let saas = Arc::new(SaasStore::new_in_memory_identity());
+    let saas = Arc::new(
+        SaasStore::with_database(Some(db.clone()))
+            .await
+            .expect("durable identity store"),
+    );
     let scoped = org_scoped_session(saas.clone(), Some(db.clone()), "Acme Invites").await;
 
     // CREATE — the token is returned exactly once, here.
@@ -325,6 +330,30 @@ async fn invite_lifecycle_create_list_resend_revoke() {
     )
     .await;
     assert!(status == StatusCode::OK || status == StatusCode::NO_CONTENT);
+    let persisted: (String,) = sqlx::query_as("SELECT status FROM invites WHERE id = $1")
+        .bind(Uuid::parse_str(&invitation_id).expect("invite UUID"))
+        .fetch_one(db.pool())
+        .await
+        .expect("durable revoked invitation");
+    assert_eq!(
+        persisted.0, "revoked",
+        "revocation must retain the audit row"
+    );
+    let expired_id = Uuid::new_v4();
+    let expired_token = bot_core::session::token::generate_token("inv");
+    sqlx::query(
+        "INSERT INTO invites (id, organization_id, email, role, token_hash, expires_at)
+         VALUES ($1, $2, 'expired@example.com', 'viewer', $3, now() - interval '1 minute')",
+    )
+    .bind(expired_id)
+    .bind(
+        Uuid::parse_str(created["organization_id"].as_str().expect("organization"))
+            .expect("org UUID"),
+    )
+    .bind(expired_token.hash)
+    .execute(db.pool())
+    .await
+    .expect("expired pending invitation");
     let (status, listed) = request(
         state_with(saas.clone(), Some(db.clone())),
         "GET",
@@ -337,6 +366,23 @@ async fn invite_lifecycle_create_list_resend_revoke() {
     assert!(
         !listed.to_string().contains(&invitation_id),
         "revoked invite must not be listed: {listed}"
+    );
+    assert!(
+        !listed.to_string().contains(&expired_id.to_string()),
+        "expired invitations are not active: {listed}"
+    );
+    let (status, body) = request(
+        state_with(saas.clone(), Some(db.clone())),
+        "POST",
+        "/api/saas/team/invites/accept",
+        Some(serde_json::json!({ "token": resent["invitation_token"], "password": PASSWORD })),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a revoked token must remain unusable: {body}"
     );
 
     // Cross-tenant isolation: a different organization does not see the

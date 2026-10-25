@@ -70,6 +70,18 @@ fn internal_reason(error: impl std::fmt::Display) -> Response {
     )
 }
 
+fn account_storage_error(error: sqlx::Error) -> Response {
+    if super::postgres::is_identity_conflict(&error) {
+        response(
+            StatusCode::CONFLICT,
+            "registration_conflict",
+            "an account could not be created with these details",
+        )
+    } else {
+        internal_reason(error)
+    }
+}
+
 async fn insert_runtime_record<T: serde::Serialize>(
     transaction: &mut Transaction<'_, Postgres>,
     kind: &'static str,
@@ -240,7 +252,8 @@ pub async fn accept_invite(
     // tenant, so the same origin restriction applies. Checked before the
     // per-invitation rate budget so a refused origin cannot consume it.
     if let Err(decision) =
-        crate::saas::ip_allowlist::enforce(&state, organization_id, &headers).await
+        crate::saas::ip_allowlist::enforce(&state, organization_id, &headers, super::request_peer())
+            .await
     {
         let _ = transaction.rollback().await;
         return crate::saas::middleware::deny_response(&state, &decision).await;
@@ -393,7 +406,7 @@ pub async fn accept_invite(
         )
         .await
         {
-            return internal_reason(error);
+            return account_storage_error(error);
         }
     }
 
@@ -425,7 +438,7 @@ pub async fn accept_invite(
     .execute(&mut *transaction)
     .await
     {
-        return internal_reason(error);
+        return account_storage_error(error);
     }
 
     let membership_lookup = format!("{}:{}", organization_id, user.id);

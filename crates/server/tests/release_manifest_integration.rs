@@ -92,8 +92,8 @@ fn frontend_lockfile_pins_patched_nextjs() {
     //     Reverting to any 15.x pin — including the vulnerable 15.5.4 and the Batch-10 patch
     //     release 15.5.26 — must fail here.
     assert!(
-        semver_tuple(&next) >= (16, 3, 6),
-        "next {next} is below the F-2 remediation floor of 16.3.6 (batch 11)"
+        semver_tuple(&next) >= (16, 4, 3),
+        "next {next} is below the Part-01 security floor of 16.4.3"
     );
     assert_ne!(
         next, "15.5.26",
@@ -117,8 +117,8 @@ fn frontend_lockfile_pins_patched_nextjs() {
         "eslint-config-next {eslint_next} must match the next {next} major/minor line"
     );
     assert!(
-        semver_tuple(&eslint_next) >= (16, 3, 6),
-        "eslint-config-next {eslint_next} is below the 16.3.6 line that matches next {next}"
+        semver_tuple(&eslint_next) >= (16, 4, 3),
+        "eslint-config-next {eslint_next} is below the 16.4.3 line that matches next {next}"
     );
 
     // (3) package.json and package-lock.json must agree (mirrors the frontend-ci.yml consistency

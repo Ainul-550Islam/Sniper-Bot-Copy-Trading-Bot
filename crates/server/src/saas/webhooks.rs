@@ -431,6 +431,12 @@ fn webhook_secret_key() -> Result<[u8; 32], String> {
     let encoded = std::env::var(WEBHOOK_SECRET_KEY_ENV).map_err(|_| {
         format!("{WEBHOOK_SECRET_KEY_ENV} must be configured as a base64-encoded 32-byte key")
     })?;
+    decode_webhook_secret_key(&encoded)
+}
+
+/// Shared by runtime encryption, startup validation and deployment preflight.
+/// AES-256-GCM requires exactly 32 decoded bytes; no plaintext fallback exists.
+pub(crate) fn decode_webhook_secret_key(encoded: &str) -> Result<[u8; 32], String> {
     let decoded = STANDARD_NO_PAD
         .decode(encoded.trim())
         .or_else(|_| STANDARD.decode(encoded.trim()))
@@ -441,7 +447,8 @@ fn webhook_secret_key() -> Result<[u8; 32], String> {
     Ok(key)
 }
 
-fn encrypt_webhook_secret(secret: &str) -> Result<String, String> {
+/// Encrypt a signing secret in the canonical authenticated storage format.
+pub fn encrypt_webhook_secret(secret: &str) -> Result<String, String> {
     let key = webhook_secret_key()?;
     let unbound = UnboundKey::new(&AES_256_GCM, &key)
         .map_err(|_| "webhook secret encryption key could not be initialized".to_string())?;
@@ -1153,5 +1160,31 @@ async fn test_webhook(
             "webhook_delivery_failed",
             delivery_error.unwrap_or_else(|| "webhook delivery failed".to_string()),
         )
+    }
+}
+
+#[cfg(test)]
+mod encryption_key_config_tests {
+    use super::*;
+
+    #[test]
+    fn encryption_key_must_be_valid_base64_and_exactly_32_bytes() {
+        for encoded in [
+            "".to_string(),
+            " ".to_string(),
+            "not-base64!".to_string(),
+            STANDARD.encode([7; 31]),
+            STANDARD.encode([7; 33]),
+        ] {
+            assert!(decode_webhook_secret_key(&encoded).is_err());
+        }
+        assert_eq!(
+            decode_webhook_secret_key(&STANDARD.encode([7; 32])).unwrap(),
+            [7; 32]
+        );
+        assert_eq!(
+            decode_webhook_secret_key(&STANDARD_NO_PAD.encode([7; 32])).unwrap(),
+            [7; 32]
+        );
     }
 }

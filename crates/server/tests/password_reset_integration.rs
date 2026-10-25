@@ -45,6 +45,7 @@ fn state_with(saas: Arc<SaasStore>, db: Option<Arc<Database>>) -> ApiState {
         auth: None,
         limiter: RateLimiter::new(0),
         sensitive_limiter: RateLimiter::new(0),
+        trusted_proxies: Default::default(),
         db,
         journal: None,
         serve_dashboard: false,
@@ -259,7 +260,12 @@ async fn reset_changes_password_revokes_sessions_and_token_is_single_use() {
     let session_b = body["token"].as_str().expect("token").to_string();
 
     // Unknown address: identical acceptance, no reset email.
-    request_reset_for(saas.clone(), &db, &format!("unknown-{}@example.com", Uuid::new_v4())).await;
+    request_reset_for(
+        saas.clone(),
+        &db,
+        &format!("unknown-{}@example.com", Uuid::new_v4()),
+    )
+    .await;
 
     request_reset_for(saas.clone(), &db, &email).await;
     let token = latest_reset_token(&db, &email).await;
@@ -268,7 +274,11 @@ async fn reset_changes_password_revokes_sessions_and_token_is_single_use() {
     let (status, _) = confirm(&db, saas.clone(), "rst_not_a_real_token", NEW_PASSWORD).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (status, _) = login(saas.clone(), &db, &email, OLD_PASSWORD).await;
-    assert_eq!(status, StatusCode::OK, "old password still valid after denial");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "old password still valid after denial"
+    );
 
     let (status, body) = confirm(&db, saas.clone(), &token, NEW_PASSWORD).await;
     assert_eq!(status, StatusCode::OK, "reset: {body}");
@@ -276,17 +286,31 @@ async fn reset_changes_password_revokes_sessions_and_token_is_single_use() {
 
     // The password login checks really changed (authoritative record).
     let (status, _) = login(saas.clone(), &db, &email, OLD_PASSWORD).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "old password must stop working");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "old password must stop working"
+    );
     let (status, _) = login(saas.clone(), &db, &email, NEW_PASSWORD).await;
     assert_eq!(status, StatusCode::OK, "new password must work");
 
     // Every pre-existing session is revoked.
-    assert_eq!(me(saas.clone(), &db, &session_a).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(me(saas.clone(), &db, &session_b).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        me(saas.clone(), &db, &session_a).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        me(saas.clone(), &db, &session_b).await,
+        StatusCode::UNAUTHORIZED
+    );
 
     // The token cannot be reused.
     let (status, _) = confirm(&db, saas.clone(), &token, "third-horse-battery-x").await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "token reuse must fail");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "token reuse must fail"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -308,7 +332,10 @@ async fn concurrent_confirms_with_one_token_yield_exactly_one_success() {
     );
     let statuses = [first.0, second.0];
     let successes = statuses.iter().filter(|s| **s == StatusCode::OK).count();
-    assert_eq!(successes, 1, "exactly one confirm may succeed: {statuses:?}");
+    assert_eq!(
+        successes, 1,
+        "exactly one confirm may succeed: {statuses:?}"
+    );
     assert!(
         statuses
             .iter()
@@ -330,10 +357,10 @@ async fn revocation_failure_rolls_back_password_token_and_sessions() {
     let session = body["token"].as_str().expect("token").to_string();
     let user_row: (String,) =
         sqlx::query_as("SELECT id::text FROM users WHERE lower(email) = lower($1)")
-        .bind(&email)
-        .fetch_one(db.pool())
-        .await
-        .expect("user row");
+            .bind(&email)
+            .fetch_one(db.pool())
+            .await
+            .expect("user row");
 
     request_reset_for(saas.clone(), &db, &email).await;
     let token = latest_reset_token(&db, &email).await;
@@ -368,12 +395,18 @@ async fn revocation_failure_rolls_back_password_token_and_sessions() {
 
     // Nothing committed: old password works, the session is still live, and
     // the token was not consumed.
-    sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger_fn}_trg ON saas_runtime_records"))
-        .execute(db.pool())
-        .await
-        .expect("drop trigger");
+    sqlx::query(&format!(
+        "DROP TRIGGER IF EXISTS {trigger_fn}_trg ON saas_runtime_records"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("drop trigger");
     let (status, _) = login(saas.clone(), &db, &email, OLD_PASSWORD).await;
-    assert_eq!(status, StatusCode::OK, "old password must still work after rollback");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "old password must still work after rollback"
+    );
     assert_eq!(
         me(saas.clone(), &db, &session).await,
         StatusCode::OK,
@@ -381,7 +414,11 @@ async fn revocation_failure_rolls_back_password_token_and_sessions() {
     );
 
     let (status, body) = confirm(&db, saas.clone(), &token, NEW_PASSWORD).await;
-    assert_eq!(status, StatusCode::OK, "the unconsumed token must still work: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the unconsumed token must still work: {body}"
+    );
     let (status, _) = login(saas.clone(), &db, &email, NEW_PASSWORD).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -389,4 +426,70 @@ async fn revocation_failure_rolls_back_password_token_and_sessions() {
         .execute(db.pool())
         .await
         .expect("drop fault function");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoked_and_expired_reset_tokens_leave_password_and_session_unchanged() {
+    let Some(db) = setup_db().await else {
+        eprintln!("NOT_RUN: reset expiry and revocation — POSTGRES_URL missing");
+        return;
+    };
+    let saas = durable_store(&db).await;
+    let email = format!("reset-expiry-{}@example.com", Uuid::new_v4());
+    register(saas.clone(), &db, &email).await;
+    let (status, body) = login(saas.clone(), &db, &email, OLD_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK);
+    let session = body["token"].as_str().expect("session").to_string();
+    request_reset_for(saas.clone(), &db, &email).await;
+    let older = latest_reset_token(&db, &email).await;
+    request_reset_for(saas.clone(), &db, &email).await;
+    let newer = latest_reset_token(&db, &email).await;
+    assert_ne!(older, newer);
+    assert_eq!(
+        confirm(&db, saas.clone(), &older, NEW_PASSWORD).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    sqlx::query("UPDATE password_reset_tokens SET created_at = now() - interval '2 minutes', expires_at = now() - interval '1 minute' WHERE token_hash = $1")
+        .bind(bot_core::session::token::hash_token(&newer))
+        .execute(db.pool()).await.expect("expire this token only");
+    assert_eq!(
+        confirm(&db, saas.clone(), &newer, NEW_PASSWORD).await.0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        login(saas.clone(), &db, &email, OLD_PASSWORD).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(me(saas.clone(), &db, &session).await, StatusCode::OK);
+    assert_eq!(
+        login(saas, &db, &email, NEW_PASSWORD).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlong_reset_password_does_not_consume_the_token() {
+    let Some(db) = setup_db().await else {
+        eprintln!("NOT_RUN: reset password upper bound — POSTGRES_URL missing");
+        return;
+    };
+    let saas = durable_store(&db).await;
+    let email = format!("reset-length-{}@example.com", Uuid::new_v4());
+    register(saas.clone(), &db, &email).await;
+    request_reset_for(saas.clone(), &db, &email).await;
+    let token = latest_reset_token(&db, &email).await;
+    let password = "x".repeat(sniper_suite::saas::users::MAX_PASSWORD_LEN + 1);
+    let (status, body) = confirm(&db, saas.clone(), &token, &password).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], "password_too_long");
+    let (status, body) = confirm(&db, saas.clone(), &token, NEW_PASSWORD).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "valid retry must still work: {body}"
+    );
+    assert_eq!(
+        login(saas, &db, &email, NEW_PASSWORD).await.0,
+        StatusCode::OK
+    );
 }

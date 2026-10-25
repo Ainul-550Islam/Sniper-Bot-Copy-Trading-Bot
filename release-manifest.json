@@ -24,8 +24,8 @@
       "programs/staking-suite (native Solana program, own lockfile, built with cargo build-sbf / agave 2.1.21)"
     ],
     "database_migrations": {
-      "count": 58,
-      "high_water_mark": "0058",
+      "count": 59,
+      "high_water_mark": "0059",
       "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)",
       "added_0019_0022": "0019_saas_billing_provider (plan/subscription/entitlement/usage/checkout/invoice/payment + billing pricing), 0020_saas_custody (profile + keys + address), 0021_saas_lifecycle (retention policy, purge lifecycle, job claims) \u2014 forward-only, Batch 1; 0022_checkout_url (durable provider checkout_url persistence for Stripe/Paddle end-to-end wiring) \u2014 forward_only",
       "added_0023": "0023_trading_tenant_columns (nullable organization_id ownership column + organizations(id) ON DELETE RESTRICT foreign key on all 32 core trading-truth tables \u2014 OMS orders/order_status_history/executions/transactions/idempotency_keys, positions/trades/balance_snapshots, dedup_keys/risk_events/audit_events, reconciliation_state, execution_intents, execution_claims/execution_claim_events, execution_lifecycle/execution_lifecycle_events, copy_leaders/copy_leader_events/copy_events/copy_links, poly_signals/poly_orders/poly_fills/poly_recon_findings, ledger_events/ledger_postings/global_positions/global_risk_decisions/kill_switches/kill_switch_events/accounting_recon_findings \u2014 STEP 1 of the enterprise tenant-isolation program; deterministic legacy backfill, NOT NULL, tenant-leading indexes and tenant-composite uniqueness follow in 0024) \u2014 forward-only",
@@ -75,20 +75,20 @@
   },
   "verification": {
     "manifest": {
-      "product_files": 1286,
-      "rust_files": 676,
+      "product_files": 1328,
+      "rust_files": 683,
       "docs_files": 156,
-      "tree_digest": "cb6e65cd979dd67b0959120c804dc9eb3470035d630e6c3d4e314632b9ccb646",
+      "tree_digest": "b88f9575f90c838e9ec9efeb1fbacaf10719b342a5c0df380ef52cbab76484d4",
       "generated_by": "scripts/update-release-manifest.sh"
     }
   },
   "docs_files": 156,
-  "rust_files": 676,
-  "test_count": 2072,
-  "migrations": 58,
+  "rust_files": 683,
+  "test_count": 2088,
+  "migrations": 59,
   "test_counts": {
     "method": "grep-count of '#[test]' attribute lines under crates/ (identical to test_count)",
-    "value": 2072,
+    "value": 2088,
     "note": "Static inventory of test functions: a count, not a pass/fail result. No run logs ship in this package; re-run per docs/TESTING.md."
   },
   "verification_status": {

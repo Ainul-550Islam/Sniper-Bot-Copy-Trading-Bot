@@ -4,6 +4,10 @@
  * No credentials in query strings. No client-side authorization assumptions.
  */
 import { request, ApiError } from "@/lib/api";
+import type { TeamRole } from "@/lib/api/team-api";
+
+/** The server resolves this alias to the authenticated caller's organization. */
+export const TEAM_MEMBERS_PATH = "/api/saas/organizations/current/members";
 
 export interface BillingStatus {
   organization_id: string;
@@ -131,7 +135,7 @@ export interface OrganizationMember {
     created_at: string;
     last_login_at: string | null;
   } | null;
-  role: "org_owner" | "admin" | "trader" | "viewer" | "auditor";
+  role: TeamRole;
   status: "active" | "invited" | "suspended";
   created_at: string;
 }
@@ -199,14 +203,8 @@ export const commercial = {
 
   // Team & Organization Members
   //
-  // Contract note (Part 5): member management lives under the SaaS team
-  // namespace on the server (crates/server/src/saas/team.rs). The
-  // organization id is NOT a path parameter there — the backend derives it
-  // from the session — so these helpers no longer take one. The earlier
-  // organization-scoped member target did not exist in the router and would
-  // have 404'd.
-  members: () =>
-    request<TeamListResponse>("/api/saas/organizations/current/members"),
+  // organizations::list_members resolves "current" through tenant authorization.
+  members: () => request<TeamListResponse>(TEAM_MEMBERS_PATH),
   inviteMember: (email: string, role: string) =>
     request<{ success: boolean; invitation_id: string }>("/api/saas/team/invites", {
       method: "POST",

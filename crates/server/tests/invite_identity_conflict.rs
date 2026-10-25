@@ -44,6 +44,7 @@ fn state_with(saas: Arc<SaasStore>, db: Option<Arc<Database>>) -> ApiState {
         auth: None,
         limiter: RateLimiter::new(0),
         sensitive_limiter: RateLimiter::new(0),
+        trusted_proxies: Default::default(),
         db,
         journal: None,
         serve_dashboard: false,
@@ -153,7 +154,10 @@ async fn org_scoped_session(
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "org creation: {body}");
-    let slug = body["organization"]["slug"].as_str().expect("slug").to_string();
+    let slug = body["organization"]["slug"]
+        .as_str()
+        .expect("slug")
+        .to_string();
     let (status, body) = request(
         state_with(saas, Some(db.clone())),
         "POST",
@@ -172,7 +176,7 @@ async fn invite(saas: Arc<SaasStore>, db: &Arc<Database>, scoped: &str, email: &
         state_with(saas, Some(db.clone())),
         "POST",
         "/api/saas/team/invites",
-        Some(json!({ "email": email, "role": "member" })),
+        Some(json!({ "email": email, "role": "viewer" })),
         Some(scoped),
     )
     .await;
@@ -218,14 +222,17 @@ async fn accepting_for_an_existing_account_joins_it_without_a_second_account() {
 
     let token = invite(saas.clone(), &db, &scoped, &member).await;
     let (status, body) = accept(saas.clone(), &db, &token, None).await;
-    assert!(status.is_success(), "existing account must join: {status} {body}");
+    assert!(
+        status.is_success(),
+        "existing account must join: {status} {body}"
+    );
 
     let (count,): (i64,) =
         sqlx::query_as("SELECT count(*) FROM users WHERE lower(email) = lower($1)")
-        .bind(&member)
-        .fetch_one(db.pool())
-        .await
-        .expect("count");
+            .bind(&member)
+            .fetch_one(db.pool())
+            .await
+            .expect("count");
     assert_eq!(count, 1, "no second account may be created");
 }
 
@@ -249,27 +256,40 @@ async fn projection_collision_on_email_is_a_409_not_a_500() {
     sqlx::query(
         "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'pbkdf2-sha256$1$AAAA$AAAA')",
     )
-        .bind(existing)
-        .bind(&address)
-        .execute(db.pool())
-        .await
-        .expect("seed projection-only account");
+    .bind(existing)
+    .bind(&address)
+    .execute(db.pool())
+    .await
+    .expect("seed projection-only account");
 
     let token = invite(saas.clone(), &db, &scoped, &address).await;
     let (status, body) = accept(saas.clone(), &db, &token, Some("accept-horse-battery")).await;
-    assert_eq!(status, StatusCode::CONFLICT, "collision must be a 409: {body}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "collision must be a 409: {body}"
+    );
     assert_eq!(body["error"], "registration_conflict");
     let text = body.to_string();
-    assert!(!text.contains("users_email_key"), "no constraint names: {text}");
-    assert!(!text.contains(&existing.to_string()), "no other account id: {text}");
+    assert!(
+        !text.contains("users_email_key"),
+        "no constraint names: {text}"
+    );
+    assert!(
+        !text.contains(&existing.to_string()),
+        "no other account id: {text}"
+    );
 
     // Nothing was created by the failed accept.
     let (count,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM saas_runtime_records WHERE kind = 'user' AND lookup_key = $1",
     )
-        .bind(&address)
-        .fetch_one(db.pool())
-        .await
-        .expect("count");
-    assert_eq!(count, 0, "the failed accept must roll back its runtime user record");
+    .bind(&address)
+    .fetch_one(db.pool())
+    .await
+    .expect("count");
+    assert_eq!(
+        count, 0,
+        "the failed accept must roll back its runtime user record"
+    );
 }

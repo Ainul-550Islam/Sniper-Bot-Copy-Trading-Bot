@@ -11,7 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 import TeamTable from "@/components/settings/team-table";
 import { TeamMember } from "@/lib/api/team-api";
-import { request } from "@/lib/api";
+import { commercial } from "@/lib/commercial";
 
 export default function TeamSettingsPage() {
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -22,15 +22,8 @@ export default function TeamSettingsPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await request<{
-        items: Array<{
-          membership_id: string;
-          user: { id: string; email: string; created_at: string } | null;
-          role: TeamMember["role"];
-          created_at: string;
-        }>;
-      }>("/api/saas/organizations/current/members");
-      setMembers((res.items || []).flatMap((member) => member.user ? [{
+      const res = await commercial.members();
+      setMembers((res.members || []).flatMap((member) => member.user ? [{
         id: member.membership_id,
         user_id: member.user.id,
         email: member.user.email,

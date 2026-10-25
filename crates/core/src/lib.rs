@@ -45,6 +45,7 @@ pub mod db;
 pub mod dedup;
 pub mod error;
 pub mod events;
+#[path = "execution/mod.rs"]
 pub mod execution;
 pub mod global_risk;
 pub mod ha;

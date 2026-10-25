@@ -30,6 +30,23 @@ pub const USAGE: &str = "usage";
 pub const JOB: &str = "provisioning_job";
 pub const PAYMENT: &str = "payment_transaction";
 
+fn identity_constraint_conflict(code: Option<&str>, constraint: Option<&str>) -> bool {
+    code == Some("23505")
+        && matches!(
+            constraint,
+            Some("users_email_key" | "saas_runtime_records_lookup_key")
+        )
+}
+
+pub(super) fn is_identity_conflict(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(error) => {
+            identity_constraint_conflict(error.code().as_deref(), error.constraint())
+        }
+        _ => false,
+    }
+}
+
 /// Shared PostgreSQL repository.
 pub struct PostgresSaasRepo {
     db: Arc<Database>,
@@ -90,7 +107,11 @@ impl PostgresSaasRepo {
                 .execute(&mut **transaction)
                 .await
                 .map_err(|error| {
-                    BotError::db(format!("project SaaS user to users table: {error}"))
+                    if is_identity_conflict(&error) {
+                        BotError::invalid("an account with that email already exists")
+                    } else {
+                        BotError::db(format!("project SaaS user to users table: {error}"))
+                    }
                 })?;
             }
             ORGANIZATION => {
@@ -282,7 +303,7 @@ impl PostgresSaasRepo {
         Ok(updated)
     }
 
-    async fn revoke_user_sessions_in_transaction(
+    pub(super) async fn revoke_user_sessions_in_transaction(
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         user_id: UserId,
         reason: &str,
@@ -375,21 +396,35 @@ impl PostgresSaasRepo {
         Ok(count)
     }
 
-    /// Atomically change a user's password and revoke every existing session.
-    pub async fn update_user_and_revoke_sessions(
-        &self,
+    /// Lock the canonical identity before changing security-sensitive fields.
+    pub(super) async fn user_for_update(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        user_id: UserId,
+    ) -> BotResult<Option<User>> {
+        let row = sqlx::query(
+            "SELECT record FROM saas_runtime_records WHERE kind = 'user' AND id = $1 FOR UPDATE",
+        )
+        .bind(user_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| BotError::db(format!("lock SaaS user: {error}")))?;
+        let user: Option<User> = row.map(|row| Self::decode(row.get("record"))).transpose()?;
+        if user.as_ref().is_some_and(|user| user.id != user_id) {
+            return Err(BotError::db(
+                "canonical user identity does not match its row",
+            ));
+        }
+        Ok(user)
+    }
+
+    /// Update the canonical user and relational projection in the SAME transaction.
+    pub(super) async fn update_user_in_transaction(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         user: &User,
-        reason: &str,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> BotResult<usize> {
+    ) -> BotResult<()> {
         let document = Self::encode(user)?;
         let email = User::normalize_email(&user.email);
-        let mut transaction = self
-            .db
-            .pool()
-            .begin()
-            .await
-            .map_err(|error| BotError::db(format!("begin password change: {error}")))?;
         let updated = sqlx::query(
             "UPDATE saas_runtime_records SET record = $3, lookup_key = $4, user_id = $5, updated_at = $6 WHERE kind = $1 AND id = $2",
         )
@@ -399,13 +434,30 @@ impl PostgresSaasRepo {
         .bind(&email)
         .bind(user.id.as_uuid())
         .bind(now)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
-        .map_err(|error| BotError::db(format!("update password record: {error}")))?;
+        .map_err(|error| BotError::db(format!("update canonical SaaS user: {error}")))?;
         if updated.rows_affected() != 1 {
             return Err(BotError::NotFound(format!("user {}", user.id)));
         }
-        Self::sync_identity_projection(&mut transaction, USER, &document).await?;
+        Self::sync_identity_projection(transaction, USER, &document).await?;
+        Ok(())
+    }
+
+    /// Atomically change a user's password and revoke every existing session.
+    pub async fn update_user_and_revoke_sessions(
+        &self,
+        user: &User,
+        reason: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BotResult<usize> {
+        let mut transaction = self
+            .db
+            .pool()
+            .begin()
+            .await
+            .map_err(|error| BotError::db(format!("begin password change: {error}")))?;
+        Self::update_user_in_transaction(&mut transaction, user, now).await?;
         let count =
             Self::revoke_user_sessions_in_transaction(&mut transaction, user.id, reason, now)
                 .await?;
@@ -623,6 +675,27 @@ mod tests {
     use chrono::{Duration, Utc};
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn only_named_identity_unique_violations_are_conflicts() {
+        for constraint in ["users_email_key", "saas_runtime_records_lookup_key"] {
+            assert!(identity_constraint_conflict(
+                Some("23505"),
+                Some(constraint)
+            ));
+            assert!(!identity_constraint_conflict(
+                Some("23503"),
+                Some(constraint)
+            ));
+        }
+        assert!(!identity_constraint_conflict(
+            Some("23505"),
+            Some("users_pkey")
+        ));
+        assert!(!identity_constraint_conflict(Some("23505"), None));
+        assert!(!identity_constraint_conflict(None, None));
+        assert!(!is_identity_conflict(&sqlx::Error::RowNotFound));
+    }
 
     /// Exercises every SaaS runtime record class through two independent
     /// repository handles. It self-skips unless POSTGRES_URL is supplied.

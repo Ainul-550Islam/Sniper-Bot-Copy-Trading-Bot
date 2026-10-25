@@ -1153,6 +1153,8 @@ pub struct ApiConfig {
     /// Read from `API_KEY` when empty.
     pub api_key_env: String,
     pub cors_origins: Vec<String>,
+    /// CIDRs allowed to supply client-IP headers; empty trusts no proxy.
+    pub trusted_proxies: Vec<String>,
     /// Serve the embedded single-file dashboard at `/`.
     pub serve_dashboard: bool,
     /// Per-principal (or per-IP when unauthenticated) request budget, in
@@ -1171,6 +1173,7 @@ impl Default for ApiConfig {
             bind_port: 8080,
             api_key_env: "API_KEY".into(),
             cors_origins: vec!["*".into()],
+            trusted_proxies: Vec::new(),
             serve_dashboard: true,
             rate_limit_rpm: 600,
         }
@@ -2487,6 +2490,11 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     }
 
     // --- api / storage ---
+    // An explicitly empty override clears TOML trust. Empty entries inside
+    // a non-empty list remain invalid instead of being silently ignored.
+    if let Ok(value) = std::env::var("TRUSTED_PROXIES") {
+        c.api.trusted_proxies = trusted_proxies_from_env(&value);
+    }
     if let Some(v) = env_str("API_BIND_HOST", w) {
         c.api.bind_host = v;
     }
@@ -3101,7 +3109,43 @@ fn validate_global_risk(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     Ok(())
 }
 
+/// Parse one CIDR. Shared with the server's tenant allowlist and proxy trust
+/// policy so configuration validation and enforcement cannot drift.
+pub fn parse_cidr(value: &str) -> Option<(std::net::IpAddr, u8)> {
+    let (address, prefix) = value.trim().split_once('/')?;
+    let address: std::net::IpAddr = address.parse().ok()?;
+    let prefix: u8 = prefix.parse().ok()?;
+    let max = if address.is_ipv4() { 32 } else { 128 };
+    if prefix > max {
+        return None;
+    }
+    Some((address, prefix))
+}
+
+fn trusted_proxies_from_env(value: &str) -> Vec<String> {
+    if value.trim().is_empty() {
+        Vec::new()
+    } else {
+        value.split(',').map(|v| v.trim().to_string()).collect()
+    }
+}
+
+/// Whether the configured bind is local-only. Shared by startup and preflight.
+pub fn is_loopback_host(host: &str) -> bool {
+    matches!(
+        host.trim(),
+        "127.0.0.1" | "localhost" | "::1" | "[::1]" | ""
+    )
+}
+
 fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
+    for cidr in &c.api.trusted_proxies {
+        if parse_cidr(cidr).is_none() {
+            return Err(BotError::config(format!(
+                "invalid api.trusted_proxies CIDR: {cidr:?}"
+            )));
+        }
+    }
     // --- signing identities (key-custody boundary) ---
     let mut seen: Vec<&str> = Vec::new();
     seen.push(PRIMARY_SIGNER_IDENTITY);
@@ -3429,6 +3473,22 @@ pub fn default_config_toml() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_proxy_config_defaults_env_and_validation() {
+        assert!(ApiConfig::default().trusted_proxies.is_empty());
+        let mut cfg: Config =
+            toml::from_str("[api]\ntrusted_proxies = [\"10.0.0.0/8\", \"2001:db8::/32\"]").unwrap();
+        validate(&cfg, &mut Vec::new()).unwrap();
+        cfg.api.trusted_proxies = trusted_proxies_from_env(" 192.0.2.0/24, ::1/128 ");
+        validate(&cfg, &mut Vec::new()).unwrap();
+        assert_eq!(cfg.api.trusted_proxies, vec!["192.0.2.0/24", "::1/128"]);
+        assert!(trusted_proxies_from_env(" ").is_empty());
+        for bad in ["10.0.0.1", "0.0.0.0/33", "::/129", "bad/8", "10.0.0.0/8,"] {
+            cfg.api.trusted_proxies = trusted_proxies_from_env(bad);
+            assert!(validate(&cfg, &mut Vec::new()).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn recovery_and_ctf_defaults_are_safe() {

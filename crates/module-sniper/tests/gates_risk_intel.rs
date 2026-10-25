@@ -454,7 +454,10 @@ fn required_sell_probe_refuses_unknown_and_missing_probes() {
     // Sellable still passes, and the default (flag off) keeps the skip.
     snap.sell_probe = Some(SellProbeOutcome::Sellable);
     let report = gates::evaluate(&snap, &cfg, now);
-    assert_eq!(gate_outcome(&report, GATE_SELL_SIMULATION), &GateOutcome::Pass);
+    assert_eq!(
+        gate_outcome(&report, GATE_SELL_SIMULATION),
+        &GateOutcome::Pass
+    );
     let relaxed = gated_config();
     snap.sell_probe = None;
     let report = gates::evaluate(&snap, &relaxed, now);

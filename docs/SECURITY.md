@@ -6,24 +6,28 @@ audit has been performed (see archive/AUDIT.md for the honest status of assuranc
 claims; a future audit's deliverables have a defined handover slot in
 `docs/EXTERNAL-VALIDATION-RUNBOOK.md` § GAP-006).
 
-### Frontend dependency advisories (remediated 2026-09-27)
+### Frontend dependency advisories (updated 2026-10-25)
 
-Two batches of remediation, both verified in this repository's own gates:
+Remediation history and the current shipped dependency floor:
 
 * **Batch 10** — `apps/control-plane` pinned `next 15.5.4`, affected by the CVSS 10.0
   remote-code-execution advisory `CVE-2025-66478` (React Server Components / App Router, upstream
   `CVE-2025-55182`). The pin was raised to the patched `next 15.5.26` for the 15.5 line (superseded the same day by Batch 11 — see below).
 * **Batch 11 (F-2)** — the 15.5 line still resolved `postcss 8.4.31`, which `npm audit` rates high
   (unescaped `</style>` output; `sourceMappingURL` `.map` disclosure) and whose fix ships only in
-  `next >= 16.3.6`. The control plane now pins **`next 16.3.8`** with **`eslint-config-next 16.3.8`**,
-  which resolves **`postcss 8.5.23`**; the shipped production dependency graph now audits clean (`0 vulnerabilities`; development-only tooling findings remain documented).
+  `next >= 16.3.6`. That batch pinned **`next 16.3.8`** with **`eslint-config-next 16.3.8`**,
+  resolving **`postcss 8.5.23`**.
+* **Part 01** — the current pins are **`next 16.4.3`** and
+  **`eslint-config-next 16.4.3`**, with **`sharp 0.35.5`** enforced through an
+  override and the regenerated lockfile. Production audit reports zero findings;
+  development tooling is not claimed vulnerability-free.
 
 Verification for the current state (`npm ci` = clean dependency state):
 
-* `npm ci --ignore-scripts` → 354 packages, exit 0; lockfile/package.json consistency check as in
+* `npm ci` → 448 packages, exit 0; lockfile/package.json consistency check as in
   `.github/workflows/frontend-ci.yml` → `lockfile consistent`.
-* `npm run audit:production` (`npm audit --omit=dev`) → **`found 0 vulnerabilities`** (production critical/high/moderate/low 0), and this is a CI hard gate in `.github/workflows/frontend-ci.yml`. The full development audit retains five high-severity transitive findings from tooling dependencies; they do not ship in the production dependency graph and remain documented.
-* `npx tsc --noEmit` → exit 0 · `npx next build` → exit 0 (Next.js 16, 5 routes prerendered static).
+* `npm run audit:production` (`npm audit --omit=dev`) → **`found 0 vulnerabilities`** (production critical/high/moderate/low 0), and this is a CI hard gate in `.github/workflows/frontend-ci.yml`. The development-inclusive audit reports seven tooling findings (three moderate, two high, two critical); the production-only graph has none.
+* `npx tsc --noEmit` → exit 0 · `npx next build` → exit 0 (Next.js 16.4.3, 49 static pages generated).
 * `npm run lint` → exit 0, non-interactive (ESLint 9 flat config, `eslint-config-next/core-web-vitals`
   + `/typescript`); the asynchronous-loader findings were resolved by deferring the initial API call to a microtask, and the rule remains a hard error in
   `apps/control-plane/eslint.config.mjs` — no rule is disabled.
@@ -130,6 +134,39 @@ All live modes: `bash scripts/run-external-validation.sh all-safe` → all evide
   key at start-up; they are used for the HMAC request headers and the
   authenticated user-websocket frame and are never logged, journaled or
   audited (the journal stores order ids and sizes only).
+
+## Client IP & trusted proxies
+
+`[api] trusted_proxies = []` is the secure default: the socket peer is the
+client, and `X-Forwarded-For` / `X-Real-IP` cannot override it. Set
+`TRUSTED_PROXIES` to comma-separated CIDRs of **only your actual proxies**
+(or configure the TOML list). Invalid CIDRs refuse startup. An empty environment
+override clears configured trust. Non-loopback binds with empty trust produce
+a preflight WARN, not implicit header trust.
+
+Behind a trusted peer, one shared resolver walks XFF **right to left**, skips
+trusted hops, and chooses the first untrusted address. A malformed/missing XFF
+may fall back to X-Real-IP only behind that trusted peer. No transport peer, or
+no verifiable origin behind a trusted peer, means tenant allowlists fail closed.
+Per-IP rate limiting uses the very same resolver; absent connect info retains
+`ip:unknown`. Request-scoped transport context is task-local, not an injectable
+internal HTTP header, and is not inherited by background tasks.
+
+The supplied nginx edge overwrites XFF with `$remote_addr`. Its optional real-IP
+block is **only** for deployments behind an explicitly allowlisted LB with
+restricted ingress. Docker allocates the default network dynamically: inspect
+its real subnet/peer addresses as described in `.env.template`; prefer a reserved
+nginx address and `/32` (or `/128`) over trusting every container on a subnet.
+Do not expose an alternate direct ingress from a trusted proxy network.
+
+Durable webhook secret storage (database enabled, or live billing requested)
+requires a base64 key decoding to exactly 32 bytes outside local loopback paper
+development; startup and deployment preflight both BLOCK an empty, malformed or
+short key. Generate it with `openssl rand -base64 32` and store it in a secrets
+manager. AES-256-GCM has no plaintext/development encryption fallback: local
+paper startup remains possible without the key, but webhook creation/delivery
+still refuses it at request time. Production/staging loopback does not exempt
+the key requirement. Compose requires a non-empty value before launch.
 
 ## Execution safety
 

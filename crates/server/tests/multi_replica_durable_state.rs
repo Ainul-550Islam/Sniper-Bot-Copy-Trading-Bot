@@ -304,15 +304,13 @@ async fn concurrent_control_writes_bump_the_version() {
 // §S-4 — custody rotation
 // ─────────────────────────────────────────────────────────────────────
 
-fn rotation(org: OrganizationId, profile: &str, old: &str, new: &str) -> RotationRecord {
-    RotationRecord::new(
-        org,
-        CustodyProfileId::parse(profile).expect("profile"),
-        SignerId::parse(old).expect("old"),
-        SignerId::parse(new).expect("new"),
-        ProviderType::Local,
-        Utc::now(),
-    )
+fn rotation(
+    org: OrganizationId,
+    profile: CustodyProfileId,
+    old: SignerId,
+    new: SignerId,
+) -> RotationRecord {
+    RotationRecord::new(org, profile, old, new, ProviderType::Local, Utc::now())
 }
 
 /// A rotation created on replica A must be readable — and advanceable —
@@ -327,7 +325,12 @@ async fn rotation_created_on_one_replica_activates_on_the_other() {
     let store_a = CustodyRotationStore::new(Some(a.clone()));
     let store_b = CustodyRotationStore::new(Some(b.clone()));
 
-    let rec = rotation(org, "profile-cross", "signer-old", "signer-new");
+    let rec = rotation(
+        org,
+        CustodyProfileId::new(),
+        SignerId::new(),
+        SignerId::new(),
+    );
     store_a.insert(&rec).await.expect("replica A creates");
 
     let mut on_b = store_b
@@ -369,13 +372,15 @@ async fn second_inflight_rotation_is_refused_across_replicas() {
     let store_a = CustodyRotationStore::new(Some(a.clone()));
     let store_b = CustodyRotationStore::new(Some(b.clone()));
 
+    let profile = CustodyProfileId::new();
+    let old = SignerId::new();
     store_a
-        .insert(&rotation(org, "profile-lock", "signer-old", "signer-new"))
+        .insert(&rotation(org, profile, old, SignerId::new()))
         .await
         .expect("first rotation");
 
     let second = store_b
-        .insert(&rotation(org, "profile-lock", "signer-old", "signer-third"))
+        .insert(&rotation(org, profile, old, SignerId::new()))
         .await;
     assert_eq!(
         second,
@@ -396,12 +401,15 @@ async fn rotation_inflight_guard_is_tenant_scoped() {
     let store_a = CustodyRotationStore::new(Some(a.clone()));
     let store_b = CustodyRotationStore::new(Some(b.clone()));
 
+    let profile = CustodyProfileId::new();
+    let old = SignerId::new();
+    let new = SignerId::new();
     store_a
-        .insert(&rotation(tenant_a, "profile-shared", "s-old", "s-new"))
+        .insert(&rotation(tenant_a, profile, old, new))
         .await
         .expect("tenant A");
     store_b
-        .insert(&rotation(tenant_b, "profile-shared", "s-old", "s-new"))
+        .insert(&rotation(tenant_b, profile, old, new))
         .await
         .expect("tenant B must not be blocked by tenant A");
 
@@ -430,7 +438,8 @@ async fn rotation_survives_a_cold_restart() {
         return not_run("rotation restart");
     };
     let org = make_org(&db, "rot-restart").await;
-    let rec = rotation(org, "profile-restart", "signer-old", "signer-new");
+    let old = SignerId::new();
+    let rec = rotation(org, CustodyProfileId::new(), old, SignerId::new());
     CustodyRotationStore::new(Some(db.clone()))
         .insert(&rec)
         .await
@@ -444,7 +453,7 @@ async fn rotation_survives_a_cold_restart() {
         .expect("read")
         .expect("the rotation MUST survive the restart");
     assert_eq!(after.state, RotationState::Pending);
-    assert_eq!(after.old_signer.to_string(), "signer-old");
+    assert_eq!(after.old_signer, old);
 }
 
 // ─────────────────────────────────────────────────────────────────────

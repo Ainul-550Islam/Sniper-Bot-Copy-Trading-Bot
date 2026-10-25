@@ -66,6 +66,8 @@ pub struct ApiState {
     pub auth: Option<Arc<Authenticator>>,
     /// Per-principal / per-IP token buckets (`rpm = 0` disables).
     pub limiter: Arc<RateLimiter>,
+    /// Explicit proxy CIDRs shared by rate limiting and tenant allowlists.
+    pub trusted_proxies: crate::saas::trusted_proxy::TrustedProxies,
     /// Lower-volume, per-identity buckets for login, MFA, and enrollment
     /// attempts. Production initializes this to ten requests per minute.
     pub sensitive_limiter: Arc<RateLimiter>,
@@ -190,6 +192,7 @@ pub fn router(state: ApiState) -> Router {
         // XCTO, frame/referrer/permissions policy, HSTS over TLS). Appends
         // headers only; it never rewrites bodies or blocks the WS upgrade.
         .route_layer(from_fn(crate::security::headers::apply_security_headers))
+        .route_layer(from_fn(crate::saas::scope_request_peer))
         .with_state(state)
 }
 
@@ -204,9 +207,13 @@ async fn ip_rate_limit(
     if state.limiter.rpm() > 0 {
         // Without connect info (unit tests via oneshot) limit under one
         // shared bucket rather than skipping the limiter entirely.
-        let key = peer
-            .map(|p| format!("ip:{}", p.0.ip()))
-            .unwrap_or_else(|| "ip:unknown".to_string());
+        let key = crate::saas::trusted_proxy::resolve_client_ip(
+            peer.map(|p| p.0.ip()),
+            req.headers(),
+            &state.trusted_proxies,
+        )
+        .map(|ip| format!("ip:{ip}"))
+        .unwrap_or_else(|| "ip:unknown".to_string());
         if let RateVerdict::Limited { retry_after_secs } = state.limiter.check(&key).await {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -217,6 +224,15 @@ async fn ip_rate_limit(
         }
     }
     next.run(req).await
+}
+
+/// Compare fixed-length digests, never raw secret strings. Shared by the
+/// HTTP owner-key branch and the legacy WebSocket authentication branch.
+fn legacy_key_matches(presented: &str, expected: &str) -> bool {
+    bot_core::session::token::constant_time_eq(
+        sha256_hex(presented).as_bytes(),
+        sha256_hex(expected).as_bytes(),
+    )
 }
 
 /// Extract a presented API key: `x-api-key` header first, then
@@ -299,7 +315,7 @@ async fn require_role(
     } else if let Some(expected) = &state.api_key {
         // Legacy single-key deployments: the key is an owner key.
         match presented {
-            Some(key) if key == *expected => Principal {
+            Some(key) if legacy_key_matches(&key, expected) => Principal {
                 label: "legacy-api-key".into(),
                 role: Role::Owner,
                 key_hash: sha256_hex(expected),
@@ -1109,7 +1125,10 @@ async fn events_ws(
         let ok = if let Some(auth) = &state.auth {
             auth.authenticate(&key).await.is_some()
         } else {
-            state.api_key.as_deref() == Some(key.as_str())
+            state
+                .api_key
+                .as_deref()
+                .is_some_and(|expected| legacy_key_matches(&key, expected))
         };
         if !ok {
             return (StatusCode::UNAUTHORIZED, "invalid or missing key").into_response();
@@ -1686,6 +1705,7 @@ mod tests {
             auth: None,
             limiter: RateLimiter::new(0),
             sensitive_limiter: RateLimiter::new(10),
+            trusted_proxies: Default::default(),
             db: None,
             journal: None,
             serve_dashboard: false,
@@ -1878,6 +1898,23 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "bearer form accepted");
+    }
+
+    #[tokio::test]
+    async fn wrong_legacy_keys_are_refused_for_both_header_styles() {
+        let mut state = test_state(true);
+        state.api_key = Some("legacy-secret".into());
+        let app = router(state);
+        for (header, value) in [
+            ("x-api-key", "legacy-secreu"),
+            ("x-api-key", "legacy-secret-longer"),
+            ("authorization", "Bearer wrong"),
+            ("authorization", "Bearer legacy-secreu"),
+        ] {
+            let (status, _, _) =
+                request(app.clone(), "POST", "/api/kill", &[(header, value)], None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
     }
 
     #[tokio::test]

@@ -330,6 +330,7 @@ mod tests {
             auth: None,
             limiter: bot_core::auth::RateLimiter::new(0),
             sensitive_limiter: bot_core::auth::RateLimiter::new(10),
+            trusted_proxies: Default::default(),
             db: None,
             journal: None,
             serve_dashboard: false,

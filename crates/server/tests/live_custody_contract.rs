@@ -43,9 +43,16 @@ fn live_custody_never_extracts_private_key() {
     // LIVE_EXTERNAL
     let cfg = LiveCustodyConfig::stub("vault", true, true, true);
     let r = LiveCustodyContract::check(cfg);
-    let json = r.to_safe_json().to_string();
-    assert!(!json.to_lowercase().contains("private"));
+    assert_eq!(r.status, ProviderStatus::NotRun);
+    let safe = r.to_safe_json();
+    assert!(safe["public_key_derived"].is_null());
+    assert!(safe["address_derived"].is_null());
+    let json = safe.to_string();
+    // Match the production module's material-leak checks: explanatory text
+    // such as "no private key extraction" is not exported key material.
     assert!(!json.contains("BEGIN PRIVATE KEY"));
+    assert!(!json.to_lowercase().contains("-----begin"));
+    assert!(!json.to_lowercase().contains("private_key"));
 }
 
 #[test]

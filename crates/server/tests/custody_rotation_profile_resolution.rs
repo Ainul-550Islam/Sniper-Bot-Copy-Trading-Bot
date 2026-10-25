@@ -80,6 +80,7 @@ async fn test_state(db: Option<Arc<Database>>) -> ApiState {
         auth: None,
         limiter: RateLimiter::new(0),
         sensitive_limiter: RateLimiter::new(0),
+        trusted_proxies: Default::default(),
         db,
         journal: None,
         serve_dashboard: false,

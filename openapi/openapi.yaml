@@ -2965,6 +2965,48 @@ paths:
         owner.
       tags:
       - organizations
+  /api/saas/organizations/current/members:
+    get:
+      description: Alias of /api/saas/organizations/{id}/members. The server resolves current through
+        tenant authorization, never a caller-selected arbitrary organization.
+      operationId: saas.listCurrentOrganizationMembers
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  count:
+                    minimum: 0
+                    type: integer
+                  items:
+                    description: Compatibility alias of members
+                    items:
+                      type: object
+                    type: array
+                  members:
+                    items:
+                      type: object
+                    type: array
+                required:
+                - count
+                - members
+                - items
+                type: object
+          description: Organization members and their public user profiles
+        '401':
+          description: Credential not recognized
+        '403':
+          description: Tenant context or users.read permission denied
+        '429':
+          description: Rate limited
+        '503':
+          description: Membership, profile or security policy storage unavailable
+      security:
+      - bearerAuth: []
+      summary: List members of the authenticated caller's current organization
+      tags:
+      - organizations
   /api/saas/organizations/{id}:
     get:
       operationId: saas.getOrganization
@@ -3853,6 +3895,41 @@ paths:
       tags:
       - events
   /api/saas/team/invites:
+    get:
+      description: Revoked and accepted invitations remain in durable storage but are not returned in
+        the active invitation list. Plaintext tokens are never returned by this endpoint.
+      operationId: saas.listInvites
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  count:
+                    minimum: 0
+                    type: integer
+                  items:
+                    items:
+                      $ref: '#/components/schemas/TeamInvite'
+                    type: array
+                  organization_id:
+                    format: uuid
+                    type: string
+                required:
+                - organization_id
+                - items
+                - count
+                type: object
+          description: Active invitation list
+        '401':
+          description: Unauthorized
+        '403':
+          description: Tenant context or users.read permission denied
+        '503':
+          description: Team storage unavailable
+      summary: List pending, unexpired invitations for the caller's organization
+      tags:
+      - Team & Access
     post:
       operationId: saas.createInvite
       responses:
