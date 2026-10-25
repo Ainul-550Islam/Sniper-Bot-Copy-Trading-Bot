@@ -1,0 +1,8 @@
+Docker verification (sandbox, 2026-10-18)
+- sniper-server:test (Dockerfile, rust:1.98.1 builder + debian runtime): BUILD OK (SERVER_BUILD=0), 115MB, uid 10001
+  - smoke: API_KEY set + API_BIND_HOST=0.0.0.0 -> /api/health {"ok":true}; unauth /api/saas/users/me -> 401
+  - without API key and non-loopback bind -> refuses to start (fail-closed, by design)
+  - database="none" in smoke run because [database] was not enabled in config (not an image defect)
+- sniper-control-plane:test (apps/control-plane/Dockerfile): BUILD OK, 296MB, uid 1000, GET / -> 200
+- Earlier apt failure (bookworm-security 404 over http) was transient; retry succeeded.
+Not verified: full compose stack `up`, Helm install on a cluster, pushed registry digests.

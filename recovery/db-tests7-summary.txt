@@ -1,0 +1,2 @@
+DB suite on working tree (HEAD 2a41bec + uncommitted), fresh sniper_test, cargo test -p sniper-suite --no-fail-fast
+passed=2080 failed=0 ignored=12 exit=0 (50 test binaries)
