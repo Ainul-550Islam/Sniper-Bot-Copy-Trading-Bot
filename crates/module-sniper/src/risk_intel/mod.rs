@@ -23,6 +23,9 @@ pub mod creator_history;
 pub mod external;
 pub mod holders;
 pub mod honeypot;
+pub mod service;
+
+pub use service::RiskIntelService;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

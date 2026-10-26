@@ -224,16 +224,28 @@ impl StripeAdapter {
             .or_else(|| headers.get("Stripe-Signature"))
             .and_then(|v| v.to_str().ok())
         {
+            // Stripe may send whitespace around the comma-separated pairs and
+            // more than one `v1=` entry while a webhook signing secret is being
+            // rotated. The timestamp is the first parsable `t=` pair, while
+            // every non-empty `v1=` candidate must be checked.
             let timestamp = sig_header
                 .split(',')
-                .find(|p| p.starts_with("t="))
-                .and_then(|p| p[2..].parse::<u64>().ok())
+                .map(|part| part.trim())
+                .find_map(|part| part.strip_prefix("t="))
+                .and_then(|value| value.trim().parse::<u64>().ok())
                 .ok_or_else(|| StripeError::Verification("missing stripe timestamp".into()))?;
-            let v1 = sig_header
+            let signatures: Vec<&str> = sig_header
                 .split(',')
-                .find(|p| p.starts_with("v1="))
-                .map(|p| &p[3..])
-                .ok_or_else(|| StripeError::Verification("missing stripe v1 signature".into()))?;
+                .map(|part| part.trim())
+                .filter_map(|part| part.strip_prefix("v1="))
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .collect();
+            if signatures.is_empty() {
+                return Err(StripeError::Verification(
+                    "missing stripe v1 signature".into(),
+                ));
+            }
             // Compute expected HMAC: hex(HMAC-SHA256(secret, "timestamp.body"))
             use hmac::{Hmac, Mac};
             use sha2::Sha256;
@@ -243,7 +255,15 @@ impl StripeAdapter {
             mac.update(b".");
             mac.update(body);
             let expected = hex::encode(mac.finalize().into_bytes());
-            if !bot_core::session::token::constant_time_eq(expected.as_bytes(), v1.as_bytes()) {
+            let mut matched = false;
+            for candidate in &signatures {
+                let candidate_matches = bot_core::session::token::constant_time_eq(
+                    expected.as_bytes(),
+                    candidate.as_bytes(),
+                );
+                matched |= candidate_matches;
+            }
+            if !matched {
                 return Err(StripeError::Verification(
                     "stripe signature mismatch".into(),
                 ));
@@ -657,5 +677,104 @@ mod tests {
         } else {
             std::env::remove_var("LIVE_BILLING");
         }
+    }
+    fn stripe_signature(secret: &str, timestamp: u64, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac key");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn stripe_headers(header: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "stripe-signature",
+            header.parse().expect("valid header value"),
+        );
+        headers
+    }
+
+    #[test]
+    fn stripe_webhook_accepts_when_second_v1_signature_matches() {
+        let adapter = StripeAdapter::with_base_for_test("sk_test_12345678", STRIPE_API_BASE);
+        let secret = "whsec_rotation_test_secret";
+        let body = br#"{"id":"evt_rotation"}"#;
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+        let valid = stripe_signature(secret, timestamp, body);
+        let headers = stripe_headers(&format!(
+            "t={timestamp},v1={invalid},v1={valid}",
+            invalid = "0".repeat(valid.len())
+        ));
+
+        let value = adapter
+            .verify_webhook(secret, &headers, body)
+            .expect("a matching later v1 candidate must be accepted");
+        assert_eq!(value["id"], "evt_rotation");
+    }
+
+    #[test]
+    fn stripe_webhook_rejects_when_no_v1_signature_matches() {
+        let adapter = StripeAdapter::with_base_for_test("sk_test_12345678", STRIPE_API_BASE);
+        let secret = "whsec_rotation_test_secret";
+        let body = br#"{"id":"evt_invalid"}"#;
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+        let headers = stripe_headers(&format!(
+            "v1={},t={timestamp},v1={}",
+            "a".repeat(64),
+            "b".repeat(64)
+        ));
+
+        let result = adapter.verify_webhook(secret, &headers, body);
+        assert!(matches!(result, Err(StripeError::Verification(_))));
+    }
+
+    #[test]
+    fn stripe_webhook_rejects_matching_signature_with_stale_timestamp() {
+        let adapter = StripeAdapter::with_base_for_test("sk_test_12345678", STRIPE_API_BASE);
+        let secret = "whsec_rotation_test_secret";
+        let body = br#"{"id":"evt_stale"}"#;
+        let timestamp = (chrono::Utc::now().timestamp() as u64).saturating_sub(301);
+        let valid = stripe_signature(secret, timestamp, body);
+        let headers = stripe_headers(&format!("t={timestamp},v1={valid}"));
+
+        let result = adapter.verify_webhook(secret, &headers, body);
+        assert!(matches!(result, Err(StripeError::Verification(_))));
+    }
+
+    #[test]
+    fn stripe_webhook_single_v1_still_passes() {
+        let adapter = StripeAdapter::with_base_for_test("sk_test_12345678", STRIPE_API_BASE);
+        let secret = "whsec_rotation_test_secret";
+        let body = br#"{"id":"evt_single"}"#;
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+        let valid = stripe_signature(secret, timestamp, body);
+        let headers = stripe_headers(&format!("t={timestamp},v1={valid}"));
+
+        let value = adapter
+            .verify_webhook(secret, &headers, body)
+            .expect("the legacy single-v1 header must keep working");
+        assert_eq!(value["id"], "evt_single");
+    }
+
+    #[test]
+    fn stripe_webhook_tolerates_whitespace_and_unordered_pairs() {
+        let adapter = StripeAdapter::with_base_for_test("sk_test_12345678", STRIPE_API_BASE);
+        let secret = "whsec_rotation_test_secret";
+        let body = br#"{"id":"evt_whitespace"}"#;
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+        let valid = stripe_signature(secret, timestamp, body);
+        let headers = stripe_headers(&format!(
+            " v1={invalid} , t={timestamp} , v1={valid} ",
+            invalid = "c".repeat(valid.len())
+        ));
+
+        let value = adapter
+            .verify_webhook(secret, &headers, body)
+            .expect("whitespace and pair ordering must not reject a valid event");
+        assert_eq!(value["id"], "evt_whitespace");
     }
 }

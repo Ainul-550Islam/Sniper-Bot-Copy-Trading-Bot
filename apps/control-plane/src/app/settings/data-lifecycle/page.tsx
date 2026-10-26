@@ -4,6 +4,18 @@ import { useEffect, useState, useCallback } from "react";
 import { AppShell } from "@/components/AppShell";
 import { commercial, toDisplayError, LifecycleStatus } from "@/lib/commercial";
 import { request, exportsApi, ApiError, type ExportEnvelope } from "@/lib/api";
+import { LifecycleActions, type LifecycleAction } from "@/components/lifecycle/LifecycleActions";
+import { lifecycleActionsApi } from "@/lib/api/lifecycle-actions-api";
+import { getCapabilities, type MembershipRole } from "@/lib/permissions";
+
+function membershipRole(role: string | undefined): MembershipRole {
+  const normalized = role?.toLowerCase() ?? "";
+  if (normalized.includes("owner")) return "owner";
+  if (normalized.includes("admin")) return "admin";
+  if (normalized.includes("operator") || normalized.includes("trader")) return "operator";
+  if (normalized.includes("analyst") || normalized.includes("auditor")) return "analyst";
+  return "viewer";
+}
 
 export default function DataLifecyclePage() {
   const [status, setStatus] = useState<LifecycleStatus | null>(null);
@@ -14,12 +26,18 @@ export default function DataLifecyclePage() {
   const [message, setMessage] = useState<string | null>(null);
   const [exportData, setExportData] = useState<ExportEnvelope | null>(null);
   const [exportKind, setExportKind] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<LifecycleAction | null>(null);
+  const [canManageLifecycle, setCanManageLifecycle] = useState(false);
 
   const loadData = useCallback(async () => {
     setError(null);
     try {
-      const me = await request<{ organizations?: Array<{ organization_id: string }> }>("/api/saas/users/me");
-      const targetOrg = me.organizations?.[0]?.organization_id ?? null;
+      const me = await request<{ organizations?: Array<{ organization_id: string; role: string }> }>("/api/saas/users/me");
+      const organization = me.organizations?.[0] ?? null;
+      const targetOrg = organization?.organization_id ?? null;
+      setCanManageLifecycle(
+        getCapabilities({ role: membershipRole(organization?.role) }).canManageTeam,
+      );
       if (!targetOrg) throw new Error("No organization found for lifecycle status");
       const s = await commercial.lifecycleStatus(targetOrg);
       setStatus(s);
@@ -33,6 +51,31 @@ export default function DataLifecyclePage() {
   useEffect(() => {
     void Promise.resolve().then(() => loadData());
   }, [loadData]);
+
+  async function runLifecycleAction(action: LifecycleAction) {
+    const orgId = status?.organization_id;
+    if (!orgId) {
+      setError("No active organization identified");
+      return;
+    }
+    setBusyAction(action);
+    setError(null);
+    setMessage(null);
+    try {
+      if (action === "disconnect") await lifecycleActionsApi.disconnect(orgId);
+      if (action === "revoke-credentials") await lifecycleActionsApi.revokeCredentials(orgId);
+      if (action === "revoke-sessions") await lifecycleActionsApi.revokeSessions(orgId);
+      if (action === "schedule-retention") {
+        await lifecycleActionsApi.scheduleRetention(orgId, { confirm: true });
+      }
+      setMessage("Lifecycle action accepted by the server; status refreshed below.");
+      await loadData();
+    } catch (e) {
+      setError(toDisplayError(e));
+    } finally {
+      setBusyAction(null);
+    }
+  }
 
   async function handleExport(kind: string) {
     setExportKind(kind);
@@ -106,6 +149,15 @@ export default function DataLifecyclePage() {
                   </div>
                 </div>
               </section>
+            )}
+
+            {status && (
+              <LifecycleActions
+                organizationId={status.organization_id}
+                canManage={canManageLifecycle}
+                busyAction={busyAction}
+                onAction={(action) => void runLifecycleAction(action)}
+              />
             )}
 
             {/* Deterministic Data Exports */}

@@ -35,8 +35,10 @@ use solana_kit::token_safety::{
 use solana_kit::tokens::MintInfo;
 
 use crate::event::{LaunchEvent, LaunchProtocol};
-use crate::gates::{MarketSnapshot, TokenHolder};
+use crate::gates::{BundlingSignal, MarketSnapshot, TokenHolder};
 use crate::pipeline::{select_route, EntryRoute, RejectReason};
+use crate::risk_intel::bundler;
+use crate::risk_intel::service::RiskIntelService;
 
 /// Venue context the route builder needs, alongside the snapshot.
 #[derive(Debug, Clone)]
@@ -324,6 +326,40 @@ async fn load_top_holders(
     }
 }
 
+/// Convert observed first-slot buys into the gate's bundling signal.
+///
+/// An empty observation list means the source did not supply first-slot
+/// buyer/funder attribution. It therefore remains `None`, preserving the
+/// gate's existing fail-closed behavior when `max_bundler_ratio` is enabled.
+pub fn bundling_signal(event: &LaunchEvent) -> Option<BundlingSignal> {
+    if event.first_slot_buys.is_empty() {
+        return None;
+    }
+    let report = bundler::analyze(&event.first_slot_buys);
+    Some(BundlingSignal {
+        first_slot_buyers: u64::from(report.total_buyers),
+        bundled_wallets: u64::from(report.clustered_buyers),
+    })
+}
+
+/// Run a sell probe through the shared TTL cache when production state is
+/// attached. Without a service, this is exactly the original direct probe.
+async fn cached_sell_probe<F, Fut>(
+    risk_intel: Option<&RiskIntelService>,
+    mint: &Pubkey,
+    now: DateTime<Utc>,
+    probe: F,
+) -> SellProbeOutcome
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = SellProbeOutcome>,
+{
+    match risk_intel {
+        Some(service) => service.sell_probe_with_cache(mint, now, probe).await,
+        None => probe().await,
+    }
+}
+
 /// Load the venue for `event`, choose the route and summarise the market.
 ///
 /// `trade_lamports` is the SOL the strategy intends to spend; the Jupiter
@@ -336,6 +372,31 @@ pub async fn load_market(
     platform_fee_cfg: &bot_core::config::PlatformFeeConfig,
     trade_lamports: u64,
     now: DateTime<Utc>,
+) -> Result<MarketData, MarketError> {
+    load_market_with_risk_intel(
+        rpc,
+        user,
+        event,
+        cfg,
+        platform_fee_cfg,
+        trade_lamports,
+        now,
+        None,
+    )
+    .await
+}
+
+/// [`load_market`] with the production risk-intel service attached.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_market_with_risk_intel(
+    rpc: &Rpc,
+    user: &Pubkey,
+    event: &LaunchEvent,
+    cfg: &SniperConfig,
+    platform_fee_cfg: &bot_core::config::PlatformFeeConfig,
+    trade_lamports: u64,
+    now: DateTime<Utc>,
+    risk_intel: Option<&RiskIntelService>,
 ) -> Result<MarketData, MarketError> {
     let mint = event
         .mint_pubkey()
@@ -368,7 +429,12 @@ pub async fn load_market(
                     // Honeypot probe (GAP-MAP P1): before committing, let
                     // the curve itself prove its sell path works.
                     let sell_probe = if cfg.simulate_sell {
-                        Some(probe_curve_sell(rpc, &ctx, user).await)
+                        Some(
+                            cached_sell_probe(risk_intel, &mint, now, || {
+                                probe_curve_sell(rpc, &ctx, user)
+                            })
+                            .await,
+                        )
                     } else {
                         None
                     };
@@ -407,8 +473,8 @@ pub async fn load_market(
                         sell_probe,
                         creator_initial_buy_sol: creator_buy,
                         top_holders,
-                        // Bundler signal is not wired yet (first-slot data).
-                        bundling: None,
+                        // Only first-slot buys actually carried by the event produce a signal.
+                        bundling: bundling_signal(event),
                         spot_price_sol: maths::pump_spot_price_sol(
                             curve.virtual_sol_reserves,
                             curve.virtual_token_reserves,
@@ -434,6 +500,7 @@ pub async fn load_market(
                         mint_info,
                         creator_buy,
                         now,
+                        risk_intel,
                     )
                     .await
                 }
@@ -449,6 +516,7 @@ pub async fn load_market(
                         mint_info,
                         creator_buy,
                         now,
+                        risk_intel,
                     )
                     .await
                 }
@@ -471,6 +539,7 @@ pub async fn load_market(
                         mint_info,
                         creator_buy,
                         now,
+                        risk_intel,
                     )
                     .await
                 }
@@ -486,6 +555,7 @@ pub async fn load_market(
                         mint_info,
                         creator_buy,
                         now,
+                        risk_intel,
                     )
                     .await
                 }
@@ -511,6 +581,7 @@ pub async fn load_market(
                         mint_info,
                         creator_buy,
                         now,
+                        risk_intel,
                     )
                     .await
                 }
@@ -526,6 +597,7 @@ pub async fn load_market(
                         mint_info,
                         creator_buy,
                         now,
+                        risk_intel,
                     )
                     .await
                 }
@@ -548,6 +620,7 @@ async fn load_pumpswap(
     mint_info: Option<MintInfo>,
     creator_buy: Option<f64>,
     now: DateTime<Utc>,
+    risk_intel: Option<&RiskIntelService>,
 ) -> Result<MarketData, MarketError> {
     let ctx = match PumpSwapContext::load(rpc, mint, user, pool).await {
         Ok(ctx) => ctx,
@@ -566,7 +639,12 @@ async fn load_pumpswap(
     let buys_disabled = ctx.config.buys_disabled();
     // Honeypot probe through the AMM's own sell instruction (GAP-MAP P1).
     let sell_probe = if cfg.simulate_sell {
-        Some(probe_pumpswap_sell(rpc, &ctx, user).await)
+        Some(
+            cached_sell_probe(risk_intel, mint, now, || {
+                probe_pumpswap_sell(rpc, &ctx, user)
+            })
+            .await,
+        )
     } else {
         None
     };
@@ -598,8 +676,8 @@ async fn load_pumpswap(
             &[ctx.pool, ctx.pool_base_token_account],
         )
         .await,
-        // Bundler signal is not wired yet (first-slot data).
-        bundling: None,
+        // Only first-slot buys actually carried by the event produce a signal.
+        bundling: bundling_signal(event),
         spot_price_sol: ctx.price(),
         fetched_at: now,
     };
@@ -623,6 +701,7 @@ async fn load_raydium(
     mint_info: Option<MintInfo>,
     creator_buy: Option<f64>,
     now: DateTime<Utc>,
+    risk_intel: Option<&RiskIntelService>,
 ) -> Result<MarketData, MarketError> {
     let pool = match RaydiumPool::load(rpc, amm_id, true).await {
         Ok(p) => p,
@@ -662,7 +741,12 @@ async fn load_raydium(
     // Honeypot probe (File 3 §6.1): simulate the pool's own reverse swap.
     // Off when `simulate_sell` is off, same as the curve venues.
     let sell_probe = if cfg.simulate_sell {
-        Some(probe_raydium_sell(rpc, &pool, mint, user).await)
+        Some(
+            cached_sell_probe(risk_intel, mint, now, || {
+                probe_raydium_sell(rpc, &pool, mint, user)
+            })
+            .await,
+        )
     } else {
         None
     };
@@ -694,8 +778,8 @@ async fn load_raydium(
             &[amm.coin_vault, amm.pc_vault],
         )
         .await,
-        // Bundler signal is not wired yet (first-slot data).
-        bundling: None,
+        // Only first-slot buys actually carried by the event produce a signal.
+        bundling: bundling_signal(event),
         spot_price_sol: spot,
         fetched_at: now,
     };
@@ -720,6 +804,7 @@ async fn load_jupiter(
     mint_info: Option<MintInfo>,
     creator_buy: Option<f64>,
     now: DateTime<Utc>,
+    risk_intel: Option<&RiskIntelService>,
 ) -> Result<MarketData, MarketError> {
     if trade_lamports == 0 {
         return Err(MarketError::unavailable(
@@ -794,7 +879,12 @@ async fn load_jupiter(
         // Aggregator route: the probe simulates the aggregator's own sell
         // transaction for this wallet (File 3 §6.1).
         sell_probe: if cfg.simulate_sell {
-            Some(probe_jupiter_sell(rpc, mint, user, decimals).await)
+            Some(
+                cached_sell_probe(risk_intel, mint, now, || {
+                    probe_jupiter_sell(rpc, mint, user, decimals)
+                })
+                .await,
+            )
         } else {
             None
         },
@@ -803,7 +893,7 @@ async fn load_jupiter(
         // holder concentration cannot exclude the pool. It stays None: an enabled
         // holder gate fails closed on this route.
         top_holders: None,
-        bundling: None,
+        bundling: bundling_signal(event),
         spot_price_sol: spot,
         fetched_at: now,
     };

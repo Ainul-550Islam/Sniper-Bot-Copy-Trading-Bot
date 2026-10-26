@@ -1,9 +1,37 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { commercial, toDisplayError, type CustodyHealth } from "@/lib/commercial";
 import { request } from "@/lib/api";
+import { ProfilePanel } from "@/components/custody/ProfilePanel";
+import { RotationPanel } from "@/components/custody/RotationPanel";
+import { SignerPanel } from "@/components/custody/SignerPanel";
+import { sessionStore } from "@/lib/auth";
+import {
+  custodyApi,
+  type CreateCustodyProfileInput,
+  type CreateCustodyRotationInput,
+  type CreateCustodySignerInput,
+  type CustodyProfile as ManagedCustodyProfile,
+  type CustodyRotation,
+  type CustodySigner as ManagedCustodySigner,
+  type SignerHealth,
+} from "@/lib/api/custody-api";
+import { getCapabilities, type MembershipRole } from "@/lib/permissions";
+
+function currentRole(): MembershipRole {
+  const state = sessionStore.getSnapshot();
+  const organization =
+    state.organizations.find((item) => item.organization_id === state.selectedOrganizationId) ??
+    state.organizations[0];
+  const role = organization?.role.toLowerCase() ?? "";
+  if (role.includes("owner")) return "owner";
+  if (role.includes("admin")) return "admin";
+  if (role.includes("operator") || role.includes("trader")) return "operator";
+  if (role.includes("analyst") || role.includes("auditor")) return "analyst";
+  return "viewer";
+}
 
 interface CustodyProfile { id: string; name: string; provider_type: string; status: string; }
 interface SignerView { id: string; public_address: string; provider_type: string; status: string; capabilities: string[]; }
@@ -16,6 +44,19 @@ export default function CustodyPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [signerError, setSignerError] = useState<string | null>(null);
+  const [, setSessionTick] = useState(0);
+  const [managedProfiles, setManagedProfiles] = useState<ManagedCustodyProfile[]>([]);
+  const [managedSigners, setManagedSigners] = useState<ManagedCustodySigner[]>([]);
+  const [managementError, setManagementError] = useState<string | null>(null);
+  const [managementBusy, setManagementBusy] = useState(false);
+  const [healthBySigner, setHealthBySigner] = useState<Record<string, SignerHealth>>({});
+  const [healthLoadingId, setHealthLoadingId] = useState<string | null>(null);
+  const [resolvedSigner, setResolvedSigner] = useState<ManagedCustodySigner | null>(null);
+  const [detailedSigner, setDetailedSigner] = useState<ManagedCustodySigner | null>(null);
+  const [profileSigners, setProfileSigners] = useState<ManagedCustodySigner[] | null>(null);
+  const [profileSignersProfile, setProfileSignersProfile] =
+    useState<ManagedCustodyProfile | null>(null);
+  const [rotations, setRotations] = useState<CustodyRotation[]>([]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -42,7 +83,13 @@ export default function CustodyPage() {
               `/api/saas/custody/profiles/${first.id}/signers`,
               { signal: abort.signal },
             );
-            if (!cancelled) setSigners(Array.isArray(s) ? s : s?.signers ?? []);
+            if (!cancelled) {
+              const legacySigners = Array.isArray(s) ? s : s?.signers ?? [];
+              // The management loader owns the complete signer inventory;
+              // do not let this legacy first-profile read overwrite it if
+              // the complete response arrived first.
+              setSigners((current) => current ?? legacySigners);
+            }
           } catch (e) {
             if (!cancelled) setSignerError(toDisplayError(e));
           }
@@ -62,12 +109,145 @@ export default function CustodyPage() {
     };
   }, []);
 
+  useEffect(() => sessionStore.subscribe(() => setSessionTick((value) => value + 1)), []);
+  const canManageCustody = getCapabilities({ role: currentRole() }).canManageTeam;
+
+  const loadManagement = useCallback(async () => {
+    try {
+      const [profileResponse, signerResponse] = await Promise.all([
+        custodyApi.listProfiles(),
+        custodyApi.listSigners(),
+      ]);
+      setManagedProfiles(profileResponse.profiles);
+      setManagedSigners(signerResponse.signers);
+      setProfiles(profileResponse.profiles);
+      setSigners(signerResponse.signers);
+    } catch (e) {
+      setManagementError(toDisplayError(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void Promise.resolve().then(loadManagement);
+  }, [loadManagement]);
+
+  async function runManagement<T>(action: () => Promise<T>): Promise<T | null> {
+    setManagementBusy(true);
+    setManagementError(null);
+    // Detail views are server snapshots; a mutation can make them stale, so
+    // they must be loaded again explicitly after the management refetch.
+    setHealthBySigner({});
+    setResolvedSigner(null);
+    setDetailedSigner(null);
+    setProfileSigners(null);
+    setProfileSignersProfile(null);
+    try {
+      const result = await action();
+      await loadManagement();
+      return result;
+    } catch (e) {
+      setManagementError(toDisplayError(e));
+      return null;
+    } finally {
+      setManagementBusy(false);
+    }
+  }
+
+  async function createManagedProfile(input: CreateCustodyProfileInput) {
+    await runManagement(() => custodyApi.createProfile(input));
+  }
+
+  async function createManagedSigner(input: CreateCustodySignerInput) {
+    await runManagement(() => custodyApi.createSigner(input));
+  }
+
+  async function loadSignerHealth(signer: ManagedCustodySigner) {
+    setHealthLoadingId(signer.id);
+    setManagementError(null);
+    try {
+      const signerHealth = await custodyApi.signerHealth(signer.id);
+      setHealthBySigner((current) => ({ ...current, [signer.id]: signerHealth }));
+    } catch (e) {
+      setManagementError(toDisplayError(e));
+    } finally {
+      setHealthLoadingId(null);
+    }
+  }
+
+  async function resolveSigner(signer: ManagedCustodySigner) {
+    setManagementError(null);
+    try {
+      const response = await custodyApi.resolveSigner(signer.id);
+      setResolvedSigner(response.signer);
+    } catch (e) {
+      setManagementError(toDisplayError(e));
+    }
+  }
+
+  async function getSigner(signer: ManagedCustodySigner) {
+    setManagementError(null);
+    try {
+      setDetailedSigner(await custodyApi.getSigner(signer.id));
+    } catch (e) {
+      setManagementError(toDisplayError(e));
+    }
+  }
+
+  async function loadProfileSigners(profile: ManagedCustodyProfile) {
+    setManagementError(null);
+    try {
+      const response = await custodyApi.listProfileSigners(profile.id);
+      setProfileSigners(response.signers);
+      setProfileSignersProfile(profile);
+    } catch (e) {
+      setManagementError(toDisplayError(e));
+    }
+  }
+
+  function upsertRotation(next: CustodyRotation) {
+    setRotations((current) => {
+      const existing = current.findIndex((item) => item.id === next.id);
+      if (existing === -1) return [next, ...current];
+      return current.map((item) => (item.id === next.id ? next : item));
+    });
+  }
+
+  async function createManagedRotation(input: CreateCustodyRotationInput) {
+    const created = await runManagement(() => custodyApi.createRotation(input));
+    if (created) upsertRotation(created);
+  }
+
+  async function loadManagedRotation(id: string) {
+    setManagementBusy(true);
+    setManagementError(null);
+    try {
+      upsertRotation(await custodyApi.getRotation(id));
+    } catch (e) {
+      setManagementError(toDisplayError(e));
+    } finally {
+      setManagementBusy(false);
+    }
+  }
+
+  async function transitionRotation(
+    rotationToTransition: CustodyRotation,
+    action: "activate" | "revoke",
+  ) {
+    const transition = await runManagement(() =>
+      action === "activate"
+        ? custodyApi.activateRotation(rotationToTransition.id)
+        : custodyApi.revokeRotation(rotationToTransition.id),
+    );
+    if (transition) await loadManagedRotation(rotationToTransition.id);
+  }
+
   async function handleRotation(profileId: string, oldId: string, newId: string) {
     setError(null);
     setRotation(null);
     try {
       const res = await commercial.createRotation(profileId, oldId, newId);
       setRotation(`Rotation created: ${res.id} — new signer will be activated after verification. Old signer remains valid until replacement is active.`);
+      await loadManagedRotation(res.id);
     } catch (e) {
       setError(toDisplayError(e));
     }
@@ -171,6 +351,66 @@ export default function CustodyPage() {
               {rotation && <div className="notice success" style={{ margin: "0.8rem 0" }}>{rotation}</div>}
               <RotationForm profiles={profiles ?? []} signers={signers ?? []} onSubmit={handleRotation} />
             </section>
+
+            {managementError && <div className="notice danger" role="alert">{managementError}</div>}
+
+            <ProfilePanel
+              profiles={managedProfiles}
+              canManage={canManageCustody}
+              busy={managementBusy}
+              onCreate={createManagedProfile}
+              onActivate={async (profile) => {
+                await runManagement(() => custodyApi.activateProfile(profile.id));
+              }}
+              onRevoke={async (profile) => {
+                await runManagement(() => custodyApi.revokeProfile(profile.id));
+              }}
+            />
+
+            <SignerPanel
+              profiles={managedProfiles}
+              signers={managedSigners}
+              healthBySigner={healthBySigner}
+              healthLoadingId={healthLoadingId}
+              resolvedSigner={resolvedSigner}
+              detailedSigner={detailedSigner}
+              profileSigners={profileSigners}
+              profileSignersProfile={profileSignersProfile}
+              canManage={canManageCustody}
+              busy={managementBusy}
+              onCreate={createManagedSigner}
+              onActivate={async (signer) => {
+                await runManagement(() => custodyApi.activateSigner(signer.id));
+              }}
+              onRevoke={async (signer) => {
+                await runManagement(() => custodyApi.revokeSigner(signer.id));
+              }}
+              onAttachCapability={async (signer, capability) => {
+                await runManagement(() =>
+                  custodyApi.attachCapability(signer.id, { capability }),
+                );
+              }}
+              onResolve={resolveSigner}
+              onHealth={loadSignerHealth}
+              onGet={getSigner}
+              onLoadProfileSigners={loadProfileSigners}
+            />
+
+            <RotationPanel
+              profiles={managedProfiles}
+              signers={managedSigners}
+              rotations={rotations}
+              canManage={canManageCustody}
+              busy={managementBusy}
+              onCreate={createManagedRotation}
+              onLoad={loadManagedRotation}
+              onActivate={async (managedRotation) => {
+                await transitionRotation(managedRotation, "activate");
+              }}
+              onRevoke={async (managedRotation) => {
+                await transitionRotation(managedRotation, "revoke");
+              }}
+            />
           </>
         )}
       </div>

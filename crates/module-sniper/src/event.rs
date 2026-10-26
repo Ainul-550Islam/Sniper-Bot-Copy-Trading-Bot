@@ -31,6 +31,8 @@ use solana_sdk::pubkey::Pubkey;
 
 use bot_core::models::{LaunchFeed, TokenLaunch, Venue};
 
+use crate::risk_intel::bundler::FirstSlotBuy;
+
 /// Tolerated clock skew between a source/chain timestamp and our clock.
 pub const MAX_CLOCK_SKEW_SECS: i64 = 5;
 /// Length of an ed25519 signature; a `signature` that does not decode to
@@ -186,6 +188,12 @@ pub struct LaunchEvent {
     /// replay matching. Never the payload itself.
     #[serde(default)]
     pub raw_hash: String,
+    /// First-slot buys actually observed by the launch source, attributed
+    /// to their funding wallets. This defaults to empty for older payloads;
+    /// an empty list means the bundler signal is unavailable and must remain
+    /// unavailable to the gate rather than being inferred.
+    #[serde(default)]
+    pub first_slot_buys: Vec<FirstSlotBuy>,
     /// The legacy launch record consumed by screening, events and
     /// dashboards. Metadata (name/symbol/uri/socials/market cap) lives here.
     pub launch: TokenLaunch,
@@ -218,6 +226,7 @@ impl LaunchEvent {
             observed_at: launch.observed_at,
             source_seq,
             raw_hash,
+            first_slot_buys: Vec::new(),
             launch,
         };
         ev.event_id = ev.compute_event_id();

@@ -414,6 +414,11 @@ impl Sniper {
                 "entry never landed (execution ledger: failed/expired)",
             )
             .await;
+        // No tokens were ever received, so this cleanup is not a creator
+        // outcome. Drop only the open-position attribution reference.
+        if let Ok(mint) = Pubkey::try_from(position.symbol.as_str()) {
+            self.risk_intel.forget_launch(&mint);
+        }
         self.state.events.publish(AppEvent::Audit {
             ts: Utc::now(),
             actor: "sniper".into(),
@@ -673,6 +678,12 @@ impl Sniper {
             self.state
                 .close_position(&position.id, status, reason)
                 .await;
+            // A full close is an observed launch outcome. The service only
+            // attributes it when entry actually observed this mint's
+            // creator; it never guesses a creator from the position alone.
+            let _ =
+                self.risk_intel
+                    .record_position_close(&mint, position.avg_entry, price, Utc::now());
             info!(
                 symbol = %position.symbol,
                 venue = venue.as_str(),

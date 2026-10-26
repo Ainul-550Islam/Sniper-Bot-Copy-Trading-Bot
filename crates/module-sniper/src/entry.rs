@@ -60,7 +60,7 @@ use solana_kit::tx::TxRequest;
 
 use crate::event::{raw_hash_of, LaunchEvent};
 use crate::gates::{self, MarketSnapshot};
-use crate::market::{load_market, MarketData, VenueData};
+use crate::market::{load_market_with_risk_intel, MarketData, VenueData};
 use crate::pipeline::{
     check_fee_budget, count_event, count_rejection, count_stage, observe_slippage, precheck,
     EntryRoute, LatencyTimeline, Lifecycle, PrecheckContext, RejectReason, Rejection, SniperStage,
@@ -277,13 +277,18 @@ impl Sniper {
             ));
         }
         // 8. Static screening (denylists, creator buy, market cap, age).
+        // Risk-intel supplies only creators with an observed rug outcome;
+        // the existing core repeat-offender switch remains the policy owner.
+        let known_bad_creators = self
+            .risk_intel
+            .known_bad_creators(event.creator_pubkey().as_ref(), &risk_cfg);
         let age_secs = (event.age_ms(now) / 1_000) as i64;
         let screen = self.risk.check_launch_with_lists(
             &event.launch,
             &risk_cfg,
             &sniper.creator_denylist,
             &sniper.keyword_denylist,
-            &[], // known-bad-creator list is not persisted yet
+            &known_bad_creators,
             age_secs,
             sniper.max_launch_age_secs,
         );
@@ -650,7 +655,7 @@ impl Sniper {
         let intended_sol = sniper.buy_sol.min(risk_cfg.sniper_position_cap());
         let intended_lamports = maths::sol_to_lamports(intended_sol);
         let fetched_at = Utc::now();
-        let market = match load_market(
+        let market = match load_market_with_risk_intel(
             &self.rpc,
             &self.wallet.pubkey,
             event,
@@ -658,6 +663,7 @@ impl Sniper {
             &cfg.platform_fee,
             intended_lamports,
             fetched_at,
+            Some(&self.risk_intel),
         )
         .await
         {
@@ -1171,6 +1177,10 @@ impl Sniper {
         position.max_hold_secs = sniper.max_hold_secs;
 
         self.state.upsert_position(position.clone()).await;
+        // Only a booked position needs creator attribution for its eventual
+        // full close. Rejected launches therefore cannot grow this map.
+        self.risk_intel
+            .note_launch(&mint, event.creator_pubkey().as_ref());
         self.state.events.publish(AppEvent::PositionUpdate {
             ts: Utc::now(),
             position: Box::new(position),

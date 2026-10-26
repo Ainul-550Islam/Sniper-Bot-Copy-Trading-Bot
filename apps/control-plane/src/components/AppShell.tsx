@@ -39,6 +39,8 @@ const COMMERCIAL_NAV: NavGroup[] = [
     items: [
       { href: "/trading/sniper", label: "Sniper Bot" },
       { href: "/trading/copy", label: "Copy Trading" },
+      { href: "/trading/dca", label: "DCA Schedules" },
+      { href: "/trading/limit-orders", label: "Limit Orders" },
       { href: "/trading/polymarket", label: "Polymarket V3" },
       { href: "/trading/telegram", label: "Telegram Alerts" },
     ],
@@ -84,6 +86,7 @@ const COMMERCIAL_NAV: NavGroup[] = [
       { href: "/settings/api", label: "API Keys" },
       { href: "/settings/webhooks", label: "Webhooks" },
       { href: "/settings/audit", label: "Audit Logs" },
+      { href: "/settings/wallet-pools", label: "Wallet Pools" },
       { href: "/settings/data-lifecycle", label: "Data Lifecycle & Purge" },
     ],
   },

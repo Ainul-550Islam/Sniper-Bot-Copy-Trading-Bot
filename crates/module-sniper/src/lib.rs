@@ -203,6 +203,10 @@ pub struct Sniper {
     /// The dev-sell bus sender kept so the exit-sweeper clone can subscribe
     /// (`None` until `with_dev_sell_bus` attaches one).
     dev_sell_tx: Option<crate::exit_policy::DevSellBus>,
+    /// Production risk-intel state shared by entry, market loading and the
+    /// exit sweeper. The service owns the creator ledger and sell-probe
+    /// cache; cloning this handle for the sweeper preserves that one owner.
+    risk_intel: crate::risk_intel::service::RiskIntelService,
 }
 
 impl Sniper {
@@ -259,6 +263,7 @@ impl Sniper {
             exit_policy: crate::exit_policy::engine_from_config(cfg.sniper.advanced_exit.as_ref()),
             dev_sell_rx: None,
             dev_sell_tx: None,
+            risk_intel: crate::risk_intel::service::RiskIntelService::new(),
         })
     }
 
@@ -298,6 +303,11 @@ impl Sniper {
     /// publish creator/dev-sell observations.
     pub fn dev_sell_sender(&self) -> Option<crate::exit_policy::DevSellBus> {
         self.dev_sell_tx.clone()
+    }
+
+    /// Shared handle to this sniper's risk-intel state.
+    pub fn risk_intel_service(&self) -> crate::risk_intel::service::RiskIntelService {
+        self.risk_intel.clone()
     }
 
     /// Bind this sniper to ONE tenant (PROMPT 4/10 §B).
@@ -502,6 +512,7 @@ impl Sniper {
                 exit_policy: sweeper_exit_policy,
                 dev_sell_rx: sweeper_dev_sell_rx,
                 dev_sell_tx: self.dev_sell_tx.clone(),
+                risk_intel: self.risk_intel.clone(),
             };
             OwnedTask::new(
                 tokio::spawn(async move { this.exit_sweeper().await }),

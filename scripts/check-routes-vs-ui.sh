@@ -24,6 +24,11 @@ pairs=(
   "/api/tenant/sniper/config|sniper/config"
   "/api/tenant/copy/config|copy/config"
   "/api/tenant/polymarket/config|polymarket/config"
+  "/api/tenant/dca-schedules|dca"
+  "/api/tenant/limit-orders|limit-orders"
+  "/api/saas/wallet-pools|wallet-pools"
+  "/api/saas/data-lifecycle|data-lifecycle"
+  "/api/saas/custody/profiles|custody"
 )
 
 failed=0
