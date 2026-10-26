@@ -32,7 +32,7 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: sniper-suite
-          image: "{{ .Values.image.repository }}@{{ required `image.digest is required: pin an immutable sha256 digest` .Values.image.digest }}"
+          image: {{ include "sniper-suite.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}

@@ -2,14 +2,17 @@
 # Overrides: helm install -f myvalues.yaml, or --set key=value.
 
 # --- Container image -------------------------------------------------------
+# Digest-only by contract (docs/IMAGE-DIGEST-DEPLOY.md): a tag is a mutable
+# pointer, so the chart takes no tag at all. `image.tag` is rejected by
+# values.schema.json, and `templates/_helpers.tpl` refuses to render without a
+# well-formed digest. The demo stack builds sniper-suite:demo from the repo-root
+# Dockerfile and resolves THAT tag to a digest before deploying:
+#   DIGEST=$(docker buildx imagetools inspect sniper-suite:demo --format '{{json .}}' | jq -r .Descriptor.Digest)
+#   helm upgrade --install sniper ./deploy/helm/sniper-suite --set image.digest="$DIGEST"
 image:
-  # Replace with your registry. The demo stack builds sniper-suite:demo from
-  # the repo-root Dockerfile; production should pin a DIGEST, not a tag.
+  # Replace with your registry.
   repository: sniper-suite
-  tag: "1.0.0"
-  # Immutable image digest (sha256:...). REQUIRED: the chart refuses to render
-  # without it, so a mutable tag can never reach a cluster. Set with
-  # --set image.digest=sha256:... or in your values file.
+  # Immutable image digest (sha256:<64 lowercase hex>). REQUIRED.
   digest: ""
   pullPolicy: IfNotPresent
 

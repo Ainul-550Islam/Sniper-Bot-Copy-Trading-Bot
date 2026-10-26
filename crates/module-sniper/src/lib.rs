@@ -457,6 +457,34 @@ impl Sniper {
         info!("module 1 (sniper) task started");
         self.state.set_detail(BotModule::Sniper, "starting").await;
 
+        // ---- PART 03 (K2): the dev-sell producer --------------------------
+        // The watcher publishes on the bus that the exit sweeper below
+        // subscribes to, so the sender has to exist before the sweeper is
+        // built. `with_dev_sell_bus` is how another process attaches one; when
+        // nobody did, this sniper owns the bus.
+        if self.dev_sell_tx.is_none() {
+            let intel = crate::risk_intel::RiskIntel::new();
+            let bus = intel.bus();
+            self.dev_sell_rx = Some(bus.subscribe());
+            self.dev_sell_tx = Some(bus);
+        }
+        // `None` unless the operator switched the trigger on AND the provider
+        // has a websocket endpoint — see `risk_intel::dev_sell::spawn`. Creating
+        // the channel above is deliberately independent of the switch: with
+        // `dev_sell_ttl_secs = 0` no watcher exists to publish, the sweeper's
+        // subscription stays idle, and the classic exit rules are untouched.
+        let dev_sell_watcher = match self.dev_sell_tx.as_ref() {
+            Some(bus) => crate::risk_intel::dev_sell::spawn(
+                self.state.clone(),
+                self.rpc.clone(),
+                self.risk_intel.clone(),
+                bus.clone(),
+            )
+            .await
+            .map(|task| OwnedTask::new(task, "sniper dev-sell watcher")),
+            None => None,
+        };
+
         // The exit sweeper runs independently of launch detection: even if the
         // feeds drop, open positions must still be managed.
         let sweeper = {
@@ -531,6 +559,11 @@ impl Sniper {
                 // Keep the sweeper alive while the service is running,
                 // then stop and join it on process shutdown.
                 self.state.wait_shutdown().await;
+                if let Some(watcher) = dev_sell_watcher {
+                    watcher
+                        .join_with_timeout(std::time::Duration::from_secs(5))
+                        .await;
+                }
                 sweeper
                     .join_with_timeout(std::time::Duration::from_secs(5))
                     .await;
@@ -614,6 +647,14 @@ impl Sniper {
         self.state
             .set_running(BotModule::Sniper, false, false)
             .await;
+        if let Some(watcher) = dev_sell_watcher {
+            // The watcher ends on its own at shutdown (it selects on
+            // `wait_shutdown`); joining before the sweeper means no
+            // observation can be published after the sweeper stopped reading.
+            watcher
+                .join_with_timeout(std::time::Duration::from_secs(5))
+                .await;
+        }
         sweeper
             .join_with_timeout(std::time::Duration::from_secs(5))
             .await;

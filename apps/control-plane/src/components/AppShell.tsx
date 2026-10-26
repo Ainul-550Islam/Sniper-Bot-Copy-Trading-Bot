@@ -60,6 +60,9 @@ const COMMERCIAL_NAV: NavGroup[] = [
       { href: "/trading/orders", label: "Orders Book" },
       { href: "/trading/positions", label: "Positions & PnL" },
       { href: "/trading/executions", label: "Execution Journal" },
+      { href: "/trading/trades", label: "Trades" },
+      { href: "/trading/balances", label: "Balances" },
+      { href: "/trading/recovery", label: "Recovery" },
       { href: "/alerts", label: "Incident Alerts" },
       { href: "/activity", label: "Activity Timeline" },
       { href: "/reports", label: "Reports & Compliance" },
@@ -82,6 +85,8 @@ const COMMERCIAL_NAV: NavGroup[] = [
     title: "Organization & Settings",
     items: [
       { href: "/settings/team", label: "Team Members" },
+      { href: "/settings/organization", label: "Organization" },
+      { href: "/settings/notifications", label: "Notifications" },
       { href: "/settings/security", label: "Security & Posture" },
       { href: "/settings/api", label: "API Keys" },
       { href: "/settings/webhooks", label: "Webhooks" },

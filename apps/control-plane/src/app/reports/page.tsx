@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 import ReportTable, { ReportItem } from "@/components/reports/report-table";
 import { request } from "@/lib/api";
+import { exportsApi } from "@/lib/api/exports-api";
 
 export default function ReportsPage() {
   const [reports, setReports] = useState<ReportItem[]>([]);
@@ -53,7 +54,13 @@ export default function ReportsPage() {
       {loading ? (
         <div className="card">Loading compliance exports...</div>
       ) : (
-        <ReportTable reports={reports} onRefresh={() => void loadReports()} />
+        <ReportTable
+          reports={reports}
+          onRefresh={() => void loadReports()}
+          onDownload={async (reportId) => {
+            await exportsApi.downloadReport(reportId);
+          }}
+        />
       )}
     </AppShell>
   );

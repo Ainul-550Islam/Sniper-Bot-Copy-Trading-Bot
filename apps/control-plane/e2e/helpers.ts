@@ -1,4 +1,5 @@
 /**
+
  * Shared fixtures for control-plane e2e specs (GAP MAP v2, Part 5).
  *
  * Every spec runs against `next dev` with the SaaS API fully mocked at the
@@ -50,6 +51,7 @@ export async function fulfillJson(route: Route, status: number, body: unknown) {
 }
 
 /**
+
  * Route every `/api/**` request through `handler`. Specs inspect the pathname
  * and fulfill what they care about; anything unhandled is answered with an
  * empty 200 so incidental background calls do not fail the run.
@@ -65,6 +67,7 @@ export async function installApiMock(
 }
 
 /**
+
  * Sign the test user in against a mocked `/api/saas/sessions` and land inside
  * the authenticated shell. `onRequest` lets a spec observe/collect the login
  * and any follow-up calls.
@@ -102,3 +105,42 @@ export async function signIn(
 export async function goToViaNav(page: Page, label: string) {
   await page.getByRole("navigation", { name: "Sections" }).getByRole("link", { name: label }).click();
 }
+
+/** Shared test invite for team-invite e2e specs (Part 04, L1). */
+export const testInvite = {
+  id: "inv_1",
+  email: "operator@example.test",
+  role: "operator",
+  status: "pending",
+  created_at: "2026-10-20T08:00:00Z",
+  expires_at: null,
+};
+
+/** Shared test billing status for billing-status e2e specs (Part 04, L3). */
+export const testBillingStatus = {
+  organization_id: organizationId,
+  plan_code: "pro",
+  plan_version: 3,
+  subscription_status: "active",
+  billing_provider: "stripe",
+  payment_state: null,
+  invoice_state: null,
+  entitlements_active: true,
+  usage: { period: "2026-10", total_requests: 1240, total_trades: 86 },
+  dunning_state: "current",
+  grace_until: null,
+  suspension_reason: null,
+  as_of: "2026-10-20T08:00:00Z",
+};
+
+/** Shared test wallet binding for wallet-pools e2e specs (Part 04, L5). */
+export const testWalletBinding = {
+  id: "bind_1",
+  organization_id: organizationId,
+  label: "E2E treasury wallet",
+  public_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRjxg8tu9g",
+  modules: ["module.sniper"],
+  created_at: "2026-10-20T08:00:00Z",
+  revoked_at: null,
+  active: false,
+};

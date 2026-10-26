@@ -42,13 +42,18 @@
     "min_liquidity_sol": 0.0,
     "require_mint_authority_revoked": false,
     "require_freeze_authority_revoked": true,
+    "simulate_sell": true,
+    "require_sell_probe": false,
     "max_creator_initial_buy_sol": 0.0,
     "min_pool_supply_fraction": 0.0,
+    "max_top_holder_pct": 0.0,
+    "max_bundler_ratio": 0.0,
     "max_snapshot_age_ms": 2000,
     "strict_gates": false,
     "stale_position_exit_secs": 0,
     "exit_retry_backoff_secs": 10,
-    "failed_entry_cleanup": true
+    "failed_entry_cleanup": true,
+    "advanced_exit": null
   },
   "risk": {
     "kill_switch": false,
@@ -80,7 +85,22 @@
     "sniper_token_cooldown_secs": 0,
     "sniper_failed_entry_cooldown_secs": 120,
     "sniper_daily_loss_limit_quote": 0.0,
-    "sniper_emergency_disable": false
+    "sniper_emergency_disable": false,
+    "copy_max_position_quote": 0.0,
+    "copy_max_total_exposure_quote": 0.0,
+    "copy_max_concurrent_positions": 0,
+    "copy_max_pending_executions": 0,
+    "copy_failed_entry_cooldown_secs": 0,
+    "copy_daily_loss_limit_quote": 0.0,
+    "copy_max_leader_exposure_quote": 0.0,
+    "copy_emergency_disable": false,
+    "poly_max_position_quote": 0.0,
+    "poly_max_total_exposure_quote": 0.0,
+    "poly_max_market_exposure_quote": 0.0,
+    "poly_max_concurrent_positions": 0,
+    "poly_max_open_orders": 0,
+    "poly_daily_loss_limit_quote": 0.0,
+    "poly_emergency_disable": false
   },
   "steps": [
     {
@@ -104,6 +124,7 @@
         "observed_at": "2026-01-01T00:00:00Z",
         "source_seq": 1,
         "raw_hash": "fixture-raw-2-2",
+        "first_slot_buys": [],
         "launch": {
           "mint": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
           "name": "Fixture 2",
@@ -137,7 +158,10 @@
         "pool_open_time": null,
         "mint_authority_revoked": true,
         "freeze_authority_revoked": true,
+        "sell_probe": null,
         "creator_initial_buy_sol": 0.5,
+        "top_holders": null,
+        "bundling": null,
         "spot_price_sol": 2.9e-8,
         "fetched_at": "2026-01-01T00:00:00Z"
       },
@@ -173,6 +197,7 @@
         "observed_at": "2026-01-01T00:00:00Z",
         "source_seq": 2,
         "raw_hash": "fixture-raw-2-2",
+        "first_slot_buys": [],
         "launch": {
           "mint": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
           "name": "Fixture 2",
@@ -206,7 +231,10 @@
         "pool_open_time": null,
         "mint_authority_revoked": true,
         "freeze_authority_revoked": true,
+        "sell_probe": null,
         "creator_initial_buy_sol": 0.5,
+        "top_holders": null,
+        "bundling": null,
         "spot_price_sol": 2.9e-8,
         "fetched_at": "2026-01-01T00:00:00Z"
       },

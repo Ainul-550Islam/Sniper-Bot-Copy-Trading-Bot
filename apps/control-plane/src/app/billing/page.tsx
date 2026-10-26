@@ -7,8 +7,13 @@
  * invoice history with downloadable records, usage limits consumption, and dunning state.
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
+import { sessionStore } from "@/lib/auth";
+import { getCapabilities, type MembershipRole } from "@/lib/permissions";
+import { BillingStatusPanel } from "@/components/billing/BillingStatusPanel";
+import { ReconcilePanel } from "@/components/billing/ReconcilePanel";
+import { UsageLimitsPanel } from "@/components/billing/UsageLimitsPanel";
 import {
   commercial,
   toDisplayError,
@@ -57,6 +62,19 @@ export default function BillingPage() {
     void Promise.resolve().then(() => loadData());
   }, [loadData]);
 
+function currentRole(): MembershipRole {
+  const state = sessionStore.getSnapshot();
+  const organization =
+    state.organizations.find((item) => item.organization_id === state.selectedOrganizationId) ??
+    state.organizations[0];
+  const role = organization?.role.toLowerCase() ?? "";
+  if (role.includes("owner")) return "owner";
+  if (role.includes("admin")) return "admin";
+  if (role.includes("operator") || role.includes("trader")) return "operator";
+  if (role.includes("analyst") || role.includes("auditor")) return "analyst";
+  return "viewer";
+}
+
   const handleUpgrade = useCallback(async (plan: PlanTier) => {
     setUpgradingCode(plan.code);
     setCheckoutNotice(null);
@@ -78,6 +96,11 @@ export default function BillingPage() {
       setUpgradingCode(null);
     }
   }, [loadData]);
+
+  const state = sessionStore.getSnapshot();
+  const orgId = state.selectedOrganizationId ?? null;
+  const canManageBilling =
+    getCapabilities({ role: currentRole() }).canManageBilling;
 
   return (
     <AppShell>
@@ -265,6 +288,15 @@ export default function BillingPage() {
                 </div>
               )}
             </section>
+
+            {/* Billing status / reconcile / usage panels (server-truth via billingStatusApi) */}
+            {orgId && (
+              <>
+                <BillingStatusPanel organizationId={orgId} />
+                <ReconcilePanel organizationId={orgId} canManage={canManageBilling} />
+                <UsageLimitsPanel organizationId={orgId} />
+              </>
+            )}
           </>
         )}
       </div>

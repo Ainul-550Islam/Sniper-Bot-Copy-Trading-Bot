@@ -97,6 +97,20 @@ the pinned crates.
 ## Quick start (paper mode)
 
 ```bash
+make init        # config.toml + .env from the shipped examples (never overwrites)
+make up          # bot + PostgreSQL + Redis, built and started (docker compose)
+make migrate     # apply the SQL migrations, then exit
+make run         # the bot itself, in paper mode, against ./config.toml
+```
+
+`make help` lists every target and needs no toolchain, no docker daemon and no
+network. `make` is only a keyboard over the commands below — nothing in it is a
+prerequisite for using this repository. Before you ship: `make test` (the
+workspace suite) and `make gates` (the repository integrity gates).
+
+The same steps by hand:
+
+```bash
 # 1. Configure
 cp config.toml.example config.toml
 $EDITOR config.toml            # enable the modules you want, set sizes
@@ -529,6 +543,14 @@ end-to-end test evidence are in [docs/STAKING.md](docs/STAKING.md).
 ## Testing
 
 ```bash
+# The whole workspace suite, single-threaded exactly as CI runs it
+make test
+
+# Gates that must hold before a release: required files, version identity,
+# migration order, marker and secret scans, fmt, clippy and the workspace
+# tests (gated suites skip cleanly without POSTGRES_URL/REDIS_URL)
+make gates
+
 # Application workspace (bot-core, solana-kit, all modules, server)
 cargo test --workspace
 
@@ -631,8 +653,10 @@ sniper-suite/
 
 ```bash
 # Full stack (recommended): bot + postgres + redis, healthchecked, volumes
+make init && make up          # or by hand:
 cp .env.template .env && $EDITOR .env
 docker compose up --build -d
+make migrate                  # MIGRATE_ONLY=1 cargo run -p sniper-suite -- --migrate-only
 
 # Image alone
 docker build -t sniper-suite .

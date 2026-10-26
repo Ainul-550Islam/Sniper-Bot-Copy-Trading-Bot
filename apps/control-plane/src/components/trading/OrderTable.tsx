@@ -10,6 +10,7 @@
  * server-side).
  */
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   classifyTradingError,
@@ -82,6 +83,7 @@ export default function OrderTable({ onShowExecutions }: { onShowExecutions?: (o
                 <th>Price</th>
                 <th>Status</th>
                 <th>Mode</th>
+                <th>Details</th>
                 <th></th>
               </tr>
             </thead>
@@ -97,6 +99,9 @@ export default function OrderTable({ onShowExecutions }: { onShowExecutions?: (o
                   <td>{o.price ?? "—"}</td>
                   <td>{o.error ? <span title={o.error}>{o.status} ⚠</span> : o.status}</td>
                   <td>{o.mode}</td>
+                  <td>
+                    <Link href={`/trading/orders/${o.id}`}>Details</Link>
+                  </td>
                   <td>
                     {onShowExecutions && (
                       <button className="link" onClick={() => onShowExecutions(o.id)}>

@@ -7,8 +7,8 @@
  * failure categorization, venue identifiers, and recovery context.
  */
 
-import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import {
   classifyTradingError,
@@ -143,8 +143,11 @@ export default function ExecutionsPage() {
                         )}
                       </td>
                       <td>{x.error ? <span className="error small" title={x.error}>{x.error.slice(0, 40)}…</span> : "—"}</td>
-                    </tr>
-                  ))}
+                    <td>
+                      <Link href={`/trading/executions/${x.id}`}>Details</Link>
+                    </td>
+                  </tr>
+                ))}
                 </tbody>
               </table>
             </div>

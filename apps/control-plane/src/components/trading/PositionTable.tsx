@@ -8,6 +8,7 @@
  * client-side zero or estimate.
  */
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   classifyTradingError,
@@ -76,6 +77,7 @@ export default function PositionTable() {
                 <th>Status</th>
                 <th>Opened</th>
                 <th>Closed</th>
+                <th>Details</th>
               </tr>
             </thead>
             <tbody>
@@ -91,6 +93,9 @@ export default function PositionTable() {
                   <td>{p.status}</td>
                   <td>{p.opened_at ? new Date(p.opened_at).toLocaleString() : "—"}</td>
                   <td>{p.closed_at ? new Date(p.closed_at).toLocaleString() : "—"}</td>
+                  <td>
+                    <Link href={`/trading/positions/${p.id}`}>Details</Link>
+                  </td>
                 </tr>
               ))}
             </tbody>

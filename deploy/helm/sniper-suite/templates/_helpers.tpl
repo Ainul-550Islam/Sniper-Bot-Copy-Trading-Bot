@@ -43,6 +43,23 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
+Immutable container image reference: `repository@digest`, never a tag.
+
+The digest is required (an empty value fails the render instead of silently
+producing a `repository@` image string) and must look like a sha256 digest, so
+a copy-pasted tag or a truncated digest cannot roll a cluster. Paired with
+values.schema.json, which rejects `image.tag` outright: there is no path from
+a mutable reference through this chart to a pod spec.
+*/}}
+{{- define "sniper-suite.image" -}}
+{{- $digest := required "image.digest is required (pin an immutable sha256:<64 hex> digest; this chart takes no tag)" .Values.image.digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $digest) -}}
+{{- fail (printf "image.digest %q is not a sha256 digest — expected sha256: followed by 64 lowercase hex characters" $digest) -}}
+{{- end -}}
+{{- printf "%s@%s" .Values.image.repository $digest -}}
+{{- end -}}
+
+{{/*
 Selector labels (subset of labels, stable across upgrades).
 */}}
 {{- define "sniper-suite.selectorLabels" -}}

@@ -232,8 +232,9 @@ impl LaunchDetector {
             };
             let tx_pp = tx.clone();
             let state_pp = state.clone();
+            let rpc_pp = rpc.clone();
             let api_key = sniper.pumpportal_api_key.clone();
-            match start_pumpportal(url, api_key, tx_pp, state_pp).await {
+            match start_pumpportal(url, api_key, tx_pp, state_pp, rpc_pp).await {
                 Ok(task) => {
                     tasks.push(task);
                     started += 1;
@@ -287,6 +288,7 @@ impl LaunchDetector {
                 Some(url) => {
                     let tx_g = tx.clone();
                     let state_g = state.clone();
+                    let rpc_g = rpc.clone();
                     let mut programs = vec![PUMP_PROGRAM_ID.to_string()];
                     if sniper.trade_pumpswap {
                         programs.push(PUMPSWAP_PROGRAM_ID.to_string());
@@ -294,7 +296,14 @@ impl LaunchDetector {
                     if sniper.trade_raydium {
                         programs.push(RAYDIUM_AMM_V4.to_string());
                     }
-                    match start_geyser_subscription(url.to_string(), programs, tx_g, state_g).await
+                    match start_geyser_subscription(
+                        url.to_string(),
+                        programs,
+                        tx_g,
+                        state_g,
+                        rpc_g,
+                    )
+                    .await
                     {
                         Ok(task) => {
                             tasks.push(task);
@@ -332,6 +341,7 @@ async fn start_pumpportal(
     api_key: Option<String>,
     tx: mpsc::Sender<LaunchEvent>,
     state: Shared,
+    rpc: Rpc,
 ) -> BotResult<tokio::task::JoinHandle<()>> {
     // PumpPortal needs no key for the public data feed; a key only raises rate
     // limits. We accept it for completeness but the subscription is identical.
@@ -366,7 +376,14 @@ async fn start_pumpportal(
             let Some(message) = message else { break };
             match message {
                 PumpPortalMessage::NewToken(m) => {
-                    let event = event_from_pumpportal(&m, seq.next_seq());
+                    let mut event = event_from_pumpportal(&m, seq.next_seq());
+                    // PART 03 K1: a pumpportal event carries no slot, so the
+                    // producer resolves the launch transaction first (one
+                    // `getTransaction`) and then reads that slot. Nothing here
+                    // runs when `sniper.max_bundler_ratio` is 0.
+                    let cfg = state.config_snapshot().await;
+                    crate::risk_intel::first_slot::attach_if_enabled(&rpc, &cfg.sniper, &mut event)
+                        .await;
                     count_decoded(SRC_PUMPPORTAL, event.protocol);
                     state.heartbeat(bot_core::models::BotModule::Sniper).await;
                     if tx.send(event).await.is_err() {
@@ -499,7 +516,21 @@ async fn start_log_subscription(
                             }
                         }
                     };
-                    if let Some(event) = event {
+                    if let Some(mut event) = event {
+                        // PART 03 K1: fill `first_slot_buys` BEFORE the event
+                        // enters the decision queue, because the bundler gate
+                        // reads it. `attach_if_enabled` does nothing at all
+                        // when `sniper.max_bundler_ratio` is 0 (the gate is
+                        // off), and a block it cannot read leaves the list
+                        // empty — which the gate already treats as missing
+                        // evidence. See `risk_intel::first_slot`.
+                        let cfg = state.config_snapshot().await;
+                        crate::risk_intel::first_slot::attach_if_enabled(
+                            &rpc,
+                            &cfg.sniper,
+                            &mut event,
+                        )
+                        .await;
                         count_decoded(source, event.protocol);
                         state.heartbeat(bot_core::models::BotModule::Sniper).await;
                         if tx.send(event).await.is_err() {
@@ -579,6 +610,7 @@ async fn start_geyser_subscription(
     programs: Vec<String>,
     tx: mpsc::Sender<LaunchEvent>,
     state: Shared,
+    rpc: Rpc,
 ) -> BotResult<tokio::task::JoinHandle<()>> {
     let ws = SolanaWs::with_policy(
         ws_url,
@@ -631,7 +663,19 @@ async fn start_geyser_subscription(
                         warn!(slot, seq = seq_no, signature = %notif.signature, "geyser notification slot regressed (reorder/replay after reconnect)");
                     }
                     let raw_hash = raw_hash_of(raw.to_string().as_bytes());
-                    if let Some(event) = event_from_notification(&notif, slot, seq_no, raw_hash) {
+                    if let Some(mut event) = event_from_notification(&notif, slot, seq_no, raw_hash)
+                    {
+                        // PART 03 K1: same enrichment as the logsSubscribe
+                        // feed — see `risk_intel::first_slot`. A geyser
+                        // notification carries the slot, so the launch slot's
+                        // block is read directly.
+                        let cfg = state.config_snapshot().await;
+                        crate::risk_intel::first_slot::attach_if_enabled(
+                            &rpc,
+                            &cfg.sniper,
+                            &mut event,
+                        )
+                        .await;
                         count_decoded(SRC_GEYSER, event.protocol);
                         state.heartbeat(bot_core::models::BotModule::Sniper).await;
                         if tx.send(event).await.is_err() {
@@ -779,7 +823,10 @@ async fn raydium_event_from_logs(
     ))
 }
 
-fn unix_to_utc(secs: i64) -> Option<DateTime<Utc>> {
+/// Feed timestamp of a chain `block_time`, shared by the block reader and the
+/// dev-sell watcher so both place an observation on the same clock. A missing
+/// or non-positive block time is `None` — never a fabricated date.
+pub(crate) fn unix_to_utc(secs: i64) -> Option<DateTime<Utc>> {
     if secs <= 0 {
         return None;
     }

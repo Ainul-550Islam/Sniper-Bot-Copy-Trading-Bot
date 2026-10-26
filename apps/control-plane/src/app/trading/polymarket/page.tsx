@@ -7,8 +7,8 @@
  * EIP-712 signer state, and truthful provider availability.
  */
 
-import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import ModuleActionButton from "@/components/trading/ModuleActionButton";
 import {
@@ -214,7 +214,11 @@ export default function PolymarketPage() {
               <tbody>
                 {orders.map((o) => (
                   <tr key={o.id}>
-                    <td><code>{o.id.slice(0, 12)}…</code></td>
+                    <td>
+                      <Link href={`/trading/polymarket/orders/${o.id}`}>
+                        <code>{o.id.slice(0, 12)}…</code>
+                      </Link>
+                    </td>
                     <td>{o.market ?? "—"}</td>
                     <td>
                       <span className={`tag ${o.side === "BUY" ? "tag--active" : "tag--warning"}`}>

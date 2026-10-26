@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { request } from "@/lib/api";
+import { exportsApi } from "@/lib/api/exports-api";
 
 export interface ReportItem {
   id: string;
@@ -17,9 +18,10 @@ export interface ReportItem {
 interface ReportTableProps {
   reports: ReportItem[];
   onRefresh: () => void;
+  onDownload?: (reportId: string) => void | Promise<void>;
 }
 
-export default function ReportTable({ reports, onRefresh }: ReportTableProps) {
+export default function ReportTable({ reports, onRefresh, onDownload }: ReportTableProps) {
   const [reportType, setReportType] = useState("accounting_ledger");
   const [format, setFormat] = useState("csv");
   const [loading, setLoading] = useState(false);
@@ -141,14 +143,15 @@ export default function ReportTable({ reports, onRefresh }: ReportTableProps) {
                     {new Date(r.created_at).toLocaleDateString()}
                   </td>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    <a
-                      href={r.download_url}
+                    <button
+                      type="button"
+                      disabled={!onDownload}
+                      onClick={() => void onDownload?.(r.id)}
                       className="btn btn-secondary"
                       style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
-                      download
                     >
                       Download
-                    </a>
+                    </button>
                   </td>
                 </tr>
               ))}

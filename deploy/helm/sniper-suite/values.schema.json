@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Ainul-550Islam/Sniper-Bot-Copy-Trading-Bot/deploy/helm/sniper-suite/values.schema.json",
+  "title": "sniper-suite chart values",
+  "description": "Structural validation of the deployment knobs Helm merges before rendering. Only the parts with a hard contract are described here: the container image must be an immutable digest. Everything else keeps the chart's own defaults, so an existing values file still validates (helm validates the WHOLE document against this schema, and an unknown key must stay legal).",
+  "type": "object",
+  "allOf": [
+    {
+      "description": "`image.tag` is rejected outright, not merely unused: a values file that still carries one is a deployment that thinks tags are allowed. The chart has no tag to fall back to.",
+      "not": {
+        "type": "object",
+        "required": ["image"],
+        "properties": {
+          "image": {
+            "type": "object",
+            "required": ["tag"]
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "digest"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Registry/repository part of the reference, e.g. ghcr.io/acme/sniper-suite."
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Immutable image digest. Required: the default is empty, which fails here (and in the sniper-suite.image helper) instead of rendering a pod whose image could change under it. Resolve a built tag to a digest with `docker buildx imagetools inspect <image> --format '{{json .}}'`."
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["IfNotPresent", "Always", "Never"],
+          "description": "With a digest pin, IfNotPresent is already deterministic; the field exists for air-gapped nodes that need Always."
+        }
+      }
+    },
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Guarded here because a negative value reaches `spec.replicas` and the API server rejects it only at apply time."
+    }
+  }
+}

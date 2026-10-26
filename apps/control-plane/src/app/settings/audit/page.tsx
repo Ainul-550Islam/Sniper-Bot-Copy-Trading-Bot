@@ -9,7 +9,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
-import { request } from "@/lib/api";
+import { request, toDisplayError } from "@/lib/api";
+import { exportsApi } from "@/lib/api/exports-api";
 
 interface AuditEvent {
   id: string;
@@ -37,6 +38,16 @@ export default function AuditLogPage() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const exportAudit = useCallback(async () => {
+    setError(null);
+    try {
+      const payload = await request<Record<string, unknown>>("/api/saas/audit/export");
+      await exportsApi.downloadJson(payload, "sniper-audit-export.json");
+    } catch (err: unknown) {
+      setError(toDisplayError(err));
+    }
+  }, []);
 
   const loadLogs = useCallback(async () => {
     setLoading(true);
@@ -75,6 +86,15 @@ export default function AuditLogPage() {
         </div>
         <button onClick={() => void loadLogs()} className="btn btn-secondary" style={{ fontSize: "0.85rem" }}>
           Refresh Ledger
+        </button>
+        <button
+          onClick={() => {
+            void exportAudit();
+          }}
+          className="btn btn-secondary"
+          style={{ fontSize: "0.85rem" }}
+        >
+          Export Audit
         </button>
       </div>
 
