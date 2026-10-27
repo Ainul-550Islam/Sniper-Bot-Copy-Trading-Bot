@@ -95,8 +95,10 @@ on a bounded `tokio::sync::mpsc`; a full/closed channel drops the event but
 increments a **measured** `dropped` counter (never silent). `Recorder::run`
 appends one fsynced NDJSON line per event, rotates a chunk at
 `chunk_max_records`/`chunk_max_bytes`, and on graceful shutdown (all sinks
-dropped, or `RecorderSink::seal()`) finalizes the chain and atomically writes
-the sealed manifest.
+dropped, or `RecorderSink::seal()`) closes the input channel, drains every
+accepted record, then finalizes the chain and atomically writes the sealed
+manifest. Sends attempted after that close fail explicitly and increment the
+same measured drop counter.
 
 `ChunkWriter` is the synchronous core (used by the importer and recovery
 tests). `ChunkWriter::resume` reopens a `recording` dataset after a crash,
@@ -165,11 +167,40 @@ Replaying the same dataset twice yields the identical `replay-hash`.
 | `DATASET_MIN_SLOT_SPAN` | verifier min slot span | 0 |
 | `DATASET_MAX_SLOT_GAP` | verifier max allowed slot gap | u64::MAX |
 
-## 9. Integration note (later batch)
+## 9. Replay labels
+
+`RecordedReplaySource` orders records by `(slot, seq)` and recomputes the
+verification verdict every time it opens a dataset. Its output carries the
+`dataset_id`, the verifier-derived `authoritative` value, and an honest
+`data_source`: `recorded` for a real capture, `synthetic_fixture` for an
+imported fixture. `authoritative_replay()` refuses failed verification,
+insufficient coverage, and every synthetic fixture. `replay-hash` includes
+those stamps and the ordered launch events in its deterministic hash domain.
+
+## 10. Integration and real capture (later wiring batch)
 
 `Sniper::with_recorder(RecorderSink)` is an optional builder hook (default
 `None`, zero behaviour change). The integration batch attaches a `Recorder`,
 spawns `Recorder::run`, and hands the sink to the sniper; observed
-`LaunchEvent`s are then captured. `scripts/run-dataset-capture.sh` is the
-bounded-session runbook that seals and verifies. No synthetic data is
-produced by that path.
+`LaunchEvent`s are then captured.
+
+`scripts/run-dataset-capture.sh` never starts a feed by default. With no
+`LIVE_DATASET_CAPTURE=1` it prints `NOT_RUN` and exits successfully without
+creating data or evidence. An actual capture requires all of the following:
+
+* `LIVE_DATASET_CAPTURE=1`, non-empty `SOLANA_RPC_URL` and `SOLANA_WS_URL`;
+* `DATASET_DIR` and a bounded `DATASET_CAPTURE_SECONDS` (minimum 600);
+* `DATASET_CAPTURE_WIRED=1`, confirming that the integration owns graceful
+  recorder shutdown and seal;
+* `DATASET_CAPTURE_CMD`, the explicit operator command for that wired process.
+
+After the bounded session the script runs `dataset_tool verify` and
+`replay-hash`. It requires a `recorded`, fully verified, authoritative result
+and writes `evidence/local/launch_dataset_capture.json`. `PASSED` is emitted
+only after all those checks succeed; every attempted failure writes `FAILED`
+and exits non-zero. It never imports fixtures and never edits
+`evidence/live/*.json`.
+
+The separate `.github/workflows/datasets.yml` job runs the dataset tests and
+the two real-PostgreSQL integration suites against a `postgres:16` service
+with `REQUIRE_POSTGRES=1`.

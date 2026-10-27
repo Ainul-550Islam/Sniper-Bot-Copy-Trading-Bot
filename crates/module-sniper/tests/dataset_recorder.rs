@@ -205,3 +205,42 @@ async fn graceful_shutdown_seals() {
     assert_eq!(on_disk.record_count, 7);
     cleanup(&root);
 }
+
+#[tokio::test]
+async fn explicit_seal_drains_accepted_records_and_measures_late_drops() {
+    let root = temp_root("seal-drain");
+    let store = FsDatasetStore::new(&root);
+    let cfg = RecorderConfig::new(&root, 1000, 4 * 1024 * 1024, 16).unwrap();
+    let m = DatasetManifest::new(
+        "ds-seal-drain".into(),
+        "seal-drain".into(),
+        DatasetSource::Recorded,
+    );
+    let (sink, recorder) = Recorder::new(store, m, &cfg).unwrap();
+
+    for i in 0..3u64 {
+        assert!(sink.record(tick(i + 1)));
+    }
+    sink.seal().await.unwrap();
+    // These sends are queued behind the seal marker because the worker has
+    // not started yet. They were accepted, so a graceful seal must write them
+    // rather than dropping the receiver's remaining queue.
+    for i in 3..5u64 {
+        assert!(sink.record(tick(i + 1)));
+    }
+
+    let sealed = recorder.run().await.unwrap();
+    assert_eq!(sealed.record_count, 5);
+    assert_eq!(sink.stats().written, 5);
+    assert_eq!(sink.stats().enqueued, 5);
+    assert_eq!(sink.stats().dropped, 0);
+
+    // The worker closed the channel at the seal marker. A later producer
+    // fails explicitly and the attempted loss is visible in the counters.
+    assert!(!sink.record(tick(6)));
+    let stats = sink.stats();
+    assert_eq!(stats.enqueued, 5);
+    assert_eq!(stats.written, 5);
+    assert_eq!(stats.dropped, 1);
+    cleanup(&root);
+}

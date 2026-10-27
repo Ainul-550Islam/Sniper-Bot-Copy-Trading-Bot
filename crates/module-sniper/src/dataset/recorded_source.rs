@@ -8,7 +8,8 @@
 //! deterministic (slot, index) order. A caller can build a `ReplayFixture`
 //! from [`RecordedReplaySource::launch_events`] and feed `ReplayEngine`.
 //!
-//! Every output is stamped with `data_source = "recorded"`, the
+//! Every output is stamped with its honest `data_source` (`recorded` for a
+//! real capture and `synthetic_fixture` for an imported fixture), the
 //! `dataset_id`, and `authoritative` COPIED FROM THE VERIFIER OUTCOME
 //! ([`VerificationReport::authoritative`]) — a dataset's own flag is never
 //! trusted. [`RecordedReplaySource::authoritative_replay`] refuses any
@@ -124,10 +125,12 @@ impl RecordedReplaySource {
 
     /// Build the stamped, deterministic output. Works for ANY dataset; the
     /// `authoritative` stamp is exactly the verifier's verdict (so a
-    /// synthetic_fixture dataset always yields `false`).
+    /// synthetic_fixture dataset always yields `false`). The source stamp is
+    /// equally strict: real captures are `recorded`, while imported fixtures
+    /// remain `synthetic_fixture` even though this same reader supports them.
     pub fn output(&self) -> ReplayOutput {
         ReplayOutput {
-            data_source: "recorded".into(),
+            data_source: self.manifest.source.as_str().into(),
             dataset_id: self.manifest.dataset_id.clone(),
             authoritative: self.report.authoritative,
             events: self.launch_events(),
@@ -161,7 +164,7 @@ impl ReplayEventSource for RecordedReplaySource {
     }
 
     fn data_source(&self) -> &str {
-        "recorded"
+        self.manifest.source.as_str()
     }
 
     fn authoritative(&self) -> bool {

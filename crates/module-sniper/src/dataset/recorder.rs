@@ -160,6 +160,10 @@ impl Recorder {
 
     /// Drive the worker. Seals on an explicit `Seal` message OR when every
     /// sink has been dropped (channel close) — both are graceful shutdowns.
+    /// An explicit seal closes the receiving side and then drains every
+    /// already-accepted record before finalizing. Records attempted after
+    /// that close fail `try_send` and increment the measured drop counter;
+    /// no accepted record can disappear behind a seal marker.
     pub async fn run(mut self) -> BotResult<DatasetManifest> {
         while let Some(msg) = self.rx.recv().await {
             match msg {
@@ -167,7 +171,7 @@ impl Recorder {
                     self.writer.append(event)?;
                     self.counters.written.fetch_add(1, Ordering::Relaxed);
                 }
-                RecorderMsg::Seal => break,
+                RecorderMsg::Seal => self.rx.close(),
             }
         }
         self.writer.seal()

@@ -63,7 +63,13 @@ fn synthetic_fixture_can_never_be_authoritative_even_if_it_claims_to_be() {
     );
 
     let source = RecordedReplaySource::open(&dir, &VerifierPolicy::default()).unwrap();
-    assert!(!source.output().authoritative);
+    let output = source.output();
+    assert!(!output.authoritative);
+    assert_eq!(
+        output.data_source, "synthetic_fixture",
+        "fixture replay must never be stamped as recorded market data"
+    );
+    assert_eq!(source.data_source(), "synthetic_fixture");
     assert!(
         source.authoritative_replay().is_err(),
         "authoritative replay must be refused"
