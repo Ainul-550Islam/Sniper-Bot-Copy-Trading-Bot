@@ -85,3 +85,12 @@ apps/control-plane/playwright-report/
 bots/**/.env
 bots/**/__pycache__/
 bots/**/*.sqlite
+
+# Local run scaffolding and captured console output (PART 03 K3): one-shot
+# launchers and their transcripts are host state, not source. Anchored to the
+# root so scripts/run-*.sh — which ARE source — stay tracked.
+/run-*.sh
+/run_baseline*.sh
+/core-launch.out
+/run-tests.out
+*.out

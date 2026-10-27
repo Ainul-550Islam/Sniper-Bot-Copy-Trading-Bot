@@ -24,8 +24,8 @@
       "programs/staking-suite (native Solana program, own lockfile, built with cargo build-sbf / agave 2.1.21)"
     ],
     "database_migrations": {
-      "count": 62,
-      "high_water_mark": "0062",
+      "count": 65,
+      "high_water_mark": "0065",
       "policy": "forward-only; no down migrations by design (docs/BACKUP-RESTORE.md)",
       "added_0019_0022": "0019_saas_billing_provider (plan/subscription/entitlement/usage/checkout/invoice/payment + billing pricing), 0020_saas_custody (profile + keys + address), 0021_saas_lifecycle (retention policy, purge lifecycle, job claims) \u2014 forward-only, Batch 1; 0022_checkout_url (durable provider checkout_url persistence for Stripe/Paddle end-to-end wiring) \u2014 forward_only",
       "added_0023": "0023_trading_tenant_columns (nullable organization_id ownership column + organizations(id) ON DELETE RESTRICT foreign key on all 32 core trading-truth tables \u2014 OMS orders/order_status_history/executions/transactions/idempotency_keys, positions/trades/balance_snapshots, dedup_keys/risk_events/audit_events, reconciliation_state, execution_intents, execution_claims/execution_claim_events, execution_lifecycle/execution_lifecycle_events, copy_leaders/copy_leader_events/copy_events/copy_links, poly_signals/poly_orders/poly_fills/poly_recon_findings, ledger_events/ledger_postings/global_positions/global_risk_decisions/kill_switches/kill_switch_events/accounting_recon_findings \u2014 STEP 1 of the enterprise tenant-isolation program; deterministic legacy backfill, NOT NULL, tenant-leading indexes and tenant-composite uniqueness follow in 0024) \u2014 forward-only",
@@ -33,7 +33,7 @@
       "added_0025": "0025_tenant_runtime_registry_config (STEP 3 of the enterprise tenant-isolation program, PROMPT 2/10: durable substrate for the tenant runtime registry and configuration engine \u2014 tenant_runtimes (one row per tenant runtime INSTANCE with fencing generation, heartbeat rotation, org/generation + stale-heartbeat indexes; NOT a second scheduler or claims table \u2014 per-execution ownership stays with execution_claims (0009) and process-level HA with 0016), tenant_configs (one row per organization, typed config with versioned rollout), tenant_config_audit + tenant_decision_log (org-recent indexes), tenant_bindings (org+kind index) \u2014 forward-only",
       "added_0026_0034": "PROMPT 3/10 enterprise tenant-isolation program, atomic PK/arbiter swaps + tenant data plane: 0026_orders_tenant_conflict (orders PK (id) -> (organization_id, id), idempotency_keys arbiter -> (organization_id, scope, key)); 0027_idempotency_tenant_conflict; 0028_execution_claims_tenant_conflict (execution_claims/execution_claim_events arbiters -> tenant-composite); 0029_copy_links_tenant_conflict (copy_leaders (organization_id, address), copy_events (organization_id, event_id), copy_links (organization_id, position_id)); 0030_polymarket_orders_tenant_conflict (poly_signals/poly_orders/poly_fills tenant-composite); 0031_execution_intents_tenant_conflict; 0032_tenant_worker_claims (worker_claims: one tenant-local leadership lane per (organization_id, purpose) with fencing generation \u2014 the global ha_leases plane stays global); 0033_accounting_tenant_conflict (ledger/postings/global positions/risk/kill-switch/accounting recon tenant-composite + reconciliation_state PK (organization_id, kind, subject)); 0034_reporting_tenant_indexes (tenant-leading indexes for the reporting/data-plane query paths) \u2014 all forward-only"
     },
-    "docs_count": 157,
+    "docs_count": 158,
     "web_apps": [
       {
         "name": "apps/control-plane",
@@ -75,20 +75,20 @@
   },
   "verification": {
     "manifest": {
-      "product_files": 1428,
-      "rust_files": 694,
-      "docs_files": 157,
-      "tree_digest": "c16dd8f289fed5db9ff6f0b2a76d16609b4bb3327c4e9445f8ba380fa6ca816e",
+      "product_files": 1453,
+      "rust_files": 712,
+      "docs_files": 158,
+      "tree_digest": "e9dfe5ad5ad463c9d5b4ab3f936eb85c41eadc6d0315f0cc74a8f105bc6e2774",
       "generated_by": "scripts/update-release-manifest.sh"
     }
   },
-  "docs_files": 157,
-  "rust_files": 694,
-  "test_count": 2113,
-  "migrations": 62,
+  "docs_files": 158,
+  "rust_files": 712,
+  "test_count": 2140,
+  "migrations": 65,
   "test_counts": {
     "method": "grep-count of '#[test]' attribute lines under crates/ (identical to test_count)",
-    "value": 2113,
+    "value": 2140,
     "note": "Static inventory of test functions: a count, not a pass/fail result. No run logs ship in this package; re-run per docs/TESTING.md."
   },
   "verification_status": {

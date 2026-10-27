@@ -127,6 +127,36 @@ jobs:
       - name: durable shared state across replicas
         run: cargo test -p sniper-suite --test multi_replica_durable_state -- --test-threads=1
 
+      # Batch 01 (A) — tenant RLS hard gates. The workspace `test` step above
+      # already runs these suites; they are re-run NAMED, with
+      # REQUIRE_POSTGRES=1, so a missing database is a hard failure instead of
+      # a silently skipped gate. rls_isolation proves cross-tenant
+      # SELECT/UPDATE/DELETE/INSERT are rejected for bot_app; rls_coverage
+      # proves every tenant-keyed public table is ENABLE + FORCE RLS with a
+      # tenant policy or carries a written exemption; backtest_truth_columns
+      # proves the 0057 truth columns are served.
+      - name: tenant RLS isolation + coverage + backtest truth (REQUIRE_POSTGRES=1)
+        env:
+          REQUIRE_POSTGRES: "1"
+        run: >-
+          cargo test --locked -p sniper-suite
+          --test rls_isolation --test rls_coverage --test backtest_truth_columns
+          -- --test-threads=1
+
+      # Catalog-level RLS coverage on an EPHEMERAL PostgreSQL 16 (independent
+      # of the service container): applies every migration twice — the second
+      # application of 0060–0062 must be a no-op — then asserts
+      # relrowsecurity + relforcerowsecurity + tenant_org_isolation for every
+      # public table with a tenant key, or a reasoned row in rls_exempt_tables.
+      - name: RLS coverage gate (ephemeral PostgreSQL 16, migrations applied twice)
+        run: bash scripts/check-rls-coverage.sh
+
+      # Evidence honesty: the status census over evidence/**/*.json must match
+      # what the buyer-facing docs claim. Fails when any doc claims more
+      # PASSED evidence than the JSON files actually carry.
+      - name: evidence truth gate (docs may not outclaim evidence/*.json)
+        run: bash tests/release/evidence_truth.sh
+
       # The committed API contract must equal what the code serves. A
       # stale artifact is worse than none: it reads as authoritative while
       # being wrong. Regenerate with ./scripts/export-openapi.sh.
@@ -601,7 +631,14 @@ jobs:
         run: |
           set -euo pipefail
           echo "[stale-scan] checking docs vs release-manifest.json counts"
-          DOCS=$(find docs -type f | wc -l | tr -d ' ')
+          # Counting methods are the canonical P0-B definitions shared with
+          # scripts/update-release-manifest.sh, tests/release/manifest_current.sh
+          # and scripts/verify-delivery.sh: docs_files = TOP-LEVEL docs/*.md
+          # only (archive history and non-md artefacts never count), rust_files
+          # = *.rs under crates/, test_count = '#[test]' occurrences under
+          # crates/. A different method here would flag a fresh manifest as
+          # stale, so all four measurers must agree by construction.
+          DOCS=$(ls docs/*.md 2>/dev/null | wc -l | tr -d ' ')
           RUST=$(find crates -name "*.rs" | wc -l | tr -d ' ')
           TESTS=$(grep -r "#\[test\]" crates 2>/dev/null | wc -l | tr -d ' ')
           echo "docs=$DOCS rust=$RUST tests=$TESTS"

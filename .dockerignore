@@ -40,3 +40,15 @@ apps/control-plane/.next
 apps/control-plane/test-results
 *.md
 !README.md
+
+# Local run scaffolding and captured console output (Batch 01 E): the same
+# host-state exclusions .gitignore carries, mirrored here so a dirty checkout
+# can never bake a launcher transcript or the rustup downloader into an image
+# layer. Patterns match at the context root only (`*` never spans `/`), so
+# scripts/run-external-validation.sh and friends remain part of the context.
+rustup-init.sh
+*.out
+run-*.sh
+run_baseline*.sh
+core-launch.out
+run-tests.out

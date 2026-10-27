@@ -1,7 +1,7 @@
 # Production Readiness Matrix — sniper-suite 0.1.0
 
 > Status: **READY** · **PARTIAL** · **EXTERNAL_REQUIRED** · **NOT_EXECUTED**  
-> Current values: <!-- stat:migrations -->62<!-- /stat --> forward-only migrations · <!-- stat:rust_files -->694<!-- /stat --> Rust files under `crates/` · <!-- stat:docs_canonical -->156<!-- /stat --> docs · <!-- stat:test_attrs_plain -->2113<!-- /stat --> `#[test]` attributes · <!-- stat:crates -->8<!-- /stat --> members · version 0.1.0
+> Current values: <!-- stat:migrations -->65<!-- /stat --> forward-only migrations · <!-- stat:rust_files -->712<!-- /stat --> Rust files under `crates/` · <!-- stat:docs_canonical -->157<!-- /stat --> docs · <!-- stat:test_attrs_plain -->2140<!-- /stat --> `#[test]` attributes · <!-- stat:crates -->8<!-- /stat --> members · version 0.1.0
 
 | Area | Check | Implementation | Status | Evidence / Command |
 |---|---|---|---|---|

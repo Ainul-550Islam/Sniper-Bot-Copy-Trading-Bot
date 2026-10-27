@@ -1,6 +1,6 @@
 # Operations Runbook — sniper-suite 0.1.0
 
-> **Current:** <!-- stat:migrations -->62<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0062<!-- /stat -->`), <!-- stat:rust_files -->694<!-- /stat --> Rust files under `crates/`, <!-- stat:crates -->8<!-- /stat --> members, version 0.1.0, `rust-toolchain.toml` pinned. Commands are real and correspond to `scripts/*` and `docs/*`.
+> **Current:** <!-- stat:migrations -->65<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0065<!-- /stat -->`), <!-- stat:rust_files -->712<!-- /stat --> Rust files under `crates/`, <!-- stat:crates -->8<!-- /stat --> members, version 0.1.0, `rust-toolchain.toml` pinned. Commands are real and correspond to `scripts/*` and `docs/*`.
 
 ## 1. Startup
 

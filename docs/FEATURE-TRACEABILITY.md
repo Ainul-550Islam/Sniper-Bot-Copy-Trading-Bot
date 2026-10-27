@@ -133,7 +133,7 @@ Nothing here is listed merely because a document mentions it.
 | Dashboard (single-file HTML, no CDN) | `crates/server/src/dashboard.rs` | inline HTML | dashboard test | phase8b (served) | — | EXECUTED |
 | Persistence bridge + recon API | `crates/server/src/{persist,recon,obs}.rs` | glue | unit tests | db_integration | PG/Redis | EXECUTED |
 | Health/readiness/metrics | `crates/core/src/obs/{health,metrics}.rs` | `/health`,`/ready`,`bot_*` | obs tests | phase8b smoke (executed: /ready 200, 4 components, `bot_health_ready 1`) | — | EXECUTED |
-| Migrations (forward-only, checksummed; high water `<!-- stat:migrations_high_water -->0062<!-- /stat -->`) | `crates/core/migrations/*.sql` | sqlx `migrate!` | — | db_integration harness | PG | EXISTS (no run log ships) |
+| Migrations (forward-only, checksummed; high water `<!-- stat:migrations_high_water -->0065<!-- /stat -->`) | `crates/core/migrations/*.sql` | sqlx `migrate!` | — | db_integration harness | PG | EXISTS (no run log ships) |
 | Docker/compose packaging | `Dockerfile`, `docker-compose.yml`, `.dockerignore` | multi-stage non-root image | — | **BLOCKED (no daemon in vendor sandbox)**; CI docker job wired | Docker (buyer) | NOT RUN (vendor); buyer step 19 |
 | CI pipeline | `.github/workflows/ci.yml` | 4 jobs | — | **BLOCKED (no runner)**; 1:1 local map in `docs/CI-LOCAL-EQUIVALENCE.md` | GitHub (buyer) | NOT RUN (vendor); buyer step 20 |
 | Release gates | `scripts/{release-check,verify-delivery}.sh` | scripted gates | — | runnable in-tree | toolchain/services | EXISTS |
