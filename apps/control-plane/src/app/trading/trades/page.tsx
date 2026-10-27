@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
-import { ApiError, toDisplayError } from "@/lib/api";
+import { toDisplayError } from "@/lib/api";
 import { tradingDetailApi, type TenantTrade } from "@/lib/api/trading-detail-api";
 
 export default function TradesPage() {

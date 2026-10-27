@@ -25,12 +25,13 @@ pub fn trading_data_plane_schemas() -> Value {
         },
         "BacktestRecord": {
             "type": "object",
-            "required": ["id", "organization_id", "strategy_id", "strategy_name", "venue", "period_start", "period_end", "initial_balance_usd", "status", "created_at"],
+            "required": ["id", "organization_id", "strategy_id", "strategy_name", "module", "venue", "period_start", "period_end", "initial_balance_usd", "status", "data_source", "authoritative", "created_at"],
             "properties": {
                 "id": { "type": "string", "format": "uuid" },
                 "organization_id": { "type": "string", "format": "uuid" },
                 "strategy_id": { "type": "string", "format": "uuid" },
                 "strategy_name": { "type": "string" },
+                "module": { "type": "string" },
                 "venue": { "type": "string" },
                 "period_start": { "type": "string", "format": "date-time" },
                 "period_end": { "type": "string", "format": "date-time" },
@@ -42,7 +43,9 @@ pub fn trading_data_plane_schemas() -> Value {
                 "total_trades": { "type": "integer" },
                 "win_rate_pct": { "type": "number" },
                 "sharpe_ratio": { "type": "number" },
-                "status": { "type": "string", "enum": ["pending", "running", "completed", "failed", "cancelled"] },
+                "status": { "type": "string", "enum": ["queued", "pending", "running", "completed", "failed", "cancelled"] },
+                "data_source": { "type": ["string", "null"], "description": "Data provenance label, such as synthetic or recorded; null until assigned." },
+                "authoritative": { "type": "boolean", "description": "True only when the run is based on authoritative recorded data." },
                 "created_at": { "type": "string", "format": "date-time" },
                 "completed_at": { "type": ["string", "null"], "format": "date-time" }
             }

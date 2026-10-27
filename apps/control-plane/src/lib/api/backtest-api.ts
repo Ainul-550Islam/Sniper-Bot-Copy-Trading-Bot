@@ -8,12 +8,14 @@
 import { tenantRequest } from "../customer-trading-api";
 
 export type BacktestStatus = "queued" | "pending" | "running" | "completed" | "failed" | "cancelled";
+export type BacktestDataSource = "synthetic" | "recorded" | (string & {});
 
 export interface BacktestRecord {
   id: string;
   organization_id: string;
   strategy_id: string;
   strategy_name: string;
+  module: string;
   venue: string;
   period_start: string;
   period_end: string;
@@ -31,8 +33,8 @@ export interface BacktestRecord {
   created_at: string;
   completed_at: string | null;
   error: string | null;
-  /** "synthetic" for seeded simulations; null until a worker has produced a result. */
-  data_source: string | null;
+  /** Backend text label (currently synthetic; reserved recorded value for real-data replay), or null while unset. */
+  data_source: BacktestDataSource | null;
   /** True only for results computed over recorded market data. Always false today. */
   authoritative: boolean;
   /** Why a queued run is waiting instead of running; null when not blocked. */

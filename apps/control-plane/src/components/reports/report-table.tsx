@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { request } from "@/lib/api";
-import { exportsApi } from "@/lib/api/exports-api";
 
 export interface ReportItem {
   id: string;

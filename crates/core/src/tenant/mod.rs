@@ -25,6 +25,7 @@
 pub mod model;
 pub mod module_kind;
 pub mod policy;
+pub mod rls_context;
 pub mod runtime_generation;
 pub mod runtime_id;
 pub mod tenant_entitlement;

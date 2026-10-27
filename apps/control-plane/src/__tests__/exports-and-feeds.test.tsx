@@ -9,7 +9,7 @@
  * - Wallet-access authorization must not POST until `window.confirm` accepts.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const requestMock = vi.fn<(...args: unknown[]) => unknown>();

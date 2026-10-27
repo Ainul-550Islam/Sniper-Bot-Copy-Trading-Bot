@@ -94,6 +94,9 @@ components:
       type: object
     BacktestRecord:
       properties:
+        authoritative:
+          description: True only when the run is based on authoritative recorded data.
+          type: boolean
         completed_at:
           format: date-time
           type:
@@ -102,6 +105,11 @@ components:
         created_at:
           format: date-time
           type: string
+        data_source:
+          description: Data provenance label, such as synthetic or recorded; null until assigned.
+          type:
+          - string
+          - 'null'
         final_balance_usd:
           type: number
         id:
@@ -111,6 +119,8 @@ components:
           type: number
         max_drawdown_pct:
           type: number
+        module:
+          type: string
         net_pnl_usd:
           type: number
         net_roi_pct:
@@ -128,6 +138,7 @@ components:
           type: number
         status:
           enum:
+          - queued
           - pending
           - running
           - completed
@@ -150,11 +161,14 @@ components:
       - organization_id
       - strategy_id
       - strategy_name
+      - module
       - venue
       - period_start
       - period_end
       - initial_balance_usd
       - status
+      - data_source
+      - authoritative
       - created_at
       type: object
     BackupStatus:

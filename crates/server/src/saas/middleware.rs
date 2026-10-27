@@ -277,6 +277,8 @@ async fn authorize_request_mode(
             },
             None => None,
         };
+        bot_core::tenant::rls_context::bind_request_tenant(org.id.as_uuid())
+            .map_err(|_| Decision::resource("a request cannot change tenant context"))?;
         return Ok(SaasContext {
             authorization: ctx,
             organization: org,
@@ -441,6 +443,8 @@ async fn authorize_request_mode(
         let mut touched = record.clone();
         touched.touch(now);
         let _ = state.saas.update_session(&touched).await;
+        bot_core::tenant::rls_context::bind_request_tenant(org.id.as_uuid())
+            .map_err(|_| Decision::resource("a request cannot change tenant context"))?;
         return Ok(SaasContext {
             authorization: ctx,
             organization: org,
@@ -496,6 +500,8 @@ async fn authorize_request_mode(
             if !decision.is_allowed() {
                 return Err(decision);
             }
+            bot_core::tenant::rls_context::bind_request_tenant(org.id.as_uuid())
+                .map_err(|_| Decision::resource("a request cannot change tenant context"))?;
             return Ok(SaasContext {
                 authorization: ctx,
                 organization: org,

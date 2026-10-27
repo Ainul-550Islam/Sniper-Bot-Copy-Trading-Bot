@@ -1,6 +1,7 @@
 "use client";
 
 import { BacktestRecord } from "@/lib/api/backtest-api";
+import DataSourceBadge from "@/components/backtest/DataSourceBadge";
 
 interface BacktestTableProps {
   items: BacktestRecord[];
@@ -56,6 +57,9 @@ export default function BacktestTable({ items, loading, onRefresh }: BacktestTab
                   <td style={{ padding: "0.75rem 1rem" }}>
                     <strong>{item.strategy_name}</strong>
                     <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>{item.venue}</div>
+                    <div style={{ marginTop: "0.35rem" }}>
+                      <DataSourceBadge dataSource={item.data_source} authoritative={item.authoritative} />
+                    </div>
                   </td>
                   <td style={{ padding: "0.75rem 1rem", fontSize: "0.8rem" }}>
                     <div>{new Date(item.period_start).toLocaleDateString()}</div>

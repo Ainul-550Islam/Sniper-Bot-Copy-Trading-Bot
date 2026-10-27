@@ -21,12 +21,12 @@ The previous version is archived at `docs/archive/GAP-MISSING-FILES-v2.md`.
 | §3 `ci_run.json` | NOT_RUN (correct) | `evidence/live/ci_run.json` |
 | §3 Helm/base image digests | OPEN — decision needed | `verify-image-digests.sh` PASS; base image digests in `Dockerfile` differ from current registry tags |
 | §4 hygiene: junk removed, `verify-delivery` junk assertion | DONE | `verify-delivery.sh` 8 PASS / 0 FAIL |
-| §4 `AUDIT.md` moved to `docs/archive/` | DONE | references updated |
+| §4 `docs/archive/AUDIT.md` moved to `docs/archive/` | DONE | references updated |
 | §4 `git filter-repo` history rewrite (`.cargo/bin/rustup`) | NOT DONE — needs explicit approval (force-push) | `.cargo/bin` is not tracked in HEAD |
 | §4 `P0-D-FULL-CODE.md` removed | DONE | 112 unique non-code lines, code present in tree |
-| §5 backtest truthfulness (`data_source`, `authoritative`, migration 0057) | NOT STARTED | — |
+| §5 backtest truthfulness (`data_source`, `authoritative`, migration 0057) | DONE | `crates/server/src/trading_data_plane/backtests.rs` selects and serializes both columns in list/detail; migration 0057 owns storage |
 | §5 recorded datasets (migrations 0055–0056, recorder, dataset store) | NOT STARTED | — |
-| §5 frontend disclosure components | NOT STARTED | — |
+| §5 frontend disclosure components | DONE | `apps/control-plane/src/components/backtest/DataSourceBadge.tsx`; list and detail pages render the shared accessible disclosure; `backtest-disclosure.test.tsx` covers source/authority combinations |
 
 ## File 3 — PART 03: signal producers, deployment contract, hygiene (2026-10-26)
 
@@ -35,7 +35,7 @@ The previous version is archived at `docs/archive/GAP-MISSING-FILES-v2.md`.
 | K1 first-slot producer for `LaunchEvent.first_slot_buys` | DONE | `crates/module-sniper/src/risk_intel/first_slot.rs`; `cargo test -p module-sniper --test first_slot_producer` → 7 PASS / 0 FAIL / 0 ignored (fixture blocks with real bincode transactions; `write_fixtures` runs by default and regenerates them byte-identically); 8 unit tests in the producer |
 | K2 creator dev-sell watcher → `DevSellObservation` | DONE | `crates/module-sniper/src/risk_intel/dev_sell.rs`; `cargo test -p module-sniper --test dev_sell_producer` → 7 PASS / 0 FAIL / 0 ignored; 6 unit tests |
 | K1/K2 wiring into the feeds and `Sniper::run` | DONE | `crates/module-sniper/src/detect.rs`, `crates/module-sniper/src/lib.rs`; `cargo clippy -p module-sniper --all-targets -- -D warnings` exit 0 |
-| K3 tracked junk untracked, `AUDIT.md` archive, `config.toml` untracked | DONE | `scripts/cleanup-tracked-junk.sh` (dry-run → apply → re-run reports clean); `verify-delivery.sh` 8 PASS / 0 FAIL; `verify-script-modes.sh` OK |
+| K3 tracked junk untracked, `docs/archive/AUDIT.md` archive, `config.toml` untracked | DONE | `scripts/cleanup-tracked-junk.sh` (dry-run → apply → re-run reports clean); `verify-delivery.sh` 8 PASS / 0 FAIL; `verify-script-modes.sh` OK |
 | K4 Helm digest-only contract | DONE | `values.yaml` has no `image.tag`; `values.schema.json` added; `tests/release/helm_image_contract.sh` PASS (CI runs exactly this static gate). Verified against helm v3.15.4: `helm lint deploy/helm/sniper-suite --set image.digest=sha256:<64 hex>` → 0 chart(s) failed, and `helm template --set migrationJob.enabled=true --set image.digest=…` renders one `sniper-suite@sha256:…` line in the Deployment and one in the Job (2 total). The chart is deliberately unrenderable with no digest: bare `helm lint` (empty default) reports `image.digest: Does not match pattern '^sha256:[0-9a-f]{64}$'`, as do uppercase, 63-hex, and `sha256:deadbeef` digests, and `--set image.tag=…` fails with `image: Additional property tag is not allowed` even alongside a valid digest — so an operator must pass `--set image.digest=` or `-f` with a digest, which is the documented install line |
 | K5 `scripts/bootstrap-config.sh` + `Makefile` | DONE | `make help` renders with `PATH=/usr/bin:/bin`; `bootstrap-config.sh --check` exits 1 when a file is missing, 0 after creating (mode 0600, never overwrites) |
 | K6 `integrity-gates` job completeness | DONE | `.github/workflows/ci.yml` now runs `verify-delivery.sh`, `helm_image_contract.sh`, `marketing_claims.sh`, `manifest_current.sh` and `check-routes-vs-ui.sh` (13 steps; YAML parses; the `app` job keeps its own pre-existing route step) |

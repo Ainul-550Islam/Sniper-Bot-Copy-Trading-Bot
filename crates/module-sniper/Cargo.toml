@@ -30,6 +30,10 @@ reqwest.workspace = true
 name = "module_sniper"
 path = "src/lib.rs"
 
+[[bin]]
+name = "dataset_tool"
+path = "src/bin/dataset_tool.rs"
+
 [dev-dependencies]
 # Integration tests build realistic wire payloads for the mock Geyser
 # websocket (encoded transactions + status metas + pump event logs).

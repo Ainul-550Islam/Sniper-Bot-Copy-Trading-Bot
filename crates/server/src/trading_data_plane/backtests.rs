@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use bot_core::membership::Permission;
 use bot_core::strategy::StrategyId;
+use bot_core::tenant::rls_context::TenantScope;
 
 use super::authorization_chain::{guard, guard_manage, TradingModuleFamily};
 use crate::api::ApiState;
@@ -151,7 +152,8 @@ fn metric(result: Option<&Value>, key: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn run_json(row: &sqlx::postgres::PgRow) -> Value {
+/// Serialize one persisted backtest row for both list and detail responses.
+pub fn run_json(row: &sqlx::postgres::PgRow) -> Value {
     let result = row
         .try_get::<Option<Value>, _>("result_json")
         .ok()
@@ -225,10 +227,21 @@ pub async fn list(State(state): State<ApiState>, headers: HeaderMap) -> Response
         Ok(value) => value,
         Err(response) => return response,
     };
+    let mut scope = match TenantScope::begin(db.pool(), auth.organization_id().as_uuid()).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to open tenant-scoped backtest transaction");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "backtest_storage_error",
+                "backtests could not be loaded",
+            );
+        }
+    };
     let query = format!("{SELECT_RUN} ORDER BY b.created_at DESC, b.id DESC");
     let rows = match sqlx::query(&query)
         .bind(auth.organization_id().as_uuid())
-        .fetch_all(db.pool())
+        .fetch_all(&mut **scope.transaction())
         .await
     {
         Ok(value) => value,
@@ -241,6 +254,14 @@ pub async fn list(State(state): State<ApiState>, headers: HeaderMap) -> Response
             );
         }
     };
+    if let Err(error) = scope.commit().await {
+        tracing::error!(error = %error, "failed to finish tenant-scoped backtest list transaction");
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backtest_storage_error",
+            "backtests could not be loaded",
+        );
+    }
     let items: Vec<Value> = rows.iter().map(run_json).collect();
     (
         StatusCode::OK,
@@ -274,6 +295,17 @@ pub async fn get_one(
         Ok(value) => value,
         Err(response) => return response,
     };
+    let mut scope = match TenantScope::begin(db.pool(), auth.organization_id().as_uuid()).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to open tenant-scoped backtest transaction");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "backtest_storage_error",
+                "backtest could not be loaded",
+            );
+        }
+    };
     let run_id = match Uuid::parse_str(&id) {
         Ok(value) => value,
         Err(_) => {
@@ -288,7 +320,7 @@ pub async fn get_one(
     let row = match sqlx::query(&query)
         .bind(auth.organization_id().as_uuid())
         .bind(run_id)
-        .fetch_optional(db.pool())
+        .fetch_optional(&mut **scope.transaction())
         .await
     {
         Ok(value) => value,
@@ -301,14 +333,23 @@ pub async fn get_one(
             );
         }
     };
-    match row {
+    let response = match row {
         Some(value) => (StatusCode::OK, Json(run_json(&value))).into_response(),
         None => error_response(
             StatusCode::NOT_FOUND,
             "backtest_not_found",
             "backtest was not found",
         ),
+    };
+    if let Err(error) = scope.commit().await {
+        tracing::error!(error = %error, "failed to finish tenant-scoped backtest detail transaction");
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backtest_storage_error",
+            "backtest could not be loaded",
+        );
     }
+    response
 }
 
 /// `POST /api/tenant/backtests`.
@@ -336,13 +377,24 @@ pub async fn create(
         Ok(value) => value,
         Err(response) => return response,
     };
+    let mut scope = match TenantScope::begin(db.pool(), auth.organization_id().as_uuid()).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to open tenant-scoped backtest transaction");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "backtest_storage_error",
+                "backtest could not be queued",
+            );
+        }
+    };
 
     let strategy_exists = sqlx::query(
         "SELECT 1 FROM tenant_strategies WHERE id = $1 AND organization_id = $2 AND status <> 'archived'",
     )
     .bind(strategy_id)
     .bind(auth.organization_id().as_uuid())
-    .fetch_optional(db.pool())
+    .fetch_optional(&mut **scope.transaction())
     .await;
     match strategy_exists {
         Ok(Some(_)) => {}
@@ -377,7 +429,7 @@ pub async fn create(
                 sqlx::query("SELECT 1 FROM launch_datasets WHERE id = $1 AND organization_id = $2")
                     .bind(parsed)
                     .bind(auth.organization_id().as_uuid())
-                    .fetch_optional(db.pool())
+                    .fetch_optional(&mut **scope.transaction())
                     .await;
             match owned {
                 Ok(Some(_)) => Some(parsed),
@@ -423,7 +475,7 @@ pub async fn create(
     // A dataset-backed run may become authoritative once replay exists; until
     // then nothing is authoritative at queue time.
     .bind(false)
-    .execute(db.pool())
+    .execute(&mut **scope.transaction())
     .await;
     if let Err(error) = insert {
         tracing::error!(error = %error, "failed to queue tenant backtest");
@@ -438,7 +490,7 @@ pub async fn create(
     let row = match sqlx::query(&query)
         .bind(auth.organization_id().as_uuid())
         .bind(run_id)
-        .fetch_one(db.pool())
+        .fetch_one(&mut **scope.transaction())
         .await
     {
         Ok(value) => value,
@@ -452,5 +504,14 @@ pub async fn create(
         }
     };
 
-    (StatusCode::CREATED, Json(run_json(&row))).into_response()
+    let response = (StatusCode::CREATED, Json(run_json(&row))).into_response();
+    if let Err(error) = scope.commit().await {
+        tracing::error!(error = %error, "failed to commit tenant-scoped backtest creation");
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backtest_storage_error",
+            "backtest could not be queued",
+        );
+    }
+    response
 }

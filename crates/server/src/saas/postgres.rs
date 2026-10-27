@@ -58,6 +58,10 @@ impl PostgresSaasRepo {
         Self { db }
     }
 
+    fn control_plane_pool(&self) -> &sqlx::PgPool {
+        self.db.system_pool().unwrap_or_else(|| self.db.pool())
+    }
+
     fn encode<T: Serialize>(record: &T) -> BotResult<serde_json::Value> {
         serde_json::to_value(record)
             .map_err(|e| BotError::db(format!("serialize SaaS record: {e}")))
@@ -230,8 +234,7 @@ impl PostgresSaasRepo {
     ) -> BotResult<bool> {
         let document = Self::encode(record)?;
         let mut transaction = self
-            .db
-            .pool()
+            .control_plane_pool()
             .begin()
             .await
             .map_err(|error| BotError::db(format!("begin SaaS {kind} insert: {error}")))?;
@@ -273,8 +276,7 @@ impl PostgresSaasRepo {
     ) -> BotResult<bool> {
         let document = Self::encode(record)?;
         let mut transaction = self
-            .db
-            .pool()
+            .control_plane_pool()
             .begin()
             .await
             .map_err(|error| BotError::db(format!("begin SaaS {kind} update: {error}")))?;
@@ -381,8 +383,7 @@ impl PostgresSaasRepo {
         now: chrono::DateTime<chrono::Utc>,
     ) -> BotResult<usize> {
         let mut transaction = self
-            .db
-            .pool()
+            .control_plane_pool()
             .begin()
             .await
             .map_err(|error| BotError::db(format!("begin user-session revocation: {error}")))?;
@@ -452,8 +453,7 @@ impl PostgresSaasRepo {
         now: chrono::DateTime<chrono::Utc>,
     ) -> BotResult<usize> {
         let mut transaction = self
-            .db
-            .pool()
+            .control_plane_pool()
             .begin()
             .await
             .map_err(|error| BotError::db(format!("begin password change: {error}")))?;
@@ -482,8 +482,7 @@ impl PostgresSaasRepo {
     ) -> BotResult<()> {
         let document = Self::encode(record)?;
         let mut transaction = self
-            .db
-            .pool()
+            .control_plane_pool()
             .begin()
             .await
             .map_err(|error| BotError::db(format!("begin SaaS {kind} upsert: {error}")))?;
@@ -523,8 +522,7 @@ impl PostgresSaasRepo {
         entitlements: &[Entitlement],
     ) -> BotResult<()> {
         let mut tx = self
-            .db
-            .pool()
+            .control_plane_pool()
             .begin()
             .await
             .map_err(|e| BotError::db(format!("begin SaaS plan assignment: {e}")))?;
@@ -588,7 +586,7 @@ impl PostgresSaasRepo {
         let row = sqlx::query("SELECT record FROM saas_runtime_records WHERE kind=$1 AND id=$2")
             .bind(kind)
             .bind(id)
-            .fetch_optional(self.db.pool())
+            .fetch_optional(self.control_plane_pool())
             .await
             .map_err(|e| BotError::db(format!("read SaaS {kind}: {e}")))?;
         row.map(|r| Self::decode(r.get("record"))).transpose()
@@ -604,7 +602,7 @@ impl PostgresSaasRepo {
             sqlx::query("SELECT record FROM saas_runtime_records WHERE kind=$1 AND lookup_key=$2")
                 .bind(kind)
                 .bind(key)
-                .fetch_optional(self.db.pool())
+                .fetch_optional(self.control_plane_pool())
                 .await
                 .map_err(|e| BotError::db(format!("lookup SaaS {kind}: {e}")))?;
         row.map(|r| Self::decode(r.get("record"))).transpose()
@@ -616,7 +614,7 @@ impl PostgresSaasRepo {
             "SELECT record FROM saas_runtime_records WHERE kind=$1 ORDER BY created_at,id",
         )
         .bind(kind)
-        .fetch_all(self.db.pool())
+        .fetch_all(self.control_plane_pool())
         .await
         .map_err(|e| BotError::db(format!("list SaaS {kind}: {e}")))?;
         rows.into_iter()
@@ -636,7 +634,7 @@ impl PostgresSaasRepo {
         )
         .bind(kind)
         .bind(organization_id.as_uuid())
-        .fetch_all(self.db.pool())
+        .fetch_all(self.control_plane_pool())
         .await
         .map_err(|e| BotError::db(format!("list tenant SaaS {kind}: {e}")))?;
         rows.into_iter()
@@ -656,7 +654,7 @@ impl PostgresSaasRepo {
         )
         .bind(kind)
         .bind(user_id.as_uuid())
-        .fetch_all(self.db.pool())
+        .fetch_all(self.control_plane_pool())
         .await
         .map_err(|e| BotError::db(format!("list user SaaS {kind}: {e}")))?;
         rows.into_iter()

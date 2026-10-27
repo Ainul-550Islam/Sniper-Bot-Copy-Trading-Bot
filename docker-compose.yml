@@ -34,6 +34,57 @@ services:
     # ports:
     #   - "127.0.0.1:5432:5432"
 
+  postgres-roles:
+    image: postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: |
+      psql "postgres://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}" \
+        --set=ON_ERROR_STOP=1 \
+        --set=app_password="$${POSTGRES_APP_PASSWORD}" \
+        --set=system_password="$${POSTGRES_SYSTEM_PASSWORD}" <<'SQL'
+      SELECT format('CREATE ROLE sniper_app LOGIN PASSWORD %L', :'app_password')
+       WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sniper_app')
+      \gexec
+      SELECT format('ALTER ROLE sniper_app WITH LOGIN PASSWORD %L', :'app_password')
+      \gexec
+      SELECT format('CREATE ROLE sniper_system LOGIN PASSWORD %L', :'system_password')
+       WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sniper_system')
+      \gexec
+      SELECT format('ALTER ROLE sniper_system WITH LOGIN PASSWORD %L', :'system_password')
+      \gexec
+      SQL
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sniper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sniper}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}
+      POSTGRES_SYSTEM_PASSWORD: ${POSTGRES_SYSTEM_PASSWORD:?set POSTGRES_SYSTEM_PASSWORD in .env}
+
+  db-migrate:
+    image: ${SNIPER_IMAGE:-sniper-suite:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    depends_on:
+      postgres-roles:
+        condition: service_completed_successfully
+    environment:
+      CONFIG_PATH: /app/config.toml
+      MIGRATE_ONLY: "1"
+      DATABASE_ENABLED: "true"
+      DATABASE_URL_ENV: POSTGRES_APP_URL
+      DATABASE_RLS_ENABLED: "true"
+      DATABASE_REQUIRED: "true"
+      DATABASE_AUTO_MIGRATE: "true"
+      POSTGRES_APP_URL: postgres://sniper_app:${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
+      POSTGRES_SYSTEM_URL: postgres://sniper_system:${POSTGRES_SYSTEM_PASSWORD:?set POSTGRES_SYSTEM_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
+      POSTGRES_DDL_URL: postgres://${POSTGRES_USER:-sniper}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
+
   redis:
     # redis:7-alpine — pinned by digest (P0 §7)
     image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
@@ -62,12 +113,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-roles:
+        condition: service_completed_successfully
+      db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     environment:
       CONFIG_PATH: /app/config.toml
+      DATABASE_ENABLED: "true"
+      DATABASE_URL_ENV: POSTGRES_APP_URL
+      DATABASE_RLS_ENABLED: "true"
+      DATABASE_REQUIRED: "true"
+      DATABASE_AUTO_MIGRATE: "false"
       RUST_LOG: ${RUST_LOG:-info}
-      POSTGRES_URL: postgres://${POSTGRES_USER:-sniper}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-sniper}
+      POSTGRES_APP_URL: postgres://sniper_app:${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
+      POSTGRES_SYSTEM_URL: postgres://sniper_system:${POSTGRES_SYSTEM_PASSWORD:?set POSTGRES_SYSTEM_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
       REDIS_URL: redis://redis:6379
       WEBHOOK_SECRET_ENCRYPTION_KEY: ${WEBHOOK_SECRET_ENCRYPTION_KEY:?set WEBHOOK_SECRET_ENCRYPTION_KEY in .env}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { TypedConfirm } from "@/components/lifecycle/TypedConfirm";
 import type { OrganizationLifecycle } from "@/lib/api/org-lifecycle-api";
 import { orgLifecycleApi } from "@/lib/api/org-lifecycle-api";
 import { toDisplayError } from "@/lib/api";

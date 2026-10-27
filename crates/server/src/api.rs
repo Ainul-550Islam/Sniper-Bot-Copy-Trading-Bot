@@ -193,7 +193,15 @@ pub fn router(state: ApiState) -> Router {
         // headers only; it never rewrites bodies or blocks the WS upgrade.
         .route_layer(from_fn(crate::security::headers::apply_security_headers))
         .route_layer(from_fn(crate::saas::scope_request_peer))
+        .route_layer(from_fn(tenant_rls_request_scope))
         .with_state(state)
+}
+
+async fn tenant_rls_request_scope(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    bot_core::tenant::rls_context::scope_request_context(next.run(request)).await
 }
 
 /// Per-IP token bucket over every matched route (DoS guard). The

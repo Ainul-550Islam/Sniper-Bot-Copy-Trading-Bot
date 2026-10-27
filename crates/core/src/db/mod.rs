@@ -48,10 +48,133 @@ use crate::obs::metrics;
 /// Embed every `crates/core/migrations/*.sql` at compile time.
 pub const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+fn pool_builder(cfg: &DatabaseConfig) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(cfg.max_connections)
+        .min_connections(cfg.min_connections)
+        .acquire_timeout(Duration::from_millis(cfg.acquire_timeout_ms))
+}
+
+fn pg_connect_options(
+    cfg: &DatabaseConfig,
+    url: &str,
+    application_name: &'static str,
+) -> BotResult<PgConnectOptions> {
+    let timeout = cfg.statement_timeout_ms.to_string();
+    url.parse::<PgConnectOptions>()
+        .map_err(|error| BotError::db(format!("invalid database URL: {error}")))
+        .map(|options| {
+            options
+                .options([("statement_timeout", timeout.as_str())])
+                .application_name(application_name)
+        })
+}
+
+fn required_database_url(env_name: &str) -> BotResult<String> {
+    std::env::var(env_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            BotError::config(format!(
+                "RLS requires the {} environment variable",
+                env_name
+            ))
+        })
+}
+
+fn validate_runtime_role_names(cfg: &DatabaseConfig) -> BotResult<()> {
+    let valid = |name: &str| {
+        !name.trim().is_empty()
+            && name.len() <= 63
+            && !name.contains('\0')
+            && !matches!(name, "bot_app" | "bot_system")
+    };
+    if !valid(&cfg.app_login_role)
+        || !valid(&cfg.system_login_role)
+        || cfg.app_login_role == cfg.system_login_role
+    {
+        return Err(BotError::config(
+            "database app_login_role and system_login_role must be distinct valid PostgreSQL login roles",
+        ));
+    }
+    Ok(())
+}
+
+fn quote_role_identifier(role: &str) -> String {
+    format!("\"{}\"", role.replace('"', "\"\""))
+}
+
+async fn grant_runtime_roles(
+    migration_pool: &PgPool,
+    app_login_role: &str,
+    system_login_role: &str,
+) -> BotResult<()> {
+    let app_login_role = quote_role_identifier(app_login_role);
+    let system_login_role = quote_role_identifier(system_login_role);
+    sqlx::query(&format!("GRANT bot_app TO {app_login_role}"))
+        .execute(migration_pool)
+        .await
+        .map_err(|error| BotError::db(format!("grant bot_app to configured app login: {error}")))?;
+    sqlx::query(&format!("GRANT bot_system TO {system_login_role}"))
+        .execute(migration_pool)
+        .await
+        .map_err(|error| {
+            BotError::db(format!(
+                "grant bot_system to configured system login: {error}"
+            ))
+        })?;
+    Ok(())
+}
+
+async fn configure_app_connection(
+    connection: &mut sqlx::postgres::PgConnection,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SET ROLE bot_app")
+        .execute(&mut *connection)
+        .await?;
+    let organization_id = crate::tenant::rls_context::current_request_tenant()
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    sqlx::query("SELECT set_config('app.org_id', $1, false)")
+        .bind(organization_id)
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+async fn configure_system_connection(
+    connection: &mut sqlx::postgres::PgConnection,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SET ROLE bot_system")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SELECT set_config('app.org_id', '', false)")
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+async fn reset_connection_context(
+    connection: &mut sqlx::postgres::PgConnection,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query("SELECT set_config('app.org_id', '', false)")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("RESET ROLE").execute(&mut *connection).await?;
+    Ok(true)
+}
+
 /// A connected PostgreSQL handle plus the policy that governs it.
 #[derive(Clone)]
 pub struct Database {
+    /// Request/data pool. In RLS mode every checkout assumes `bot_app` and
+    /// carries the task-local authenticated tenant, defaulting to no tenant.
     pool: PgPool,
+    /// Privileged identity/control-plane pool; never used for trading data.
+    system_pool: Option<PgPool>,
+    /// Schema-owner pool used only for migrations and migration metadata.
+    migration_pool: Option<PgPool>,
+    rls_enabled: bool,
     query_timeout: Duration,
 }
 
@@ -59,29 +182,113 @@ impl Database {
     /// Connect using `[database]` config. `url` is the resolved connection
     /// string (read from the configured env var by the caller).
     pub async fn connect(cfg: &DatabaseConfig, url: &str) -> BotResult<Self> {
-        let options: PgConnectOptions = url
-            .parse::<PgConnectOptions>()
-            .map_err(|e| BotError::db(format!("invalid database url: {e}")))?
-            // Server-side statement timeout: nothing may run away.
-            .options([("statement_timeout", &cfg.statement_timeout_ms.to_string())])
-            .application_name("sniper-suite");
+        let (system_pool, migration_pool, pool) = if cfg.rls_enabled {
+            let system_url = required_database_url(&cfg.system_url_env)?;
+            validate_runtime_role_names(cfg)?;
+            let migration_pool = if cfg.auto_migrate {
+                let migration_url = required_database_url(&cfg.migration_url_env)?;
+                let migration_options =
+                    pg_connect_options(cfg, &migration_url, "sniper-suite-migrations")?;
+                let migration_pool = pool_builder(cfg)
+                    .connect_with(migration_options)
+                    .await
+                    .map_err(|e| {
+                        BotError::db(format!(
+                            "migration database pool connect failed for env {}: {e}",
+                            cfg.migration_url_env
+                        ))
+                    })?;
+                MIGRATOR
+                    .run(&migration_pool)
+                    .await
+                    .map_err(|e| BotError::db(format!("RLS bootstrap migrations failed: {e}")))?;
+                grant_runtime_roles(&migration_pool, &cfg.app_login_role, &cfg.system_login_role)
+                    .await?;
+                Some(migration_pool)
+            } else {
+                None
+            };
 
-        let pool = PgPoolOptions::new()
-            .max_connections(cfg.max_connections)
-            .min_connections(cfg.min_connections)
-            .acquire_timeout(Duration::from_millis(cfg.acquire_timeout_ms))
-            .connect_with(options)
-            .await
-            .map_err(|e| BotError::db(format!("database connect failed: {e}")))?;
+            let system_options = pg_connect_options(cfg, &system_url, "sniper-suite-system")?;
+            if system_options.get_username() != cfg.system_login_role {
+                return Err(BotError::config(
+                    "POSTGRES_SYSTEM_URL username must match database.system_login_role",
+                ));
+            }
+            let app_options = pg_connect_options(cfg, url, "sniper-suite-app")?;
+            if app_options.get_username() != cfg.app_login_role {
+                return Err(BotError::config(
+                    "application database URL username must match database.app_login_role",
+                ));
+            }
+            let system_pool = pool_builder(cfg)
+                .after_connect(|connection, _| {
+                    Box::pin(async move { configure_system_connection(connection).await })
+                })
+                .before_acquire(|connection, _| {
+                    Box::pin(async move {
+                        configure_system_connection(connection).await?;
+                        Ok(true)
+                    })
+                })
+                .after_release(|connection, _| {
+                    Box::pin(async move {
+                        reset_connection_context(connection).await?;
+                        Ok(true)
+                    })
+                })
+                .connect_with(system_options)
+                .await
+                .map_err(|e| {
+                    BotError::db(format!(
+                        "system database pool connect failed for env {}: {e}",
+                        cfg.system_url_env
+                    ))
+                })?;
+
+            let app_pool = pool_builder(cfg)
+                .after_connect(|connection, _| {
+                    Box::pin(async move { configure_app_connection(connection).await })
+                })
+                .before_acquire(|connection, _| {
+                    Box::pin(async move {
+                        configure_app_connection(connection).await?;
+                        Ok(true)
+                    })
+                })
+                .after_release(|connection, _| {
+                    Box::pin(async move {
+                        reset_connection_context(connection).await?;
+                        Ok(true)
+                    })
+                })
+                .connect_with(app_options)
+                .await
+                .map_err(|e| BotError::db(format!("application database connect failed: {e}")))?;
+            (Some(system_pool), migration_pool, app_pool)
+        } else {
+            let options = pg_connect_options(cfg, url, "sniper-suite-legacy")?;
+            let pool = pool_builder(cfg)
+                .connect_with(options)
+                .await
+                .map_err(|e| BotError::db(format!("database connect failed: {e}")))?;
+            (None, None, pool)
+        };
 
         let db = Database {
             pool,
+            system_pool,
+            migration_pool,
+            rls_enabled: cfg.rls_enabled,
             query_timeout: Duration::from_millis(cfg.query_timeout_ms.max(100)),
         };
-
-        // Prove the connection works before declaring success.
         db.ping().await?;
-        info!(max_connections = cfg.max_connections, "postgres connected");
+        info!(
+            max_connections = cfg.max_connections,
+            rls_enabled = cfg.rls_enabled,
+            system_pool = db.system_pool.is_some(),
+            "postgres connected"
+        );
         Ok(db)
     }
 
@@ -89,8 +296,17 @@ impl Database {
     /// (MigrateError is not a sqlx::Error); migrations may legitimately take
     /// longer than a query timeout, so no client-side cap is applied.
     pub async fn migrate(&self) -> BotResult<()> {
+        let migration_pool = match &self.migration_pool {
+            Some(pool) => pool,
+            None if !self.rls_enabled => &self.pool,
+            None => {
+                return Err(BotError::config(
+                    "RLS mode requires a separately configured migration pool",
+                ));
+            }
+        };
         MIGRATOR
-            .run(&self.pool)
+            .run(migration_pool)
             .await
             .map_err(|e| BotError::db(format!("migrations failed: {e}")))?;
         info!("database migrations applied");
@@ -124,7 +340,12 @@ impl Database {
         let row = self
             .timed(
                 "migration_count",
-                sqlx::query("SELECT COUNT(*) AS n FROM _sqlx_migrations").fetch_one(self.pool()),
+                sqlx::query("SELECT COUNT(*) AS n FROM _sqlx_migrations").fetch_one(
+                    self.migration_pool
+                        .as_ref()
+                        .or(self.system_pool.as_ref())
+                        .unwrap_or(&self.pool),
+                ),
             )
             .await
             .map_err(|e| BotError::db(e.to_string()))?;
@@ -135,11 +356,26 @@ impl Database {
     /// graceful-shutdown persistence phase.
     pub async fn close(&self) {
         self.pool.close().await;
-        info!("postgres pool closed");
+        if let Some(pool) = &self.system_pool {
+            pool.close().await;
+        }
+        if let Some(pool) = &self.migration_pool {
+            pool.close().await;
+        }
+        info!("postgres pools closed");
     }
 
+    /// The non-bypass request/data pool. In RLS mode this role defaults to
+    /// an empty tenant context and is bound to the authenticated request
+    /// context on every connection checkout.
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// The separate privileged identity/control-plane pool, when RLS mode
+    /// is enabled. Never use it for tenant trading queries.
+    pub fn system_pool(&self) -> Option<&PgPool> {
+        self.system_pool.as_ref()
     }
 
     /// Run a future under the client-side query timeout, metering the
@@ -250,6 +486,15 @@ pub async fn open(cfg: &DatabaseConfig) -> BotResult<Option<Database>> {
         debug!("database disabled by config");
         return Ok(None);
     }
+    if !cfg.rls_enabled {
+        return Err(BotError::config(
+            "database.enabled requires database.rls_enabled=true; legacy unscoped pools are not allowed at runtime",
+        ));
+    }
+    required_database_url(&cfg.system_url_env)?;
+    if cfg.auto_migrate {
+        required_database_url(&cfg.migration_url_env)?;
+    }
     let Some(url) = resolve_url(cfg) else {
         let msg = format!("database enabled but env var {} is not set", cfg.url_env);
         if cfg.required {
@@ -259,23 +504,12 @@ pub async fn open(cfg: &DatabaseConfig) -> BotResult<Option<Database>> {
         return Ok(None);
     };
     match Database::connect(cfg, &url).await {
-        Ok(db) => {
-            if cfg.auto_migrate {
-                if let Err(e) = db.migrate().await {
-                    if cfg.required {
-                        return Err(e);
-                    }
-                    warn!(error = %e, "migration failed — continuing without the database");
-                    return Ok(None);
-                }
-            }
-            Ok(Some(db))
-        }
-        Err(e) => {
+        Ok(db) => Ok(Some(db)),
+        Err(error) => {
             if cfg.required {
-                return Err(e);
+                return Err(error);
             }
-            warn!(error = %e, "database unavailable — continuing without it");
+            warn!(error = %error, "database unavailable — continuing without it");
             Ok(None)
         }
     }

@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import BacktestMetrics from "@/components/backtest/BacktestMetrics";
+import DataSourceBadge from "@/components/backtest/DataSourceBadge";
 import { ErrorState } from "@/components/common/ErrorState";
 import { BacktestRecord, getBacktest } from "@/lib/api/backtest-api";
 
@@ -52,6 +53,12 @@ export default function BacktestDetailPage() {
       ) : backtest ? (
         <div>
           <BacktestMetrics backtest={backtest} />
+          <div style={{ margin: "1rem 0" }}>
+            <DataSourceBadge dataSource={backtest.data_source} authoritative={backtest.authoritative} />
+            <p className="muted small" style={{ marginTop: "0.5rem" }}>
+              Simulated results are illustrative only. A run is authoritative only when the server reports recorded market data and marks the result authoritative.
+            </p>
+          </div>
 
           <div className="card">
             <h3 style={{ marginTop: 0 }}>Simulation Assumptions &amp; Dataset</h3>

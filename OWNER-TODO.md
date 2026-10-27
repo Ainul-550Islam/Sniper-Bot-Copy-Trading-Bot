@@ -17,7 +17,7 @@
 - Counsel documents: licence or IP assignment, terms, privacy, risk disclosure. Agent must not write legal text.
 - A real security contact in SECURITY.md.
 - Staking program keypair, declare_id! and deployment.
-- Live validation runs in order with spend caps (evidence/live 11 of 11 PASSED).
+- Live validation runs in order with spend caps. Current evidence count: 1 PASSED and 18 NOT_RUN across 19 JSON files under `evidence/` (`tests/release/evidence_truth.sh`); the NOT_RUN items still need owner-provisioned environments and credentials.
 - Credentials to rotate: none flagged by the history scan; rotate any key you have ever pasted into chat.
 - Independent audit and penetration test reports in evidence/audits/.
 

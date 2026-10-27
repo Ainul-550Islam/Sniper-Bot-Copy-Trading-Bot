@@ -135,6 +135,19 @@ pub fn startup_security_checks(
     )
 }
 
+/// Migration-only starts touch the schema but never read or write webhook
+/// secrets. Keep network/proxy diagnostics, but do not require the unrelated
+/// runtime encryption key in the short-lived DDL job.
+pub fn migration_security_checks(
+    cfg: &bot_core::config::Config,
+    env_mode: &str,
+) -> Vec<PreflightCheck> {
+    startup_security_checks(cfg, env_mode, false, None)
+        .into_iter()
+        .filter(|check| check.name != "webhook_secret_encryption_key")
+        .collect()
+}
+
 pub fn evaluate(input: PreflightInput) -> PreflightReport {
     let mut checks = Vec::new();
     checks.extend(security_checks(
@@ -413,6 +426,17 @@ mod startup_security_tests {
         assert!(checks.iter().any(|c| c.status == PreflightStatus::Block));
         let checks = startup_security_checks(&cfg, "development", true, None);
         assert!(checks.iter().any(|c| c.status == PreflightStatus::Block));
+    }
+
+    #[test]
+    fn migration_job_does_not_require_the_runtime_webhook_encryption_key() {
+        let mut cfg = bot_core::config::Config::default();
+        cfg.database.enabled = true;
+        let checks = migration_security_checks(&cfg, "production");
+        assert!(checks.iter().all(|check| {
+            check.name != "webhook_secret_encryption_key" && check.status != PreflightStatus::Block
+        }));
+        assert!(checks.iter().any(|check| check.name == "trusted_proxies"));
     }
 
     #[test]

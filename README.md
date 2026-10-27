@@ -627,7 +627,7 @@ sniper-suite/
 ├─ SECURITY.md                  vulnerability-reporting policy
 ├─ scripts/                     release-check.sh (scripted release validation)
 │                               + verify-delivery.sh (bundle integrity check)
-├─ docs/                        <!-- stat:docs_canonical -->155<!-- /stat --> current documents covering engineering,
+├─ docs/                        <!-- stat:docs_canonical -->156<!-- /stat --> current documents covering engineering,
 │                               SaaS, buyer handover, evidence, release and
 │                               operations (index: docs/DELIVERY-MANIFEST.md;
 │                               start: docs/BUYER-HANDOVER.md)

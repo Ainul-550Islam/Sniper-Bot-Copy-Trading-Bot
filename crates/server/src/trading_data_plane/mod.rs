@@ -18,6 +18,7 @@ pub mod backtests;
 pub mod bots;
 pub mod config_store;
 pub mod copy;
+pub mod dataset_store_pg;
 pub mod dca;
 pub mod dca_worker;
 pub mod executions;

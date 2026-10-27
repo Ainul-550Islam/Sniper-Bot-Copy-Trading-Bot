@@ -4,7 +4,15 @@
 
 | Variable | Required | Env | Secret | Source Config | Default Behavior | Failure Behavior |
 |---|---|---|---|---|---|---|
-| `DATABASE_URL` | Optional (if `database.required=false`) / Required (if `true`) | `DATABASE_URL` | Yes (password) | `[database]` `url` or env `DATABASE_URL` | No DB → memory store, warn, single replica | `GET /ready` not ready if required, `db_integration` NOT_RUN |
+| `POSTGRES_APP_URL` | Required when `[database].enabled=true` | `POSTGRES_APP_URL` | Yes (app-role password) | `[database]` `url_env`; login role named by `app_login_role`, automatically granted `bot_app` | RLS app pool, empty tenant context fails closed | Startup refuses enabled legacy/unscoped database config |
+| `POSTGRES_SYSTEM_URL` | Required when `[database].enabled=true` | `POSTGRES_SYSTEM_URL` | Yes (system-role password) | `[database]` `system_url_env`; separate login role granted `bot_system` | Identity/control-plane pool only | Startup fails if absent or role cannot be assumed |
+| `POSTGRES_DDL_URL` | Required for migration job / `auto_migrate=true` | `POSTGRES_DDL_URL` | Yes (schema-owner password) | `[database]` `migration_url_env`; migrate-only job | Not present in the production app container (`auto_migrate=false`) | Migrations and runtime-role grants fail closed |
+| `DATABASE_ENABLED` | Required for Compose / production | `DATABASE_ENABLED` | No | Database env override; set true when PostgreSQL is deployed | Local standalone config may remain disabled | `DATABASE_REQUIRED=true` makes pool failure fatal |
+| `DATABASE_URL_ENV` | Required for Compose / production | `DATABASE_URL_ENV` | No | Database env override selecting the app-pool URL variable | Compose uses `POSTGRES_APP_URL` | Startup fails if the configured URL variable is absent |
+| `DATABASE_RLS_ENABLED` | Required when database is enabled | `DATABASE_RLS_ENABLED` | No | Database env override; must remain true for tenant isolation | Compose and production enable RLS | Config validation rejects an enabled DB with RLS disabled |
+| `DATABASE_REQUIRED` | Required for production | `DATABASE_REQUIRED` | No | Database env override | Compose and production set true | Startup fails rather than silently degrading |
+| `DATABASE_AUTO_MIGRATE` | No | `DATABASE_AUTO_MIGRATE` | No | Database env override | Runtime app false; one-shot migration job forces true | Missing DDL credentials fail the migration job |
+| `POSTGRES_URL` / `DATABASE_URL` | Test/legacy only | `POSTGRES_URL` / `DATABASE_URL` | Yes | Integration harness or legacy config | Not the runtime app pool in the production template | Not used by RLS runtime config |
 | `REDIS_URL` | Optional | `REDIS_URL` | Yes | `[redis]` `url` | No Redis → dedup L1 only | `redis_integration` NOT_RUN |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | Required for webhook create/delivery | `WEBHOOK_SECRET_ENCRYPTION_KEY` | Yes | SaaS webhook AES-256-GCM envelope | No key → webhook creation and delivery refuse; legacy plaintext rows must be rotated | `webhook_secret_storage_unavailable` / `webhook_secret_unavailable` |
 | `MFA_ENCRYPTION_KEY` | Required when MFA is enabled | `MFA_ENCRYPTION_KEY` | Yes | SaaS TOTP AES-256-GCM envelope | No key → TOTP enrollment, verification, and MFA-protected authentication refuse; use a stable base64-encoded 32-byte key | `mfa_encryption_key_missing` / `mfa_secret_unavailable` |

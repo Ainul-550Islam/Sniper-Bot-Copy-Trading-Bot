@@ -103,13 +103,19 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(&cfg.observability);
     let environment = std::env::var("SNIPER_ENVIRONMENT").unwrap_or_else(|_| "development".into());
     let live_billing = std::env::var("LIVE_BILLING").is_ok_and(|value| value == "1");
+    let migration_only = migrate_only_requested();
     let webhook_key = std::env::var("WEBHOOK_SECRET_ENCRYPTION_KEY").ok();
-    for check in ops::deployment_preflight::startup_security_checks(
-        &cfg,
-        &environment,
-        live_billing,
-        webhook_key.as_deref(),
-    ) {
+    let preflight_checks = if migration_only {
+        ops::deployment_preflight::migration_security_checks(&cfg, &environment)
+    } else {
+        ops::deployment_preflight::startup_security_checks(
+            &cfg,
+            &environment,
+            live_billing,
+            webhook_key.as_deref(),
+        )
+    };
+    for check in preflight_checks {
         match check.status {
             ops::deployment_preflight::PreflightStatus::Block => {
                 anyhow::bail!("startup preflight failed: {}: {}", check.name, check.detail);
@@ -137,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
     // about to be deployed (scripts/deploy-release.sh step 3). Running the
     // migration from the deployed build is the point: a schema advanced by
     // some other binary is a schema nobody verified against this one.
-    if migrate_only_requested() {
+    if migration_only {
         return run_migrations_only(&cfg).await;
     }
 

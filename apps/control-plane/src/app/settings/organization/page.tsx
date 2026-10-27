@@ -31,13 +31,11 @@ function currentRole(): MembershipRole {
  * backend remains the authoritative gate.
  */
 export default function OrganizationSettingsPage() {
-  const [, setSessionTick] = useState(0);
   const [lifecycle, setLifecycle] = useState<OrganizationLifecycle | null>(null);
   const [organizationSlug, setOrganizationSlug] = useState("");
   const [organizationId, setOrganizationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   const canManage = getCapabilities({ role: currentRole() }).canManageTeam;
 
@@ -87,7 +85,6 @@ export default function OrganizationSettingsPage() {
           lifecycle={lifecycle ?? null}
           canManage={canManage}
           onRefresh={() => {
-            setBusy(false);
             void load();
           }}
         />

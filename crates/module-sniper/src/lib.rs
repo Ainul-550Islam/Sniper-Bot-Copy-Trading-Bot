@@ -65,6 +65,7 @@ use solana_kit::tenant_transaction::TenantTransactionMeta;
 use solana_kit::tokens::Wallet;
 
 pub mod backtest;
+pub mod dataset;
 pub mod dca;
 pub mod detect;
 pub mod entry;
@@ -207,6 +208,11 @@ pub struct Sniper {
     /// exit sweeper. The service owns the creator ledger and sell-probe
     /// cache; cloning this handle for the sweeper preserves that one owner.
     risk_intel: crate::risk_intel::service::RiskIntelService,
+    /// OPTIONAL recorded-launch-data sink (BATCH 02). Attached by the server
+    /// in the integration batch; when `None` (the default) the sniper is
+    /// byte-for-byte unchanged. When `Some`, every observed launch is
+    /// offered to the recorder non-blockingly (never on the money path).
+    recorder: Option<crate::dataset::RecorderSink>,
 }
 
 impl Sniper {
@@ -264,7 +270,23 @@ impl Sniper {
             dev_sell_rx: None,
             dev_sell_tx: None,
             risk_intel: crate::risk_intel::service::RiskIntelService::new(),
+            recorder: None,
         })
+    }
+
+    /// Attach a recorded-launch-data sink (BATCH 02). Every observed launch
+    /// is then offered to the recorder; the call is non-blocking and measured
+    /// (drops are counted by the sink), so it can never stall detection.
+    /// `None`/default keeps the classic behaviour unchanged.
+    #[must_use]
+    pub fn with_recorder(mut self, sink: crate::dataset::RecorderSink) -> Self {
+        self.recorder = Some(sink);
+        self
+    }
+
+    /// The attached recorder sink, when any.
+    pub fn recorder(&self) -> Option<crate::dataset::RecorderSink> {
+        self.recorder.clone()
     }
 
     /// Attach the distributed execution-ownership registry (Prompt 3
@@ -541,6 +563,9 @@ impl Sniper {
                 dev_sell_rx: sweeper_dev_sell_rx,
                 dev_sell_tx: self.dev_sell_tx.clone(),
                 risk_intel: self.risk_intel.clone(),
+                // The exit sweeper never records launches; only the main
+                // detection loop feeds the recorder.
+                recorder: None,
             };
             OwnedTask::new(
                 tokio::spawn(async move { this.exit_sweeper().await }),
@@ -591,6 +616,13 @@ impl Sniper {
                 info!("module 1 (sniper) stopping (shutdown or feed closed)");
                 break;
             };
+            // BATCH 02: offer EVERY observed launch to the recorded-data
+            // sink (even when disabled/kill-switched — this is raw market
+            // data capture, independent of trading). Non-blocking and
+            // measured; zero cost when no recorder is attached.
+            if let Some(rec) = &self.recorder {
+                rec.record(crate::dataset::RecordedEvent::launch(launch.clone()));
+            }
             // Decision-queue backlog (cheap atomic read of the mpsc length).
             bot_core::obs::metrics::global()
                 .gauge(

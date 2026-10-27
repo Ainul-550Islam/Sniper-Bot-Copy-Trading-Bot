@@ -44,7 +44,6 @@ export default function WalletPoolsPage() {
   const [mutating, setMutating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bindings, setBindings] = useState<WalletBindingView[]>([]);
-  const [bindingsLoading, setBindingsLoading] = useState(false);
   const [busyAuthorize, setBusyAuthorize] = useState<string | null>(null);
   const [authorizeModule, setAuthorizeModule] = useState<"module.sniper" | "module.copy" | "module.polymarket">("module.sniper");
 

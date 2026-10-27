@@ -483,9 +483,16 @@ required_roles = []
 
 [database]
 enabled = false
-url_env = "POSTGRES_URL"
-required = false                             # true => fail startup when unreachable
-auto_migrate = true                          # run embedded migrations on connect
+url_env = "POSTGRES_APP_URL"                # bot_app login/member connection
+rls_enabled = true                           # mandatory when database.enabled=true
+system_url_env = "POSTGRES_SYSTEM_URL"      # separate identity/control-plane pool
+app_login_role = "sniper_app"                # DDL pool grants this login membership in bot_app
+system_login_role = "sniper_system"          # DDL pool grants this login membership in bot_system
+migration_url_env = "POSTGRES_DDL_URL"      # schema-owner connection; never used for requests
+required = true                              # fail closed when any pool is unavailable
+# Production app instances keep the DDL credential out of the runtime container.
+# Run the separate migration job (`MIGRATE_ONLY=1`) with POSTGRES_DDL_URL.
+auto_migrate = false
 max_connections = 8
 min_connections = 0
 acquire_timeout_ms = 5000

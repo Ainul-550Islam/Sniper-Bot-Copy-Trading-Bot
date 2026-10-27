@@ -773,6 +773,7 @@ mod tests {
             acquire_timeout_ms: 5000,
             statement_timeout_ms: 5000,
             query_timeout_ms: 5000,
+            ..Default::default()
         };
         let db = std::sync::Arc::new(
             bot_core::db::Database::connect(&cfg, &url)
@@ -1342,6 +1343,7 @@ mod tests {
             acquire_timeout_ms: 5000,
             statement_timeout_ms: 5000,
             query_timeout_ms: 5000,
+            ..Default::default()
         };
         let db = std::sync::Arc::new(
             bot_core::db::Database::connect(&cfg, &url)
@@ -1548,6 +1550,7 @@ mod tests {
             acquire_timeout_ms: 5000,
             statement_timeout_ms: 5000,
             query_timeout_ms: 5000,
+            ..Default::default()
         };
         let db = std::sync::Arc::new(
             bot_core::db::Database::connect(&cfg, &url)

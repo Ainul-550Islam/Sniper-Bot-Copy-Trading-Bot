@@ -4,15 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
-import { TradeDetail } from "@/components/trading/TradeDetail";
 import { ApiError, toDisplayError } from "@/lib/api";
 import { tradingDetailApi } from "@/lib/api/trading-detail-api";
 import type { TenantTrade } from "@/lib/api/trading-detail-api";
-
-interface TradesForPositionResponse {
-  position_id: string;
-  trades: TenantTrade[];
-}
 
 export default function TradesForPositionPage() {
   const params = useParams();

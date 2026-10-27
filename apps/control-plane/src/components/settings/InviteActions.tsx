@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import type { TeamInvite } from "@/lib/api/team-invites-api";
-import { teamInvitesApi } from "@/lib/api/team-invites-api";
 import { toDisplayError } from "@/lib/api";
 
 interface InviteActionsProps {
@@ -48,7 +47,7 @@ export function InviteActions({
   };
 
   return (
-    <td style={{ padding: "0.75rem 1rem", borderTop: "1px solid var(--line)" }}>
+    <div>
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
         <span className="badge" style={{ background: "rgba(255,255,255,0.08)" }}>
           {invite.status}
@@ -77,7 +76,7 @@ export function InviteActions({
           {error}
         </div>
       )}
-    </td>
+    </div>
   );
 }
 

@@ -20,7 +20,7 @@
 ## Actually Tested (this repo, hermetic)
 
 - `cargo fmt --all --check` PASS
-- `cargo check --workspace --lib` runnable (<!-- stat:rust_files -->683<!-- /stat --> Rust files, <!-- stat:migrations -->59<!-- /stat --> migrations, <!-- stat:crates -->8<!-- /stat --> members; no run log shipped)
+- `cargo check --workspace --lib` runnable (<!-- stat:rust_files -->694<!-- /stat --> Rust files, <!-- stat:migrations -->62<!-- /stat --> migrations, <!-- stat:crates -->8<!-- /stat --> members; no run log shipped)
 - `cargo test -p saas-sdk` harness exists (no run log shipped) + `cargo test --test observability_config` etc. (1331 grep)
 - `npm ci --ignore-scripts` + `typecheck` + `build` + `lint` (frontend)
 - `docker build -t sniper-suite:ci` + smoke `curl /api/health` (in CI `docker` job)

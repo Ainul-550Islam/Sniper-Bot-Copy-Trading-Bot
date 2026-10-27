@@ -1529,6 +1529,19 @@ pub struct DatabaseConfig {
     /// Name of the env var holding the connection URL (the URL itself is a
     /// secret — it embeds credentials — so it is never stored in TOML).
     pub url_env: String,
+    /// Require row-level security roles and per-request tenant context on the
+    /// application pool. `open()` refuses an enabled database when this is
+    /// false; direct `connect()` remains available to isolated legacy tests.
+    pub rls_enabled: bool,
+    /// Env var for the separately credentialed `bot_system` connection pool.
+    pub system_url_env: String,
+    /// Login role used by the application pool, granted membership in bot_app.
+    pub app_login_role: String,
+    /// Login role used by the trusted system pool, granted membership in bot_system.
+    pub system_login_role: String,
+    /// Env var for a schema-owner/migrator connection. Never reuse this pool
+    /// for request queries.
+    pub migration_url_env: String,
     /// When true, startup FAILS if the database is configured but cannot be
     /// reached or migrated. When false the app degrades to memory/JSONL.
     pub required: bool,
@@ -1548,6 +1561,11 @@ impl Default for DatabaseConfig {
         DatabaseConfig {
             enabled: false,
             url_env: "POSTGRES_URL".into(),
+            rls_enabled: false,
+            system_url_env: "POSTGRES_SYSTEM_URL".into(),
+            app_login_role: "sniper_app".into(),
+            system_login_role: "sniper_system".into(),
+            migration_url_env: "POSTGRES_DDL_URL".into(),
             required: false,
             auto_migrate: true,
             max_connections: 8,
@@ -2091,8 +2109,14 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     }
 
     // --- persistence / dedup ---
+    if let Some(v) = env_str("DATABASE_URL_ENV", w) {
+        c.database.url_env = v;
+    }
     if let Some(v) = env_bool("DATABASE_ENABLED", w) {
         c.database.enabled = v;
+    }
+    if let Some(v) = env_bool("DATABASE_RLS_ENABLED", w) {
+        c.database.rls_enabled = v;
     }
     if let Some(v) = env_bool("DATABASE_REQUIRED", w) {
         c.database.required = v;
@@ -3415,6 +3439,21 @@ fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
         if c.database.url_env.trim().is_empty() {
             return Err(BotError::config("database.url_env must not be empty"));
         }
+        if !c.database.rls_enabled {
+            return Err(BotError::config(
+                "database.enabled requires database.rls_enabled=true",
+            ));
+        }
+        if c.database.system_url_env.trim().is_empty()
+            || c.database.migration_url_env.trim().is_empty()
+            || c.database.app_login_role.trim().is_empty()
+            || c.database.system_login_role.trim().is_empty()
+            || c.database.app_login_role == c.database.system_login_role
+        {
+            return Err(BotError::config(
+                "RLS requires distinct app/system login roles and system/migration URL env names",
+            ));
+        }
         if c.database.max_connections == 0 {
             return Err(BotError::config("database.max_connections must be >= 1"));
         }
@@ -3786,6 +3825,7 @@ priority_fee_micro_lamports = 250000
         cfg.database.enabled = false;
         assert!(validate_err(&cfg).contains("database"));
         cfg.database.enabled = true;
+        cfg.database.rls_enabled = true;
         let mut w = Vec::new();
         validate(&cfg, &mut w).expect("clustered + database validates");
     }
@@ -3817,6 +3857,7 @@ priority_fee_micro_lamports = 250000
             "feed:polymarket_user".into(),
         ];
         cfg.database.enabled = true;
+        cfg.database.rls_enabled = true;
         let mut w = Vec::new();
         validate(&cfg, &mut w).expect("known roles validate");
         let roles = cfg.ha.required_role_list();

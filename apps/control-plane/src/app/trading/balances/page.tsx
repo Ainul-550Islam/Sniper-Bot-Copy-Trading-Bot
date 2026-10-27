@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
 import { BalancesTable } from "@/components/trading/BalancesTable";
-import { ApiError, toDisplayError } from "@/lib/api";
+import { toDisplayError } from "@/lib/api";
 import { tradingDetailApi, type BalancesResponse } from "@/lib/api/trading-detail-api";
 
 export default function BalancesPage() {
