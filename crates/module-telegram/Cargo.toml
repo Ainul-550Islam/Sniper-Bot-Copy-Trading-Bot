@@ -26,6 +26,15 @@ hmac.workspace = true
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
+# BATCH 04 — consent + nonce trading commands.
+# Both crates are already in Cargo.lock (workspace deps + transitively present),
+# so this only adds two edges to the `module-telegram` entry: `bs58` decodes
+# mints for the 32-byte validation, `uuid` mints command/consent/idempotency
+# identifiers. No new third-party crate is introduced, and no version was
+# bumped: the `[[package]] name = "module-telegram"` stanza is the only part of
+# Cargo.lock this batch touches.
+bs58.workspace = true
+uuid.workspace = true
 
 [lib]
 name = "module_telegram"

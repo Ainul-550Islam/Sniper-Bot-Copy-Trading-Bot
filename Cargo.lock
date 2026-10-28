@@ -2692,6 +2692,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bot-core",
+ "bs58",
  "chrono",
  "futures",
  "hex",
@@ -2707,6 +2708,7 @@ dependencies = [
  "solana-kit",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

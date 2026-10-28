@@ -3,10 +3,57 @@
 //! [`parse_command`] is pure (and unit-tested); [`handle`] applies a parsed
 //! command to shared state and returns the reply text. Authorization is
 //! deny-by-default: if no allowlist is configured, control commands are refused.
+//!
+//! ## Trading commands (BATCH 04)
+//!
+//! This file is also the router for the consent-gated trading surface
+//! (`/consent`, `/buy`, `/sell`, `/confirm`, `/cancel`, `/pending`). Those
+//! commands are **not** handled here: they are handed to a
+//! [`TradeConsole`] when one is attached to the bot, which keeps the existing
+//! control commands byte-for-byte unchanged in behaviour. The console owns the
+//! flow and delegates each concern to its single owner:
+//!
+//! | concern | owner |
+//! |---|---|
+//! | parsing / validation | [`parse`] |
+//! | consent rules | [`crate::consent::policy`] |
+//! | nonce generation + hashing | [`nonce`] |
+//! | pending-command state machine | [`pending`] |
+//! | caps + rate limiting | [`limits`] |
+//! | audit + redaction | [`audit`] |
+//! | user-facing text | [`reply`] |
+//!
+//! `src/commands.rs` + `src/commands/*.rs` is a single module: the file below
+//! is the router, the directory holds the owners listed above.
+
+use std::collections::HashMap;
+
+use uuid::Uuid;
+
+pub mod audit;
+pub mod buy;
+pub mod confirm;
+pub mod consent_cmd;
+pub mod limits;
+pub mod nonce;
+pub mod parse;
+pub mod pending;
+pub mod reply;
+pub mod sell;
 
 use bot_core::config::TelegramConfig;
 use bot_core::models::{BotModule, ExecutionMode};
 use bot_core::state::Shared;
+
+use crate::commands::audit::{
+    AuditAmount, AuditBps, AuditDetail, AuditEvent, AuditStore, InMemoryAuditStore, TradeAuditEvent,
+};
+use crate::commands::limits::{LimitDeny, RateLimiter, TradeLimits};
+use crate::commands::pending::{CommandStore, InMemoryCommandStore};
+use crate::commands::reply::Reply;
+use crate::consent::store::{ConsentStore, InMemoryConsentStore, StoreError};
+use crate::consent::{ConsentBounds, ConsentError};
+use crate::trade_port::{TradeAction, TradeCommandPort};
 
 /// What a command acts on.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,21 +91,26 @@ pub enum Command {
     Mode(Option<String>),
     /// `/config` — redacted effective configuration.
     Config,
-    /// `/buy <mint> <sol>` — request a buy (confirm via inline keyboard;
-    /// never executed on the first tap).
+    /// `/buy <mint> <sol> [slippage_bps]` — request a buy (never executed on
+    /// the first tap: the trade desk draws an inline keyboard, the trade
+    /// console issues a nonce).
     Buy {
         /// Base58 token mint.
         mint: String,
         /// SOL amount as typed by the operator.
         sol: String,
+        /// Optional slippage tolerance in basis points, as typed.
+        slippage_bps: Option<String>,
     },
-    /// `/sell <mint> <percent>` — request selling a fraction of the open
-    /// position (confirm via inline keyboard).
+    /// `/sell <mint> <percent|all> [slippage_bps]` — request selling a
+    /// fraction of the open position.
     Sell {
         /// Base58 token mint.
         mint: String,
         /// Percentage of the open position to sell, as typed by the operator.
         pct: String,
+        /// Optional slippage tolerance in basis points, as typed.
+        slippage_bps: Option<String>,
     },
     /// `/snipe on|off` — shortcut for enabling/disabling the sniper module.
     Snipe(bool),
@@ -66,6 +118,14 @@ pub enum Command {
     Wallets,
     /// `/limit` — this chat's trade limits and current usage.
     Limit,
+    /// `/consent grant|status|revoke` — the consent surface (BATCH 04).
+    Consent(consent_cmd::ConsentAction),
+    /// `/confirm <nonce>` — execute one pending command.
+    Confirm(String),
+    /// `/cancel <nonce>` — cancel one pending command.
+    Cancel(String),
+    /// `/pending` — list this chat's pending commands.
+    Pending,
     /// Unrecognized command text (empty string = not addressed to us).
     Unknown(String),
 }
@@ -151,8 +211,18 @@ pub fn command_requires(cmd: &Command) -> TgRole {
         | Command::Wallets
         | Command::Limit => TgRole::Readonly,
         // Money-moving commands: operator or owner only, and even then the
-        // trade still requires the inline-keyboard confirmation tap.
+        // trade still requires a second, nonce-bound confirmation step.
         Command::Buy { .. } | Command::Sell { .. } => TgRole::Operator,
+        // BATCH 04 — granting a consent hands trading power to a chat, so it is
+        // reserved for owners; revoking it (an emergency action) needs only an
+        // operator; reading it is harmless.
+        Command::Consent(consent_cmd::ConsentAction::Grant { .. }) => TgRole::Owner,
+        Command::Consent(consent_cmd::ConsentAction::Revoke) => TgRole::Operator,
+        Command::Consent(consent_cmd::ConsentAction::Status) => TgRole::Readonly,
+        Command::Consent(consent_cmd::ConsentAction::Usage) => TgRole::Readonly,
+        Command::Consent(consent_cmd::ConsentAction::Invalid(_)) => TgRole::Readonly,
+        Command::Confirm(_) | Command::Cancel(_) => TgRole::Operator,
+        Command::Pending => TgRole::Readonly,
         // Switching TO live is the one telegram action reserved for owners.
         Command::Mode(Some(m)) if m.eq_ignore_ascii_case("live") => TgRole::Owner,
         Command::Mode(_)
@@ -207,6 +277,7 @@ pub fn parse_command(text: &str, prefix: &str) -> Command {
             Command::Buy {
                 mint: args.next().unwrap_or("").to_string(),
                 sol: args.next().unwrap_or("").to_string(),
+                slippage_bps: args.next().map(str::to_string),
             }
         }
         "sell" => {
@@ -214,8 +285,16 @@ pub fn parse_command(text: &str, prefix: &str) -> Command {
             Command::Sell {
                 mint: args.next().unwrap_or("").to_string(),
                 pct: args.next().unwrap_or("").to_string(),
+                slippage_bps: args.next().map(str::to_string),
             }
         }
+        // ---------------------------------------------------------- BATCH 04 --
+        // Consent-gated trading surface. Routing to it (and the fact that it
+        // is only live when a TradeConsole is attached) happens in `lib.rs`.
+        "consent" | "consents" => Command::Consent(consent_cmd::ConsentAction::parse(&rest)),
+        "confirm" => Command::Confirm(rest.split_whitespace().next().unwrap_or("").to_string()),
+        "cancel" => Command::Cancel(rest.split_whitespace().next().unwrap_or("").to_string()),
+        "pending" => Command::Pending,
         "snipe" => Command::Snipe(matches!(
             rest.trim().to_ascii_lowercase().as_str(),
             "on" | "1" | "true" | "yes"
@@ -290,6 +369,12 @@ pub async fn handle(state: &Shared, command: Command, role: TgRole) -> String {
         Command::Limit => {
             "Use /limit through the trade desk to see this chat's live usage.".to_string()
         }
+        // BATCH 04 — reaching these here means no TradeConsole is attached to
+        // the bot (otherwise `lib.rs` routes them to the console). Refuse
+        // loudly with the single owner's text instead of silently dropping.
+        Command::Consent(_) | Command::Confirm(_) | Command::Cancel(_) | Command::Pending => {
+            reply::not_configured().plain().to_string()
+        }
         Command::Unknown(u) if u.is_empty() => String::new(),
         Command::Unknown(u) => format!("Unknown command '{u}'. Try /help."),
     }
@@ -315,6 +400,10 @@ fn help_text() -> String {
         "/snipe on|off — toggle the sniper module",
         "/wallets — configured wallets + balances",
         "/limit — this chat's trade limits and usage",
+        "/consent grant|status|revoke — consent-gated trading (BATCH 04)",
+        "/confirm <nonce> — execute a pending trade command",
+        "/cancel <nonce> — cancel a pending trade command",
+        "/pending — list this chat's pending trade commands",
     ]
     .join("\n")
 }
@@ -809,18 +898,863 @@ pub async fn handle_trade_command(
         )));
     }
     match command {
-        Command::Buy { mint, sol } => {
-            Some(desk.request_buy(chat_id, user_id, &mint, &sol, now).await)
-        }
-        Command::Sell { mint, pct } => {
-            Some(desk.request_sell(chat_id, user_id, &mint, &pct, now).await)
-        }
+        Command::Buy {
+            mint,
+            sol,
+            slippage_bps: _,
+        } => Some(desk.request_buy(chat_id, user_id, &mint, &sol, now).await),
+        Command::Sell {
+            mint,
+            pct,
+            slippage_bps: _,
+        } => Some(desk.request_sell(chat_id, user_id, &mint, &pct, now).await),
         Command::Limit => Some(desk.limits_text(chat_id, now).await),
         Command::Wallets => Some(TradeReply::plain(wallets_text(state).await)),
         Command::Snipe(on) => Some(TradeReply::plain(
             handle(state, Command::Snipe(on), role).await,
         )),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BATCH 04 — consent-gated trade console (router + shared flow)
+// ---------------------------------------------------------------------------
+
+/// A chat ↔ tenant ↔ user link.
+///
+/// A Telegram chat id is **not** an identity: the console only trades for a
+/// chat that the control plane has linked to an organization *and* whose linked
+/// user matches the Telegram user issuing the command. Both halves are checked
+/// on every command (see [`TradeConsole::resolve_link`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatLink {
+    /// Tenant that owns this chat.
+    pub organization_id: String,
+    /// The Telegram user the chat is linked to.
+    pub user_id: i64,
+    /// `false` for alert-only links: they may read `/consent status` but never
+    /// trade and never grant.
+    pub trading_enabled: bool,
+}
+
+impl ChatLink {
+    /// Build a trading-enabled link.
+    pub fn trading(organization_id: impl Into<String>, user_id: i64) -> Self {
+        Self {
+            organization_id: organization_id.into(),
+            user_id,
+            trading_enabled: true,
+        }
+    }
+
+    /// Build an alert-only link.
+    pub fn alerts_only(organization_id: impl Into<String>, user_id: i64) -> Self {
+        Self {
+            organization_id: organization_id.into(),
+            user_id,
+            trading_enabled: false,
+        }
+    }
+}
+
+/// Why a chat/user could not be resolved to a tenant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkDeny {
+    /// The chat is not linked to any organization.
+    Unlinked,
+    /// The chat is linked, but to a different Telegram user.
+    WrongUser,
+    /// The link exists but trading is disabled for it.
+    TradingDisabled,
+}
+
+impl LinkDeny {
+    /// Stable machine code (audit `reason`).
+    pub fn code(&self) -> &'static str {
+        match self {
+            LinkDeny::Unlinked => "unlinked_chat",
+            LinkDeny::WrongUser => "chat_user_mismatch",
+            LinkDeny::TradingDisabled => "trading_disabled",
+        }
+    }
+
+    /// The operator-facing explanation.
+    pub fn explain(&self) -> &'static str {
+        match self {
+            LinkDeny::Unlinked => {
+                "this chat is not linked to an organization — link it from the control plane first"
+            }
+            LinkDeny::WrongUser => "this chat is linked to a different Telegram user",
+            LinkDeny::TradingDisabled => "trading is disabled for this chat's link (alerts only)",
+        }
+    }
+}
+
+/// Concrete handles to the in-memory stores, kept alongside the trait objects
+/// so tests and operator diagnostics can inspect them without downcasting.
+#[derive(Clone)]
+pub struct MemoryStores {
+    /// The in-memory consent store.
+    pub consents: Arc<InMemoryConsentStore>,
+    /// The in-memory command store.
+    pub commands: Arc<InMemoryCommandStore>,
+    /// The in-memory audit store.
+    pub audit: Arc<InMemoryAuditStore>,
+}
+
+/// The three stores the console needs, bundled so wiring stays one call.
+#[derive(Clone)]
+pub struct TradeStores {
+    /// Consent rows (migration 0066).
+    pub consents: Arc<dyn ConsentStore>,
+    /// Command rows (migration 0067).
+    pub commands: Arc<dyn CommandStore>,
+    /// Audit rows (migration 0067).
+    pub audit: Arc<dyn AuditStore>,
+    memory: Option<MemoryStores>,
+}
+
+impl TradeStores {
+    /// Process-local stores — the deployment default until Batch 07 wires
+    /// Postgres, and what every flow test uses.
+    pub fn in_memory() -> Self {
+        let consents = Arc::new(InMemoryConsentStore::new());
+        let commands = Arc::new(InMemoryCommandStore::new());
+        let audit = Arc::new(InMemoryAuditStore::new());
+        Self {
+            consents: consents.clone(),
+            commands: commands.clone(),
+            audit: audit.clone(),
+            memory: Some(MemoryStores {
+                consents,
+                commands,
+                audit,
+            }),
+        }
+    }
+
+    /// Fully specified bundle (used by the server's Postgres wiring).
+    pub fn new(
+        consents: Arc<dyn ConsentStore>,
+        commands: Arc<dyn CommandStore>,
+        audit: Arc<dyn AuditStore>,
+    ) -> Self {
+        Self {
+            consents,
+            commands,
+            audit,
+            memory: None,
+        }
+    }
+
+    /// The concrete in-memory handles, when this bundle is process-local.
+    pub fn memory(&self) -> Option<&MemoryStores> {
+        self.memory.as_ref()
+    }
+}
+
+/// Tunables the console validates against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TradeConsoleConfig {
+    /// Consent defaults and hard bounds.
+    pub consent_bounds: ConsentBounds,
+    /// Slippage window, rate limit and cap arithmetic.
+    pub limits: TradeLimits,
+}
+
+/// The raw, **unvalidated** trade request as typed (`/buy` or `/sell`).
+///
+/// Validation happens after the consent gate so an unauthorized chat cannot
+/// probe the parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TradeRequestRaw {
+    /// `/buy <mint> <amount_sol> [slippage_bps]`.
+    Buy {
+        /// Mint as typed.
+        mint: String,
+        /// Amount as typed.
+        sol: String,
+        /// Slippage as typed.
+        slippage: Option<String>,
+    },
+    /// `/sell <mint> <percent|all> [slippage_bps]`.
+    Sell {
+        /// Mint as typed.
+        mint: String,
+        /// Percentage as typed.
+        percent: String,
+        /// Slippage as typed.
+        slippage: Option<String>,
+    },
+}
+
+impl TradeRequestRaw {
+    /// The action this request performs.
+    pub fn action(&self) -> TradeAction {
+        match self {
+            TradeRequestRaw::Buy { .. } => TradeAction::Buy,
+            TradeRequestRaw::Sell { .. } => TradeAction::Sell,
+        }
+    }
+}
+
+/// Is this command owned by the trade console (as opposed to the pre-existing
+/// control commands)?
+pub fn is_console_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Buy { .. }
+            | Command::Sell { .. }
+            | Command::Consent(_)
+            | Command::Confirm(_)
+            | Command::Cancel(_)
+            | Command::Pending
+    )
+}
+
+/// The consent-gated trading surface.
+///
+/// One per bot process. Attached to [`crate::TelegramBot`] with
+/// `with_trade_console`; when it is absent the new commands answer "not
+/// configured" and every pre-existing command behaves exactly as before.
+pub struct TradeConsole {
+    state: Shared,
+    port: Arc<dyn TradeCommandPort>,
+    consent_store: Arc<dyn ConsentStore>,
+    command_store: Arc<dyn CommandStore>,
+    audit_store: Arc<dyn AuditStore>,
+    consent_bounds: ConsentBounds,
+    limits: TradeLimits,
+    rate: RateLimiter,
+    links: tokio::sync::RwLock<HashMap<i64, ChatLink>>,
+}
+
+impl std::fmt::Debug for TradeConsole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TradeConsole")
+            .field("consent_bounds", &self.consent_bounds)
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TradeConsole {
+    /// Build a console. Fails closed on an incoherent limit configuration.
+    pub fn new(
+        state: Shared,
+        port: Arc<dyn TradeCommandPort>,
+        stores: TradeStores,
+        config: TradeConsoleConfig,
+    ) -> Result<Self, LimitDeny> {
+        config.limits.validate()?;
+        config.consent_bounds.validate().map_err(|e| {
+            LimitDeny::InvalidConfig(format!("consent bounds rejected: {}", e.code()))
+        })?;
+        let rate = RateLimiter::new(config.limits.rate)?;
+        Ok(Self {
+            state,
+            port,
+            consent_store: stores.consents,
+            command_store: stores.commands,
+            audit_store: stores.audit,
+            consent_bounds: config.consent_bounds,
+            limits: config.limits,
+            rate,
+            links: tokio::sync::RwLock::new(HashMap::new()),
+        })
+    }
+
+    /// The parse mode every console reply must be sent with.
+    pub fn parse_mode(&self) -> &'static str {
+        reply::PARSE_MODE
+    }
+
+    /// The limits in force (for tests and operator diagnostics).
+    pub fn limits(&self) -> &TradeLimits {
+        &self.limits
+    }
+
+    /// The consent bounds in force.
+    pub fn consent_bounds(&self) -> &ConsentBounds {
+        &self.consent_bounds
+    }
+
+    /// Bind a chat to a tenant (the control plane calls this from its link
+    /// flow; tests call it directly).
+    pub async fn link_chat(&self, chat_id: i64, link: ChatLink) {
+        self.links.write().await.insert(chat_id, link);
+    }
+
+    /// Remove a link. Pending commands of that chat are cancelled: an unlinked
+    /// chat must not keep a live money button.
+    pub async fn unlink_chat(&self, chat_id: i64, now: DateTime<Utc>) -> Vec<Uuid> {
+        let removed = self.links.write().await.remove(&chat_id);
+        let Some(link) = removed else {
+            return Vec::new();
+        };
+        self.command_store
+            .cancel_pending(&link.organization_id, chat_id, now)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// The link for `(chat, user)`, or the reason it cannot be used.
+    pub async fn resolve_link(&self, chat_id: i64, user_id: i64) -> Result<ChatLink, LinkDeny> {
+        let links = self.links.read().await;
+        let Some(link) = links.get(&chat_id) else {
+            return Err(LinkDeny::Unlinked);
+        };
+        if link.user_id != user_id {
+            return Err(LinkDeny::WrongUser);
+        }
+        if !link.trading_enabled {
+            return Err(LinkDeny::TradingDisabled);
+        }
+        Ok(link.clone())
+    }
+
+    /// Route one command. `None` means "not a console command" and the caller
+    /// must fall through to its own handler.
+    pub async fn handle(
+        &self,
+        command: Command,
+        role: TgRole,
+        chat_id: i64,
+        user_id: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> Option<Reply> {
+        if !is_console_command(&command) {
+            return None;
+        }
+        let required = command_requires(&command);
+        if !role.satisfies(required) {
+            return Some(reply::denied_with_hint(
+                "insufficient_role",
+                &format!(
+                    "your role '{}' cannot run this command (needs '{}')",
+                    role.as_str(),
+                    required.as_str()
+                ),
+                "Ask an owner to run it.",
+            ));
+        }
+        Some(match command {
+            Command::Buy {
+                mint,
+                sol,
+                slippage_bps,
+            } => {
+                self.handle_buy(chat_id, user_id, &mint, &sol, slippage_bps.as_deref(), now)
+                    .await
+            }
+            Command::Sell {
+                mint,
+                pct,
+                slippage_bps,
+            } => {
+                self.handle_sell(chat_id, user_id, &mint, &pct, slippage_bps.as_deref(), now)
+                    .await
+            }
+            Command::Consent(action) => self.handle_consent(action, chat_id, user_id, now).await,
+            Command::Confirm(nonce) => self.handle_confirm(chat_id, user_id, &nonce, now).await,
+            Command::Cancel(nonce) => self.handle_cancel(chat_id, user_id, &nonce, now).await,
+            Command::Pending => self.handle_pending(chat_id, user_id, now).await,
+            // `is_console_command` guarantees this is unreachable.
+            // Unreachable: `is_console_command` gates the match above.
+            _ => reply::not_configured(),
+        })
+    }
+
+    // ------------------------------------------------------------ the flow --
+
+    /// `/buy` flow, step by step (see `commands/buy.rs` for the grammar).
+    pub(crate) async fn submit_buy(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        mint: &str,
+        sol: &str,
+        slippage: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Reply {
+        self.submit(
+            chat_id,
+            user_id,
+            TradeRequestRaw::Buy {
+                mint: mint.to_string(),
+                sol: sol.to_string(),
+                slippage: slippage.map(str::to_string),
+            },
+            now,
+        )
+        .await
+    }
+
+    /// `/sell` flow.
+    pub(crate) async fn submit_sell(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        mint: &str,
+        percent: &str,
+        slippage: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Reply {
+        self.submit(
+            chat_id,
+            user_id,
+            TradeRequestRaw::Sell {
+                mint: mint.to_string(),
+                percent: percent.to_string(),
+                slippage: slippage.map(str::to_string),
+            },
+            now,
+        )
+        .await
+    }
+
+    /// The shared request pipeline: link → consent → validate → caps → mode →
+    /// pending + nonce → audit → reply. Every branch that refuses writes one
+    /// `denied` audit row.
+    async fn submit(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        request: TradeRequestRaw,
+        now: DateTime<Utc>,
+    ) -> Reply {
+        let action = request.action();
+        // 1. chat → linked user → organization.
+        let link = match self.resolve_link(chat_id, user_id).await {
+            Ok(link) => link,
+            Err(deny) => return self.deny_link(chat_id, None, deny, now).await,
+        };
+        let org = link.organization_id.clone();
+
+        // Housekeeping first, so a stale row can never be confirmed later.
+        let _ = self.command_store.expire_overdue(now).await;
+
+        // 5a. kill switch (cheap, local) before anything else expensive.
+        if self.state.kill_switch() {
+            return self
+                .deny(
+                    Some(&org),
+                    chat_id,
+                    "halted",
+                    "the kill switch is engaged",
+                    now,
+                )
+                .await;
+        }
+        // 5b. mode gates: paper/simulate are fine, live needs BOTH gates.
+        let mode = match self.port.current_mode().await {
+            Ok(mode) => mode,
+            Err(err) => {
+                return self
+                    .deny(Some(&org), chat_id, err.code(), err.detail(), now)
+                    .await
+            }
+        };
+        if mode.live_but_gated() {
+            return self
+                .deny(
+                    Some(&org),
+                    chat_id,
+                    "live_gates_closed",
+                    "execution.mode is LIVE but allow_live_trading is false",
+                    now,
+                )
+                .await;
+        }
+        if self.port.is_halted().await {
+            return self
+                .deny(Some(&org), chat_id, "halted", "the executor is halted", now)
+                .await;
+        }
+
+        // 2. an ACTIVE consent covering this action.
+        let consent = match self.consent_store.active(&org, chat_id, now).await {
+            Ok(consent) => consent,
+            Err(err) => {
+                return self
+                    .deny(
+                        Some(&org),
+                        chat_id,
+                        "consent_store_unavailable",
+                        err.detail(),
+                        now,
+                    )
+                    .await
+            }
+        };
+        let consent = match crate::consent::policy::require_active(consent.as_ref(), action, now) {
+            Ok(consent) => consent.clone(),
+            Err(err) => {
+                return self
+                    .deny(
+                        Some(&org),
+                        chat_id,
+                        err.code(),
+                        &consent_refusal_hint(&err),
+                        now,
+                    )
+                    .await
+            }
+        };
+
+        // 3. validate the typed input (never clamp, never guess).
+        let (mint, amount_lamports, percent_bps, slippage_bps) = match &request {
+            TradeRequestRaw::Buy {
+                mint,
+                sol,
+                slippage,
+            } => match buy::parse_buy_args(mint, sol, slippage.as_deref(), &self.limits) {
+                Ok(order) => (
+                    order.mint,
+                    Some(order.amount_lamports),
+                    None,
+                    order.slippage_bps,
+                ),
+                Err(err) => {
+                    return self
+                        .deny(Some(&org), chat_id, err.code(), &err.message(), now)
+                        .await
+                }
+            },
+            TradeRequestRaw::Sell {
+                mint,
+                percent,
+                slippage,
+            } => match sell::parse_sell_args(mint, percent, slippage.as_deref(), &self.limits) {
+                Ok(order) => (
+                    order.mint,
+                    None,
+                    Some(order.percent_bps),
+                    order.slippage_bps,
+                ),
+                Err(err) => {
+                    return self
+                        .deny(Some(&org), chat_id, err.code(), &err.message(), now)
+                        .await
+                }
+            },
+        };
+
+        // 4. caps: min(consent, org) per order, plus the rolling 24h cap.
+        let org_limits = match self.port.org_risk_limits(&org).await {
+            Ok(limits) => limits,
+            Err(err) => {
+                return self
+                    .deny(Some(&org), chat_id, err.code(), err.detail(), now)
+                    .await
+            }
+        };
+        let (order_cap, daily_cap) = limits::applicable_caps(&consent, &org_limits);
+        if let Some(amount) = amount_lamports {
+            if let Err(err) = limits::check_order_cap(amount, order_cap) {
+                return self
+                    .deny_limit(
+                        Some(&org),
+                        chat_id,
+                        &err,
+                        amount,
+                        order_cap,
+                        daily_cap,
+                        0,
+                        now,
+                    )
+                    .await;
+            }
+            let window_start = limits::rolling_window_start(now, limits::ROLLING_CAP_WINDOW_SECS);
+            let spent = match self
+                .command_store
+                .spent_since(&org, chat_id, window_start)
+                .await
+            {
+                Ok(spent) => spent,
+                Err(err) => {
+                    return self
+                        .deny(
+                            Some(&org),
+                            chat_id,
+                            "command_store_unavailable",
+                            err.detail(),
+                            now,
+                        )
+                        .await
+                }
+            };
+            if let Err(err) = limits::check_daily_cap(spent, amount, daily_cap) {
+                return self
+                    .deny_limit(
+                        Some(&org),
+                        chat_id,
+                        &err,
+                        amount,
+                        order_cap,
+                        daily_cap,
+                        spent,
+                        now,
+                    )
+                    .await;
+            }
+        }
+
+        // 4b. rate limit: in-memory token bucket AND the durable ledger count.
+        let rate_window = limits::rolling_window_start(now, self.limits.rate.window_secs);
+        let durable = match self
+            .command_store
+            .count_since(&org, chat_id, rate_window)
+            .await
+        {
+            Ok(count) => count,
+            Err(err) => {
+                return self
+                    .deny(
+                        Some(&org),
+                        chat_id,
+                        "command_store_unavailable",
+                        err.detail(),
+                        now,
+                    )
+                    .await
+            }
+        };
+        if let Err(err) = self.rate.check(&org, chat_id, now, durable) {
+            return self
+                .deny(
+                    Some(&org),
+                    chat_id,
+                    err.code(),
+                    "rate limit reached for this chat",
+                    now,
+                )
+                .await;
+        }
+
+        // 6. create the pending command with a fresh CSPRNG nonce.
+        let spec = pending::PendingSpec {
+            organization_id: org.clone(),
+            user_id,
+            chat_id,
+            action,
+            mint: mint.clone(),
+            amount_lamports,
+            percent_bps,
+            slippage_bps,
+        };
+        let (row, nonce) = pending::TradeCommand::open(spec, now);
+        // The audit row is written BEFORE the command becomes confirmable: a
+        // command that cannot be audited must not exist.
+        if let Err(err) = self
+            .audit(
+                Some(row.command_id),
+                Some(&org),
+                chat_id,
+                AuditEvent::Requested,
+                AuditDetail::new()
+                    .action(action)
+                    .mint(&mint)
+                    .lamports(AuditAmount::AmountLamports, row.amount_lamports_or_zero())
+                    .bps(AuditBps::PercentBps, row.percent_bps_or_zero())
+                    .bps(AuditBps::SlippageBps, slippage_bps)
+                    .lamports(AuditAmount::OrderCapLamports, order_cap)
+                    .lamports(AuditAmount::DailyCapLamports, daily_cap)
+                    .mode(mode.mode.as_str()),
+                now,
+            )
+            .await
+        {
+            return self
+                .deny(
+                    Some(&org),
+                    chat_id,
+                    "audit_store_unavailable",
+                    err.detail(),
+                    now,
+                )
+                .await;
+        }
+        if let Err(err) = self.command_store.insert(&row).await {
+            return self
+                .deny(
+                    Some(&org),
+                    chat_id,
+                    "command_store_unavailable",
+                    err.detail(),
+                    now,
+                )
+                .await;
+        }
+
+        // 7. hand the one-time nonce to the chat.
+        reply::pending_created(
+            action,
+            &mint,
+            amount_lamports,
+            percent_bps,
+            slippage_bps,
+            nonce.expose(),
+            pending::COMMAND_TTL_SECS,
+            mode.mode.as_str(),
+        )
+    }
+
+    // ------------------------------------------------------------- helpers --
+
+    /// Append one audit row.
+    pub(crate) async fn audit(
+        &self,
+        command_id: Option<Uuid>,
+        organization_id: Option<&str>,
+        chat_id: i64,
+        event: AuditEvent,
+        detail: AuditDetail,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let row = TradeAuditEvent::new(
+            command_id,
+            organization_id.unwrap_or_default(),
+            chat_id,
+            event,
+            detail,
+            now,
+        );
+        self.audit_store.append(&row).await
+    }
+
+    /// Audit a denial (best effort: a denial must be delivered even when the
+    /// ledger is down) and answer the chat.
+    pub(crate) async fn deny(
+        &self,
+        organization_id: Option<&str>,
+        chat_id: i64,
+        code: &str,
+        explanation: &str,
+        now: DateTime<Utc>,
+    ) -> Reply {
+        if let Err(err) = self
+            .audit(
+                None,
+                organization_id,
+                chat_id,
+                AuditEvent::Denied,
+                AuditDetail::new().reason(code).failure_detail(explanation),
+                now,
+            )
+            .await
+        {
+            tracing::warn!(
+                chat_id,
+                code,
+                error = %err.detail(),
+                "telegram trade denial could not be audited"
+            );
+        }
+        reply::denied(code, explanation)
+    }
+
+    /// Audit and answer a link refusal (no tenant is known, so the row carries
+    /// an empty organization: it is a platform-level record).
+    pub(crate) async fn deny_link(
+        &self,
+        chat_id: i64,
+        organization_id: Option<&str>,
+        deny: LinkDeny,
+        now: DateTime<Utc>,
+    ) -> Reply {
+        self.deny(organization_id, chat_id, deny.code(), deny.explain(), now)
+            .await
+    }
+
+    /// Audit and answer an unlinked / sender-less message.
+    pub(crate) async fn deny_unlinked(
+        &self,
+        chat_id: i64,
+        code: &str,
+        explanation: &str,
+        now: DateTime<Utc>,
+    ) -> Reply {
+        self.deny(None, chat_id, code, explanation, now).await
+    }
+
+    /// Audit and answer a limit refusal, with the numbers that mattered.
+    #[allow(clippy::too_many_arguments)]
+    async fn deny_limit(
+        &self,
+        organization_id: Option<&str>,
+        chat_id: i64,
+        denial: &LimitDeny,
+        amount_lamports: u64,
+        order_cap: u64,
+        daily_cap: u64,
+        spent: u64,
+        now: DateTime<Utc>,
+    ) -> Reply {
+        let explanation = match denial {
+            LimitDeny::OrderCapExceeded { cap_lamports, .. } => format!(
+                "that amount exceeds the per-order cap of {} SOL",
+                reply::format_sol(*cap_lamports)
+            ),
+            LimitDeny::DailyCapExceeded { cap_lamports, .. } => format!(
+                "the rolling 24h cap of {} SOL is exhausted (spent {} SOL)",
+                reply::format_sol(*cap_lamports),
+                reply::format_sol(spent)
+            ),
+            LimitDeny::CapOverflow => "the amount is too large to account for".to_string(),
+            LimitDeny::RateLimited {
+                capacity,
+                window_secs,
+            } => {
+                format!("at most {capacity} commands per {window_secs}s per chat")
+            }
+            LimitDeny::InvalidConfig(detail) => detail.clone(),
+        };
+        if let Err(err) = self
+            .audit(
+                None,
+                organization_id,
+                chat_id,
+                AuditEvent::Denied,
+                AuditDetail::new()
+                    .reason(denial.code())
+                    .lamports(AuditAmount::AmountLamports, amount_lamports)
+                    .lamports(AuditAmount::OrderCapLamports, order_cap)
+                    .lamports(AuditAmount::DailyCapLamports, daily_cap)
+                    .lamports(AuditAmount::SpentLamports, spent),
+                now,
+            )
+            .await
+        {
+            tracing::warn!(
+                chat_id,
+                code = denial.code(),
+                error = %err.detail(),
+                "telegram trade limit denial could not be audited"
+            );
+        }
+        reply::denied(denial.code(), &explanation)
+    }
+}
+
+/// Short, secret-free explanation for a consent refusal.
+fn consent_refusal_hint(error: &ConsentError) -> String {
+    match error {
+        ConsentError::Missing => format!(
+            "no active consent for this chat — grant one with /consent grant ... {}",
+            crate::consent::policy::CONSENT_PHRASE
+        ),
+        ConsentError::Expired => {
+            "the consent expired — grant a new one with /consent grant".to_string()
+        }
+        ConsentError::Revoked => {
+            "the consent was revoked — grant a new one with /consent grant".to_string()
+        }
+        ConsentError::ScopeDenied(action) => {
+            format!("the consent does not cover {}", action.as_str())
+        }
+        other => other.code().to_string(),
     }
 }
 

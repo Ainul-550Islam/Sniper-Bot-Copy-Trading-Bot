@@ -9,6 +9,15 @@
 //! The bot token is read from the environment variable named by
 //! `telegram.bot_token_env` (default `TELEGRAM_BOT_TOKEN`). With no token the
 //! module idles harmlessly.
+//!
+//! ## Trading (BATCH 04)
+//!
+//! When a [`commands::TradeConsole`] is attached ([`TelegramBot::with_trade_console`])
+//! the router sends `/consent`, `/buy`, `/sell`, `/confirm`, `/cancel` and
+//! `/pending` to it. The console implements the consent-gated flow against a
+//! [`trade_port::TradeCommandPort`] — the seam the server implements in the
+//! final integration batch. Without a console attached the new commands answer
+//! "not configured" and every pre-existing command behaves exactly as before.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -17,7 +26,21 @@ pub mod alerts;
 pub mod api;
 pub mod callbacks;
 pub mod commands;
+pub mod consent;
+pub mod trade_port;
 pub mod trade_session;
+
+pub use commands::{
+    ChatLink, LinkDeny, MemoryStores, TradeConsole, TradeConsoleConfig, TradeStores,
+};
+pub use consent::{
+    Consent, ConsentBounds, ConsentError, ConsentScope, ConsentStatus, ConsentStore,
+    InMemoryConsentStore, CONSENT_PHRASE,
+};
+pub use trade_port::{
+    ExecutionReceipt, FakeTradePort, OrderRequest, OrgRiskLimits, PortError, PortMode, TradeAction,
+    TradeCommandPort,
+};
 
 use std::sync::Arc;
 
@@ -39,6 +62,10 @@ pub struct TelegramBot {
     /// those commands reply with a "trading not configured" notice and the
     /// bot stays read-only exactly like before.
     trade_desk: Option<Arc<commands::TradeDesk>>,
+    /// Optional consent-gated trade console (BATCH 04). When attached it takes
+    /// priority over `trade_desk` for `/buy`, `/sell`, `/consent`, `/confirm`,
+    /// `/cancel` and `/pending`.
+    trade_console: Option<Arc<commands::TradeConsole>>,
 }
 
 impl TelegramBot {
@@ -69,7 +96,21 @@ impl TelegramBot {
             api,
             alert_chat_id,
             trade_desk: None,
+            trade_console: None,
         }))
+    }
+
+    /// Build a bot around an explicit [`TelegramApi`] (a token-free entry point
+    /// for embeddings and for the end-to-end dispatcher tests, which point the
+    /// client at a local stand-in server instead of Telegram).
+    pub fn from_api(state: Shared, api: TelegramApi, alert_chat_id: Option<i64>) -> Self {
+        Self {
+            state,
+            api,
+            alert_chat_id,
+            trade_desk: None,
+            trade_console: None,
+        }
     }
 
     /// Attach the trade desk (server wiring supplies the executor and the
@@ -78,6 +119,20 @@ impl TelegramBot {
     pub fn with_trade_desk(mut self, desk: Arc<commands::TradeDesk>) -> Self {
         self.trade_desk = Some(desk);
         self
+    }
+
+    /// Attach the consent-gated trade console (BATCH 04). Server wiring supplies
+    /// the [`trade_port::TradeCommandPort`] implementation and the chat links.
+    #[must_use]
+    pub fn with_trade_console(mut self, console: Arc<commands::TradeConsole>) -> Self {
+        self.trade_console = Some(console);
+        self
+    }
+
+    /// The API client this bot uses (read-only borrow; used by tests to assert
+    /// which base URL is in force).
+    pub fn api(&self) -> &TelegramApi {
+        &self.api
     }
 
     /// Run the control bot: register commands, start alerting, then poll.
@@ -190,6 +245,21 @@ impl TelegramBot {
                     });
 
                 let command = parse_command(&text, &tg.prefix);
+                // BATCH 04: the consent-gated console takes priority for the
+                // commands it owns when it is attached. Everything else falls
+                // through to the pre-existing handlers unchanged.
+                if let Some(console) = &self.trade_console {
+                    if commands::is_console_command(&command) {
+                        let reply = console
+                            .handle(command, role, chat_id, user_id, chrono::Utc::now())
+                            .await;
+                        if let Some(reply) = reply {
+                            self.send_console_reply(chat_id, &reply, console.parse_mode())
+                                .await;
+                        }
+                        continue;
+                    }
+                }
                 // Trade commands go through the desk when one is attached
                 // (they need the session + confirmation keyboard).
                 if matches!(
@@ -275,6 +345,18 @@ impl TelegramBot {
                 self.send_trade_reply(chat_id, &reply, &cfg.telegram.parse_mode)
                     .await;
             }
+        }
+    }
+
+    /// Send a trade-console reply. Console replies are always MarkdownV2 and
+    /// already fully escaped by [`commands::reply`].
+    async fn send_console_reply(&self, chat_id: i64, reply: &commands::reply::Reply, mode: &str) {
+        if let Err(e) = self
+            .api
+            .send_message(chat_id, &reply.markdown_v2(), Some(mode))
+            .await
+        {
+            warn!(error = %e, "failed to send trade console reply");
         }
     }
 
@@ -364,6 +446,18 @@ pub fn menu() -> Vec<BotCommand> {
         BotCommand {
             command: "limit".into(),
             description: "This chat's trade limits and usage".into(),
+        },
+        BotCommand {
+            command: "consent".into(),
+            description: "Grant|status|revoke trade consent".into(),
+        },
+        BotCommand {
+            command: "confirm".into(),
+            description: "Confirm a pending trade by nonce".into(),
+        },
+        BotCommand {
+            command: "pending".into(),
+            description: "Pending trade commands".into(),
         },
         BotCommand {
             command: "help".into(),
