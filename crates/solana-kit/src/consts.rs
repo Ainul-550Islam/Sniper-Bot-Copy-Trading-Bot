@@ -201,10 +201,281 @@ pub static RAYDIUM_AMM_V4: Lazy<Pubkey> =
     Lazy::new(|| pk("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"));
 pub static RAYDIUM_CLMM: Lazy<Pubkey> =
     Lazy::new(|| pk("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"));
+/// Raydium CPMM (`cp-swap`) — the Anchor constant-product AMM.
+/// The id is the `address` field of the vendored official IDL
+/// `crates/solana-kit/idl/raydium_cp_swap.json`.
 pub static RAYDIUM_CPMM: Lazy<Pubkey> =
     Lazy::new(|| pk("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"));
+/// Canonical `*_PROGRAM_ID` alias for [`RAYDIUM_CPMM`] matching [`PUMP_PROGRAM_ID`].
+pub static RAYDIUM_CPMM_PROGRAM_ID: Lazy<Pubkey> = Lazy::new(|| *RAYDIUM_CPMM);
+/// Shared Raydium CPMM vault/LP mint authority PDA (`["vault_and_lp_mint_auth_seed"]`).
+pub static RAYDIUM_CPMM_AUTHORITY: Lazy<Pubkey> = Lazy::new(|| {
+    Pubkey::find_program_address(&[RAYDIUM_CPMM_SEED_AUTH], &RAYDIUM_CPMM_PROGRAM_ID).0
+});
+
+/// Raydium LaunchLab (`launchpad`) — the Anchor bonding-curve launchpad.
+/// The id is the `address` field of the vendored official IDL
+/// `crates/solana-kit/idl/raydium_launchpad.json`.
 pub static RAYDIUM_LAUNCHLAB: Lazy<Pubkey> =
     Lazy::new(|| pk("LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"));
+/// Canonical `*_PROGRAM_ID` alias for [`RAYDIUM_LAUNCHLAB`] matching [`PUMP_PROGRAM_ID`].
+pub static RAYDIUM_LAUNCHLAB_PROGRAM_ID: Lazy<Pubkey> = Lazy::new(|| *RAYDIUM_LAUNCHLAB);
+/// Shared Raydium LaunchLab vault authority PDA (`["vault_auth_seed"]`).
+pub static RAYDIUM_LAUNCHLAB_AUTHORITY: Lazy<Pubkey> = Lazy::new(|| {
+    Pubkey::find_program_address(
+        &[RAYDIUM_LAUNCHLAB_SEED_AUTH],
+        &RAYDIUM_LAUNCHLAB_PROGRAM_ID,
+    )
+    .0
+});
+/// Shared Raydium LaunchLab Anchor CPI event authority PDA (`["__event_authority"]`).
+pub static RAYDIUM_LAUNCHLAB_EVENT_AUTHORITY: Lazy<Pubkey> = Lazy::new(|| {
+    Pubkey::find_program_address(
+        &[RAYDIUM_LAUNCHLAB_SEED_EVENT_AUTHORITY],
+        &RAYDIUM_LAUNCHLAB_PROGRAM_ID,
+    )
+    .0
+});
+
+// --------------------------------------------------------------------------
+// Raydium CPMM (`cp-swap`) — shared seeds + Anchor discriminators
+// --------------------------------------------------------------------------
+//
+// Seeds come from the official program source
+// (`raydium-io/raydium-cp-swap` @ f4b9b26342afe9122d5ff67cd7a4f19ded4ac0a5):
+//   programs/cp-swap/src/lib.rs                    -> AUTH_SEED
+//   programs/cp-swap/src/states/pool.rs            -> POOL_SEED et al.
+//   programs/cp-swap/src/states/config.rs          -> AMM_CONFIG_SEED
+//   programs/cp-swap/src/states/oracle.rs          -> OBSERVATION_SEED
+//   programs/cp-swap/src/states/permission.rs      -> PERMISSION_SEED
+
+/// Authority (vault + LP-mint authority) of every CPMM pool.
+pub const RAYDIUM_CPMM_SEED_AUTH: &[u8] = b"vault_and_lp_mint_auth_seed";
+/// The `AmmConfig` PDA (per config index).
+pub const RAYDIUM_CPMM_SEED_AMM_CONFIG: &[u8] = b"amm_config";
+/// The `PoolState` PDA (per config + mint pair).
+pub const RAYDIUM_CPMM_SEED_POOL: &[u8] = b"pool";
+/// The pool's LP mint PDA.
+pub const RAYDIUM_CPMM_SEED_POOL_LP_MINT: &[u8] = b"pool_lp_mint";
+/// The pool's token vault PDA (per vault mint).
+pub const RAYDIUM_CPMM_SEED_POOL_VAULT: &[u8] = b"pool_vault";
+/// The pool's oracle `ObservationState` PDA.
+pub const RAYDIUM_CPMM_SEED_OBSERVATION: &[u8] = b"observation";
+/// The permission PDA (used by `initialize_with_permission`).
+pub const RAYDIUM_CPMM_SEED_PERMISSION: &[u8] = b"permission";
+
+/// `global:swap_base_input` — sha256("global:swap_base_input")[..8].
+pub const RAYDIUM_CPMM_DISC_SWAP_BASE_INPUT: [u8; 8] = [143, 190, 90, 218, 196, 30, 51, 222];
+/// `global:swap_base_output` — sha256("global:swap_base_output")[..8].
+pub const RAYDIUM_CPMM_DISC_SWAP_BASE_OUTPUT: [u8; 8] = [55, 217, 98, 86, 163, 74, 180, 173];
+/// `global:initialize` — sha256("global:initialize")[..8].
+pub const RAYDIUM_CPMM_DISC_INITIALIZE: [u8; 8] = [175, 175, 109, 31, 13, 152, 155, 237];
+/// `global:initialize_with_permission` — sha256("global:initialize_with_permission")[..8].
+pub const RAYDIUM_CPMM_DISC_INITIALIZE_WITH_PERMISSION: [u8; 8] =
+    [63, 55, 254, 65, 49, 178, 89, 121];
+
+/// `account:PoolState` — sha256("account:PoolState")[..8].
+pub const RAYDIUM_CPMM_ACC_DISC_POOL_STATE: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
+/// `account:AmmConfig` — sha256("account:AmmConfig")[..8].
+pub const RAYDIUM_CPMM_ACC_DISC_AMM_CONFIG: [u8; 8] = [218, 244, 33, 104, 203, 203, 43, 111];
+/// `account:ObservationState` — sha256("account:ObservationState")[..8].
+pub const RAYDIUM_CPMM_ACC_DISC_OBSERVATION_STATE: [u8; 8] = [122, 174, 197, 53, 129, 9, 165, 132];
+
+/// `event:SwapEvent` — sha256("event:SwapEvent")[..8].
+pub const RAYDIUM_CPMM_EV_SWAP: [u8; 8] = [64, 198, 205, 232, 38, 8, 113, 226];
+/// `event:LpChangeEvent` — sha256("event:LpChangeEvent")[..8].
+pub const RAYDIUM_CPMM_EV_LP_CHANGE: [u8; 8] = [121, 163, 205, 201, 57, 218, 117, 60];
+
+/// Byte length of the CPMM `PoolState` account, including the 8-byte Anchor
+/// discriminator.
+///
+/// Source: `raydium-io/raydium-cp-swap` @ f4b9b26342afe9122d5ff67cd7a4f19ded4ac0a5
+/// → `programs/cp-swap/src/states/pool.rs`:
+/// `PoolState::LEN = 8 + 10 * 32 + 1 * 5 + 8 * 7 + 1 * 2 + 6 * 1 + 2 * 8 + 8 * 28`
+/// = 637.
+pub const RAYDIUM_CPMM_POOL_STATE_LEN: usize = 637;
+/// Byte length of the CPMM `AmmConfig` account, including the discriminator.
+///
+/// Source: `programs/cp-swap/src/states/config.rs`:
+/// `AmmConfig::LEN = 8 + 1 + 1 + 2 + 4 * 8 + 32 * 2 + 8 + 8 + 8 * 14` = 236.
+pub const RAYDIUM_CPMM_AMM_CONFIG_LEN: usize = 236;
+/// Byte length of the CPMM `ObservationState` account, including the
+/// discriminator.
+///
+/// Source: `programs/cp-swap/src/states/oracle.rs`:
+/// `ObservationState::LEN = 8 + 1 + 2 + 32 + (Observation::LEN * 100) + 8 * 4`
+/// where `Observation::LEN = 8 + 16 + 16 = 40` → 8 + 1 + 2 + 32 + 4000 + 32 = 4075.
+pub const RAYDIUM_CPMM_OBSERVATION_STATE_LEN: usize = 4075;
+/// Number of observation slots in the CPMM oracle ring buffer.
+pub const RAYDIUM_CPMM_OBSERVATION_NUM: usize = 100;
+
+/// CPMM pool status bit 0 — deposits disabled when set.
+pub const RAYDIUM_CPMM_STATUS_DISABLE_DEPOSIT: u8 = 1 << 0;
+/// CPMM pool status bit 1 — withdrawals disabled when set.
+pub const RAYDIUM_CPMM_STATUS_DISABLE_WITHDRAW: u8 = 1 << 1;
+/// CPMM pool status bit 2 — swaps disabled when set.
+pub const RAYDIUM_CPMM_STATUS_DISABLE_SWAP: u8 = 1 << 2;
+
+/// The CPMM fee-rate denominator: "hundredths of a bip", i.e. 10^-6.
+///
+/// Source: `raydium-io/raydium-cp-swap` →
+/// `programs/cp-swap/src/curve/fees.rs` → `FEE_RATE_DENOMINATOR_VALUE`.
+pub const RAYDIUM_CPMM_FEE_RATE_DENOMINATOR: u64 = 1_000_000;
+
+// --------------------------------------------------------------------------
+// Raydium LaunchLab (`launchpad`) — shared seeds + Anchor discriminators
+// --------------------------------------------------------------------------
+//
+// Seeds come from the official Raydium SDK
+// (`raydium-io/raydium-sdk-V2` @ f8549145afe75d4c486e30c43331c2c4da32b1eb):
+//   src/raydium/launchpad/pda.ts -> AUTH_SEED, CONFIG_SEED, POOL_VESTING_SEED, …
+
+/// The LaunchLab vault authority PDA.
+pub const RAYDIUM_LAUNCHLAB_SEED_AUTH: &[u8] = b"vault_auth_seed";
+/// The `GlobalConfig` PDA (per quote mint + curve type + index).
+pub const RAYDIUM_LAUNCHLAB_SEED_CONFIG: &[u8] = b"global_config";
+/// The `PoolState` PDA (per base/quote mint pair).
+pub const RAYDIUM_LAUNCHLAB_SEED_POOL: &[u8] = b"pool";
+/// The pool token vault PDA (per vault mint).
+pub const RAYDIUM_LAUNCHLAB_SEED_POOL_VAULT: &[u8] = b"pool_vault";
+/// The vesting-record PDA.
+pub const RAYDIUM_LAUNCHLAB_SEED_POOL_VESTING: &[u8] = b"pool_vesting";
+/// The `PlatformConfig` PDA (per platform admin).
+pub const RAYDIUM_LAUNCHLAB_SEED_PLATFORM: &[u8] = b"platform_config";
+/// The platform fee-vault authority PDA.
+pub const RAYDIUM_LAUNCHLAB_SEED_PLATFORM_FEE_VAULT_AUTH: &[u8] = b"platform_fee_vault_auth_seed";
+/// The creator fee-vault authority PDA.
+pub const RAYDIUM_LAUNCHLAB_SEED_CREATOR_FEE_VAULT_AUTH: &[u8] = b"creator_fee_vault_auth_seed";
+/// The `PlatformGlobalAccess` PDA.
+pub const RAYDIUM_LAUNCHLAB_SEED_PLATFORM_GLOBAL_ACCESS: &[u8] = b"platform_global_access";
+/// Anchor's CPI event-authority seed (shared by every Anchor program).
+pub const RAYDIUM_LAUNCHLAB_SEED_EVENT_AUTHORITY: &[u8] = b"__event_authority";
+
+/// `global:buy_exact_in` — sha256("global:buy_exact_in")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_BUY_EXACT_IN: [u8; 8] = [250, 234, 13, 123, 213, 156, 19, 236];
+/// `global:buy_exact_out` — sha256("global:buy_exact_out")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_BUY_EXACT_OUT: [u8; 8] = [24, 211, 116, 40, 105, 3, 153, 56];
+/// `global:sell_exact_in` — sha256("global:sell_exact_in")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_SELL_EXACT_IN: [u8; 8] = [149, 39, 222, 155, 211, 124, 152, 26];
+/// `global:sell_exact_out` — sha256("global:sell_exact_out")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_SELL_EXACT_OUT: [u8; 8] = [95, 200, 71, 34, 8, 9, 11, 166];
+/// `global:initialize` — sha256("global:initialize")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_INITIALIZE: [u8; 8] = [175, 175, 109, 31, 13, 152, 155, 237];
+/// `global:initialize_v2` — sha256("global:initialize_v2")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_INITIALIZE_V2: [u8; 8] = [67, 153, 175, 39, 218, 16, 38, 32];
+/// `global:initialize_with_token_2022` — sha256("global:initialize_with_token_2022")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_INITIALIZE_WITH_TOKEN_2022: [u8; 8] =
+    [37, 190, 126, 222, 44, 154, 171, 17];
+/// `global:migrate_to_amm` — sha256("global:migrate_to_amm")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_MIGRATE_TO_AMM: [u8; 8] = [207, 82, 192, 145, 254, 207, 145, 223];
+/// `global:migrate_to_cpswap` — sha256("global:migrate_to_cpswap")[..8].
+pub const RAYDIUM_LAUNCHLAB_DISC_MIGRATE_TO_CPSWAP: [u8; 8] =
+    [136, 92, 200, 103, 28, 218, 144, 140];
+
+/// `account:PoolState` — sha256("account:PoolState")[..8].
+pub const RAYDIUM_LAUNCHLAB_ACC_DISC_POOL_STATE: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
+/// `account:GlobalConfig` — sha256("account:GlobalConfig")[..8].
+pub const RAYDIUM_LAUNCHLAB_ACC_DISC_GLOBAL_CONFIG: [u8; 8] =
+    [149, 8, 156, 202, 160, 252, 176, 217];
+/// `account:PlatformConfig` — sha256("account:PlatformConfig")[..8].
+pub const RAYDIUM_LAUNCHLAB_ACC_DISC_PLATFORM_CONFIG: [u8; 8] =
+    [160, 78, 128, 0, 248, 83, 230, 160];
+/// `account:VestingRecord` — sha256("account:VestingRecord")[..8].
+pub const RAYDIUM_LAUNCHLAB_ACC_DISC_VESTING_RECORD: [u8; 8] =
+    [106, 243, 221, 205, 230, 126, 85, 83];
+
+/// `event:TradeEvent` — sha256("event:TradeEvent")[..8].
+pub const RAYDIUM_LAUNCHLAB_EV_TRADE: [u8; 8] = [189, 219, 127, 211, 78, 230, 97, 238];
+/// `event:PoolCreateEvent` — sha256("event:PoolCreateEvent")[..8].
+pub const RAYDIUM_LAUNCHLAB_EV_POOL_CREATE: [u8; 8] = [151, 215, 226, 9, 118, 161, 115, 174];
+/// `event:CreateVestingEvent` — sha256("event:CreateVestingEvent")[..8].
+pub const RAYDIUM_LAUNCHLAB_EV_CREATE_VESTING: [u8; 8] = [150, 152, 11, 179, 52, 210, 191, 125];
+/// `event:ClaimVestedEvent` — sha256("event:ClaimVestedEvent")[..8].
+pub const RAYDIUM_LAUNCHLAB_EV_CLAIM_VESTED: [u8; 8] = [21, 194, 114, 87, 120, 211, 226, 32];
+
+/// Byte length of the LaunchLab `PoolState` account, including the 8-byte
+/// Anchor discriminator.
+///
+/// The LaunchLab Anchor program source is not published, so the length is
+/// derived from the **official vendored IDL**
+/// (`crates/solana-kit/idl/raydium_launchpad.json`, type `PoolState`), field
+/// by field, in declaration order:
+///
+/// ```text
+///  8  discriminator
+///  8  epoch                    u64
+///  1  auth_bump                u8
+///  1  status                   u8
+///  1  base_decimals            u8
+///  1  quote_decimals           u8
+///  1  migrate_type             u8
+///  8  supply                   u64
+///  8  total_base_sell          u64
+///  8  virtual_base             u64
+///  8  virtual_quote            u64
+///  8  real_base                u64
+///  8  real_quote               u64
+///  8  total_quote_fund_raising u64
+///  8  quote_protocol_fee       u64
+///  8  platform_fee             u64
+///  8  migrate_fee              u64
+/// 40  vesting_schedule         VestingSchedule (5 × u64)
+/// 32  global_config            pubkey
+/// 32  platform_config          pubkey
+/// 32  base_mint                pubkey
+/// 32  quote_mint               pubkey
+/// 32  base_vault               pubkey
+/// 32  quote_vault              pubkey
+/// 32  creator                  pubkey
+///  1  token_program_flag       u8
+///  1  amm_creator_fee_on       u8 (AmmCreatorFeeOn enum)
+///  8  platform_vesting_share   u64
+/// 54  padding                  [u8; 54]
+/// ```
+///
+/// 8 + 8 + 5 + 9*8 + 40 + 7*32 + 2 + 8 + 54 = 429.
+pub const RAYDIUM_LAUNCHLAB_POOL_STATE_LEN: usize = 429;
+
+/// Byte length of the LaunchLab `GlobalConfig` account, including the
+/// discriminator. Derived from the vendored IDL's `GlobalConfig` type:
+/// 8 + 8 + 1 + 2 + 8*9 + 32*5 + 1 + 7 + 15*8 = 371.
+pub const RAYDIUM_LAUNCHLAB_GLOBAL_CONFIG_LEN: usize = 371;
+
+/// Byte length of the LaunchLab `VestingRecord` account, including the
+/// discriminator. Derived from the vendored IDL's `VestingRecord` type:
+/// 8 + 8 + 32 + 32 + 8 + 8 + 8*8 = 160.
+pub const RAYDIUM_LAUNCHLAB_VESTING_RECORD_LEN: usize = 160;
+
+/// LaunchLab pool status — still fundraising.
+pub const RAYDIUM_LAUNCHLAB_STATUS_FUND: u8 = 0;
+/// LaunchLab pool status — fundraising finished, waiting for migration.
+pub const RAYDIUM_LAUNCHLAB_STATUS_MIGRATE: u8 = 1;
+/// LaunchLab pool status — migrated to an AMM; the curve is closed.
+pub const RAYDIUM_LAUNCHLAB_STATUS_TRADE: u8 = 2;
+
+/// LaunchLab migration target — Raydium AMM v4 (OpenBook-backed).
+pub const RAYDIUM_LAUNCHLAB_MIGRATE_TO_AMM: u8 = 0;
+/// LaunchLab migration target — Raydium CPMM (`cp-swap`).
+pub const RAYDIUM_LAUNCHLAB_MIGRATE_TO_CPSWAP: u8 = 1;
+
+/// LaunchLab curve type 0 — constant product.
+pub const RAYDIUM_LAUNCHLAB_CURVE_CONSTANT: u8 = 0;
+/// LaunchLab curve type 1 — fixed price.
+pub const RAYDIUM_LAUNCHLAB_CURVE_FIXED: u8 = 1;
+/// LaunchLab curve type 2 — linear price.
+pub const RAYDIUM_LAUNCHLAB_CURVE_LINEAR: u8 = 2;
+
+/// The LaunchLab fee-rate denominator: "hundredths of a bip", i.e. 10^-6.
+///
+/// Source: `raydium-io/raydium-sdk-V2` @ f8549145afe75d4c486e30c43331c2c4da32b1eb
+/// → `src/common/fee.ts` → `FEE_RATE_DENOMINATOR_VALUE`.
+pub const RAYDIUM_LAUNCHLAB_FEE_RATE_DENOMINATOR: u64 = 1_000_000;
+
+/// `Q64 = 2^64` — the fixed-point scale used by the LaunchLab linear curve.
+///
+/// Source: `src/raydium/launchpad/curve/func.ts` → `MathLaunch._Q64`.
+pub const RAYDIUM_LAUNCHLAB_Q64: u128 = 1u128 << 64;
+
 /// Meteora DLMM (verified against multiple 2026 sources; see venues/mod.rs).
 pub static METEORA_DLMM: Lazy<Pubkey> =
     Lazy::new(|| pk("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"));
@@ -586,5 +857,22 @@ mod tests {
             ea, *PUMP_EVENT_AUTHORITY,
             "event authority seed must be \"__event_authority\""
         );
+    }
+
+    #[test]
+    fn raydium_program_ids_and_shared_authorities_resolve() {
+        assert_eq!(*RAYDIUM_CPMM_PROGRAM_ID, *RAYDIUM_CPMM);
+        assert_eq!(*RAYDIUM_LAUNCHLAB_PROGRAM_ID, *RAYDIUM_LAUNCHLAB);
+        assert_eq!(
+            RAYDIUM_CPMM_PROGRAM_ID.to_string(),
+            "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"
+        );
+        assert_eq!(
+            RAYDIUM_LAUNCHLAB_PROGRAM_ID.to_string(),
+            "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"
+        );
+        assert_ne!(*RAYDIUM_CPMM_AUTHORITY, Pubkey::default());
+        assert_ne!(*RAYDIUM_LAUNCHLAB_AUTHORITY, Pubkey::default());
+        assert_ne!(*RAYDIUM_LAUNCHLAB_EVENT_AUTHORITY, Pubkey::default());
     }
 }

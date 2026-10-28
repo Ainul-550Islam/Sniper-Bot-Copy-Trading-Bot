@@ -8,22 +8,29 @@
 //! * **Program identity** — verified and pinned (see the `const` blocks in
 //!   each adapter; every id is also in `scripts/protocol-pins.json` and
 //!   guarded by `check-protocol-drift.sh`).
-//! * **Instruction/account layouts** — NOT yet verified against the current
-//!   IDLs for these venues. Until an adapter's [`VenueAdapter::layout_verified`]
-//!   returns `true`, [`VenueAdapter::build_swap`] MUST refuse with
+//! * **Instruction/account layouts** — verified per adapter. Until an
+//!   adapter's [`VenueAdapter::layout_verified`] returns `true`,
+//!   [`VenueAdapter::build_swap`] MUST refuse with
 //!   [`VenueError::LayoutUnverified`]. Shipping unverified layouts is how
 //!   funds get lost; the type system makes the gate unmissable.
 //!
 //! Current adapters:
-//! * `raydium_cpmm` — Raydium CPMM (constant-product market maker pools).
-//! * `meteora`      — Meteora DLMM and Meteora DAMM v1.
+//! * `raydium_cpmm`      — Raydium CPMM (`cp-swap`), Anchor constant-product
+//!   AMM. **Layout verified** against the official vendored IDL.
+//! * `raydium_launchlab` — Raydium LaunchLab (`launchpad`), Anchor
+//!   bonding-curve launchpad with three curve types. **Layout verified**
+//!   against the official vendored IDL.
+//! * `meteora`           — Meteora DLMM and Meteora DAMM v1. Layouts are
+//!   still unverified, so they keep refusing.
 //!
-//! Not included yet, deliberately: LaunchLab (const exists in
-//! `crate::consts::RAYDIUM_LAUNCHLAB`, but its pool layout needs the same
-//! verification pass first) and any venue whose 2026 docs we have not read.
+//! Not included yet, deliberately: any venue whose 2026 docs we have not read.
 
 pub mod meteora;
+// Explicit module root so unpacking an archive over a tree that still has the
+// superseded `raydium_cpmm.rs` stub on disk never hits E0761 before cleanup.
+#[path = "raydium_cpmm/mod.rs"]
 pub mod raydium_cpmm;
+pub mod raydium_launchlab;
 
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
@@ -107,10 +114,15 @@ pub struct VenueRegistry {
 
 impl VenueRegistry {
     /// The default registry: every shipped adapter, preference order.
+    ///
+    /// The Raydium venues come first: they are the deepest liquidity on
+    /// Solana and, as of Batch 03, their layouts are verified against the
+    /// official vendored IDLs.
     pub fn default_registry() -> Self {
         VenueRegistry {
             adapters: vec![
                 Box::new(raydium_cpmm::RaydiumCpmm::new()),
+                Box::new(raydium_launchlab::RaydiumLaunchLab::new()),
                 Box::new(meteora::MeteoraDlmm::new()),
                 Box::new(meteora::MeteoraDammV1::new()),
             ],
@@ -140,6 +152,9 @@ mod tests {
     #[test]
     fn unverified_adapters_refuse_to_build() {
         for adapter in VenueRegistry::default_registry().all() {
+            if adapter.layout_verified() {
+                continue;
+            }
             let req = VenueSwapRequest {
                 base_mint: Pubkey::new_unique(),
                 quote_mint: Pubkey::new_unique(),
@@ -153,15 +168,42 @@ mod tests {
                 "{} must refuse until layout_verified",
                 adapter.id()
             );
-            assert!(!adapter.layout_verified());
         }
     }
 
     #[test]
-    fn nothing_is_buildable_until_layouts_are_verified() {
-        // This test is the tripwire: when an adapter's layout gets verified,
-        // it must be a DELIBERATE change that shows up here.
-        assert!(VenueRegistry::default_registry().buildable().is_empty());
+    fn the_verified_raydium_venues_are_registered_and_buildable() {
+        let reg = VenueRegistry::default_registry();
+        let cpmm = reg.all().iter().find(|v| v.id() == "raydium_cpmm").unwrap();
+        assert!(cpmm.layout_verified());
+        let launchlab = reg
+            .all()
+            .iter()
+            .find(|v| v.id() == "raydium_launchlab")
+            .unwrap();
+        assert!(launchlab.layout_verified());
+
+        let ids: Vec<&str> = reg.buildable().iter().map(|a| a.id()).collect();
+        assert!(ids.contains(&"raydium_cpmm"));
+        assert!(ids.contains(&"raydium_launchlab"));
+        // Meteora's layouts are still unverified, so it stays out.
+        assert!(!ids.contains(&"meteora_dlmm"));
+        assert!(!ids.contains(&"meteora_damm_v1"));
+    }
+
+    #[test]
+    fn the_existing_venues_still_resolve() {
+        let reg = VenueRegistry::default_registry();
+        let dlmm = reg.all().iter().find(|v| v.id() == "meteora_dlmm").unwrap();
+        assert_eq!(*dlmm.program_id(), *crate::consts::METEORA_DLMM);
+        let damm = reg
+            .all()
+            .iter()
+            .find(|v| v.id() == "meteora_damm_v1")
+            .unwrap();
+        assert_eq!(*damm.program_id(), *crate::consts::METEORA_DAMM_V1);
+        assert!(!dlmm.layout_verified());
+        assert!(!damm.layout_verified());
     }
 
     #[test]
@@ -170,6 +212,12 @@ mod tests {
         let reg = VenueRegistry::default_registry();
         let cpmm = reg.all().iter().find(|v| v.id() == "raydium_cpmm").unwrap();
         assert_eq!(*cpmm.program_id(), *consts::RAYDIUM_CPMM);
+        let launchlab = reg
+            .all()
+            .iter()
+            .find(|v| v.id() == "raydium_launchlab")
+            .unwrap();
+        assert_eq!(*launchlab.program_id(), *consts::RAYDIUM_LAUNCHLAB);
         let dlmm = reg.all().iter().find(|v| v.id() == "meteora_dlmm").unwrap();
         assert_eq!(*dlmm.program_id(), *consts::METEORA_DLMM);
         let damm = reg

@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "SYNTHETIC FIXTURE - NOT MAINNET DATA.",
+    "Every byte below is produced by solana-kit's own synthetic encoders",
+    "from deterministic placeholder keys ([0x99;32], [0xAA;32], ...).",
+    "No key, signature or account captured from the real chain appears here.",
+    "The layout is the official Raydium LaunchLab `PoolState` /",
+    "`GlobalConfig` layout (raydium-io/raydium-idl @",
+    "e7e0c96fe77bcf6a020b84a44c47a722aac8e359)."
+  ],
+  "decoded_expectations": {
+    "amm_creator_fee_on": 0,
+    "auth_bump": 253,
+    "base_decimals": 6,
+    "base_mint": "DdqGmK5uamYN5vmuZrzpQhKeehLdwtPLVJdhu5P2iJKC",
+    "base_vault": "Fw5KdYvFgue4q1HAQ264JTZax6VUr3jDVBJ1szuQ7dHE",
+    "creator": "JEKNVnkbo3jma5nREBBJCDoXFVeKkD56V3xKrvRmWxFG",
+    "epoch": 0,
+    "global_config": "BLbDu5FZUdSfLrGejhuaWw5iMJBo3j3TVRyPv9rfJyMA",
+    "migrate_type": 1,
+    "platform_config": "CVDFLCAjXhVWiPXH9nTCTpCgVzmDVoiPzNJYuccr1dqB",
+    "platform_vesting_share": 0,
+    "quote_decimals": 9,
+    "quote_mint": "EnTJCS15dqbDTU2XywYSMaScoPv4Py4GzExrtY9DQxoD",
+    "quote_vault": "H5hM4fqRjygvCYXnp6dgFLgZ6o4uJ8Q9z7dAsTfapHmF",
+    "real_base": 0,
+    "real_quote": 0,
+    "status": 0,
+    "supply": 1000000000000000,
+    "token_program_flag": 0,
+    "total_base_sell": 793100000000000,
+    "total_quote_fund_raising": 85000000000,
+    "virtual_base": 1073471847374405,
+    "virtual_quote": 30050573465
+  },
+  "discriminators": {
+    "buy_exact_in": "faea0d7bd59c13ec",
+    "buy_exact_out": "18d3742869039938",
+    "sell_exact_in": "9527de9bd37c981a",
+    "sell_exact_out": "5fc8472208090ba6"
+  },
+  "global_config": {
+    "account": "GlobalConfig",
+    "data_hex": "95089ccaa0fcb0d900000000000000000000000000000000000000c409000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0000001c5fce87c8af8b45d7c3f7ade49be2cfe640968a5342342f42469a11a30000001d154af1c17b481790d0d4a684fab751b64c58e9f3a0d841a37e8fb6810000001e639d60c7d2483557e3d05d41539eca67f32b6a115642b6e9dab0509d0000001fc5ef2c46597402f4e3371bca0abd0f4008e0492d1cd6b0d086f091620000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "discriminator": "95089ccaa0fcb0d9",
+    "expected_length": 371,
+    "length": 371
+  },
+  "idl_source": "raydium-io/raydium-idl @ e7e0c96fe77bcf6a020b84a44c47a722aac8e359",
+  "pool_state": {
+    "account": "PoolState",
+    "data_hex": "f7ede3f5d7c3de460000000000000000fd000609010080c6a47e8d03000078c5fb51d10200459e232451d00300995c27ff0600000000000000000000000000000000000000001265ca13000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009999999999999999999999999999999999999999999999999999999999999999aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "discriminator": "f7ede3f5d7c3de46",
+    "expected_length": 429,
+    "length": 429
+  },
+  "program_id": "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj",
+  "sdk_source": "raydium-io/raydium-sdk-V2 @ f8549145afe75d4c486e30c43331c2c4da32b1eb",
+  "synthetic": true
+}

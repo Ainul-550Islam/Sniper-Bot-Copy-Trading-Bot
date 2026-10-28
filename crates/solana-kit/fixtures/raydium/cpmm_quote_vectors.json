@@ -1,0 +1,428 @@
+{
+  "_comment": [
+    "SYNTHETIC QUOTE VECTORS + OFFICIAL PROGRAM ROUNDING VECTORS - NOT MAINNET DATA.",
+    "official_constant_product_rounding contains the 10 verbatim rounding vectors",
+    "from raydium-io/raydium-cp-swap @ f4b9b26342afe9122d5ff67cd7a4f19ded4ac0a5",
+    "`programs/cp-swap/src/curve/constant_product.rs:176-206` (`constant_product_swap_rounding`).",
+    "exact_in and exact_out are deterministic SwapResult vectors computed by the",
+    "byte-exact port of `programs/cp-swap/src/curve/{calculator,fees,constant_product}.rs`."
+  ],
+  "official_program_tests_source": "raydium-io/raydium-cp-swap @ f4b9b26342afe9122d5ff67cd7a4f19ded4ac0a5 -> programs/cp-swap/src/curve/constant_product.rs:176-206 (constant_product_swap_rounding)",
+  "official_constant_product_rounding": [
+    {
+      "input_amount": "10",
+      "input_vault_amount": "4000000",
+      "output_vault_amount": "70000000000",
+      "expected_output_amount": "174999"
+    },
+    {
+      "input_amount": "20",
+      "input_vault_amount": "29980",
+      "output_vault_amount": "10000",
+      "expected_output_amount": "6"
+    },
+    {
+      "input_amount": "19",
+      "input_vault_amount": "29980",
+      "output_vault_amount": "10000",
+      "expected_output_amount": "6"
+    },
+    {
+      "input_amount": "18",
+      "input_vault_amount": "29980",
+      "output_vault_amount": "10000",
+      "expected_output_amount": "6"
+    },
+    {
+      "input_amount": "10",
+      "input_vault_amount": "20000",
+      "output_vault_amount": "30000",
+      "expected_output_amount": "14"
+    },
+    {
+      "input_amount": "10",
+      "input_vault_amount": "19991",
+      "output_vault_amount": "30000",
+      "expected_output_amount": "14"
+    },
+    {
+      "input_amount": "10",
+      "input_vault_amount": "19990",
+      "output_vault_amount": "30000",
+      "expected_output_amount": "15"
+    },
+    {
+      "input_amount": "100",
+      "input_vault_amount": "60000",
+      "output_vault_amount": "30000",
+      "expected_output_amount": "49"
+    },
+    {
+      "input_amount": "99",
+      "input_vault_amount": "60000",
+      "output_vault_amount": "30000",
+      "expected_output_amount": "49"
+    },
+    {
+      "input_amount": "98",
+      "input_vault_amount": "60000",
+      "output_vault_amount": "30000",
+      "expected_output_amount": "48"
+    }
+  ],
+  "discriminators": {
+    "swap_base_input": "8fbe5adac41e33de",
+    "swap_base_output": "37d96256a34ab4ad"
+  },
+  "exact_in": [
+    {
+      "amount_in": 1000,
+      "case": "no_fees",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 1000,
+      "new_input_vault_amount": 1000001000,
+      "new_output_vault_amount": 1999998001,
+      "output_amount": 1999,
+      "protocol_fee": 0,
+      "trade_fee": 0
+    },
+    {
+      "amount_in": 1000000,
+      "case": "no_fees",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 1000000,
+      "new_input_vault_amount": 1001000000,
+      "new_output_vault_amount": 1998001999,
+      "output_amount": 1998001,
+      "protocol_fee": 0,
+      "trade_fee": 0
+    },
+    {
+      "amount_in": 100000000,
+      "case": "no_fees",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 100000000,
+      "new_input_vault_amount": 1100000000,
+      "new_output_vault_amount": 1818181819,
+      "output_amount": 181818181,
+      "protocol_fee": 0,
+      "trade_fee": 0
+    },
+    {
+      "amount_in": 1000,
+      "case": "trade_fee_only",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 1000,
+      "new_input_vault_amount": 1000000997,
+      "new_output_vault_amount": 1999998007,
+      "output_amount": 1993,
+      "protocol_fee": 0,
+      "trade_fee": 3
+    },
+    {
+      "amount_in": 1000000,
+      "case": "trade_fee_only",
+      "creator_fee": 0,
+      "fund_fee": 1,
+      "input_amount": 1000000,
+      "new_input_vault_amount": 1000997500,
+      "new_output_vault_amount": 1998006989,
+      "output_amount": 1993011,
+      "protocol_fee": 1,
+      "trade_fee": 2500
+    },
+    {
+      "amount_in": 100000000,
+      "case": "trade_fee_only",
+      "creator_fee": 0,
+      "fund_fee": 125,
+      "input_amount": 100000000,
+      "new_input_vault_amount": 1099750000,
+      "new_output_vault_amount": 1818595136,
+      "output_amount": 181404864,
+      "protocol_fee": 125,
+      "trade_fee": 250000
+    },
+    {
+      "amount_in": 1000,
+      "case": "creator_fee_on_output",
+      "creator_fee": 2,
+      "fund_fee": 0,
+      "input_amount": 1000,
+      "new_input_vault_amount": 1000000997,
+      "new_output_vault_amount": 1999998007,
+      "output_amount": 1991,
+      "protocol_fee": 0,
+      "trade_fee": 3
+    },
+    {
+      "amount_in": 1000000,
+      "case": "creator_fee_on_output",
+      "creator_fee": 1994,
+      "fund_fee": 1,
+      "input_amount": 1000000,
+      "new_input_vault_amount": 1000997500,
+      "new_output_vault_amount": 1998006989,
+      "output_amount": 1991017,
+      "protocol_fee": 1,
+      "trade_fee": 2500
+    },
+    {
+      "amount_in": 100000000,
+      "case": "creator_fee_on_output",
+      "creator_fee": 181405,
+      "fund_fee": 125,
+      "input_amount": 100000000,
+      "new_input_vault_amount": 1099750000,
+      "new_output_vault_amount": 1818595136,
+      "output_amount": 181223459,
+      "protocol_fee": 125,
+      "trade_fee": 250000
+    },
+    {
+      "amount_in": 1000,
+      "case": "creator_fee_on_input",
+      "creator_fee": 1,
+      "fund_fee": 0,
+      "input_amount": 1000,
+      "new_input_vault_amount": 1000000996,
+      "new_output_vault_amount": 1999998009,
+      "output_amount": 1991,
+      "protocol_fee": 0,
+      "trade_fee": 3
+    },
+    {
+      "amount_in": 1000000,
+      "case": "creator_fee_on_input",
+      "creator_fee": 1000,
+      "fund_fee": 1,
+      "input_amount": 1000000,
+      "new_input_vault_amount": 1000996500,
+      "new_output_vault_amount": 1998008985,
+      "output_amount": 1991015,
+      "protocol_fee": 1,
+      "trade_fee": 2500
+    },
+    {
+      "amount_in": 100000000,
+      "case": "creator_fee_on_input",
+      "creator_fee": 100000,
+      "fund_fee": 125,
+      "input_amount": 100000000,
+      "new_input_vault_amount": 1099650000,
+      "new_output_vault_amount": 1818760515,
+      "output_amount": 181239485,
+      "protocol_fee": 125,
+      "trade_fee": 250000
+    }
+  ],
+  "exact_out": [
+    {
+      "amount_out": 1000,
+      "case": "no_fees",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 501,
+      "new_input_vault_amount": 1000000501,
+      "new_output_vault_amount": 1999999000,
+      "output_amount": 1000,
+      "protocol_fee": 0,
+      "trade_fee": 0
+    },
+    {
+      "amount_out": 1000000,
+      "case": "no_fees",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 500251,
+      "new_input_vault_amount": 1000500251,
+      "new_output_vault_amount": 1999000000,
+      "output_amount": 1000000,
+      "protocol_fee": 0,
+      "trade_fee": 0
+    },
+    {
+      "amount_out": 100000000,
+      "case": "no_fees",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 52631579,
+      "new_input_vault_amount": 1052631579,
+      "new_output_vault_amount": 1900000000,
+      "output_amount": 100000000,
+      "protocol_fee": 0,
+      "trade_fee": 0
+    },
+    {
+      "amount_out": 1000,
+      "case": "trade_fee_only",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 503,
+      "new_input_vault_amount": 1000000501,
+      "new_output_vault_amount": 1999999000,
+      "output_amount": 1000,
+      "protocol_fee": 0,
+      "trade_fee": 2
+    },
+    {
+      "amount_out": 1000000,
+      "case": "trade_fee_only",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 501505,
+      "new_input_vault_amount": 1000500251,
+      "new_output_vault_amount": 1999000000,
+      "output_amount": 1000000,
+      "protocol_fee": 0,
+      "trade_fee": 1254
+    },
+    {
+      "amount_out": 100000000,
+      "case": "trade_fee_only",
+      "creator_fee": 0,
+      "fund_fee": 65,
+      "input_amount": 52763488,
+      "new_input_vault_amount": 1052631579,
+      "new_output_vault_amount": 1900000000,
+      "output_amount": 100000000,
+      "protocol_fee": 65,
+      "trade_fee": 131909
+    },
+    {
+      "amount_out": 1000,
+      "case": "creator_fee_on_output",
+      "creator_fee": 2,
+      "fund_fee": 0,
+      "input_amount": 504,
+      "new_input_vault_amount": 1000000502,
+      "new_output_vault_amount": 1999998998,
+      "output_amount": 1000,
+      "protocol_fee": 0,
+      "trade_fee": 2
+    },
+    {
+      "amount_out": 1000000,
+      "case": "creator_fee_on_output",
+      "creator_fee": 1002,
+      "fund_fee": 0,
+      "input_amount": 502008,
+      "new_input_vault_amount": 1000500752,
+      "new_output_vault_amount": 1998998998,
+      "output_amount": 1000000,
+      "protocol_fee": 0,
+      "trade_fee": 1256
+    },
+    {
+      "amount_out": 100000000,
+      "case": "creator_fee_on_output",
+      "creator_fee": 100101,
+      "fund_fee": 66,
+      "input_amount": 52819088,
+      "new_input_vault_amount": 1052687040,
+      "new_output_vault_amount": 1899899899,
+      "output_amount": 100000000,
+      "protocol_fee": 66,
+      "trade_fee": 132048
+    },
+    {
+      "amount_out": 1000,
+      "case": "creator_fee_on_input",
+      "creator_fee": 0,
+      "fund_fee": 0,
+      "input_amount": 503,
+      "new_input_vault_amount": 1000000501,
+      "new_output_vault_amount": 1999999000,
+      "output_amount": 1000,
+      "protocol_fee": 0,
+      "trade_fee": 2
+    },
+    {
+      "amount_out": 1000000,
+      "case": "creator_fee_on_input",
+      "creator_fee": 502,
+      "fund_fee": 0,
+      "input_amount": 502009,
+      "new_input_vault_amount": 1000500251,
+      "new_output_vault_amount": 1999000000,
+      "output_amount": 1000000,
+      "protocol_fee": 0,
+      "trade_fee": 1256
+    },
+    {
+      "amount_out": 100000000,
+      "case": "creator_fee_on_input",
+      "creator_fee": 52816,
+      "fund_fee": 66,
+      "input_amount": 52816437,
+      "new_input_vault_amount": 1052631579,
+      "new_output_vault_amount": 1900000000,
+      "output_amount": 100000000,
+      "protocol_fee": 66,
+      "trade_fee": 132042
+    }
+  ],
+  "fee_helpers": [
+    {
+      "amount": 1000000,
+      "case": "trading_fee_is_ceiled",
+      "rate": 2500,
+      "value": 2500
+    },
+    {
+      "amount": 1000000,
+      "case": "protocol_fee_is_floored",
+      "rate": 500,
+      "value": 500
+    },
+    {
+      "amount": 1000000,
+      "case": "fund_fee_is_floored",
+      "rate": 500,
+      "value": 500
+    },
+    {
+      "amount": 1000000,
+      "case": "creator_fee_is_ceiled",
+      "rate": 1000,
+      "value": 1000
+    },
+    {
+      "case": "split_creator_fee_is_floored",
+      "creator_fee_rate": 1000,
+      "total_fee": 1000000,
+      "trade_fee_rate": 2500,
+      "value": 285714
+    },
+    {
+      "case": "pre_fee_amount_is_ceiled",
+      "post_fee_amount": 750,
+      "rate": 250000,
+      "value": 1000
+    }
+  ],
+  "fee_rate_denominator": 1000000,
+  "program_id": "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+  "program_source": "raydium-io/raydium-cp-swap @ f4b9b26342afe9122d5ff67cd7a4f19ded4ac0a5",
+  "reserves": {
+    "input_vault_amount": 1000000000,
+    "output_vault_amount": 2000000000
+  },
+  "slippage_helpers": {
+    "max_in_with_slippage_bps": {
+      "expected_in": 1000,
+      "slippage_bps": 100,
+      "value": 1010
+    },
+    "min_out_with_slippage_bps": {
+      "expected_out": 1000,
+      "slippage_bps": 100,
+      "value": 990
+    }
+  },
+  "synthetic": true
+}
