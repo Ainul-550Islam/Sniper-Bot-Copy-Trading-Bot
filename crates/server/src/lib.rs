@@ -29,6 +29,7 @@ pub mod provisioning;
 pub mod recon;
 pub mod runtime_registry;
 pub mod saas;
+pub mod telegram_trade_port;
 pub mod telegram_trade_store_pg;
 pub mod tenant;
 pub mod tenant_background;

@@ -8959,7 +8959,7 @@
         ]
       },
       "put": {
-        "description": "Bind the tenant's Telegram chat to the trading bridge.",
+        "description": "Bind the tenant's Telegram chat. Body: chat_id (integer, required), telegram_user_id (positive integer, optional — the user allowed to act in the chat), trading_enabled (boolean, optional, requires telegram_user_id). A rebind always rewrites the trading-link fields; absent means cleared. The binding alone never enables trading: orders additionally need an in-chat consent.",
         "operationId": "tenant.bindTelegram",
         "requestBody": {
           "content": {
@@ -8982,11 +8982,112 @@
             },
             "description": "The binding."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Malformed chat id or trading-link fields (including trading_enabled without telegram_user_id)."
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/telegram/consent": {
+      "get": {
+        "description": "The live Telegram trade consent for the bound chat, if any (view only — granting happens in chat via the confirmation phrase; the phrase digest is never returned).",
+        "operationId": "tenant.telegramConsent",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Consent state (consent is null when none is live)."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The tenant has no Telegram chat binding."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The consent store is unavailable."
+          }
+        },
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/api/tenant/telegram/consent/revoke": {
+      "post": {
+        "description": "Revoke the live Telegram trade consent for the bound chat and cancel every pending command of that chat. Idempotent: revoking when nothing is live returns revoked=null.",
+        "operationId": "tenant.revokeTelegramConsent",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The revoked consent (or null) and the cancelled pending command ids."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The tenant has no Telegram chat binding."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The consent store is unavailable."
           }
         },
         "tags": [

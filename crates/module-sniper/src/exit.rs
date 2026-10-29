@@ -49,7 +49,11 @@ use solana_kit::pump::{self, BondingCurveState, BuildOptions, PumpContext};
 use solana_kit::pumpswap::{self, PumpSwapContext};
 use solana_kit::raydium::RaydiumPool;
 use solana_kit::tx::TxRequest;
+use solana_kit::venues::raydium_cpmm::accounts::CpmmSide;
+use solana_kit::venues::raydium_cpmm::adapter::{CpmmPool, RaydiumCpmm};
+use solana_kit::venues::raydium_launchlab::adapter::RaydiumLaunchLab;
 
+use crate::market::{load_cpmm_pool, load_launchlab_market, read_mint, LaunchLabMarket};
 use crate::pipeline::EntryRoute;
 use crate::Sniper;
 
@@ -467,6 +471,31 @@ impl Sniper {
                     }
                 }
             }
+            Venue::RaydiumCpmm => {
+                if let Some(cpmm) = pool {
+                    if let Ok(p) = load_cpmm_pool(&self.rpc, &cpmm).await {
+                        let price = cpmm_price_in_sol(&p, &mint);
+                        if price.is_finite() && price > 0.0 {
+                            return Ok(price);
+                        }
+                    }
+                }
+            }
+            Venue::RaydiumLaunchLab => {
+                // The pool address is deterministic from the mint pair, so
+                // the mark still resolves when the position lost it. A
+                // migrated pool prices through the generic path below.
+                let launchlab =
+                    pool.unwrap_or_else(|| RaydiumLaunchLab::pool_pda(&mint, &WSOL_MINT));
+                if let Ok(market) = load_launchlab_market(&self.rpc, &launchlab).await {
+                    if market.pool.state.is_curve_open() {
+                        let price = launchlab_price_in_sol(&market);
+                        if price.is_finite() && price > 0.0 {
+                            return Ok(price);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         self.mark_price_sol(&position.symbol).await
@@ -519,13 +548,7 @@ impl Sniper {
             return Ok(());
         }
         let cfg = self.state.config_snapshot().await;
-        let base_decimals = 6u8;
         let sell_qty_human = position.qty * fraction;
-        let sell_raw = maths::to_raw_amount(sell_qty_human, base_decimals);
-        if sell_raw == 0 {
-            permit.finish(false).await;
-            return Ok(());
-        }
 
         let mint = Pubkey::try_from(position.symbol.as_str())
             .map_err(|e| BotError::invalid(format!("position mint {}: {e}", position.symbol)))?;
@@ -534,6 +557,44 @@ impl Sniper {
         // Resolve the exit route from the position's venue and the live
         // venue state; every path below is one hardened-executor call.
         let route = self.exit_route(position, &mint, &cfg.sniper).await?;
+
+        // The raw sell amount needs the token's real decimals, which the
+        // position record does not carry: take them from the loaded venue
+        // (pump.fun curve tokens are always 6dp; the aggregator path reads
+        // the mint). Guessing 6 for an arbitrary Raydium/CPMM/LaunchLab
+        // mint would size the sell wrong by orders of magnitude.
+        let base_decimals = match &route {
+            ExitVenue::Curve(_) => 6,
+            ExitVenue::PumpSwap(ctx) => ctx.base_decimals,
+            ExitVenue::Raydium(pool) => raydium_base_decimals(pool, &mint).ok_or_else(|| {
+                BotError::invalid(format!(
+                    "raydium pool does not contain mint {mint}; cannot size the exit"
+                ))
+            })?,
+            ExitVenue::RaydiumCpmm(pool) => match pool.side_of(&mint) {
+                Some(CpmmSide::Token0) => pool.state.mint_0_decimals,
+                Some(CpmmSide::Token1) => pool.state.mint_1_decimals,
+                None => {
+                    return Err(BotError::invalid(format!(
+                        "raydium cpmm pool does not contain mint {mint}; cannot size the exit"
+                    )))
+                }
+            },
+            ExitVenue::RaydiumLaunchLab(market) => market.pool.state.base_decimals,
+            ExitVenue::Jupiter => read_mint(&self.rpc, &mint)
+                .await
+                .map(|info| info.decimals)
+                .ok_or_else(|| {
+                    BotError::invalid(format!(
+                        "mint {mint} decimals unreadable; cannot size the jupiter exit"
+                    ))
+                })?,
+        };
+        let sell_raw = maths::to_raw_amount(sell_qty_human, base_decimals);
+        if sell_raw == 0 {
+            permit.finish(false).await;
+            return Ok(());
+        }
 
         // Fencing (§E): re-validate ownership immediately before the
         // money-moving branch — a taken-over replica must not sell.
@@ -566,6 +627,31 @@ impl Sniper {
                     EntryRoute::RaydiumV4Direct.as_str(),
                 );
                 self.sell_on_raydium(&pool, &mint, sell_raw, pct, &cfg, &intent_id)
+                    .await?
+            }
+            ExitVenue::RaydiumCpmm(pool) => {
+                let pct = cfg.sniper.raydium_cpmm_slippage_pct.unwrap_or(slippage_pct);
+                let intent_id = exit_intent_id(
+                    "sniper",
+                    position,
+                    sell_raw,
+                    EntryRoute::RaydiumCpmmDirect.as_str(),
+                );
+                self.sell_on_raydium_cpmm(&pool, &mint, sell_raw, pct, &cfg, &intent_id)
+                    .await?
+            }
+            ExitVenue::RaydiumLaunchLab(market) => {
+                let pct = cfg
+                    .sniper
+                    .raydium_launchlab_slippage_pct
+                    .unwrap_or(slippage_pct);
+                let intent_id = exit_intent_id(
+                    "sniper",
+                    position,
+                    sell_raw,
+                    EntryRoute::RaydiumLaunchLabDirect.as_str(),
+                );
+                self.sell_on_raydium_launchlab(&market, &mint, sell_raw, pct, &cfg, &intent_id)
                     .await?
             }
             ExitVenue::Jupiter => {
@@ -760,6 +846,38 @@ impl Sniper {
                     Err(e) => jupiter_or(format!("raydium pool unavailable: {e}")),
                 }
             }
+            Venue::RaydiumCpmm => {
+                if !sniper.trade_raydium_cpmm {
+                    return jupiter_or("trade_raydium_cpmm is off".into());
+                }
+                let Some(cpmm) = pool else {
+                    return jupiter_or("position carries no raydium cpmm pool id".into());
+                };
+                match load_cpmm_pool(&self.rpc, &cpmm).await {
+                    Ok(p) if !p.state.status.swaps_disabled() => {
+                        Ok(ExitVenue::RaydiumCpmm(Box::new(p)))
+                    }
+                    Ok(_) => jupiter_or("raydium cpmm pool has swaps disabled".into()),
+                    Err(e) => jupiter_or(format!("raydium cpmm pool unavailable: {e}")),
+                }
+            }
+            Venue::RaydiumLaunchLab => {
+                if !sniper.trade_raydium_launchlab {
+                    return jupiter_or("trade_raydium_launchlab is off".into());
+                }
+                let launchlab =
+                    pool.unwrap_or_else(|| RaydiumLaunchLab::pool_pda(mint, &WSOL_MINT));
+                match load_launchlab_market(&self.rpc, &launchlab).await {
+                    Ok(m) if m.pool.state.is_curve_open() => {
+                        Ok(ExitVenue::RaydiumLaunchLab(Box::new(m)))
+                    }
+                    Ok(_) => jupiter_or(
+                        "raydium launchlab curve is closed (migrated); direct exit unavailable"
+                            .into(),
+                    ),
+                    Err(e) => jupiter_or(format!("raydium launchlab pool unavailable: {e}")),
+                }
+            }
             Venue::Jupiter => Ok(ExitVenue::Jupiter),
             _ => {
                 // pump.fun (and anything else): the curve while it is live,
@@ -933,6 +1051,131 @@ impl Sniper {
         ))
     }
 
+    /// Sell on a Raydium CPMM pool (token -> WSOL, unwrapped in the same tx).
+    async fn sell_on_raydium_cpmm(
+        &mut self,
+        pool: &CpmmPool,
+        mint: &Pubkey,
+        sell_raw: u64,
+        slippage_pct: f64,
+        cfg: &bot_core::config::Config,
+        intent_id: &str,
+    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+        let venue = RaydiumCpmm::new();
+        let expected_out = venue.quote(pool, mint, sell_raw)?;
+        let min_out = maths::minus_pct_u64(expected_out, slippage_pct);
+        if expected_out == 0 || min_out == 0 {
+            return Err(BotError::solana(
+                "raydium cpmm exit quotes zero output (or slippage would allow zero out)",
+            ));
+        }
+        let (wsol_ata, create_wsol) = self.wallet.ensure_ata(&self.rpc, &WSOL_MINT).await?;
+        let (token_ata, _create_token) = self.wallet.ensure_ata(&self.rpc, mint).await?;
+        let swap_ix = venue.build_sell_ix(
+            pool,
+            &self.wallet.pubkey,
+            mint,
+            &WSOL_MINT,
+            &token_ata,
+            &wsol_ata,
+            sell_raw,
+            min_out,
+        )?;
+        let mut req = TxRequest::new(format!("exit-cpmm-{mint}"));
+        if let Some(ix) = create_wsol {
+            req = req.with_instruction(ix);
+        }
+        let mut req = req.with_instruction(swap_ix);
+        req.unwrap_sol = true;
+        // Atomic platform fee on the sale proceeds (GAP-MAP P1).
+        if let Some((fee_ix, decision)) = solana_kit::fee_transfer::build_fee_transfer_ix(
+            &self.wallet.pubkey,
+            min_out,
+            &cfg.platform_fee,
+        ) {
+            debug!(
+                fee_lamports = decision.lamports,
+                "platform fee appended to cpmm exit"
+            );
+            req = req.after_unwrap(fee_ix);
+        }
+        let result = self
+            .run_exit_request(req, cfg, intent_id, mint, sell_raw)
+            .await?;
+        Ok((
+            maths::lamports_to_sol(min_out),
+            signature_of(&result),
+            Venue::RaydiumCpmm,
+            result.status,
+        ))
+    }
+
+    /// Sell on the Raydium LaunchLab curve (token -> WSOL, unwrapped in
+    /// the same tx). Only reached while the curve is open; a migrated pool
+    /// takes the Jupiter hand-off in `exit_route`.
+    async fn sell_on_raydium_launchlab(
+        &mut self,
+        market: &LaunchLabMarket,
+        mint: &Pubkey,
+        sell_raw: u64,
+        slippage_pct: f64,
+        cfg: &bot_core::config::Config,
+        intent_id: &str,
+    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+        let venue = RaydiumLaunchLab::new();
+        let expected_out = venue.quote_sell(
+            &market.pool,
+            sell_raw,
+            market.platform_fee_rate,
+            market.creator_fee_rate,
+            0,
+        )?;
+        let min_out = maths::minus_pct_u64(expected_out, slippage_pct);
+        if expected_out == 0 || min_out == 0 {
+            return Err(BotError::solana(
+                "raydium launchlab exit quotes zero output (or slippage would allow zero out)",
+            ));
+        }
+        let (wsol_ata, create_wsol) = self.wallet.ensure_ata(&self.rpc, &WSOL_MINT).await?;
+        let (token_ata, _create_token) = self.wallet.ensure_ata(&self.rpc, mint).await?;
+        let swap_ix = venue.build_sell_ix(
+            &market.pool,
+            &self.wallet.pubkey,
+            &token_ata,
+            &wsol_ata,
+            sell_raw,
+            min_out,
+            0,
+        )?;
+        let mut req = TxRequest::new(format!("exit-ll-{mint}"));
+        if let Some(ix) = create_wsol {
+            req = req.with_instruction(ix);
+        }
+        let mut req = req.with_instruction(swap_ix);
+        req.unwrap_sol = true;
+        // Atomic platform fee on the sale proceeds (GAP-MAP P1).
+        if let Some((fee_ix, decision)) = solana_kit::fee_transfer::build_fee_transfer_ix(
+            &self.wallet.pubkey,
+            min_out,
+            &cfg.platform_fee,
+        ) {
+            debug!(
+                fee_lamports = decision.lamports,
+                "platform fee appended to launchlab exit"
+            );
+            req = req.after_unwrap(fee_ix);
+        }
+        let result = self
+            .run_exit_request(req, cfg, intent_id, mint, sell_raw)
+            .await?;
+        Ok((
+            maths::lamports_to_sol(min_out),
+            signature_of(&result),
+            Venue::RaydiumLaunchLab,
+            result.status,
+        ))
+    }
+
     /// Common tail for the direct exit routes: fees, deterministic intent
     /// id, attribution, policy refresh, write-ahead journal, hardened
     /// executor.
@@ -1057,6 +1300,8 @@ enum ExitVenue {
     Curve(Box<PumpContext>),
     PumpSwap(Box<PumpSwapContext>),
     Raydium(Box<RaydiumPool>),
+    RaydiumCpmm(Box<CpmmPool>),
+    RaydiumLaunchLab(Box<LaunchLabMarket>),
     Jupiter,
 }
 
@@ -1065,6 +1310,59 @@ fn signature_of(result: &solana_kit::execute::ExecutionResult) -> Option<String>
         None
     } else {
         Some(result.signature.clone())
+    }
+}
+
+/// The base mint's decimals in a loaded Raydium AMM v4 pool, or `None`
+/// when the mint is not in the pool.
+fn raydium_base_decimals(pool: &RaydiumPool, mint: &Pubkey) -> Option<u8> {
+    use solana_kit::raydium::PoolSide;
+    match pool.amm.side_of(mint) {
+        Some(PoolSide::Coin) => u8::try_from(pool.amm.coin_decimals).ok(),
+        Some(PoolSide::Pc) => u8::try_from(pool.amm.pc_decimals).ok(),
+        None => None,
+    }
+}
+
+/// Spot price of `mint` in SOL from a loaded CPMM pool's tradable
+/// reserves. Zero when the mint is not the SOL pair's base side.
+fn cpmm_price_in_sol(pool: &CpmmPool, mint: &Pubkey) -> f64 {
+    let Ok((reserve_0, reserve_1)) = pool.reserves() else {
+        return 0.0;
+    };
+    let (quote_raw, base_raw, base_decimals) = match pool.side_of(mint) {
+        Some(CpmmSide::Token0) if pool.state.token_1_mint == *WSOL_MINT => {
+            (reserve_1, reserve_0, pool.state.mint_0_decimals)
+        }
+        Some(CpmmSide::Token1) if pool.state.token_0_mint == *WSOL_MINT => {
+            (reserve_0, reserve_1, pool.state.mint_1_decimals)
+        }
+        _ => return 0.0,
+    };
+    let base_human = maths::from_raw_amount(base_raw, base_decimals);
+    if base_human <= 0.0 {
+        return 0.0;
+    }
+    maths::lamports_to_sol(quote_raw) / base_human
+}
+
+/// Realizable price of one whole LaunchLab base token in SOL: what selling
+/// it on the curve returns after fees. Zero when the curve cannot quote.
+fn launchlab_price_in_sol(market: &LaunchLabMarket) -> f64 {
+    let decimals = market.pool.state.base_decimals;
+    let one_token_raw = 10u64.saturating_pow(u32::from(decimals));
+    if one_token_raw == 0 {
+        return 0.0;
+    }
+    match RaydiumLaunchLab::new().quote_sell(
+        &market.pool,
+        one_token_raw,
+        market.platform_fee_rate,
+        market.creator_fee_rate,
+        0,
+    ) {
+        Ok(out) if out > 0 => maths::lamports_to_sol(out),
+        _ => 0.0,
     }
 }
 
@@ -1203,5 +1501,35 @@ mod tests {
             a,
             exit_intent_id_for(&other_mint, 500_000_000, EntryRoute::PumpCurve)
         );
+    }
+
+    #[test]
+    fn cpmm_mark_prices_the_base_side_against_the_wsol_reserve() {
+        use solana_kit::venues::raydium_cpmm::accounts::{
+            encode_synthetic_amm_config, AmmConfig as CpmmAmmConfig, PoolState as CpmmPoolState,
+            SyntheticPoolState,
+        };
+        let base = Pubkey::new_unique();
+        let synthetic = SyntheticPoolState {
+            token_0_mint: base,
+            token_1_mint: *WSOL_MINT,
+            mint_0_decimals: 6,
+            mint_1_decimals: 9,
+            ..SyntheticPoolState::default()
+        };
+        let pool = CpmmPool {
+            pool: Pubkey::new_unique(),
+            state: CpmmPoolState::decode(&synthetic.encode()).unwrap(),
+            config: CpmmAmmConfig::decode(&encode_synthetic_amm_config(0, 2_500, 500, 0, 0))
+                .unwrap(),
+            // 2 whole base tokens against 3 SOL -> 1.5 SOL per token.
+            token_0_vault_balance: 2_000_000,
+            token_1_vault_balance: 3_000_000_000,
+        };
+        let price = cpmm_price_in_sol(&pool, &base);
+        assert!((price - 1.5).abs() < 1e-12, "price = {price}");
+        // The quote mint itself and unrelated mints never price as base.
+        assert_eq!(cpmm_price_in_sol(&pool, &WSOL_MINT), 0.0);
+        assert_eq!(cpmm_price_in_sol(&pool, &Pubkey::new_unique()), 0.0);
     }
 }

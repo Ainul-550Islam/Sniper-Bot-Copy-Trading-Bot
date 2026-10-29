@@ -42,7 +42,10 @@ use bot_core::maths;
 use bot_core::models::{LaunchFeed, TokenLaunch, TokenSocials};
 use bot_core::state::Shared;
 
-use solana_kit::consts::{PUMPSWAP_PROGRAM_ID, PUMP_PROGRAM_ID, RAYDIUM_AMM_V4, WSOL_MINT};
+use solana_kit::consts::{
+    PUMPSWAP_PROGRAM_ID, PUMP_PROGRAM_ID, RAYDIUM_AMM_V4, RAYDIUM_CPMM, RAYDIUM_LAUNCHLAB,
+    RAYDIUM_LAUNCHLAB_DISC_INITIALIZE_WITH_TOKEN_2022, WSOL_MINT,
+};
 use solana_kit::decode::{decode_instructions, parse_transaction_notification, TxNotification};
 use solana_kit::events::{self, PumpEvent};
 use solana_kit::pumpportal::{
@@ -50,6 +53,8 @@ use solana_kit::pumpportal::{
 };
 use solana_kit::raydium::{self, PoolInitEvent};
 use solana_kit::rpc::Rpc;
+use solana_kit::venues::raydium_cpmm::decode::CpmmPoolInitEvent;
+use solana_kit::venues::raydium_launchlab::decode::LaunchLabPoolInitEvent;
 use solana_kit::ws::{
     redact_ws_url, LogsFilter, SolanaWs, TransactionFilter, WsMessage, WsPolicy, WsStatus,
 };
@@ -165,6 +170,8 @@ const SRC_PUMPPORTAL: &str = "pumpportal";
 const SRC_LOGS_PUMP: &str = "logs_pump";
 const SRC_LOGS_PUMPSWAP: &str = "logs_pumpswap";
 const SRC_LOGS_RAYDIUM: &str = "logs_raydium";
+const SRC_LOGS_RAYDIUM_CPMM: &str = "logs_raydium_cpmm";
+const SRC_LOGS_RAYDIUM_LAUNCHLAB: &str = "logs_raydium_launchlab";
 const SRC_GEYSER: &str = "geyser";
 
 fn feed_counter(name: &str, help: &str, source: &str) {
@@ -244,15 +251,35 @@ impl LaunchDetector {
             }
         }
 
+        // Which protocols the websocket feeds observe. A protocol is worth
+        // a subscription when something can consume its events: the direct
+        // route, the Jupiter fallback (CPMM/LaunchLab have no other
+        // detection source), or the launch dataset recorder, which records
+        // observations before any trading gate runs.
+        let observe_pumpswap = sniper.trade_pumpswap || sniper.record_launch_dataset;
+        let observe_raydium = sniper.trade_raydium || sniper.record_launch_dataset;
+        let observe_cpmm = sniper.trade_raydium_cpmm
+            || sniper.use_jupiter_fallback
+            || sniper.record_launch_dataset;
+        let observe_launchlab = sniper.trade_raydium_launchlab
+            || sniper.use_jupiter_fallback
+            || sniper.record_launch_dataset;
+
         // ---- Solana logsSubscribe (one subscription per protocol) ---------
         if sniper.use_log_subscription {
             let ws_url = rpc.ws_url().to_string();
             let mut protocols = vec![LaunchProtocol::PumpFun];
-            if sniper.trade_pumpswap {
+            if observe_pumpswap {
                 protocols.push(LaunchProtocol::PumpSwap);
             }
-            if sniper.trade_raydium {
+            if observe_raydium {
                 protocols.push(LaunchProtocol::RaydiumAmmV4);
+            }
+            if observe_cpmm {
+                protocols.push(LaunchProtocol::RaydiumCpmm);
+            }
+            if observe_launchlab {
+                protocols.push(LaunchProtocol::RaydiumLaunchLab);
             }
             for protocol in protocols {
                 match start_log_subscription(
@@ -290,11 +317,17 @@ impl LaunchDetector {
                     let state_g = state.clone();
                     let rpc_g = rpc.clone();
                     let mut programs = vec![PUMP_PROGRAM_ID.to_string()];
-                    if sniper.trade_pumpswap {
+                    if observe_pumpswap {
                         programs.push(PUMPSWAP_PROGRAM_ID.to_string());
                     }
-                    if sniper.trade_raydium {
+                    if observe_raydium {
                         programs.push(RAYDIUM_AMM_V4.to_string());
+                    }
+                    if observe_cpmm {
+                        programs.push(RAYDIUM_CPMM.to_string());
+                    }
+                    if observe_launchlab {
+                        programs.push(RAYDIUM_LAUNCHLAB.to_string());
                     }
                     match start_geyser_subscription(
                         url.to_string(),
@@ -423,6 +456,10 @@ async fn start_log_subscription(
         LaunchProtocol::PumpFun => (PUMP_PROGRAM_ID.to_string(), SRC_LOGS_PUMP),
         LaunchProtocol::PumpSwap => (PUMPSWAP_PROGRAM_ID.to_string(), SRC_LOGS_PUMPSWAP),
         LaunchProtocol::RaydiumAmmV4 => (RAYDIUM_AMM_V4.to_string(), SRC_LOGS_RAYDIUM),
+        LaunchProtocol::RaydiumCpmm => (RAYDIUM_CPMM.to_string(), SRC_LOGS_RAYDIUM_CPMM),
+        LaunchProtocol::RaydiumLaunchLab => {
+            (RAYDIUM_LAUNCHLAB.to_string(), SRC_LOGS_RAYDIUM_LAUNCHLAB)
+        }
     };
     let mut sub = match ws
         .logs_subscribe(LogsFilter::default().mentions([program]))
@@ -511,6 +548,42 @@ async fn start_log_subscription(
                                 Ok(ev) => ev,
                                 Err(e) => {
                                     debug!(%signature, error = %e, "raydium initialize2 seen but the transaction could not be decoded");
+                                    None
+                                }
+                            }
+                        }
+                        LaunchProtocol::RaydiumCpmm => {
+                            match cpmm_event_from_logs(
+                                &rpc,
+                                &signature,
+                                slot,
+                                &logs,
+                                seq_no,
+                                raw.clone(),
+                            )
+                            .await
+                            {
+                                Ok(ev) => ev,
+                                Err(e) => {
+                                    debug!(%signature, error = %e, "raydium cpmm initialize seen but the transaction could not be decoded");
+                                    None
+                                }
+                            }
+                        }
+                        LaunchProtocol::RaydiumLaunchLab => {
+                            match launchlab_event_from_logs(
+                                &rpc,
+                                &signature,
+                                slot,
+                                &logs,
+                                seq_no,
+                                raw.clone(),
+                            )
+                            .await
+                            {
+                                Ok(ev) => ev,
+                                Err(e) => {
+                                    debug!(%signature, error = %e, "raydium launchlab initialize seen but the transaction could not be decoded");
                                     None
                                 }
                             }
@@ -777,6 +850,39 @@ pub fn event_from_notification(
             raw_hash,
         );
     }
+    if has_initialize_log(logs, CPMM_INITIALIZE_LOG_NAMES)
+        || has_initialize_log(logs, LAUNCHLAB_INITIALIZE_LOG_NAMES)
+    {
+        let ixs = decode_instructions(&notif.transaction, &notif.meta).ok()?;
+        for ix in &ixs {
+            if let Ok(Some(init)) =
+                CpmmPoolInitEvent::from_instruction(&ix.program_id, &ix.accounts, &ix.data)
+            {
+                return event_from_cpmm_init(
+                    &init,
+                    sig,
+                    slot,
+                    block_time,
+                    LaunchFeed::TransactionSubscribe,
+                    seq,
+                    raw_hash,
+                );
+            }
+        }
+        for ix in &ixs {
+            if let Some(ev) = launchlab_event_from_instruction(
+                ix,
+                sig.clone(),
+                slot,
+                block_time,
+                LaunchFeed::TransactionSubscribe,
+                seq,
+                raw_hash.clone(),
+            ) {
+                return Some(ev);
+            }
+        }
+    }
     None
 }
 
@@ -821,6 +927,169 @@ async fn raydium_event_from_logs(
         seq,
         raw_hash,
     ))
+}
+
+/// Anchor `Instruction: <Name>` log lines that mark a CPMM pool creation.
+const CPMM_INITIALIZE_LOG_NAMES: &[&str] = &["Initialize", "InitializeWithPermission"];
+/// Anchor `Instruction: <Name>` log lines that mark a LaunchLab pool creation.
+const LAUNCHLAB_INITIALIZE_LOG_NAMES: &[&str] =
+    &["Initialize", "InitializeV2", "InitializeWithToken2022"];
+
+/// True when `logs` carry an Anchor instruction line for one of `names`.
+/// Used as a cheap pre-filter: the creating transaction is only fetched
+/// when its logs already say a pool was initialised.
+fn has_initialize_log(logs: &[String], names: &[&str]) -> bool {
+    logs.iter().any(|line| {
+        let line = line.trim();
+        names
+            .iter()
+            .any(|name| line.ends_with(&format!("Instruction: {name}")))
+    })
+}
+
+/// Fetch a confirmed transaction and resolve its top-level instructions.
+async fn decoded_tx_instructions(
+    rpc: &Rpc,
+    signature: &str,
+) -> BotResult<
+    Option<(
+        Vec<solana_kit::decode::DecodedInstruction>,
+        u64,
+        Option<i64>,
+    )>,
+> {
+    let sig = solana_sdk::signature::Signature::from_str(signature)
+        .map_err(|e| bot_core::error::BotError::encoding(format!("signature {signature}: {e}")))?;
+    let Some(confirmed) = rpc.get_transaction(&sig).await? else {
+        return Ok(None);
+    };
+    let meta = confirmed
+        .transaction
+        .meta
+        .as_ref()
+        .ok_or_else(|| bot_core::error::BotError::solana("confirmed tx has no meta"))?;
+    let ixs = decode_instructions(&confirmed.transaction.transaction, meta)?;
+    Ok(Some((ixs, confirmed.slot, confirmed.block_time)))
+}
+
+/// `logsSubscribe` only carries the Anchor instruction line; fetch the
+/// creating transaction to read the CPMM pool's mints and deposits.
+async fn cpmm_event_from_logs(
+    rpc: &Rpc,
+    signature: &str,
+    slot: u64,
+    logs: &[String],
+    seq: u64,
+    raw_hash: String,
+) -> BotResult<Option<LaunchEvent>> {
+    if !has_initialize_log(logs, CPMM_INITIALIZE_LOG_NAMES) {
+        return Ok(None);
+    }
+    let Some((ixs, tx_slot, block_time)) = decoded_tx_instructions(rpc, signature).await? else {
+        return Ok(None);
+    };
+    for ix in &ixs {
+        if let Some(init) =
+            CpmmPoolInitEvent::from_instruction(&ix.program_id, &ix.accounts, &ix.data)?
+        {
+            return Ok(event_from_cpmm_init(
+                &init,
+                Some(signature.to_string()),
+                if tx_slot > 0 { tx_slot } else { slot },
+                block_time,
+                LaunchFeed::SolanaLogs,
+                seq,
+                raw_hash,
+            ));
+        }
+    }
+    Ok(None)
+}
+
+/// Same shape as [`cpmm_event_from_logs`] for LaunchLab pool creations.
+async fn launchlab_event_from_logs(
+    rpc: &Rpc,
+    signature: &str,
+    slot: u64,
+    logs: &[String],
+    seq: u64,
+    raw_hash: String,
+) -> BotResult<Option<LaunchEvent>> {
+    if !has_initialize_log(logs, LAUNCHLAB_INITIALIZE_LOG_NAMES) {
+        return Ok(None);
+    }
+    let Some((ixs, tx_slot, block_time)) = decoded_tx_instructions(rpc, signature).await? else {
+        return Ok(None);
+    };
+    let slot = if tx_slot > 0 { tx_slot } else { slot };
+    for ix in &ixs {
+        if let Some(ev) = launchlab_event_from_instruction(
+            ix,
+            Some(signature.to_string()),
+            slot,
+            block_time,
+            LaunchFeed::SolanaLogs,
+            seq,
+            raw_hash.clone(),
+        ) {
+            return Ok(Some(ev));
+        }
+    }
+    Ok(None)
+}
+
+/// One decoded instruction -> LaunchLab launch event. Handles the
+/// IDL-decoded `initialize` / `initialize_v2` here, plus an account-only
+/// conversion for `initialize_with_token_2022`, whose argument layout
+/// differs but whose account prefix (payer, creator, global_config,
+/// platform_config, authority, pool_state, base_mint, quote_mint, vaults)
+/// is identical in the IDL; the market loader reads the decimals and the
+/// curve state from chain, so nothing is fabricated.
+fn launchlab_event_from_instruction(
+    ix: &solana_kit::decode::DecodedInstruction,
+    signature: Option<String>,
+    slot: u64,
+    block_time: Option<i64>,
+    feed: LaunchFeed,
+    seq: u64,
+    raw_hash: String,
+) -> Option<LaunchEvent> {
+    if let Ok(Some(init)) =
+        LaunchLabPoolInitEvent::from_instruction(&ix.program_id, &ix.accounts, &ix.data)
+    {
+        return event_from_launchlab_init(&init, signature, slot, block_time, feed, seq, raw_hash);
+    }
+    if ix.program_id == *RAYDIUM_LAUNCHLAB
+        && ix.data.len() >= 8
+        && ix.data[..8] == RAYDIUM_LAUNCHLAB_DISC_INITIALIZE_WITH_TOKEN_2022
+        && ix.accounts.len() >= 10
+    {
+        let init = LaunchLabPoolInitEvent {
+            pool_state: ix.accounts[5],
+            creator: ix.accounts[1],
+            global_config: ix.accounts[2],
+            platform_config: ix.accounts[3],
+            base_mint: ix.accounts[6],
+            quote_mint: ix.accounts[7],
+            base_vault: ix.accounts[8],
+            quote_vault: ix.accounts[9],
+            curve_type: 0,
+            supply: 0,
+            total_base_sell: 0,
+            total_quote_fund_raising: 0,
+            migrate_type: 0,
+            decimals: 0,
+        };
+        let mut ev =
+            event_from_launchlab_init(&init, signature, slot, block_time, feed, seq, raw_hash)?;
+        // The zeroed fields above mean "not decoded from this layout":
+        // the decimals in particular must come from the mint read, not
+        // from this event.
+        ev.base_decimals = None;
+        ev.event_id = ev.compute_event_id();
+        return Some(ev);
+    }
+    None
 }
 
 /// Feed timestamp of a chain `block_time`, shared by the block reader and the
@@ -997,6 +1266,105 @@ pub fn event_from_raydium_init(
     ev.liquidity_base_raw = Some(base_raw);
     // Decimals are unknown until the mint is read; the price needs them.
     ev.base_decimals = None;
+    ev.initial_price_sol = None;
+    ev.event_ts = block_time.and_then(unix_to_utc);
+    ev.event_id = ev.compute_event_id();
+    Some(ev)
+}
+
+/// Convert a decoded Raydium CPMM `initialize` into a [`LaunchEvent`].
+/// Only SOL pairs are launches the sniper can act on.
+pub fn event_from_cpmm_init(
+    init: &CpmmPoolInitEvent,
+    signature: Option<String>,
+    slot: u64,
+    block_time: Option<i64>,
+    feed: LaunchFeed,
+    seq: u64,
+    raw_hash: String,
+) -> Option<LaunchEvent> {
+    let (base_mint, sol, base_raw) = if init.token_1_mint == *WSOL_MINT {
+        (init.token_0_mint, init.init_amount_1, init.init_amount_0)
+    } else if init.token_0_mint == *WSOL_MINT {
+        (init.token_1_mint, init.init_amount_0, init.init_amount_1)
+    } else {
+        debug!(pool = %init.pool_state, "raydium cpmm pool is not SOL-quoted; ignored");
+        return None;
+    };
+    let launch = TokenLaunch {
+        mint: base_mint.to_string(),
+        name: format!("raydium cpmm pool {}", short(&init.pool_state.to_string())),
+        symbol: short(&base_mint.to_string()),
+        uri: None,
+        creator: init.creator.to_string(),
+        pool: init.pool_state.to_string(),
+        initial_buy_sol: 0.0,
+        market_cap_sol: 0.0,
+        market_cap_usd: None,
+        total_supply: None,
+        slot: (slot > 0).then_some(slot),
+        signature,
+        tx_type: Some("initialize".to_string()),
+        observed_at: Utc::now(),
+        feed,
+        socials: None,
+    };
+    let mut ev = LaunchEvent::from_token_launch(launch, seq, raw_hash);
+    ev.protocol = LaunchProtocol::RaydiumCpmm;
+    ev.pool = Some(init.pool_state.to_string());
+    ev.liquidity_quote_lamports = Some(sol);
+    ev.liquidity_base_raw = Some(base_raw);
+    ev.base_decimals = None;
+    ev.initial_price_sol = None;
+    ev.event_ts = block_time.and_then(unix_to_utc);
+    ev.event_id = ev.compute_event_id();
+    Some(ev)
+}
+
+/// Convert a decoded Raydium LaunchLab `initialize` into a [`LaunchEvent`].
+/// Only SOL-quoted pools are launches the sniper can act on. A fresh curve
+/// holds no real quote yet, so the event carries no liquidity figure —
+/// the fundraising target is not liquidity and is never reported as one.
+pub fn event_from_launchlab_init(
+    init: &LaunchLabPoolInitEvent,
+    signature: Option<String>,
+    slot: u64,
+    block_time: Option<i64>,
+    feed: LaunchFeed,
+    seq: u64,
+    raw_hash: String,
+) -> Option<LaunchEvent> {
+    if init.quote_mint != *WSOL_MINT {
+        debug!(pool = %init.pool_state, quote = %init.quote_mint, "raydium launchlab pool is not SOL-quoted; ignored");
+        return None;
+    }
+    let launch = TokenLaunch {
+        mint: init.base_mint.to_string(),
+        name: format!(
+            "raydium launchlab pool {}",
+            short(&init.pool_state.to_string())
+        ),
+        symbol: short(&init.base_mint.to_string()),
+        uri: None,
+        creator: init.creator.to_string(),
+        pool: init.pool_state.to_string(),
+        initial_buy_sol: 0.0,
+        market_cap_sol: 0.0,
+        market_cap_usd: None,
+        total_supply: None,
+        slot: (slot > 0).then_some(slot),
+        signature,
+        tx_type: Some("initialize".to_string()),
+        observed_at: Utc::now(),
+        feed,
+        socials: None,
+    };
+    let mut ev = LaunchEvent::from_token_launch(launch, seq, raw_hash);
+    ev.protocol = LaunchProtocol::RaydiumLaunchLab;
+    ev.pool = Some(init.pool_state.to_string());
+    ev.liquidity_quote_lamports = None;
+    ev.liquidity_base_raw = (init.total_base_sell > 0).then_some(init.total_base_sell);
+    ev.base_decimals = Some(init.decimals);
     ev.initial_price_sol = None;
     ev.event_ts = block_time.and_then(unix_to_utc);
     ev.event_id = ev.compute_event_id();
@@ -1421,6 +1789,186 @@ mod tests {
             "r".into()
         )
         .is_none());
+    }
+
+    #[test]
+    fn cpmm_initialize_becomes_a_cpmm_event_on_either_side() {
+        let base = Pubkey::new_unique();
+        let init = CpmmPoolInitEvent {
+            pool_state: Pubkey::new_unique(),
+            amm_config: Pubkey::new_unique(),
+            creator: Pubkey::new_unique(),
+            token_0_mint: base,
+            token_1_mint: *WSOL_MINT,
+            lp_mint: Pubkey::new_unique(),
+            token_0_vault: Pubkey::new_unique(),
+            token_1_vault: Pubkey::new_unique(),
+            observation_state: Pubkey::new_unique(),
+            init_amount_0: 2_000_000,
+            init_amount_1: 3_000_000_000,
+            open_time: 0,
+        };
+        let ev = event_from_cpmm_init(
+            &init,
+            Some(sig64()),
+            88,
+            Some(1_700_000_300),
+            LaunchFeed::SolanaLogs,
+            4,
+            "r".into(),
+        )
+        .expect("init -> event");
+        assert_eq!(ev.protocol, LaunchProtocol::RaydiumCpmm);
+        assert_eq!(ev.mint, base.to_string());
+        assert_eq!(
+            ev.pool.as_deref(),
+            Some(init.pool_state.to_string().as_str())
+        );
+        assert_eq!(ev.liquidity_quote_lamports, Some(3_000_000_000));
+        assert_eq!(ev.liquidity_base_raw, Some(2_000_000));
+        assert_eq!(ev.validate_shape(Utc::now()), Ok(()));
+        // WSOL on the token_0 side flips the orientation.
+        let flipped = CpmmPoolInitEvent {
+            token_0_mint: *WSOL_MINT,
+            token_1_mint: base,
+            init_amount_0: 3_000_000_000,
+            init_amount_1: 2_000_000,
+            ..init.clone()
+        };
+        let ev = event_from_cpmm_init(
+            &flipped,
+            Some(sig64()),
+            88,
+            None,
+            LaunchFeed::TransactionSubscribe,
+            5,
+            "r".into(),
+        )
+        .expect("flipped init -> event");
+        assert_eq!(ev.mint, base.to_string());
+        assert_eq!(ev.liquidity_quote_lamports, Some(3_000_000_000));
+        assert_eq!(ev.liquidity_base_raw, Some(2_000_000));
+        // A non-SOL pair is not a launch.
+        let other = CpmmPoolInitEvent {
+            token_1_mint: Pubkey::new_unique(),
+            ..init
+        };
+        assert!(event_from_cpmm_init(
+            &other,
+            None,
+            88,
+            None,
+            LaunchFeed::SolanaLogs,
+            6,
+            "r".into()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn launchlab_initialize_becomes_a_launchlab_event_without_fake_liquidity() {
+        let init = LaunchLabPoolInitEvent {
+            pool_state: Pubkey::new_unique(),
+            creator: Pubkey::new_unique(),
+            global_config: Pubkey::new_unique(),
+            platform_config: Pubkey::new_unique(),
+            base_mint: Pubkey::new_unique(),
+            quote_mint: *WSOL_MINT,
+            base_vault: Pubkey::new_unique(),
+            quote_vault: Pubkey::new_unique(),
+            curve_type: 0,
+            supply: 1_000_000_000,
+            total_base_sell: 800_000_000,
+            total_quote_fund_raising: 85_000_000_000,
+            migrate_type: 1,
+            decimals: 6,
+        };
+        let ev = event_from_launchlab_init(
+            &init,
+            Some(sig64()),
+            99,
+            Some(1_700_000_400),
+            LaunchFeed::SolanaLogs,
+            7,
+            "r".into(),
+        )
+        .expect("init -> event");
+        assert_eq!(ev.protocol, LaunchProtocol::RaydiumLaunchLab);
+        assert_eq!(ev.mint, init.base_mint.to_string());
+        assert_eq!(
+            ev.pool.as_deref(),
+            Some(init.pool_state.to_string().as_str())
+        );
+        assert_eq!(ev.base_decimals, Some(6));
+        assert_eq!(ev.liquidity_base_raw, Some(800_000_000));
+        assert_eq!(
+            ev.liquidity_quote_lamports, None,
+            "a fresh curve holds no real quote; the fundraising target is not liquidity"
+        );
+        assert_eq!(ev.validate_shape(Utc::now()), Ok(()));
+        let other = LaunchLabPoolInitEvent {
+            quote_mint: Pubkey::new_unique(),
+            ..init
+        };
+        assert!(event_from_launchlab_init(
+            &other,
+            None,
+            99,
+            None,
+            LaunchFeed::SolanaLogs,
+            8,
+            "r".into()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn launchlab_token2022_instruction_converts_from_accounts_only() {
+        let accounts: Vec<Pubkey> = (0..15).map(|_| Pubkey::new_unique()).collect();
+        let mut accounts = accounts;
+        accounts[7] = *WSOL_MINT;
+        let ix = solana_kit::decode::DecodedInstruction {
+            program_id: *RAYDIUM_LAUNCHLAB,
+            accounts: accounts.clone(),
+            data: RAYDIUM_LAUNCHLAB_DISC_INITIALIZE_WITH_TOKEN_2022.to_vec(),
+        };
+        let ev = launchlab_event_from_instruction(
+            &ix,
+            Some(sig64()),
+            100,
+            None,
+            LaunchFeed::TransactionSubscribe,
+            9,
+            "r".into(),
+        )
+        .expect("token2022 init -> event");
+        assert_eq!(ev.protocol, LaunchProtocol::RaydiumLaunchLab);
+        assert_eq!(ev.mint, accounts[6].to_string());
+        assert_eq!(ev.pool.as_deref(), Some(accounts[5].to_string().as_str()));
+        assert_eq!(
+            ev.base_decimals, None,
+            "decimals come from the mint read, never from the undecoded layout"
+        );
+        assert_eq!(ev.validate_shape(Utc::now()), Ok(()));
+    }
+
+    #[test]
+    fn initialize_log_matching_is_exact_about_the_instruction_name() {
+        let logs = vec![
+            "Program LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj invoke [1]".to_string(),
+            "Program log: Instruction: InitializeV2".to_string(),
+        ];
+        assert!(has_initialize_log(&logs, LAUNCHLAB_INITIALIZE_LOG_NAMES));
+        assert!(
+            !has_initialize_log(&logs, CPMM_INITIALIZE_LOG_NAMES),
+            "InitializeV2 must not match the CPMM Initialize pre-filter"
+        );
+        let swap_logs = vec!["Program log: Instruction: SwapBaseInput".to_string()];
+        assert!(!has_initialize_log(&swap_logs, CPMM_INITIALIZE_LOG_NAMES));
+        assert!(!has_initialize_log(
+            &swap_logs,
+            LAUNCHLAB_INITIALIZE_LOG_NAMES
+        ));
     }
 
     #[test]

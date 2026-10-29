@@ -36,6 +36,9 @@ pub enum SwapVenue {
     RaydiumAmmV4,
     RaydiumClmm,
     RaydiumCpmm,
+    /// Raydium LaunchLab bonding curve (Batch 07: previously folded into
+    /// `Other` by the LaunchLab decoder's placeholder mapping).
+    RaydiumLaunchLab,
     Jupiter,
     /// A DEX we do not model. The deltas are still valid.
     Other,
@@ -51,6 +54,7 @@ impl SwapVenue {
             SwapVenue::RaydiumAmmV4 => "raydium_v4",
             SwapVenue::RaydiumClmm => "raydium_clmm",
             SwapVenue::RaydiumCpmm => "raydium_cpmm",
+            SwapVenue::RaydiumLaunchLab => "raydium_launchlab",
             SwapVenue::Jupiter => "jupiter",
             SwapVenue::Other => "other",
             SwapVenue::None => "none",
@@ -323,6 +327,9 @@ fn classify_venue(
     }
     if all.contains(&*RAYDIUM_CPMM) {
         return SwapVenue::RaydiumCpmm;
+    }
+    if all.contains(&*RAYDIUM_LAUNCHLAB) {
+        return SwapVenue::RaydiumLaunchLab;
     }
     // Any unrecognised program beyond the usual system/token noise.
     let noise = [
@@ -937,6 +944,12 @@ mod tests {
             classify_venue(&[*RAYDIUM_CPMM], &meta),
             SwapVenue::RaydiumCpmm
         );
+        assert_eq!(
+            classify_venue(&[*RAYDIUM_LAUNCHLAB], &meta),
+            SwapVenue::RaydiumLaunchLab
+        );
+        assert_eq!(SwapVenue::RaydiumLaunchLab.as_str(), "raydium_launchlab");
+        assert!(SwapVenue::RaydiumLaunchLab.is_dex());
         let random = Pubkey::new_unique();
         assert_eq!(classify_venue(&[random], &meta), SwapVenue::Other);
         assert!(!SwapVenue::Other.is_dex());

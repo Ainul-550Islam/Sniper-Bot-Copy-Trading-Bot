@@ -11,17 +11,17 @@ They are NOT the result of a test run and must never be quoted as one.**
 |---|---|---|
 | `crates` | <!-- stat:crates -->8<!-- /stat --> | workspace `members` listed in the root `Cargo.toml` |
 | `programs` | <!-- stat:programs -->1<!-- /stat --> | directories under `programs/` that contain a `Cargo.toml` |
-| `rust_files` | <!-- stat:rust_files -->712<!-- /stat --> | `find crates -type f -name '*.rs'` |
-| `rust_lines` | <!-- stat:rust_lines -->270996<!-- /stat --> | total lines of those `.rs` files (newline count + 1 per file) |
+| `rust_files` | <!-- stat:rust_files -->766<!-- /stat --> | `find crates -type f -name '*.rs'` |
+| `rust_lines` | <!-- stat:rust_lines -->302044<!-- /stat --> | total lines of those `.rs` files (newline count + 1 per file) |
 | `rust_lines_staking` | <!-- stat:rust_lines_staking -->5700<!-- /stat --> | lines of `*.rs` under `programs/staking-suite/src` and `/tests` |
-| `test_attrs_plain` | <!-- stat:test_attrs_plain -->2140<!-- /stat --> | occurrences of the literal `#[test]` under `crates/` (read_text().count, same method as `update-release-manifest.sh`) |
-| `test_attrs_tokio` | <!-- stat:test_attrs_tokio -->957<!-- /stat --> | occurrences of `#[tokio::test` under `crates/` |
+| `test_attrs_plain` | <!-- stat:test_attrs_plain -->2578<!-- /stat --> | occurrences of the literal `#[test]` under `crates/` (read_text().count, same method as `update-release-manifest.sh`) |
+| `test_attrs_tokio` | <!-- stat:test_attrs_tokio -->1026<!-- /stat --> | occurrences of `#[tokio::test` under `crates/` |
 | `test_attrs_staking` | <!-- stat:test_attrs_staking -->81<!-- /stat --> | `#[test]` + `#[tokio::test` occurrences under `programs/staking-suite` |
-| `migrations` | <!-- stat:migrations -->65<!-- /stat --> | `crates/core/migrations/*.sql` |
-| `migrations_high_water` | <!-- stat:migrations_high_water -->0065<!-- /stat --> | numeric prefix of the last migration file in sort order |
-| `docs_canonical` | <!-- stat:docs_canonical -->157<!-- /stat --> | top-level `docs/*.md` EXCLUDING `docs/STATS.md` (this file never counts itself) |
+| `migrations` | <!-- stat:migrations -->67<!-- /stat --> | `crates/core/migrations/*.sql` |
+| `migrations_high_water` | <!-- stat:migrations_high_water -->0067<!-- /stat --> | numeric prefix of the last migration file in sort order |
+| `docs_canonical` | <!-- stat:docs_canonical -->159<!-- /stat --> | top-level `docs/*.md` EXCLUDING `docs/STATS.md` (this file never counts itself) |
 | `control_plane_pages` | <!-- stat:control_plane_pages -->63<!-- /stat --> | `find apps/control-plane/src/app -name page.tsx` |
-| `control_plane_ts_lines` | <!-- stat:control_plane_ts_lines -->23353<!-- /stat --> | lines of `*.ts` and `*.tsx` under `apps/control-plane/src` |
+| `control_plane_ts_lines` | <!-- stat:control_plane_ts_lines -->23752<!-- /stat --> | lines of `*.ts` and `*.tsx` under `apps/control-plane/src` |
 | `evidence_passed` | <!-- stat:evidence_passed -->1<!-- /stat --> | `"status": "PASSED"` in `evidence/**/*.json` |
 | `evidence_not_run` | <!-- stat:evidence_not_run -->18<!-- /stat --> | `"status": "NOT_RUN"` in `evidence/**/*.json` |
 | `evidence_other` | <!-- stat:evidence_other -->0<!-- /stat --> | evidence JSON files whose status is neither PASSED nor NOT_RUN |

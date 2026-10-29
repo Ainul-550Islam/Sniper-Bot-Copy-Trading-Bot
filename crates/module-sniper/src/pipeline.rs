@@ -464,6 +464,10 @@ pub enum EntryRoute {
     PumpSwapDirect,
     /// Raydium AMM v4, direct instruction build.
     RaydiumV4Direct,
+    /// Raydium CPMM (cp-swap), direct instruction build (Batch 07).
+    RaydiumCpmmDirect,
+    /// Raydium LaunchLab bonding curve, direct instruction build (Batch 07).
+    RaydiumLaunchLabDirect,
     /// Jupiter aggregator (prebuilt swap handed to the execution engine).
     Jupiter,
 }
@@ -474,6 +478,8 @@ impl EntryRoute {
             EntryRoute::PumpCurve => "curve",
             EntryRoute::PumpSwapDirect => "pumpswap",
             EntryRoute::RaydiumV4Direct => "raydium",
+            EntryRoute::RaydiumCpmmDirect => "raydium_cpmm",
+            EntryRoute::RaydiumLaunchLabDirect => "raydium_launchlab",
             EntryRoute::Jupiter => "jupiter",
         }
     }
@@ -484,6 +490,8 @@ impl EntryRoute {
             EntryRoute::PumpCurve => bot_core::models::Venue::PumpFun,
             EntryRoute::PumpSwapDirect => bot_core::models::Venue::PumpSwap,
             EntryRoute::RaydiumV4Direct => bot_core::models::Venue::RaydiumAmmV4,
+            EntryRoute::RaydiumCpmmDirect => bot_core::models::Venue::RaydiumCpmm,
+            EntryRoute::RaydiumLaunchLabDirect => bot_core::models::Venue::RaydiumLaunchLab,
             EntryRoute::Jupiter => bot_core::models::Venue::Jupiter,
         }
     }
@@ -516,6 +524,20 @@ pub fn protocol_routable(protocol: LaunchProtocol, cfg: &SniperConfig) -> Result
                 Ok(())
             } else {
                 Err("raydium_amm_v4 launches need sniper.trade_raydium or sniper.use_jupiter_fallback".into())
+            }
+        }
+        LaunchProtocol::RaydiumCpmm => {
+            if cfg.trade_raydium_cpmm || cfg.use_jupiter_fallback {
+                Ok(())
+            } else {
+                Err("raydium_cpmm launches need sniper.trade_raydium_cpmm or sniper.use_jupiter_fallback".into())
+            }
+        }
+        LaunchProtocol::RaydiumLaunchLab => {
+            if cfg.trade_raydium_launchlab || cfg.use_jupiter_fallback {
+                Ok(())
+            } else {
+                Err("raydium_launchlab launches need sniper.trade_raydium_launchlab or sniper.use_jupiter_fallback".into())
             }
         }
     }
@@ -556,6 +578,30 @@ pub fn select_route(
                 Err("raydium_amm_v4: neither trade_raydium nor use_jupiter_fallback is on".into())
             }
         }
+        LaunchProtocol::RaydiumCpmm => {
+            if cfg.trade_raydium_cpmm {
+                Ok(EntryRoute::RaydiumCpmmDirect)
+            } else if cfg.use_jupiter_fallback {
+                Ok(EntryRoute::Jupiter)
+            } else {
+                Err(
+                    "raydium_cpmm: neither trade_raydium_cpmm nor use_jupiter_fallback is on"
+                        .into(),
+                )
+            }
+        }
+        LaunchProtocol::RaydiumLaunchLab => {
+            // A graduated LaunchLab pool no longer trades on its curve; the
+            // market loader downgrades a direct choice to Jupiter when the
+            // loaded pool has migrated and the fallback is on.
+            if cfg.trade_raydium_launchlab {
+                Ok(EntryRoute::RaydiumLaunchLabDirect)
+            } else if cfg.use_jupiter_fallback {
+                Ok(EntryRoute::Jupiter)
+            } else {
+                Err("raydium_launchlab: neither trade_raydium_launchlab nor use_jupiter_fallback is on".into())
+            }
+        }
     }
 }
 
@@ -587,9 +633,11 @@ pub struct FeeEstimate {
 pub fn route_compute_units(route: EntryRoute, exec: &ExecutionConfig) -> u32 {
     match route {
         EntryRoute::Jupiter => MAX_TRANSACTION_COMPUTE_UNITS,
-        EntryRoute::PumpCurve | EntryRoute::PumpSwapDirect | EntryRoute::RaydiumV4Direct => {
-            exec.compute_unit_limit
-        }
+        EntryRoute::PumpCurve
+        | EntryRoute::PumpSwapDirect
+        | EntryRoute::RaydiumV4Direct
+        | EntryRoute::RaydiumCpmmDirect
+        | EntryRoute::RaydiumLaunchLabDirect => exec.compute_unit_limit,
     }
 }
 
@@ -1118,6 +1166,50 @@ mod tests {
         assert!(protocol_routable(LaunchProtocol::PumpFun, &cfg).is_ok());
         assert!(protocol_routable(LaunchProtocol::PumpSwap, &cfg).is_err());
         assert!(protocol_routable(LaunchProtocol::RaydiumAmmV4, &cfg).is_err());
+
+        // Batch 07: CPMM / LaunchLab default to no direct trading; Jupiter
+        // covers them while the fallback is on, and the dedicated flags
+        // select the direct routes.
+        let mut cfg = SniperConfig::default();
+        assert!(!cfg.trade_raydium_cpmm && !cfg.trade_raydium_launchlab);
+        assert_eq!(
+            select_route(LaunchProtocol::RaydiumCpmm, &cfg, false),
+            Ok(EntryRoute::Jupiter)
+        );
+        assert_eq!(
+            select_route(LaunchProtocol::RaydiumLaunchLab, &cfg, false),
+            Ok(EntryRoute::Jupiter)
+        );
+        cfg.trade_raydium_cpmm = true;
+        cfg.trade_raydium_launchlab = true;
+        assert_eq!(
+            select_route(LaunchProtocol::RaydiumCpmm, &cfg, false),
+            Ok(EntryRoute::RaydiumCpmmDirect)
+        );
+        assert_eq!(
+            select_route(LaunchProtocol::RaydiumLaunchLab, &cfg, false),
+            Ok(EntryRoute::RaydiumLaunchLabDirect)
+        );
+        cfg.trade_raydium_cpmm = false;
+        cfg.trade_raydium_launchlab = false;
+        cfg.use_jupiter_fallback = false;
+        assert!(select_route(LaunchProtocol::RaydiumCpmm, &cfg, false).is_err());
+        assert!(select_route(LaunchProtocol::RaydiumLaunchLab, &cfg, false).is_err());
+        assert!(protocol_routable(LaunchProtocol::RaydiumCpmm, &cfg).is_err());
+        assert!(protocol_routable(LaunchProtocol::RaydiumLaunchLab, &cfg).is_err());
+        assert_eq!(
+            EntryRoute::RaydiumCpmmDirect.venue(),
+            bot_core::models::Venue::RaydiumCpmm
+        );
+        assert_eq!(
+            EntryRoute::RaydiumLaunchLabDirect.venue(),
+            bot_core::models::Venue::RaydiumLaunchLab
+        );
+        assert_eq!(EntryRoute::RaydiumCpmmDirect.as_str(), "raydium_cpmm");
+        assert_eq!(
+            EntryRoute::RaydiumLaunchLabDirect.as_str(),
+            "raydium_launchlab"
+        );
 
         assert_eq!(
             EntryRoute::PumpSwapDirect.venue(),

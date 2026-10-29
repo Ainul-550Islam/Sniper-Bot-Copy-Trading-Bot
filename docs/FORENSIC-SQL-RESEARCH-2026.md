@@ -21,6 +21,27 @@ tests/forensics/sql-pattern-regression.sh  # regression gate (fails on class-4)
 (The correct command is `scripts/forensic-sql-scan.sh`; the regression
 test is the gate that must stay green.)
 
+## Current rerun — 2026-10-28 integration cleanup
+
+The scanner was rerun on the merged Batch 03 + Batch 04 tree and again
+after the identity-plane changes in this document. The current machine
+measurement is:
+
+| Measurement | Current value |
+| --- | ---: |
+| Rust files swept | 759 |
+| `sqlx::query` sites | 788 |
+| Inline statements extracted | 733 |
+| Class 1 — tenant-safe | 327 |
+| Class 2 — intentional-global | 51 |
+| Class 3 — operator-only | 15 |
+| Class 4 — missing-tenant-enforcement | **0** |
+| Class 5 — cosmetic | 91 |
+
+The 2026-10-06 group and class tables below are retained as the original
+research snapshot. Current acceptance is the scanner's exit status, not
+the historical counts in those tables.
+
 ## The five forensic classes
 
 | Class | Name | Meaning |
@@ -57,7 +78,7 @@ Group counts overlap classes: G1–G8 hits are classified 1/3/5 after
 triage; G10 collects the sanctioned global/operator access; G11 is the
 test-fixture population.
 
-## Class summary (machine-measured)
+## Class summary (2026-10-06 snapshot)
 
 | Class | Count |
 | --- | --- |
@@ -108,6 +129,54 @@ test-fixture population.
 | crates/core/src/db/mod.rs | _sqlx_migrations | Migration bookkeeping | Keep |
 | crates/server/src/runtime_registry/store.rs (heartbeat/stop) | tenant_runtimes | Runtime registry plane: heartbeat/stop are generation-fenced by the runtime's own identity (id + fencing token); the row's `organization_id` is written at registration and never derived here | Keep; defense-in-depth org predicate is a future hardening, tracked as P2 |
 
+### 2026-10-28 identity-plane follow-up
+
+The integration-cleanup baseline reran the sweep at the merged Batch 03 +
+Batch 04 tree and found 10 class-4 statements in the pre-authentication
+identity plane. They were not adjudicated as a family: every statement was
+read in its transaction and resolved in the narrowest safe way.
+
+Three statements became tenant-safe in SQL rather than receiving a sanction:
+
+| Statement | Change |
+| --- | --- |
+| Invited organization record lookup in `saas/auth_flows.rs` | Keeps `kind` + record `id` and now also predicates `organization_id`, both bound from the organization read from the locked invitation row. |
+| Existing-membership lookup in `saas/auth_flows.rs` | Keeps the composite `lookup_key` and now also predicates `organization_id` and `user_id`, so the redundancy is inside the SQL rather than only encoded in a string. |
+| Invitation closure `UPDATE` in `saas/auth_flows.rs` | Repeats invitation `id`, `organization_id`, bearer-token `token_hash`, `status = 'pending'`, and `expires_at > now()`; the locked-row guarantees are reasserted when the state changes. |
+
+One finding disappeared through removal rather than classification.
+Password-reset completion no longer issues a post-commit
+`SELECT email FROM users WHERE id = $1`. The canonical user was already
+loaded and locked inside the reset transaction, and the relational
+projection commits atomically with that user. The security alert now uses
+`user.email` from the canonical transaction state.
+
+The remaining six statements are intentional-global, but they are not
+covered by a broad file/table allowance. `scripts/forensic-sql-scan.sh`
+contains `IDENTITY_PLANE_SANCTIONS`, where every entry names the file stem,
+table, and **exact normalized SQL fragment**. Any textual change to one of
+those statements removes the match and makes the scanner report class 4
+again until the replacement is reviewed:
+
+| File | Global statement | Why it cannot start with a tenant predicate | Containment |
+| --- | --- | --- | --- |
+| `saas/auth_flows.rs` | pending invitation by `token_hash` | The public bearer invitation is the credential that *resolves* the organization; trusting a caller-supplied org would be weaker. | One locked, unexpired, pending token row in a transaction; all later writes derive the org from that row. IP and rate controls run before the flow. |
+| `saas/auth_flows.rs` | invited user runtime record by email-derived `lookup_key` | A user identity is global across organizations, and the email itself comes from the locked invitation rather than free request selection. | `kind = 'user'`, unique normalized lookup key, `FOR UPDATE`, account-status checks, then org-scoped membership/session/audit writes. |
+| `saas/auth_flows.rs` | `INSERT INTO users ...` | `users` models the global person/account and has no `organization_id` column. | Globally unique id/email; tenant attachment is separately written to `organization_members` under the locked invitation org in the same transaction. |
+| `saas/postgres.rs` | `INSERT INTO users ...` projection | The canonical repository projects the same global identity; the table again has no tenant column. | Globally unique id/email; membership methods carry the tenant relationship and predicates. |
+| `saas/email_verification.rs` | `users` by normalized email | Verification resend starts with only an email and must not require or reveal tenant membership. | Enumeration-safe response; an issued token is bound to the resolved user id, and confirmation re-loads the canonical active user and compares the normalized email. |
+| `saas/password_reset.rs` | `users` by normalized email | Password-reset request likewise starts before authentication or tenant selection. | Enumeration-safe response; an issued token is bound to the resolved user id, and confirmation re-loads the canonical active user before changing credentials. |
+
+`crates/server/tests/identity_plane_sql_contract.rs` is the regression test
+for this adjudication. It proves that each exact fragment occurs once in its
+source and scanner entry, that none of the six pairs exists in the broad
+`SANCTIONED_GLOBAL` list, that the scanner file stems remain unique across
+all crates, that the invitation flow binds the row-derived org/user in the
+right positions, and that the removed password-reset lookup has not
+returned. The dynamic PostgreSQL suites continue to prove race, expiry,
+membership, session, and reset behaviour; the source contract prevents a
+silent weakening of the static boundary between those runs.
+
 ## Class 3 — operator-only access (every site family, with purpose and action)
 
 | File / family | Table | Purpose | Action |
@@ -128,11 +197,15 @@ test-fixture population.
 * **No cross-tenant JOINs without org equality (G5 = 0).**
 * **No string-interpolated SQL (G9 = 0):** every statement binds
   parameters; none is assembled with `format!`/`push_str`.
-* **Extraction coverage:** 385 of 400 `sqlx::query` sites have inline
-  literals; the scan refuses to report a clean sweep if coverage drops
-  (tolerance bound 15). The non-literal sites are typed-query helpers
-  (`.map()`-built dynamic filters under `TenantQueryScope`, which the
-  `require_org_predicate` enforcement test covers).
+* **Extraction coverage (2026-10-28 rerun):** 733 inline statements were
+  extracted from 788 textual `sqlx::query` occurrences. The remaining
+  occurrences include variable-built statements, column-list templates,
+  test-only DDL, and non-call text. The scanner prints an extraction
+  coverage warning for that difference; its build-failing condition in the
+  current implementation remains a class-4 finding. Dynamic product
+  statements therefore still depend on their typed scope helpers and the
+  `require_org_predicate` enforcement tests rather than this literal
+  classifier alone.
 
 ## Honest limitations
 
@@ -140,16 +213,29 @@ test-fixture population.
    (class 3) means the statement lives in the operator plane of the
    codebase; the tenant data plane never routes to it. A future
    call-graph pass could tighten this further.
-2. The identity-resolution plane (class 2) enforces org equality at
-   the service layer, not in SQL — by necessity, because an
-   unauthenticated session token cannot carry a trustworthy org id.
+2. The identity-resolution plane still contains a deliberately small set
+   of pre-tenant statements that resolve a bearer token or global user.
+   Since 2026-10-28 those statements are exact-fragment sanctioned, and
+   every place where the invitation row has already supplied a trustworthy
+   organization repeats that organization in SQL. Service-layer checks
+   remain necessary for the initial token-to-identity resolution itself.
 3. `risk_events` attribution to the deployment org in the legacy
    operator plane is a real, documented limitation (per-tenant risk
    attribution exists only through the tenant data plane).
+4. Literal extraction is not complete for variable-built or templated
+   SQL. The 2026-10-28 rerun therefore proves zero class-4 findings among
+   the statements the classifier extracted, while the typed tenant-scope
+   helpers and PostgreSQL RLS suites remain part of the enforcement story
+   for dynamic statements. Improving the extractor's variable resolution
+   is useful future hardening; it was not hidden by increasing a tolerance
+   or broadening a sanction in the cleanup batch.
 
 ## Regression gate
 
 `tests/forensics/sql-pattern-regression.sh` runs this scan and fails
 the release on ANY class-4 finding, and additionally proves the scanner
 detects a planted unscoped statement (a scanner that cannot fail is
-worthless). Both checks must stay green.
+worthless). `crates/server/tests/identity_plane_sql_contract.rs` adds the
+source-level guard for the exact identity-plane sanctions and
+organization-scoped invitation predicates. All three checks must stay
+green.

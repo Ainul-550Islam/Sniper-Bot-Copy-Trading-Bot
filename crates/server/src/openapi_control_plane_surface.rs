@@ -1371,10 +1371,11 @@ pub fn control_plane_surface_paths() -> Value {
             "put": {
                 "tags": ["tenant"],
                 "operationId": "tenant.bindTelegram",
-                "description": "Bind the tenant's Telegram chat to the trading bridge.",
+                "description": "Bind the tenant's Telegram chat. Body: chat_id (integer, required), telegram_user_id (positive integer, optional — the user allowed to act in the chat), trading_enabled (boolean, optional, requires telegram_user_id). A rebind always rewrites the trading-link fields; absent means cleared. The binding alone never enables trading: orders additionally need an in-chat consent.",
                 "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
                 "responses": {
                     "200": { "description": "The binding.", "content": { "application/json": { "schema": { "type": "object" } } } },
+                    "400": { "description": "Malformed chat id or trading-link fields (including trading_enabled without telegram_user_id).", "content": { "application/json": { "schema": { "type": "object" } } } },
                     "401": { "$ref": "#/components/responses/Unauthorized" },
                     "403": { "$ref": "#/components/responses/Forbidden" }
                 }
@@ -1387,6 +1388,33 @@ pub fn control_plane_surface_paths() -> Value {
                     "200": { "description": "The binding is removed.", "content": { "application/json": { "schema": { "type": "object" } } } },
                     "401": { "$ref": "#/components/responses/Unauthorized" },
                     "403": { "$ref": "#/components/responses/Forbidden" }
+                }
+            }
+        },
+        "/api/tenant/telegram/consent": {
+            "get": {
+                "tags": ["tenant"],
+                "operationId": "tenant.telegramConsent",
+                "description": "The live Telegram trade consent for the bound chat, if any (view only — granting happens in chat via the confirmation phrase; the phrase digest is never returned).",
+                "responses": {
+                    "200": { "description": "Consent state (consent is null when none is live).", "content": { "application/json": { "schema": { "type": "object" } } } },
+                    "401": { "$ref": "#/components/responses/Unauthorized" },
+                    "404": { "description": "The tenant has no Telegram chat binding.", "content": { "application/json": { "schema": { "type": "object" } } } },
+                    "503": { "description": "The consent store is unavailable.", "content": { "application/json": { "schema": { "type": "object" } } } }
+                }
+            }
+        },
+        "/api/tenant/telegram/consent/revoke": {
+            "post": {
+                "tags": ["tenant"],
+                "operationId": "tenant.revokeTelegramConsent",
+                "description": "Revoke the live Telegram trade consent for the bound chat and cancel every pending command of that chat. Idempotent: revoking when nothing is live returns revoked=null.",
+                "responses": {
+                    "200": { "description": "The revoked consent (or null) and the cancelled pending command ids.", "content": { "application/json": { "schema": { "type": "object" } } } },
+                    "401": { "$ref": "#/components/responses/Unauthorized" },
+                    "403": { "$ref": "#/components/responses/Forbidden" },
+                    "404": { "description": "The tenant has no Telegram chat binding.", "content": { "application/json": { "schema": { "type": "object" } } } },
+                    "503": { "description": "The consent store is unavailable.", "content": { "application/json": { "schema": { "type": "object" } } } }
                 }
             }
         },

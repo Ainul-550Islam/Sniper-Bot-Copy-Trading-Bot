@@ -166,6 +166,9 @@ Replaying the same dataset twice yields the identical `replay-hash`.
 | `DATASET_MIN_RECORDS` | verifier min records | 1 |
 | `DATASET_MIN_SLOT_SPAN` | verifier min slot span | 0 |
 | `DATASET_MAX_SLOT_GAP` | verifier max allowed slot gap | u64::MAX |
+| `SNIPER_RECORD_LAUNCH_DATASET` | server runtime switch (`[sniper] record_launch_dataset`, Batch 07) | off |
+| `DATASET_ID` | dataset id for the server runtime (empty = derived from startup time) | (derived) |
+| `LIVE_DATASET_CAPTURE` | capture-script gate; `1` also enables the server runtime switch | unset |
 
 ## 9. Replay labels
 
@@ -177,12 +180,28 @@ imported fixture. `authoritative_replay()` refuses failed verification,
 insufficient coverage, and every synthetic fixture. `replay-hash` includes
 those stamps and the ordered launch events in its deterministic hash domain.
 
-## 10. Integration and real capture (later wiring batch)
+## 10. Integration and real capture
 
 `Sniper::with_recorder(RecorderSink)` is an optional builder hook (default
-`None`, zero behaviour change). The integration batch attaches a `Recorder`,
-spawns `Recorder::run`, and hands the sink to the sniper; observed
-`LaunchEvent`s are then captured.
+`None`, zero behaviour change). Batch 07 wired the runtime in the server
+binary: when `[sniper] record_launch_dataset = true` (env
+`SNIPER_RECORD_LAUNCH_DATASET`, or `LIVE_DATASET_CAPTURE=1` — the capture
+script's contract), `spawn_modules` builds a `Recorder` from
+`launch_dataset_dir` (`DATASET_DIR`, required — config validation fails
+closed without it), the chunk/channel tuning keys and an optional
+`launch_dataset_id` (empty derives one from the startup time), attaches the
+sink via `Sniper::with_recorder`, and spawns the writer task alongside the
+module handles. Observed `LaunchEvent`s are offered to the recorder before
+any trading gate, so a pure capture run can leave every `trade_*` flag off;
+CPMM/LaunchLab launches are observed for recording even when neither
+direct trading nor the Jupiter fallback would consume them. On shutdown
+the sniper task ends and drops the sink, the channel closes, and the
+recorder seals the manifest inside the bounded 15-second module-drain
+phase. A recorder that fails to initialise is logged and the sniper
+continues without recording — the money path never depends on the
+recorder. No live capture has been executed by this wiring batch, so any
+`recorded`/authoritative dataset claim remains `NOT_RUN` until an operator
+actually runs one and the verifier passes it.
 
 `scripts/run-dataset-capture.sh` never starts a feed by default. With no
 `LIVE_DATASET_CAPTURE=1` it prints `NOT_RUN` and exits successfully without

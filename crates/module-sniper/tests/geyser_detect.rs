@@ -293,7 +293,10 @@ async fn geyser_transaction_subscribe_yields_a_token_launch() {
 
     // The subscription filtered on the pump program first, and — with the
     // default config enabling both AMM protocols — on PumpSwap and Raydium
-    // AMM v4 as well (one push feed serves all three detectors).
+    // AMM v4 as well. Batch 07 adds Raydium CPMM and LaunchLab: their
+    // direct-trading flags default off, but the default Jupiter fallback
+    // can consume both protocols, so one push feed serves all five
+    // detectors.
     let frames = received.lock().unwrap().clone();
     let sub = frames
         .iter()
@@ -305,6 +308,8 @@ async fn geyser_transaction_subscribe_yields_a_token_launch() {
             PUMP_PROGRAM_ID.to_string(),
             solana_kit::consts::PUMPSWAP_PROGRAM_ID.to_string(),
             solana_kit::consts::RAYDIUM_AMM_V4.to_string(),
+            solana_kit::consts::RAYDIUM_CPMM_PROGRAM_ID.to_string(),
+            solana_kit::consts::RAYDIUM_LAUNCHLAB_PROGRAM_ID.to_string(),
         ])
     );
 

@@ -534,9 +534,21 @@ pub struct SniperConfig {
     /// graduated pump tokens use the Jupiter fallback only.
     pub trade_pumpswap: bool,
     /// Raydium AMM v4 protocol: detect `initialize2` pool creations and
-    /// route entries/exits directly through the AMM v4 program. CLMM /
-    /// CPMM / LaunchLab pools are recognised but never traded.
+    /// route entries/exits directly through the AMM v4 program.
     pub trade_raydium: bool,
+    /// Raydium CPMM (cp-swap) protocol: detect `initialize` pool creations
+    /// and route entries/exits directly through the CPMM program. Default
+    /// OFF (Batch 07): the layouts are IDL-verified but no mainnet round
+    /// trip is claimed, so direct trading is an explicit opt-in. With this
+    /// off, CPMM launches still route through Jupiter when the fallback is
+    /// on, and are still observed when dataset recording is on.
+    pub trade_raydium_cpmm: bool,
+    /// Raydium LaunchLab (launchpad) protocol: detect `initialize` pool
+    /// creations and route entries/exits directly through the LaunchLab
+    /// bonding curve while it is open. Default OFF (Batch 07), same
+    /// rationale as `trade_raydium_cpmm`. A graduated LaunchLab pool falls
+    /// back to Jupiter when the fallback is on.
+    pub trade_raydium_launchlab: bool,
     /// Fall back to the Jupiter aggregator if no direct venue is found.
     pub use_jupiter_fallback: bool,
     /// Sell rules ----------------------------------------------------------
@@ -582,6 +594,8 @@ pub struct SniperConfig {
     /// `slippage_pct`).
     pub pumpswap_slippage_pct: Option<f64>,
     pub raydium_slippage_pct: Option<f64>,
+    pub raydium_cpmm_slippage_pct: Option<f64>,
+    pub raydium_launchlab_slippage_pct: Option<f64>,
     /// Per-token slippage override in basis points, keyed by mint
     /// (`[sniper.slippage_overrides_bps]`). Still clamped by the hard max.
     pub slippage_overrides_bps: std::collections::BTreeMap<String, u64>,
@@ -656,6 +670,26 @@ pub struct SniperConfig {
     /// behaviour is exactly the classic single-TP/SL/trailing engine.
     #[serde(default)]
     pub advanced_exit: Option<AdvancedExitConfig>,
+    /// Launch dataset recording (Batch 02 recorder, Batch 07 runtime):
+    /// when true, the server spawns a `module-sniper` dataset `Recorder`,
+    /// attaches its sink to the sniper (`Sniper::with_recorder`) and seals
+    /// the manifest on graceful shutdown. Recording observes launches
+    /// before any trading gate, so a capture run can leave every trading
+    /// flag off. `LIVE_DATASET_CAPTURE=1` also enables it (the capture
+    /// script's contract).
+    pub record_launch_dataset: bool,
+    /// Output directory for the recorded dataset (`DATASET_DIR`). Required
+    /// when `record_launch_dataset` is on; there is no safe default that
+    /// could silently write into the working tree.
+    pub launch_dataset_dir: String,
+    /// Optional dataset id; empty lets the recorder derive one.
+    pub launch_dataset_id: String,
+    /// Recorder chunk rotation: maximum records per chunk file.
+    pub launch_dataset_chunk_max_records: usize,
+    /// Recorder chunk rotation: maximum bytes per chunk file.
+    pub launch_dataset_chunk_max_bytes: usize,
+    /// Recorder channel capacity between the sniper and the writer task.
+    pub launch_dataset_channel_capacity: usize,
 }
 
 /// One rung of the advanced take-profit ladder (GAP-MAP v2 P2).
@@ -708,6 +742,8 @@ impl Default for SniperConfig {
             use_transaction_subscribe: false,
             trade_pumpswap: true,
             trade_raydium: true,
+            trade_raydium_cpmm: false,
+            trade_raydium_launchlab: false,
             use_jupiter_fallback: true,
             take_profit_pct: Some(1.0),
             stop_loss_pct: Some(0.3),
@@ -731,6 +767,8 @@ impl Default for SniperConfig {
             slippage_mode: "fixed".into(),
             pumpswap_slippage_pct: None,
             raydium_slippage_pct: None,
+            raydium_cpmm_slippage_pct: None,
+            raydium_launchlab_slippage_pct: None,
             slippage_overrides_bps: std::collections::BTreeMap::new(),
             max_price_impact_bps: 2_500,
             max_entry_fee_lamports: 0,
@@ -749,6 +787,12 @@ impl Default for SniperConfig {
             exit_retry_backoff_secs: 10,
             failed_entry_cleanup: true,
             advanced_exit: None,
+            record_launch_dataset: false,
+            launch_dataset_dir: String::new(),
+            launch_dataset_id: String::new(),
+            launch_dataset_chunk_max_records: 1_000,
+            launch_dataset_chunk_max_bytes: 4 * 1024 * 1024,
+            launch_dataset_channel_capacity: 1_024,
         }
     }
 }
@@ -1117,6 +1161,19 @@ pub struct TelegramConfig {
     pub hourly_summary: bool,
     /// Message prefix, useful when several bots share a chat.
     pub prefix: String,
+    /// Telegram trade console (Batch 04 commands, Batch 07 wiring): attach
+    /// the consent-gated `/buy` + `/sell` console to the bot. Default OFF.
+    /// Attaching additionally requires a database, the deployment
+    /// organization, the Batch 04 trade tables, and the dedicated lamport
+    /// caps below; every missing piece leaves the bot notify/control-only.
+    pub trading_enabled: bool,
+    /// Hard cap for ONE Telegram buy, in lamports. `0` = trading cannot
+    /// attach (fail-closed); the console's per-org limit provider also
+    /// refuses while this is zero.
+    pub trading_max_order_lamports: u64,
+    /// Hard cap for Telegram buys per rolling day, in lamports. `0` =
+    /// trading cannot attach (fail-closed). Must be >= the per-order cap.
+    pub trading_daily_cap_lamports: u64,
 }
 
 impl Default for TelegramConfig {
@@ -1139,6 +1196,9 @@ impl Default for TelegramConfig {
             alert_on_loss_limit: true,
             hourly_summary: true,
             prefix: String::new(),
+            trading_enabled: false,
+            trading_max_order_lamports: 0,
+            trading_daily_cap_lamports: 0,
         }
     }
 }
@@ -2233,6 +2293,39 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     if let Some(v) = env_bool("SNIPER_TRADE_RAYDIUM", w) {
         c.sniper.trade_raydium = v;
     }
+    if let Some(v) = env_bool("SNIPER_TRADE_RAYDIUM_CPMM", w) {
+        c.sniper.trade_raydium_cpmm = v;
+    }
+    if let Some(v) = env_bool("SNIPER_TRADE_RAYDIUM_LAUNCHLAB", w) {
+        c.sniper.trade_raydium_launchlab = v;
+    }
+    if let Some(v) = env_f64("SNIPER_RAYDIUM_CPMM_SLIPPAGE_PCT", w) {
+        c.sniper.raydium_cpmm_slippage_pct = Some(v);
+    }
+    if let Some(v) = env_f64("SNIPER_RAYDIUM_LAUNCHLAB_SLIPPAGE_PCT", w) {
+        c.sniper.raydium_launchlab_slippage_pct = Some(v);
+    }
+    if let Some(v) = env_bool("SNIPER_RECORD_LAUNCH_DATASET", w) {
+        c.sniper.record_launch_dataset = v;
+    }
+    if let Some(v) = env_bool("LIVE_DATASET_CAPTURE", w) {
+        c.sniper.record_launch_dataset = v;
+    }
+    if let Some(v) = env_str("DATASET_DIR", w) {
+        c.sniper.launch_dataset_dir = v;
+    }
+    if let Some(v) = env_str("DATASET_ID", w) {
+        c.sniper.launch_dataset_id = v;
+    }
+    if let Some(v) = env_u64("DATASET_CHUNK_MAX_RECORDS", w) {
+        c.sniper.launch_dataset_chunk_max_records = v as usize;
+    }
+    if let Some(v) = env_u64("DATASET_CHUNK_MAX_BYTES", w) {
+        c.sniper.launch_dataset_chunk_max_bytes = v as usize;
+    }
+    if let Some(v) = env_u64("DATASET_CHANNEL_CAPACITY", w) {
+        c.sniper.launch_dataset_channel_capacity = v as usize;
+    }
     if let Some(v) = env_str("SNIPER_SLIPPAGE_MODE", w) {
         c.sniper.slippage_mode = v;
     }
@@ -2512,6 +2605,15 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
             Err(e) => w.push(format!("TELEGRAM_ALERT_CHAT_ID: {e}")),
         }
     }
+    if let Some(v) = env_bool("TELEGRAM_TRADING_ENABLED", w) {
+        c.telegram.trading_enabled = v;
+    }
+    if let Some(v) = env_u64("TELEGRAM_TRADING_MAX_ORDER_LAMPORTS", w) {
+        c.telegram.trading_max_order_lamports = v;
+    }
+    if let Some(v) = env_u64("TELEGRAM_TRADING_DAILY_CAP_LAMPORTS", w) {
+        c.telegram.trading_daily_cap_lamports = v;
+    }
 
     // --- api / storage ---
     // An explicitly empty override clears TOML trust. Empty entries inside
@@ -2642,6 +2744,14 @@ fn validate_sniper_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     for (label, v) in [
         ("sniper.pumpswap_slippage_pct", sn.pumpswap_slippage_pct),
         ("sniper.raydium_slippage_pct", sn.raydium_slippage_pct),
+        (
+            "sniper.raydium_cpmm_slippage_pct",
+            sn.raydium_cpmm_slippage_pct,
+        ),
+        (
+            "sniper.raydium_launchlab_slippage_pct",
+            sn.raydium_launchlab_slippage_pct,
+        ),
     ] {
         if let Some(v) = v {
             if !v.is_finite() || !(0.0..=100.0).contains(&v) {
@@ -2758,6 +2868,46 @@ fn validate_sniper_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
             "sniper.trade_pumpswap is on but neither use_log_subscription nor use_transaction_subscribe is — PumpSwap pool creations are only detectable through a Solana websocket feed"
                 .into(),
         );
+    }
+    if sn.trade_raydium_cpmm && !sn.use_log_subscription && !sn.use_transaction_subscribe {
+        w.push(
+            "sniper.trade_raydium_cpmm is on but neither use_log_subscription nor use_transaction_subscribe is — CPMM pools are only detectable through a Solana websocket feed"
+                .into(),
+        );
+    }
+    if sn.trade_raydium_launchlab && !sn.use_log_subscription && !sn.use_transaction_subscribe {
+        w.push(
+            "sniper.trade_raydium_launchlab is on but neither use_log_subscription nor use_transaction_subscribe is — LaunchLab pools are only detectable through a Solana websocket feed"
+                .into(),
+        );
+    }
+    if sn.record_launch_dataset {
+        if sn.launch_dataset_dir.trim().is_empty() {
+            return Err(BotError::config(
+                "sniper.record_launch_dataset is on but sniper.launch_dataset_dir / DATASET_DIR is empty",
+            ));
+        }
+        if sn.launch_dataset_chunk_max_records == 0 {
+            return Err(BotError::config(
+                "sniper.launch_dataset_chunk_max_records must be > 0",
+            ));
+        }
+        if sn.launch_dataset_chunk_max_bytes == 0 {
+            return Err(BotError::config(
+                "sniper.launch_dataset_chunk_max_bytes must be > 0",
+            ));
+        }
+        if sn.launch_dataset_channel_capacity == 0 {
+            return Err(BotError::config(
+                "sniper.launch_dataset_channel_capacity must be > 0",
+            ));
+        }
+        if !sn.use_log_subscription && !sn.use_transaction_subscribe && !sn.use_pumpportal {
+            w.push(
+                "sniper.record_launch_dataset is on but no launch feed is enabled — the recorder will seal an empty dataset"
+                    .into(),
+            );
+        }
     }
     let r = &c.risk;
     for (label, v) in [
@@ -3371,6 +3521,36 @@ fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
                 "telegram has no allowed_chat_ids / allowed_user_ids — control commands will be refused"
                     .into(),
             );
+        }
+    }
+    if c.telegram.trading_enabled {
+        if !c.telegram.enabled {
+            return Err(BotError::config(
+                "telegram.trading_enabled requires telegram.enabled",
+            ));
+        }
+        if c.telegram.trading_max_order_lamports == 0 {
+            return Err(BotError::config(
+                "telegram.trading_max_order_lamports must be > 0 when telegram.trading_enabled is on (0 is the fail-closed default)",
+            ));
+        }
+        if c.telegram.trading_daily_cap_lamports == 0 {
+            return Err(BotError::config(
+                "telegram.trading_daily_cap_lamports must be > 0 when telegram.trading_enabled is on (0 is the fail-closed default)",
+            ));
+        }
+        if c.telegram.trading_daily_cap_lamports < c.telegram.trading_max_order_lamports {
+            return Err(BotError::config(
+                "telegram.trading_daily_cap_lamports must be >= telegram.trading_max_order_lamports",
+            ));
+        }
+        if c.telegram.allowed_chat_ids.is_empty()
+            && c.telegram.allowed_user_ids.is_empty()
+            && c.telegram.owner_user_ids.is_empty()
+        {
+            return Err(BotError::config(
+                "telegram.trading_enabled requires at least one of allowed_chat_ids / allowed_user_ids / owner_user_ids (the bot role gate runs before the trade console)",
+            ));
         }
     }
     if c.copy.enabled && c.copy.wallets.is_empty() {

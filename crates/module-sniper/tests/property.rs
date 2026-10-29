@@ -327,7 +327,9 @@ fn event_id_ignores_everything_but_identity_and_reference() {
         p.protocol = match base.protocol {
             LaunchProtocol::PumpFun => LaunchProtocol::PumpSwap,
             LaunchProtocol::PumpSwap => LaunchProtocol::RaydiumAmmV4,
-            LaunchProtocol::RaydiumAmmV4 => LaunchProtocol::PumpFun,
+            LaunchProtocol::RaydiumAmmV4 => LaunchProtocol::RaydiumCpmm,
+            LaunchProtocol::RaydiumCpmm => LaunchProtocol::RaydiumLaunchLab,
+            LaunchProtocol::RaydiumLaunchLab => LaunchProtocol::PumpFun,
         };
         assert_ne!(
             p.compute_event_id(),

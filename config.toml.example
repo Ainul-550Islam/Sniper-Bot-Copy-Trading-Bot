@@ -161,6 +161,8 @@ use_log_subscription = true                  # logsSubscribe on pump.fun (+ Pump
 use_transaction_subscribe = false            # Geyser push feed (needs network.geyser_ws_url); lowest latency
 trade_pumpswap = true                        # detect PumpSwap CreatePool launches + route through the AMM
 trade_raydium = true                         # detect Raydium AMM v4 initialize2 pools + route through AMM v4
+trade_raydium_cpmm = false                   # Batch 07: Raydium CPMM (CP-Swap) launches — direct routing; default OFF
+trade_raydium_launchlab = false              # Batch 07: Raydium LaunchLab curve launches — direct routing; default OFF
 use_jupiter_fallback = true                  # Jupiter when no direct venue is available (entries + exits)
 take_profit_pct = 1.0                        # FRACTION (1.0 = +100%)
 stop_loss_pct = 0.3                          # FRACTION (0.3 = -30%)
@@ -181,6 +183,8 @@ keyword_denylist = ["rug", "scam", "honeypot", "test"]
 slippage_mode = "fixed"                      # "fixed" | "liquidity_aware" | "price_impact"
 # pumpswap_slippage_pct = 15.0               # per-protocol base (PERCENT); unset = slippage_pct
 # raydium_slippage_pct = 15.0                # per-protocol base (PERCENT); unset = slippage_pct
+# raydium_cpmm_slippage_pct = 15.0           # Batch 07 CPMM base (PERCENT); unset = slippage_pct
+# raydium_launchlab_slippage_pct = 15.0      # Batch 07 LaunchLab base (PERCENT); unset = slippage_pct
 slippage_overrides_bps = {}                  # per-mint override in BPS, e.g. { "<mint>" = 500 }
 max_price_impact_bps = 2500                  # reject when modelled price impact exceeds this (0 = off)
 max_entry_fee_lamports = 0                   # FEE_LIMIT budget for the worst-case entry tx fee (0 = off; >= 5000)
@@ -211,6 +215,18 @@ failed_entry_cleanup = true                  # close (no sell) positions whose e
 # ]
 # break_even = { activation_multiple = 1.5, buffer = 0.02 }
 # dev_sell_ttl_secs = 300
+
+# Launch dataset recording (Batch 02 recorder, Batch 07 runtime). When on,
+# the server attaches the recorder to the sniper and seals the dataset on
+# graceful shutdown. Recording observes launches BEFORE any trading gate,
+# so a pure capture run can leave every trade flag off (see
+# docs/BACKTEST-DATASETS.md and scripts/run-dataset-capture.sh).
+record_launch_dataset = false                # env: SNIPER_RECORD_LAUNCH_DATASET / LIVE_DATASET_CAPTURE=1
+launch_dataset_dir = ""                      # env: DATASET_DIR; REQUIRED when recording (no default)
+launch_dataset_id = ""                       # empty = derived from startup time
+launch_dataset_chunk_max_records = 1000
+launch_dataset_chunk_max_bytes = 4194304
+launch_dataset_channel_capacity = 1024
 
 # --- Module 2: copy trading --------------------------------------------------
 [copy]
@@ -360,6 +376,15 @@ alert_on_disconnect = true
 alert_on_loss_limit = true
 hourly_summary = true
 prefix = ""                                  # require this text prefix before commands
+# Trade console (Batch 04 commands, Batch 07 server wiring). Attaches ONLY
+# when all of these hold: telegram.enabled + trading_enabled + a database +
+# the deployment organization + migrations 0066/0067 + both caps below > 0.
+# Orders then still need an in-chat consent (phrase echo), a nonce hold and
+# a second-press confirm. The control plane can view/revoke consent at
+# /api/tenant/telegram/consent but can never grant it.
+trading_enabled = false                      # env: TELEGRAM_TRADING_ENABLED
+trading_max_order_lamports = 0               # env: TELEGRAM_TRADING_MAX_ORDER_LAMPORTS; 0 = console off
+trading_daily_cap_lamports = 0               # env: TELEGRAM_TRADING_DAILY_CAP_LAMPORTS; must be >= max order
 
 # --- Control-plane API + dashboard -------------------------------------------
 [api]

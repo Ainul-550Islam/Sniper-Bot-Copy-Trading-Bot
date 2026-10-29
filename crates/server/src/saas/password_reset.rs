@@ -285,27 +285,29 @@ pub async fn confirm_reset(
         return unavailable(error);
     }
     info!(sessions_revoked = revoked, "password reset complete");
-    // Security-alert email (best effort).
-    if let Some(email) = user_email(db, user_id).await {
-        let rendered = templates::security_alert(
-            &email,
-            "password_changed",
-            "Your password was changed via a reset link. All sessions were signed out.",
-        );
-        let dedup = format!("password_reset_done:{user_id}:{token_id}");
-        let _ = outbox::enqueue(
-            db.pool(),
-            &dedup,
-            rendered.template_key,
-            &email,
-            &rendered.subject,
-            &rendered.body_text,
-            Some(&rendered.body_html),
-            Some(user_id),
-            None,
-        )
-        .await;
-    }
+    // Security-alert email (best effort). The canonical user was loaded and
+    // locked inside the reset transaction above, and the relational
+    // projection was committed atomically with it. Use that already
+    // authenticated address instead of issuing a second, redundant identity
+    // lookup after the commit.
+    let rendered = templates::security_alert(
+        &user.email,
+        "password_changed",
+        "Your password was changed via a reset link. All sessions were signed out.",
+    );
+    let dedup = format!("password_reset_done:{user_id}:{token_id}");
+    let _ = outbox::enqueue(
+        db.pool(),
+        &dedup,
+        rendered.template_key,
+        &user.email,
+        &rendered.subject,
+        &rendered.body_text,
+        Some(&rendered.body_html),
+        Some(user_id),
+        None,
+    )
+    .await;
     (
         StatusCode::OK,
         Json(json!({
@@ -336,16 +338,6 @@ fn invalid_token() -> Response {
         })),
     )
         .into_response()
-}
-
-async fn user_email(db: &bot_core::db::Database, user_id: uuid::Uuid) -> Option<String> {
-    sqlx::query("SELECT email FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(db.pool())
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| r.try_get::<String, _>("email").ok())
 }
 
 /// Public base URL for links. `PUBLIC_BASE_URL` wins; otherwise relative

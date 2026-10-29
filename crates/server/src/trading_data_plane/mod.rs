@@ -102,6 +102,11 @@ pub fn routes() -> Router<ApiState> {
             "/api/tenant/telegram/binding",
             put(telegram::bind).delete(telegram::unbind),
         )
+        .route("/api/tenant/telegram/consent", get(telegram::consent))
+        .route(
+            "/api/tenant/telegram/consent/revoke",
+            post(telegram::consent_revoke),
+        )
         .route("/api/tenant/copy/leaders", get(copy::leaders))
         .route("/api/tenant/copy/leaders/:address", get(copy::leader))
         .route("/api/tenant/copy/links", get(copy::open_links))

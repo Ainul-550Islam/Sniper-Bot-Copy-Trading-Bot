@@ -459,11 +459,11 @@ fn a_buy_trade_converts_into_the_neutral_swap_with_the_other_venue() {
     assert_eq!(swap.block_time, Some(1_700_000_000));
     assert!(swap.succeeded);
     assert_eq!(swap.programs, vec![RAYDIUM_LAUNCHLAB.to_string()]);
-    // `SwapVenue` is a pre-existing public enum matched exhaustively by
-    // `module-copy`, which is owned by another batch. The LaunchLab venue
-    // therefore reports the generic `Other` venue; the LaunchLab-specific
-    // detail stays in `LaunchLabTradeEvent`.
-    assert_eq!(swap.venue, SwapVenue::Other);
+    // Batch 07 added `SwapVenue::RaydiumLaunchLab` together with the
+    // exhaustive `module-copy` mapping, so the neutral conversion reports
+    // the precise venue; the LaunchLab-specific detail stays in
+    // `LaunchLabTradeEvent`.
+    assert_eq!(swap.venue, SwapVenue::RaydiumLaunchLab);
 }
 
 #[test]
@@ -627,7 +627,7 @@ fn all_eight_instruction_decoders_match_vendored_launchpad_idl_account_indices()
         assert_eq!(decoded.quote_mint, by_name["quote_token_mint"]);
         let swap = to_decoded_swap_from_instruction(&decoded, "sig-ll", 77, None, 6, 9).unwrap();
         assert_eq!(swap.side, expected_side);
-        assert_eq!(swap.venue, SwapVenue::Other);
+        assert_eq!(swap.venue, SwapVenue::RaydiumLaunchLab);
     }
 
     // 3. migrate_to_amm & migrate_to_cpswap

@@ -310,7 +310,9 @@ pub struct BondingCurveState {
     /// Byte 82: decides the `sell` account layout. `None` when the account is
     /// the older 81-byte version and has not been extended yet.
     pub cashback_enabled: Option<bool>,
-    /// `None` on a v1 account, which is always SOL-quoted.
+    /// `None` on a v1 account, which is always SOL-quoted, and on a v2
+    /// account whose quote-mint field is still zeroed (also SOL-quoted).
+    /// The parser never yields `Some(Pubkey::default())`.
     pub quote_mint: Option<Pubkey>,
     pub creator_fee_bps: Option<u64>,
     pub can_edit_creator_fee: Option<bool>,
@@ -344,9 +346,14 @@ impl BondingCurveState {
             creator: read_pubkey(data, BC_OFF_CREATOR),
             is_mayhem_mode: at(BC_OFF_IS_MAYHEM_MODE).map(|b| b != 0),
             cashback_enabled: at(BC_OFF_IS_CASHBACK_COIN).map(|b| b != 0),
+            // A v2-sized account can still be SOL-quoted: the field is then
+            // left zeroed rather than set to WSOL. `Pubkey::default()` is
+            // the system program, never a mint, so a zeroed field must read
+            // as `None` (same as a v1 account), not `Some(default)`.
             quote_mint: data
                 .get(BC_OFF_QUOTE_MINT..BC_OFF_QUOTE_MINT + 32)
-                .map(|_| read_pubkey(data, BC_OFF_QUOTE_MINT)),
+                .map(|_| read_pubkey(data, BC_OFF_QUOTE_MINT))
+                .filter(|pk| *pk != Pubkey::default()),
             creator_fee_bps: data
                 .get(BC_OFF_CREATOR_FEE_BPS..BC_OFF_CREATOR_FEE_BPS + 8)
                 .map(|_| read_u64(data, BC_OFF_CREATOR_FEE_BPS)),
@@ -356,9 +363,15 @@ impl BondingCurveState {
         })
     }
 
-    /// The quote mint, defaulting to WSOL for a v1 account.
+    /// The quote mint, defaulting to WSOL for a v1 account. A zeroed
+    /// (`Pubkey::default()`) quote mint also means WSOL; the parser
+    /// normalizes it to `None`, and this guard covers states built any
+    /// other way (e.g. deserialized).
     pub fn quote_mint_or_wsol(&self) -> Pubkey {
-        self.quote_mint.unwrap_or(*WSOL_MINT)
+        match self.quote_mint {
+            Some(pk) if pk != Pubkey::default() => pk,
+            _ => *WSOL_MINT,
+        }
     }
 
     /// True when this is the extended (v2) account layout.
@@ -1265,6 +1278,45 @@ mod tests {
         let old = BondingCurveState::parse(&curve_data(false, BONDING_CURVE_MIN_LEN)).unwrap();
         assert_eq!(old.cashback_enabled, None);
         assert!(old.needs_extend());
+    }
+
+    #[test]
+    fn zeroed_quote_mint_on_extended_account_means_sol_quoted() {
+        // Live-mainnet regression (2026-10-29 paper smoke): extended
+        // bonding-curve accounts leave `quote_mint` zeroed when the curve
+        // is SOL-quoted. Parsing those zero bytes as
+        // `Some(Pubkey::default())` made `PumpContext::load` ask for the
+        // token program of the system program and abort every entry with
+        // "mint 11111111111111111111111111111111 is owned by unsupported
+        // program NativeLoader1111111111111111111111111111111".
+        for len in [BONDING_CURVE_V2_LEN, BONDING_CURVE_FULL_LEN] {
+            let c = BondingCurveState::parse(&curve_data(false, len)).unwrap();
+            assert_eq!(c.quote_mint, None, "len {len}");
+            assert_eq!(c.quote_mint_or_wsol(), *WSOL_MINT, "len {len}");
+        }
+        // A v1 account has no quote-mint bytes at all.
+        let v1 = BondingCurveState::parse(&curve_data(false, BONDING_CURVE_MIN_LEN)).unwrap();
+        assert_eq!(v1.quote_mint, None);
+        assert_eq!(v1.quote_mint_or_wsol(), *WSOL_MINT);
+    }
+
+    #[test]
+    fn explicit_quote_mint_is_preserved() {
+        let quote = Pubkey::new_from_array([9u8; 32]);
+        let mut d = curve_data(false, BONDING_CURVE_FULL_LEN);
+        d[BC_OFF_QUOTE_MINT..BC_OFF_QUOTE_MINT + 32].copy_from_slice(&[9u8; 32]);
+        let c = BondingCurveState::parse(&d).unwrap();
+        assert_eq!(c.quote_mint, Some(quote));
+        assert_eq!(c.quote_mint_or_wsol(), quote);
+    }
+
+    #[test]
+    fn default_quote_mint_accessor_falls_back_to_wsol() {
+        // States can also arrive via deserialization, bypassing `parse`;
+        // the accessor must still refuse the system-program pubkey.
+        let mut c = BondingCurveState::parse(&curve_data(false, BONDING_CURVE_FULL_LEN)).unwrap();
+        c.quote_mint = Some(Pubkey::default());
+        assert_eq!(c.quote_mint_or_wsol(), *WSOL_MINT);
     }
 
     #[test]

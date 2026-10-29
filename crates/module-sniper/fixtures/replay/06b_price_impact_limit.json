@@ -13,6 +13,8 @@
     "use_transaction_subscribe": false,
     "trade_pumpswap": true,
     "trade_raydium": true,
+    "trade_raydium_cpmm": false,
+    "trade_raydium_launchlab": false,
     "use_jupiter_fallback": true,
     "take_profit_pct": 1.0,
     "stop_loss_pct": 0.3,
@@ -36,6 +38,8 @@
     "slippage_mode": "fixed",
     "pumpswap_slippage_pct": null,
     "raydium_slippage_pct": null,
+    "raydium_cpmm_slippage_pct": null,
+    "raydium_launchlab_slippage_pct": null,
     "slippage_overrides_bps": {},
     "max_price_impact_bps": 10,
     "max_entry_fee_lamports": 0,
@@ -53,7 +57,13 @@
     "stale_position_exit_secs": 0,
     "exit_retry_backoff_secs": 10,
     "failed_entry_cleanup": true,
-    "advanced_exit": null
+    "advanced_exit": null,
+    "record_launch_dataset": false,
+    "launch_dataset_dir": "",
+    "launch_dataset_id": "",
+    "launch_dataset_chunk_max_records": 1000,
+    "launch_dataset_chunk_max_bytes": 4194304,
+    "launch_dataset_channel_capacity": 1024
   },
   "risk": {
     "kill_switch": false,

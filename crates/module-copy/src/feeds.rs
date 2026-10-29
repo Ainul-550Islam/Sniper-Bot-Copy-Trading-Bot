@@ -887,7 +887,9 @@ pub fn wallet_trade_from_decoded(swap: &DecodedSwap) -> WalletTrade {
     let venue = match swap.venue {
         SwapVenue::PumpBondingCurve => Venue::PumpFun,
         SwapVenue::PumpSwap => Venue::PumpSwap,
-        SwapVenue::RaydiumAmmV4 | SwapVenue::RaydiumCpmm => Venue::RaydiumAmmV4,
+        SwapVenue::RaydiumAmmV4 => Venue::RaydiumAmmV4,
+        SwapVenue::RaydiumCpmm => Venue::RaydiumCpmm,
+        SwapVenue::RaydiumLaunchLab => Venue::RaydiumLaunchLab,
         SwapVenue::RaydiumClmm => Venue::RaydiumClmm,
         SwapVenue::Jupiter | SwapVenue::Other | SwapVenue::None => Venue::Jupiter,
     };
@@ -1030,6 +1032,38 @@ mod tests {
         assert_eq!(trade.side, PositionSide::Short);
         assert!((trade.sol_amount - 1.5).abs() < 1e-9);
         assert_eq!(trade.venue, Venue::PumpSwap);
+    }
+
+    #[test]
+    fn decoded_raydium_cpmm_and_launchlab_keep_their_precise_venues() {
+        let mut swap = DecodedSwap {
+            signature: "sig".into(),
+            slot: 9,
+            block_time: None,
+            wallet: "w".into(),
+            side: Side::Buy,
+            venue: SwapVenue::RaydiumLaunchLab,
+            base_mint: "base".into(),
+            quote_mint: WSOL_MINT.to_string(),
+            base_amount: 3_000_000,
+            quote_amount: 2_000_000_000,
+            base_decimals: 6,
+            quote_decimals: 9,
+            fee_lamports: 0,
+            price_quote_per_base: 0.0,
+            programs: vec![],
+            events: vec![],
+            logs: vec![],
+            succeeded: true,
+            error: None,
+        };
+        let trade = wallet_trade_from_decoded(&swap);
+        assert_eq!(trade.venue, Venue::RaydiumLaunchLab);
+        assert_eq!(trade.side, PositionSide::Long);
+        assert!((trade.sol_amount - 2.0).abs() < 1e-9);
+        swap.venue = SwapVenue::RaydiumCpmm;
+        let trade = wallet_trade_from_decoded(&swap);
+        assert_eq!(trade.venue, Venue::RaydiumCpmm);
     }
 }
 

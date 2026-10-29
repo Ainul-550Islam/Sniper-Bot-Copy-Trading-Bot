@@ -36,6 +36,8 @@ pub mod provisioning;
 mod recon;
 pub mod runtime_registry;
 pub mod saas;
+pub mod telegram_trade_port;
+pub mod telegram_trade_store_pg;
 pub mod tenant;
 pub mod tenant_background;
 pub mod tenant_config;
@@ -786,6 +788,20 @@ async fn main() -> anyhow::Result<()> {
     let poly_store: Option<Arc<dyn module_polymarket::store::PolyStore>> = db.as_ref().map(|d| {
         Arc::new(recon::DbPolyStore::new(d.clone())) as Arc<dyn module_polymarket::store::PolyStore>
     });
+    // ---- TASK 7A: SaaS control plane ---------------------------------------
+    // The tenant store is created before the modules and the API so the
+    // deployment organization exists on the first request — and so the
+    // Batch 07 Telegram trade console can bind to it (the port and the
+    // RLS-scoped trade stores are deployment-organization-only). A
+    // single-tenant operator keeps using their deployment key; it maps to
+    // this organization and can never reach another one.
+    let saas = Arc::new(saas::SaasStore::with_database(db.clone()).await?);
+    let deployment_org = match saas::ensure_deployment_organization(&saas).await? {
+        Some(org) => org,
+        None => anyhow::bail!("failed to initialize the deployment organization"),
+    };
+    let deployment_org_id = deployment_org.id;
+
     let module_handles = spawn_modules(
         &state,
         &rpc,
@@ -796,19 +812,11 @@ async fn main() -> anyhow::Result<()> {
         copy_store.as_ref(),
         poly_store.as_ref(),
         &ownership,
+        db.as_ref(),
+        Some(deployment_org_id),
+        &shutdown,
     )
     .await;
-
-    // ---- TASK 7A: SaaS control plane ---------------------------------------
-    // The tenant store is created before the API so the deployment
-    // organization exists on the first request. A single-tenant operator
-    // keeps using their deployment key; it maps to this organization and
-    // can never reach another one.
-    let saas = Arc::new(saas::SaasStore::with_database(db.clone()).await?);
-    match saas::ensure_deployment_organization(&saas).await? {
-        Some(_) => {}
-        None => anyhow::bail!("failed to initialize the deployment organization"),
-    }
 
     // ---- control plane -----------------------------------------------------
     let api_handle = if cfg.api.enabled {
@@ -944,6 +952,9 @@ async fn spawn_modules(
     copy_store: Option<&Arc<dyn module_copy::recovery::CopyStore>>,
     poly_store: Option<&Arc<dyn module_polymarket::store::PolyStore>>,
     ownership: &Arc<bot_core::ownership::OwnershipRegistry>,
+    db: Option<&Arc<bot_core::db::Database>>,
+    deployment_org: Option<bot_core::tenant::OrganizationId>,
+    shutdown: &Arc<Shutdown>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -963,6 +974,47 @@ async fn spawn_modules(
                     None => sniper,
                 };
                 let sniper = sniper.with_ownership(Arc::clone(ownership));
+                // Batch 07 — launch-dataset recorder runtime. The sink is
+                // offered every observed launch before the trading gates;
+                // when the sniper task ends it drops the sink, the channel
+                // closes, and the recorder task seals the dataset. The
+                // recorder handle rides in `handles`, so the module-drain
+                // phase (15s) bounds the seal like every other module.
+                let sniper = if cfg.sniper.record_launch_dataset {
+                    match build_launch_recorder(cfg) {
+                        Ok((sink, task)) => {
+                            handles.push(tokio::spawn(async move {
+                                match task.finish().await {
+                                    Ok(manifest) => info!(
+                                        dataset_id = %manifest.dataset_id,
+                                        records = manifest.record_count,
+                                        status = ?manifest.status,
+                                        "launch dataset recorder sealed"
+                                    ),
+                                    Err(e) => error!(
+                                        error = %e,
+                                        "launch dataset recorder failed to seal"
+                                    ),
+                                }
+                            }));
+                            info!(
+                                dir = %cfg.sniper.launch_dataset_dir,
+                                "launch dataset recorder attached"
+                            );
+                            sniper.with_recorder(sink)
+                        }
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                "launch dataset recorder failed to initialise; \
+                                 sniper continues without recording"
+                            );
+                            sniper
+                        }
+                    }
+                } else {
+                    sniper
+                };
                 handles.push(tokio::spawn(async move { sniper.run().await }));
                 info!("module 1 (sniper) spawned");
             }
@@ -1018,15 +1070,80 @@ async fn spawn_modules(
         }
     }
 
-    // Module 5 — telegram control.
+    // Module 5 — telegram control. Batch 07: when trading is enabled and
+    // every gate holds (database + deployment organization + positive caps
+    // + the three Batch 04 tables), the consent-gated trade console is
+    // attached and the bot task runs under the deployment-org RLS scope.
+    // Any missing piece downgrades to the notify/control-only bot — never
+    // to an in-memory or unscoped trading console.
     if cfg.telegram.enabled {
-        match module_telegram::spawn(state.clone()).await {
-            Ok(Some(handle)) => {
-                handles.push(handle);
-                info!("module 5 (telegram) spawned");
+        let console = if cfg.telegram.trading_enabled {
+            build_telegram_console(
+                state,
+                rpc,
+                wallet,
+                signers,
+                cfg,
+                intents,
+                db,
+                deployment_org,
+            )
+            .await
+        } else {
+            None
+        };
+        match console {
+            Some(console) => {
+                let org = deployment_org.map(|o| o.as_uuid());
+                // Durable chat binding → in-memory ChatLink. Sync once now
+                // (so the link exists before the first message), then keep
+                // it fresh on a 5s tick until shutdown.
+                if let (Some(database), Some(org_id)) = (db, deployment_org) {
+                    let initial = sync_telegram_chat_link(database, org_id, &console, None).await;
+                    let database = Arc::clone(database);
+                    let console_sync = Arc::clone(&console);
+                    let shutdown_sync = Arc::clone(shutdown);
+                    handles.push(tokio::spawn(async move {
+                        let mut applied = initial;
+                        loop {
+                            tokio::select! {
+                                () = shutdown_sync.wait() => break,
+                                () = tokio::time::sleep(Duration::from_secs(5)) => {
+                                    applied = sync_telegram_chat_link(
+                                        &database,
+                                        org_id,
+                                        &console_sync,
+                                        applied,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }));
+                }
+                match module_telegram::spawn_with_console(state.clone(), Some(console), org).await {
+                    Ok(Some(handle)) => {
+                        handles.push(handle);
+                        info!("module 5 (telegram) spawned with trade console");
+                    }
+                    Ok(None) => {
+                        info!("module 5 (telegram) disabled (no bot token)")
+                    }
+                    Err(e) => {
+                        error!(error = %e, "module 5 (telegram) failed to initialise")
+                    }
+                }
             }
-            Ok(None) => info!("module 5 (telegram) disabled (no bot token)"),
-            Err(e) => error!(error = %e, "module 5 (telegram) failed to initialise"),
+            None => match module_telegram::spawn(state.clone()).await {
+                Ok(Some(handle)) => {
+                    handles.push(handle);
+                    info!("module 5 (telegram) spawned");
+                }
+                Ok(None) => info!("module 5 (telegram) disabled (no bot token)"),
+                Err(e) => {
+                    error!(error = %e, "module 5 (telegram) failed to initialise")
+                }
+            },
         }
     }
 
@@ -1036,6 +1153,200 @@ async fn spawn_modules(
     }
 
     handles
+}
+
+/// Build the launch-dataset recorder from `[sniper]` config (Batch 07).
+///
+/// Returns the sink for the sniper plus the spawned recorder task. The
+/// dataset id comes from config when set, otherwise it is derived from the
+/// startup time so two boots never append into one dataset directory. The
+/// source is always `Recorded` — this path only ever sees live feed
+/// observations, and `authoritative` still has to be earned from the
+/// verifier, never from this constructor.
+fn build_launch_recorder(
+    cfg: &Config,
+) -> Result<
+    (
+        module_sniper::dataset::RecorderSink,
+        module_sniper::dataset::recorder::RecorderTask,
+    ),
+    bot_core::error::BotError,
+> {
+    use module_sniper::dataset::{
+        DatasetManifest, DatasetSource, FsDatasetStore, Recorder, RecorderConfig,
+    };
+    let sn = &cfg.sniper;
+    let rcfg = RecorderConfig::new(
+        sn.launch_dataset_dir.clone(),
+        sn.launch_dataset_chunk_max_records,
+        sn.launch_dataset_chunk_max_bytes,
+        sn.launch_dataset_channel_capacity,
+    )?;
+    let dataset_id = if sn.launch_dataset_id.trim().is_empty() {
+        format!("launch-{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"))
+    } else {
+        sn.launch_dataset_id.trim().to_string()
+    };
+    let store = FsDatasetStore::new(sn.launch_dataset_dir.clone());
+    let manifest = DatasetManifest::new(
+        dataset_id,
+        "server launch recording".to_string(),
+        DatasetSource::Recorded,
+    );
+    let (sink, recorder) = Recorder::new(store, manifest, &rcfg)?;
+    Ok((sink, recorder.spawn()))
+}
+
+/// Build the Telegram trade console when every Batch 07 gate holds.
+///
+/// Fail-closed ladder, each rung logged: database present → deployment
+/// organization known → both Telegram lamport caps positive → all three
+/// Batch 04 trade tables installed → console limit configuration valid.
+/// Any failure returns `None` and the caller runs the notify/control-only
+/// bot; there is deliberately no in-memory-store fallback for money
+/// commands in the server binary.
+#[allow(clippy::too_many_arguments)]
+async fn build_telegram_console(
+    state: &bot_core::state::Shared,
+    rpc: &Rpc,
+    wallet: &Arc<Wallet>,
+    signers: &Arc<SignerRegistry>,
+    cfg: &Config,
+    intents: Option<&Arc<dyn bot_core::recovery::IntentSink>>,
+    db: Option<&Arc<bot_core::db::Database>>,
+    deployment_org: Option<bot_core::tenant::OrganizationId>,
+) -> Option<Arc<module_telegram::TradeConsole>> {
+    let Some(database) = db else {
+        warn!(
+            "telegram trading_enabled but no database is configured; \
+             trade console not attached"
+        );
+        return None;
+    };
+    let Some(org) = deployment_org else {
+        warn!(
+            "telegram trading_enabled but the deployment organization is \
+             unknown; trade console not attached"
+        );
+        return None;
+    };
+    if cfg.telegram.trading_max_order_lamports == 0 || cfg.telegram.trading_daily_cap_lamports == 0
+    {
+        warn!(
+            max_order = cfg.telegram.trading_max_order_lamports,
+            daily_cap = cfg.telegram.trading_daily_cap_lamports,
+            "telegram trading caps must both be positive; trade console not attached"
+        );
+        return None;
+    }
+    let store = telegram_trade_store_pg::PgTradeStore::new(database.pool().clone());
+    match store.installed_tables().await {
+        Ok(3) => {}
+        Ok(n) => {
+            warn!(
+                installed = n,
+                "telegram trade tables incomplete (need migrations 0066+0067); \
+                 trade console not attached"
+            );
+            return None;
+        }
+        Err(e) => {
+            warn!(error = %e.detail(), code = e.code(), "telegram trade table probe failed; trade console not attached");
+            return None;
+        }
+    }
+    let port = telegram_trade_port::DeploymentTradePort::new(
+        state.clone(),
+        rpc.clone(),
+        Arc::clone(wallet),
+        Some(Arc::clone(signers)),
+        intents.map(Arc::clone),
+        org.to_string(),
+        cfg,
+    );
+    match module_telegram::TradeConsole::new(
+        state.clone(),
+        Arc::new(port),
+        store.trade_stores(),
+        module_telegram::TradeConsoleConfig::default(),
+    ) {
+        Ok(console) => {
+            info!(organization_id = %org, "telegram trade console attached");
+            Some(Arc::new(console))
+        }
+        Err(e) => {
+            error!(error = ?e, "telegram trade console configuration rejected");
+            None
+        }
+    }
+}
+
+/// The chat link a durable binding implies, if any.
+///
+/// Pure and fail-closed: no binding, or a binding without a positive
+/// Telegram user id, never produces a link (a chat id alone is not an
+/// identity). `trading_enabled` on the binding decides between a trading
+/// link and an alerts-only link.
+fn desired_chat_link(
+    binding: Option<&trading_data_plane::telegram::TelegramBinding>,
+    organization_id: &str,
+) -> Option<(i64, module_telegram::ChatLink)> {
+    let binding = binding?;
+    let user_id = binding.telegram_user_id.filter(|u| *u > 0)?;
+    let link = if binding.trading_enabled {
+        module_telegram::ChatLink::trading(organization_id, user_id)
+    } else {
+        module_telegram::ChatLink::alerts_only(organization_id, user_id)
+    };
+    Some((binding.chat_id, link))
+}
+
+/// Reconcile the console's in-memory chat link with the durable binding.
+///
+/// Runs inside the deployment-org RLS scope (the config store and the
+/// command store both sit behind tenant RLS). On any change the previous
+/// chat is unlinked first — which cancels its pending commands — so a
+/// rebind, an unbind, or a trading-flag flip can never leave a live money
+/// button behind. A load error keeps the previously applied link and
+/// retries on the next tick; it never invents a link.
+async fn sync_telegram_chat_link(
+    db: &Arc<bot_core::db::Database>,
+    org: bot_core::tenant::OrganizationId,
+    console: &Arc<module_telegram::TradeConsole>,
+    applied: Option<(i64, module_telegram::ChatLink)>,
+) -> Option<(i64, module_telegram::ChatLink)> {
+    bot_core::tenant::rls_context::scope_tenant_context(org.as_uuid(), async move {
+        let binding = match trading_data_plane::telegram::load_binding(db, org).await {
+            Ok(binding) => binding,
+            Err(e) => {
+                warn!(error = %e, "telegram binding sync failed; keeping current link");
+                return applied;
+            }
+        };
+        let desired = desired_chat_link(binding.as_ref(), &org.to_string());
+        if desired == applied {
+            return applied;
+        }
+        if let Some((prev_chat, _)) = &applied {
+            let cancelled = console.unlink_chat(*prev_chat, chrono::Utc::now()).await;
+            info!(
+                chat_id = prev_chat,
+                cancelled_pending = cancelled.len(),
+                "telegram chat link removed by binding sync"
+            );
+        }
+        if let Some((chat_id, link)) = &desired {
+            info!(
+                chat_id,
+                user_id = link.user_id,
+                trading_enabled = link.trading_enabled,
+                "telegram chat link applied from durable binding"
+            );
+            console.link_chat(*chat_id, link.clone()).await;
+        }
+        desired
+    })
+    .await
 }
 
 use bot_core::config::is_loopback_host as is_loopback;
@@ -1475,12 +1786,55 @@ async fn run_migrations_only(cfg: &Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::desired_chat_link;
     use super::is_loopback;
     use super::{block_modules_for_unresolved, modules_for_recon_kind};
     use bot_core::audit::AuditTrail;
     use bot_core::config::{AppConfig, Config};
     use bot_core::models::BotModule;
     use bot_core::state::AppState;
+
+    #[test]
+    fn desired_chat_link_requires_an_identified_user() {
+        use super::trading_data_plane::telegram::TelegramBinding;
+        let at = chrono::Utc::now();
+        let base = TelegramBinding {
+            chat_id: -99,
+            bound_at: at,
+            bound_by: "operator".to_string(),
+            telegram_user_id: None,
+            trading_enabled: true,
+        };
+        // No binding at all: no link.
+        assert_eq!(desired_chat_link(None, "org"), None);
+        // Trading flag without a user: still no link — a chat id alone is
+        // not an identity, whatever the durable document claims.
+        assert_eq!(desired_chat_link(Some(&base), "org"), None);
+        // Non-positive user ids are not identities either.
+        let zero_user = TelegramBinding {
+            telegram_user_id: Some(0),
+            ..base.clone()
+        };
+        assert_eq!(desired_chat_link(Some(&zero_user), "org"), None);
+        // Identified user + trading flag: a trading link for THAT user.
+        let trading = TelegramBinding {
+            telegram_user_id: Some(777),
+            ..base.clone()
+        };
+        assert_eq!(
+            desired_chat_link(Some(&trading), "org"),
+            Some((-99, module_telegram::ChatLink::trading("org", 777)))
+        );
+        // Identified user without the flag: alerts only.
+        let alerts = TelegramBinding {
+            trading_enabled: false,
+            ..trading
+        };
+        assert_eq!(
+            desired_chat_link(Some(&alerts), "org"),
+            Some((-99, module_telegram::ChatLink::alerts_only("org", 777)))
+        );
+    }
 
     #[tokio::test]
     async fn startup_gate_blocks_only_affected_modules() {

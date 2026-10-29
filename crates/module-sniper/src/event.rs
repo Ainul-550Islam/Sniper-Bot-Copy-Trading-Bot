@@ -50,6 +50,12 @@ pub enum LaunchProtocol {
     PumpSwap,
     /// A Raydium AMM v4 pool initialisation (`initialize2`).
     RaydiumAmmV4,
+    /// A Raydium CPMM (cp-swap) pool initialisation (`initialize` /
+    /// `initialize_with_permission`), Batch 07.
+    RaydiumCpmm,
+    /// A Raydium LaunchLab (launchpad) pool initialisation (`initialize` /
+    /// `initialize_v2` / `initialize_with_token_2022`), Batch 07.
+    RaydiumLaunchLab,
 }
 
 impl LaunchProtocol {
@@ -58,6 +64,8 @@ impl LaunchProtocol {
             LaunchProtocol::PumpFun => "pump_fun",
             LaunchProtocol::PumpSwap => "pump_swap",
             LaunchProtocol::RaydiumAmmV4 => "raydium_amm_v4",
+            LaunchProtocol::RaydiumCpmm => "raydium_cpmm",
+            LaunchProtocol::RaydiumLaunchLab => "raydium_launchlab",
         }
     }
 
@@ -68,6 +76,8 @@ impl LaunchProtocol {
             LaunchProtocol::PumpFun => Venue::PumpFun,
             LaunchProtocol::PumpSwap => Venue::PumpSwap,
             LaunchProtocol::RaydiumAmmV4 => Venue::RaydiumAmmV4,
+            LaunchProtocol::RaydiumCpmm => Venue::RaydiumCpmm,
+            LaunchProtocol::RaydiumLaunchLab => Venue::RaydiumLaunchLab,
         }
     }
 

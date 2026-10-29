@@ -108,7 +108,9 @@ pub fn venue_enabled(cfg: &CopyConfig, venue: Venue) -> bool {
     match venue {
         Venue::PumpFun => cfg.decode_pumpfun,
         Venue::PumpSwap => cfg.decode_pumpswap,
-        Venue::RaydiumAmmV4 | Venue::RaydiumClmm => cfg.decode_raydium,
+        Venue::RaydiumAmmV4 | Venue::RaydiumClmm | Venue::RaydiumCpmm | Venue::RaydiumLaunchLab => {
+            cfg.decode_raydium
+        }
         Venue::Jupiter => cfg.decode_jupiter,
         Venue::Paper => true,
         Venue::PolymarketClob => false,

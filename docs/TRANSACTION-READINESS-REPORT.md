@@ -2,7 +2,7 @@
 
 > Evidence, not sales guarantee. No valuation claim, no “guaranteed $20k-$60k” language.
 
-**Snapshot (live):** Version 0.1.0 · <!-- stat:migrations -->65<!-- /stat --> migrations · <!-- stat:rust_files -->712<!-- /stat --> Rust sources under `crates/` · <!-- stat:crates -->8<!-- /stat --> workspace members · <!-- stat:docs_canonical -->157<!-- /stat --> docs · <!-- stat:test_attrs_plain -->2140<!-- /stat --> `#[test]` attributes (a static count, not a run result) · `rust-toolchain.toml` pinned — historical snapshots quoted dated counts that no longer matched the tree and were removed; `docs/STATS.md` is now the single source
+**Snapshot (live):** Version 0.1.0 · <!-- stat:migrations -->67<!-- /stat --> migrations · <!-- stat:rust_files -->766<!-- /stat --> Rust sources under `crates/` · <!-- stat:crates -->8<!-- /stat --> workspace members · <!-- stat:docs_canonical -->159<!-- /stat --> docs · <!-- stat:test_attrs_plain -->2578<!-- /stat --> `#[test]` attributes (a static count, not a run result) · `rust-toolchain.toml` pinned — historical snapshots quoted dated counts that no longer matched the tree and were removed; `docs/STATS.md` is now the single source
 
 ## 1. Code Completeness
 

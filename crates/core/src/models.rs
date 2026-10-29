@@ -154,8 +154,12 @@ pub enum Venue {
     PumpSwap,
     /// Raydium AMM v4 (OpenBook-backed constant product).
     RaydiumAmmV4,
-    /// Raydium CLMM / CPMM.
+    /// Raydium CLMM (concentrated liquidity).
     RaydiumClmm,
+    /// Raydium CPMM (cp-swap constant product, Batch 03 adapter / Batch 07 routing).
+    RaydiumCpmm,
+    /// Raydium LaunchLab (launchpad bonding curve, Batch 03 adapter / Batch 07 routing).
+    RaydiumLaunchLab,
     /// Jupiter aggregator (routing fallback).
     Jupiter,
     /// Polymarket central limit order book.
@@ -178,6 +182,8 @@ impl Venue {
             Venue::PumpSwap => "pumpswap",
             Venue::RaydiumAmmV4 => "raydium-amm-v4",
             Venue::RaydiumClmm => "raydium-clmm",
+            Venue::RaydiumCpmm => "raydium-cpmm",
+            Venue::RaydiumLaunchLab => "raydium-launchlab",
             Venue::Jupiter => "jupiter",
             Venue::PolymarketClob => "polymarket",
             Venue::Paper => "paper",
@@ -191,6 +197,10 @@ impl Venue {
             "pumpswap" => Venue::PumpSwap,
             "raydium-amm-v4" => Venue::RaydiumAmmV4,
             "raydium-clmm" => Venue::RaydiumClmm,
+            "raydium-cpmm" | "raydium_cpmm" => Venue::RaydiumCpmm,
+            "raydium-launchlab" | "raydium_launchlab" | "raydium_launch_lab" => {
+                Venue::RaydiumLaunchLab
+            }
             "jupiter" => Venue::Jupiter,
             "polymarket" => Venue::PolymarketClob,
             "paper" => Venue::Paper,

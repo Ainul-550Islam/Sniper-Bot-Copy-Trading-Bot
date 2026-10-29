@@ -15,9 +15,11 @@
 //! When a [`commands::TradeConsole`] is attached ([`TelegramBot::with_trade_console`])
 //! the router sends `/consent`, `/buy`, `/sell`, `/confirm`, `/cancel` and
 //! `/pending` to it. The console implements the consent-gated flow against a
-//! [`trade_port::TradeCommandPort`] — the seam the server implements in the
-//! final integration batch. Without a console attached the new commands answer
-//! "not configured" and every pre-existing command behaves exactly as before.
+//! [`trade_port::TradeCommandPort`] — implemented by the server in Batch 07
+//! (`telegram_trade_port`) and attached through [`spawn_with_console`] when
+//! Telegram trading is enabled and risk-gated on. Without a console attached
+//! the new commands answer "not configured" and every pre-existing command
+//! behaves exactly as before.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -468,12 +470,40 @@ pub fn menu() -> Vec<BotCommand> {
 
 /// Convenience for the server binary: build + run if a token is present.
 pub async fn spawn(state: Shared) -> BotResult<Option<tokio::task::JoinHandle<()>>> {
+    spawn_with_console(state, None, None).await
+}
+
+/// Spawn the bot with an optional consent-gated trade console attached
+/// (Batch 07 server wiring).
+///
+/// `tenant_org` binds the PostgreSQL RLS tenant for the whole bot task:
+/// the console's stores run on the application pool, whose checkout hook
+/// takes `app.org_id` from the task-local tenant, and Tokio task-locals
+/// do not propagate into `tokio::spawn` — so the scope wraps the spawned
+/// future itself. Pass the deployment organization when a console is
+/// attached; without a tenant the stores stay fail-closed under RLS.
+pub async fn spawn_with_console(
+    state: Shared,
+    console: Option<Arc<commands::TradeConsole>>,
+    tenant_org: Option<uuid::Uuid>,
+) -> BotResult<Option<tokio::task::JoinHandle<()>>> {
     match TelegramBot::new(state.clone()).await? {
-        Some(bot) => {
+        Some(mut bot) => {
+            if let Some(console) = console {
+                bot = bot.with_trade_console(console);
+            }
             let bot = Arc::new(bot);
             let handle = tokio::spawn(async move {
-                if let Err(e) = bot.run().await {
-                    warn!(error = %e, "telegram bot stopped");
+                let run = async move {
+                    if let Err(e) = bot.run().await {
+                        warn!(error = %e, "telegram bot stopped");
+                    }
+                };
+                match tenant_org {
+                    Some(org) => {
+                        bot_core::tenant::rls_context::scope_tenant_context(org, run).await
+                    }
+                    None => run.await,
                 }
             });
             Ok(Some(handle))

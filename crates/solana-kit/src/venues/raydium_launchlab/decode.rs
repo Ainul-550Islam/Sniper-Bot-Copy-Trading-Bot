@@ -784,14 +784,12 @@ pub fn to_decoded_swap(
         block_time,
         wallet: wallet.to_string(),
         side,
-        // `SwapVenue` is a pre-existing public enum that `module-copy` matches
-        // exhaustively, and `module-copy` is owned by another batch. Adding a
-        // `RaydiumLaunchLab` variant here would break that crate's build, so
-        // the neutral conversion reports the generic `Other` venue instead.
-        // The LaunchLab-specific detail is preserved in
-        // [`LaunchLabTradeEvent`], which carries the pool status, the fee
-        // split and the amounts.
-        venue: SwapVenue::Other,
+        // Batch 07 added `SwapVenue::RaydiumLaunchLab` (with the exhaustive
+        // `module-copy` mapping updated in the same batch), so the neutral
+        // conversion now reports the precise venue. The LaunchLab-specific
+        // detail remains available in [`LaunchLabTradeEvent`], which
+        // carries the pool status, the fee split and the amounts.
+        venue: SwapVenue::RaydiumLaunchLab,
         base_mint: base_mint.to_string(),
         quote_mint: quote_mint.to_string(),
         base_amount,
@@ -1180,7 +1178,7 @@ mod tests {
             assert_eq!(ix.quote_mint, trade_accounts[10]);
             let swap = to_decoded_swap_from_instruction(&ix, "sig", 1, None, 6, 9).unwrap();
             assert_eq!(swap.side, expected_side);
-            assert_eq!(swap.venue, SwapVenue::Other);
+            assert_eq!(swap.venue, SwapVenue::RaydiumLaunchLab);
         }
 
         let amm_accounts: Vec<Pubkey> = (0..32).map(|_| Pubkey::new_unique()).collect();

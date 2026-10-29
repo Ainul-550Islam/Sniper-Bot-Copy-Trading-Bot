@@ -57,6 +57,8 @@ use solana_kit::jupiter::{Jupiter, QuoteRequest};
 use solana_kit::pump::{self, BuildOptions};
 use solana_kit::pumpswap;
 use solana_kit::tx::TxRequest;
+use solana_kit::venues::raydium_cpmm::adapter::RaydiumCpmm;
+use solana_kit::venues::raydium_launchlab::adapter::RaydiumLaunchLab;
 
 use crate::event::{raw_hash_of, LaunchEvent};
 use crate::gates::{self, MarketSnapshot};
@@ -987,6 +989,115 @@ impl Sniper {
                     base_decimals: approved.market.snapshot.base_decimals,
                 })
             }
+            (VenueData::RaydiumCpmm(pool), EntryRoute::RaydiumCpmmDirect) => {
+                let venue = RaydiumCpmm::new();
+                let expected_out = venue.quote(pool, &WSOL_MINT, lamports)?;
+                let min_out = maths::minus_pct_u64(expected_out, slip_pct);
+                if expected_out == 0 || min_out == 0 {
+                    return Err(BotError::solana(
+                        "raydium cpmm returns zero tokens for this buy (or slippage would allow zero out)",
+                    ));
+                }
+                let (token_ata, create_ata) = self.wallet.ensure_ata(&self.rpc, mint).await?;
+                // The WSOL ATA itself is created/funded by wrap_sol below;
+                // only its deterministic address is needed for the swap.
+                let wsol_ata = pump::associated_user(
+                    &WSOL_MINT,
+                    &self.wallet.pubkey,
+                    &solana_kit::consts::TOKEN_PROGRAM,
+                );
+                let swap_ix = venue.build_buy_ix(
+                    pool,
+                    &self.wallet.pubkey,
+                    mint,
+                    &WSOL_MINT,
+                    &token_ata,
+                    &wsol_ata,
+                    lamports,
+                    min_out,
+                )?;
+                let mut req = TxRequest::new(format!("snipe-cpmm-{}", event.launch.symbol));
+                if let Some(ix) = create_ata {
+                    req = req.with_instruction(ix);
+                }
+                // Atomic platform fee (GAP-MAP P1).
+                if let Some((fee_ix, decision)) = solana_kit::fee_transfer::build_fee_transfer_ix(
+                    &self.wallet.pubkey,
+                    lamports,
+                    &cfg.platform_fee,
+                ) {
+                    debug!(
+                        fee_lamports = decision.lamports,
+                        "platform fee appended to cpmm snipe"
+                    );
+                    req = req.with_instruction(fee_ix);
+                }
+                let mut req = with_common(req.with_instruction(swap_ix)).wrap_sol(lamports);
+                req.unwrap_sol = true;
+                Ok(Prepared::Request {
+                    req,
+                    expected_out_raw: expected_out,
+                    spend_lamports: lamports,
+                    base_decimals: approved.market.snapshot.base_decimals,
+                })
+            }
+            (VenueData::RaydiumLaunchLab(market), EntryRoute::RaydiumLaunchLabDirect) => {
+                let venue = RaydiumLaunchLab::new();
+                let expected_out = venue.quote_buy(
+                    &market.pool,
+                    lamports,
+                    market.platform_fee_rate,
+                    market.creator_fee_rate,
+                    0,
+                )?;
+                let min_out = maths::minus_pct_u64(expected_out, slip_pct);
+                if expected_out == 0 || min_out == 0 {
+                    return Err(BotError::solana(
+                        "raydium launchlab returns zero tokens for this buy (or slippage would allow zero out)",
+                    ));
+                }
+                let (token_ata, create_ata) = self.wallet.ensure_ata(&self.rpc, mint).await?;
+                // The WSOL ATA itself is created/funded by wrap_sol below;
+                // only its deterministic address is needed for the swap.
+                let wsol_ata = pump::associated_user(
+                    &WSOL_MINT,
+                    &self.wallet.pubkey,
+                    &solana_kit::consts::TOKEN_PROGRAM,
+                );
+                let swap_ix = venue.build_buy_ix(
+                    &market.pool,
+                    &self.wallet.pubkey,
+                    &token_ata,
+                    &wsol_ata,
+                    lamports,
+                    min_out,
+                    0,
+                )?;
+                let mut req = TxRequest::new(format!("snipe-ll-{}", event.launch.symbol));
+                if let Some(ix) = create_ata {
+                    req = req.with_instruction(ix);
+                }
+                // Atomic platform fee (GAP-MAP P1).
+                if let Some((fee_ix, decision)) = solana_kit::fee_transfer::build_fee_transfer_ix(
+                    &self.wallet.pubkey,
+                    lamports,
+                    &cfg.platform_fee,
+                ) {
+                    debug!(
+                        fee_lamports = decision.lamports,
+                        "platform fee appended to launchlab snipe"
+                    );
+                    req = req.with_instruction(fee_ix);
+                }
+                let mut req = with_common(req.with_instruction(swap_ix)).wrap_sol(lamports);
+                req.unwrap_sol = true;
+                Ok(Prepared::Request {
+                    req,
+                    expected_out_raw: expected_out,
+                    spend_lamports: lamports,
+                    base_decimals: approved.market.snapshot.base_decimals,
+                })
+            }
             (VenueData::Jupiter(quote), EntryRoute::Jupiter) => {
                 let out_amount = quote.out_amount_u64()?;
                 if out_amount == 0 {
@@ -1365,6 +1476,10 @@ fn slippage_inputs(
     let protocol_bps = match route {
         EntryRoute::PumpSwapDirect => sniper.pumpswap_slippage_pct.map(slippage::pct_to_bps),
         EntryRoute::RaydiumV4Direct => sniper.raydium_slippage_pct.map(slippage::pct_to_bps),
+        EntryRoute::RaydiumCpmmDirect => sniper.raydium_cpmm_slippage_pct.map(slippage::pct_to_bps),
+        EntryRoute::RaydiumLaunchLabDirect => sniper
+            .raydium_launchlab_slippage_pct
+            .map(slippage::pct_to_bps),
         EntryRoute::PumpCurve | EntryRoute::Jupiter => None,
     };
     SlippageInputs {
@@ -1383,6 +1498,8 @@ fn venue_name(v: &VenueData) -> &'static str {
         VenueData::PumpCurve(_) => "pump curve",
         VenueData::PumpSwap(_) => "pumpswap pool",
         VenueData::Raydium(_) => "raydium pool",
+        VenueData::RaydiumCpmm(_) => "raydium cpmm pool",
+        VenueData::RaydiumLaunchLab(_) => "raydium launchlab pool",
         VenueData::Jupiter(_) => "jupiter quote",
     }
 }

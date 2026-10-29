@@ -180,9 +180,45 @@ export interface TelegramStatusResponse {
   effective_state: string;
   runtime: { runtime_id: string; generation: string; phase: string; since: string } | null;
   runtime_detail: string | null;
-  binding: { chat_id: number; bound_at: string; bound_by: string } | null;
-  binding_detail: { purpose: string; delivery: string };
+  binding: {
+    chat_id: number;
+    bound_at: string;
+    bound_by: string;
+    telegram_user_id: number | null;
+    trading_enabled: boolean;
+  } | null;
+  binding_detail: { purpose: string; delivery: string; trading?: string };
   controls: { available: boolean; actions: string[] };
+}
+
+/** One consent row as projected by `GET /api/tenant/telegram/consent` (the phrase digest is never exposed). */
+export interface TelegramConsentView {
+  consent_id: string;
+  chat_id: number;
+  user_id: number;
+  scope: string[];
+  max_order_lamports: number;
+  daily_cap_lamports: number;
+  status: "active" | "expired" | "revoked" | string;
+  granted_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+}
+
+/** `GET /api/tenant/telegram/consent`. */
+export interface TelegramConsentResponse {
+  organization_id: string;
+  chat_id: number;
+  consent: TelegramConsentView | null;
+  grant: string;
+}
+
+/** `POST /api/tenant/telegram/consent/revoke`. */
+export interface TelegramConsentRevokeResponse {
+  organization_id: string;
+  chat_id: number;
+  revoked: TelegramConsentView | null;
+  cancelled_pending: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -455,15 +491,41 @@ export const customerTrading = {
 
   // --- telegram binding/status (§J 77) -------------------------------------
   telegramStatus: () => tenantRequest<TelegramStatusResponse>("/api/tenant/telegram/status"),
-  bindTelegram: (chatId: number) =>
-    tenantRequest<{ organization_id: string; binding: { chat_id: number; bound_at: string; bound_by: string }; detail: string }>(
-      "/api/tenant/telegram/binding",
-      { method: "PUT", body: { chat_id: chatId } },
-    ),
+  bindTelegram: (
+    chatId: number,
+    link?: { telegramUserId?: number; tradingEnabled?: boolean },
+  ) =>
+    tenantRequest<{
+      organization_id: string;
+      binding: {
+        chat_id: number;
+        bound_at: string;
+        bound_by: string;
+        telegram_user_id: number | null;
+        trading_enabled: boolean;
+      };
+      detail: string;
+    }>("/api/tenant/telegram/binding", {
+      method: "PUT",
+      body: {
+        chat_id: chatId,
+        // The server treats absent link fields as cleared; send them
+        // explicitly so the UI state is exactly what gets persisted.
+        telegram_user_id: link?.telegramUserId ?? null,
+        trading_enabled: link?.tradingEnabled ?? false,
+      },
+    }),
   unbindTelegram: () =>
     tenantRequest<{ organization_id: string; binding: null; detail: string }>(
       "/api/tenant/telegram/binding",
       { method: "DELETE" },
+    ),
+  telegramConsent: () =>
+    tenantRequest<TelegramConsentResponse>("/api/tenant/telegram/consent"),
+  revokeTelegramConsent: () =>
+    tenantRequest<TelegramConsentRevokeResponse>(
+      "/api/tenant/telegram/consent/revoke",
+      { method: "POST" },
     ),
 
   // --- copy trading specific -----------------------------------------------

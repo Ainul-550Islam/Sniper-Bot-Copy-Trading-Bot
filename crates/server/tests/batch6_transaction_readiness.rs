@@ -297,13 +297,15 @@ fn all_25_batch6_docs_exist() {
     // 2026-10-10: 122 -> 155 (measured `ls docs/*.md` on the tree at 0e28a0d;
     // the release-manifest docs_files value was re-measured with it).
     // 2026-10-27: 155 -> 156 canonical docs after adding TENANT-ISOLATION.md.
-    // Bumping this pin is the deliberate act of acknowledging the new
-    // document set.
+    // 2026-10-28: the integration-cleanup baseline re-measured the merged
+    // Batch 03 + Batch 04 tree at da0d937 and found three more top-level
+    // documents. Bumping this pin is the deliberate act of acknowledging the
+    // new document set.
     // Include the generated STATS.md in this total, as docs_files in the
-    // release manifest does; the canonical count excluding it is 156.
+    // release manifest does; the canonical count excluding it is 159.
     assert_eq!(
-        count, 157,
-        "docs/*.md should equal the current document count (157)"
+        count, 160,
+        "docs/*.md should equal the current document count (160)"
     );
 }
 

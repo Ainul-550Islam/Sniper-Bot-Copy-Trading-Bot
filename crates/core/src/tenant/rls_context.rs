@@ -42,6 +42,22 @@ pub fn bind_request_tenant(organization_id: Uuid) -> Result<(), TenantContextCon
     }
 }
 
+/// Run a trusted non-HTTP worker future with its tenant already bound.
+///
+/// This is the worker counterpart of [`scope_request_context`] +
+/// [`bind_request_tenant`]: long-lived tasks that act for exactly one
+/// organization (the deployment-scoped Telegram trade console is the
+/// Batch 07 caller) have no HTTP middleware to bind the tenant for them,
+/// and Tokio task-locals do not propagate into `tokio::spawn`, so the
+/// scope must wrap the spawned future itself. The scope starts with the
+/// tenant already bound, so a later `bind_request_tenant` to a different
+/// organization inside the future is rejected exactly as on the HTTP path.
+pub async fn scope_tenant_context<F: Future>(organization_id: Uuid, future: F) -> F::Output {
+    REQUEST_ORGANIZATION_ID
+        .scope(Cell::new(Some(organization_id)), future)
+        .await
+}
+
 /// Current authenticated tenant used by the request-pool checkout hook.
 pub fn current_request_tenant() -> Option<Uuid> {
     REQUEST_ORGANIZATION_ID.try_with(Cell::get).ok().flatten()
@@ -204,6 +220,25 @@ mod tests {
                 assert_eq!(current_request_tenant(), Some(tenant_b));
             })
         );
+    }
+
+    #[tokio::test]
+    async fn tenant_context_scope_starts_bound_and_rejects_switches() {
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+        scope_tenant_context(tenant_a, async {
+            assert_eq!(current_request_tenant(), Some(tenant_a));
+            bind_request_tenant(tenant_a).unwrap();
+            assert_eq!(
+                bind_request_tenant(tenant_b),
+                Err(TenantContextConflict {
+                    existing: tenant_a,
+                    requested: tenant_b,
+                })
+            );
+        })
+        .await;
+        assert_eq!(current_request_tenant(), None);
     }
 
     #[test]
