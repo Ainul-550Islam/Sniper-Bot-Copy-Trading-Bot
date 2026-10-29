@@ -125,7 +125,7 @@ Digests live in `deploy/release/base-images.lock.json`.
   are **not** implemented — do not claim supply-chain attestation for
   the runtime image on the strength of this document. (An SBOM is
   produced separately: `scripts/generate-sbom.sh`,
-  `sbom.cyclonedx.json`.)
+  `sbom.json`, the one canonical CycloneDX SBOM.)
 * **Compose only.** There is no Kubernetes rollout/rollback integration.
 * **The ledger is host-local.** Back it up with the host. Without it a
   rollback is guesswork.

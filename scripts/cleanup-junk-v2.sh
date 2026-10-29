@@ -41,7 +41,6 @@ JUNK_PATHS=(
   "APPLY.sh"
   "APPLY-BATCH07.sh"
   "APPLY-PUSH-READY.sh"
-  "sbom.cyclonedx.json"
   "AUDIT.md"
 )
 

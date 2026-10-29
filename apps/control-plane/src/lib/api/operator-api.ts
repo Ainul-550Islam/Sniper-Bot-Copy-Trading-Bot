@@ -9,9 +9,25 @@
  * - Propagates backend `ApiError` instances.
  * - ZERO localStorage / sessionStorage usage (credentials remain in memory only).
  * - Plaintext API keys are never echoed or retained.
+ *
+ * CREDENTIAL MODEL (Round 2, defect D1): every route below is an OPERATOR
+ * route on the backend. `require_role` authenticates it with `extract_key`,
+ * which reads `x-api-key` (then `Authorization: Bearer …`) and resolves it
+ * through the operator key registry by SHA-256. The SaaS session token is a
+ * different credential for a different plane and is rejected with 401 here.
+ *
+ * So every call:
+ *   - sends `x-api-key: <operator key>` from the in-memory operator store;
+ *   - passes `anonymous: true` so `request()` attaches NEITHER the session
+ *     `Authorization` header NOR the `x-organization` tenant hint;
+ *   - throws {@link OperatorKeyRequiredError} locally when the console is
+ *     locked, so no request leaves the browser without a key;
+ *   - clears the stored key on a 401, which returns the UI to the unlock
+ *     prompt instead of retrying a credential the backend has refused.
  */
 
-import { request, ApiError } from "../api";
+import { request, ApiError, type RequestOptions } from "../api";
+import { clearOperatorKey, getOperatorKey } from "../operator-session";
 
 export { ApiError };
 
@@ -235,106 +251,156 @@ export interface PostAccountingEventResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Operator credential plumbing
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown BEFORE a request is made when no operator key is in memory.
+ *
+ * It is deliberately not an {@link ApiError}: no HTTP response exists yet, and
+ * the UI uses the type to render the unlock prompt instead of an error banner.
+ */
+export class OperatorKeyRequiredError extends Error {
+  constructor() {
+    super(
+      "operator_key_required: unlock the operator console with an operator API key",
+    );
+    this.name = "OperatorKeyRequiredError";
+  }
+}
+
+/**
+ * One typed call to an operator route.
+ *
+ * `anonymous: true` is not optional: without it `request()` would attach the
+ * tenant session token and the `x-organization` hint, which the operator plane
+ * does not accept (and which would leak the tenant session to a route that
+ * logs presented keys by hash).
+ */
+async function opRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const key = getOperatorKey();
+  if (key === null) {
+    throw new OperatorKeyRequiredError();
+  }
+  try {
+    return await request<T>(path, {
+      ...options,
+      anonymous: true,
+      headers: { ...(options.headers ?? {}), "x-api-key": key },
+    });
+  } catch (error) {
+    // A 401 means the backend refused this exact key (unknown, revoked, or
+    // insufficient role). Drop it — keeping a refused credential would only
+    // produce the same 401 on every retry — and keep the server's reason so the
+    // unlock prompt can show it.
+    if (error instanceof ApiError && error.status === 401) {
+      clearOperatorKey(error.reason);
+    }
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Operator API Functions
 // ---------------------------------------------------------------------------
 
 export async function getHealth(): Promise<HealthResponse> {
-  return request<HealthResponse>("/api/health");
+  return opRequest<HealthResponse>("/api/health");
 }
 
 export async function setMode(mode: string): Promise<ModeResponse> {
-  return request<ModeResponse>("/api/mode", {
+  return opRequest<ModeResponse>("/api/mode", {
     method: "POST",
     body: { mode },
   });
 }
 
 export async function getModules(): Promise<ModuleStatus[]> {
-  return request<ModuleStatus[]>("/api/modules");
+  return opRequest<ModuleStatus[]>("/api/modules");
 }
 
 export async function enableModule(name: string): Promise<ModuleToggleResponse> {
-  return request<ModuleToggleResponse>(`/api/modules/${encodeURIComponent(name)}/enable`, {
+  return opRequest<ModuleToggleResponse>(`/api/modules/${encodeURIComponent(name)}/enable`, {
     method: "POST",
   });
 }
 
 export async function disableModule(name: string): Promise<ModuleToggleResponse> {
-  return request<ModuleToggleResponse>(`/api/modules/${encodeURIComponent(name)}/disable`, {
+  return opRequest<ModuleToggleResponse>(`/api/modules/${encodeURIComponent(name)}/disable`, {
     method: "POST",
   });
 }
 
 export async function killSystem(): Promise<KillResponse> {
-  return request<KillResponse>("/api/kill", {
+  return opRequest<KillResponse>("/api/kill", {
     method: "POST",
   });
 }
 
 export async function resumeSystem(): Promise<ResumeResponse> {
-  return request<ResumeResponse>("/api/resume", {
+  return opRequest<ResumeResponse>("/api/resume", {
     method: "POST",
   });
 }
 
 export async function setRiskKillSwitch(input: RiskKillSwitchInput): Promise<RiskKillSwitchResponse> {
-  return request<RiskKillSwitchResponse>("/api/risk/kill-switch", {
+  return opRequest<RiskKillSwitchResponse>("/api/risk/kill-switch", {
     method: "POST",
     body: input,
   });
 }
 
 export async function getKeys(): Promise<KeysListResponse> {
-  return request<KeysListResponse>("/api/keys");
+  return opRequest<KeysListResponse>("/api/keys");
 }
 
 export async function addKey(input: AddKeyInput): Promise<AddKeyResponse> {
-  return request<AddKeyResponse>("/api/keys", {
+  return opRequest<AddKeyResponse>("/api/keys", {
     method: "POST",
     body: input,
   });
 }
 
 export async function revokeKey(hash: string): Promise<RevokeKeyResponse> {
-  return request<RevokeKeyResponse>(`/api/keys/${encodeURIComponent(hash)}`, {
+  return opRequest<RevokeKeyResponse>(`/api/keys/${encodeURIComponent(hash)}`, {
     method: "DELETE",
   });
 }
 
 export async function getAuditTrail(limit?: number): Promise<AuditListResponse> {
   const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
-  return request<AuditListResponse>(`/api/audit${query}`);
+  return opRequest<AuditListResponse>(`/api/audit${query}`);
 }
 
 export async function verifyAuditChain(): Promise<AuditVerifyResponse> {
-  return request<AuditVerifyResponse>("/api/audit/verify");
+  return opRequest<AuditVerifyResponse>("/api/audit/verify");
 }
 
 export async function getJournalStatus(): Promise<JournalStatus> {
-  return request<JournalStatus>("/api/journal");
+  return opRequest<JournalStatus>("/api/journal");
 }
 
 export async function rotateJournal(): Promise<JournalRotateResponse> {
-  return request<JournalRotateResponse>("/api/journal", {
+  return opRequest<JournalRotateResponse>("/api/journal", {
     method: "POST",
   });
 }
 
 export async function getDbStatus(): Promise<DbStatus> {
-  return request<DbStatus>("/api/db");
+  return opRequest<DbStatus>("/api/db");
 }
 
 export async function getConfig(): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>("/api/config");
+  return opRequest<Record<string, unknown>>("/api/config");
 }
 
 export async function getReconciliationFindings(limit?: number): Promise<ReconciliationFindingsResponse> {
   const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
-  return request<ReconciliationFindingsResponse>(`/api/reconciliation/findings${query}`);
+  return opRequest<ReconciliationFindingsResponse>(`/api/reconciliation/findings${query}`);
 }
 
 export async function getRecoveryFailed(): Promise<RecoveryFailedResponse> {
-  return request<RecoveryFailedResponse>("/api/recovery/failed");
+  return opRequest<RecoveryFailedResponse>("/api/recovery/failed");
 }
 
 export async function getExecutions(params?: {
@@ -347,36 +413,36 @@ export async function getExecutions(params?: {
   if (params?.state !== undefined) searchParams.set("state", params.state);
   if (params?.open !== undefined) searchParams.set("open", String(params.open));
   const query = searchParams.toString() ? `?${searchParams.toString()}` : "";
-  return request<ExecutionsResponse>(`/api/executions${query}`);
+  return opRequest<ExecutionsResponse>(`/api/executions${query}`);
 }
 
 export async function getExecutionById(id: string): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>(`/api/executions/${encodeURIComponent(id)}`);
+  return opRequest<Record<string, unknown>>(`/api/executions/${encodeURIComponent(id)}`);
 }
 
 export async function getTrades(limit?: number): Promise<unknown[]> {
   const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
-  return request<unknown[]>(`/api/trades${query}`);
+  return opRequest<unknown[]>(`/api/trades${query}`);
 }
 
 export async function getWallets(): Promise<WalletsResponse> {
-  return request<WalletsResponse>("/api/wallets");
+  return opRequest<WalletsResponse>("/api/wallets");
 }
 
 export async function getAccountingEvents(limit?: number): Promise<AccountingEventsResponse> {
   const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
-  return request<AccountingEventsResponse>(`/api/accounting/events${query}`);
+  return opRequest<AccountingEventsResponse>(`/api/accounting/events${query}`);
 }
 
 export async function postAccountingEvent(input: AccountingEventInput): Promise<PostAccountingEventResponse> {
-  return request<PostAccountingEventResponse>("/api/accounting/events", {
+  return opRequest<PostAccountingEventResponse>("/api/accounting/events", {
     method: "POST",
     body: input,
   });
 }
 
 export async function getOrderById(id: string): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>(`/api/orders/${encodeURIComponent(id)}`);
+  return opRequest<Record<string, unknown>>(`/api/orders/${encodeURIComponent(id)}`);
 }
 
 export function getEventsWsPath(): string {

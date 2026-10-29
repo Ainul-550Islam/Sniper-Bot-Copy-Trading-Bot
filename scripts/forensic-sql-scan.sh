@@ -30,11 +30,20 @@
 # classification rationale, so the report is auditable line by line.
 #
 # Exit codes: 0 = no class-4 findings; 1 = class-4 findings (see the
-# report); 2 = scanner could not run (missing inputs, extraction
-# failures beyond the tolerated bound).
+# report); 2 = scanner could not run (missing inputs, or extraction
+# failures beyond the tolerated 2% bound).
+#
+# Usage:
+#   scripts/forensic-sql-scan.sh                 # sweep crates/** of this repo
+#   scripts/forensic-sql-scan.sh <root>          # sweep another tree
+#
+# The second form is how tests/release/forensic_sql_extractor.sh runs the
+# extractor against the fixtures in tests/release/forensic_sql_fixtures: any
+# root without a `crates/` directory is swept whole (`**/*.rs`).
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT="$(cd "$ROOT" && pwd)"
 
 exec python3 - "$ROOT" <<'PY'
 import re
@@ -150,51 +159,334 @@ GROUPS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Extraction: one record per sqlx::query* call, plus interpolation probes.
+# Extraction: one record per sqlx::query* call site.
+#
+# The sweep is only as good as its extraction: a statement the scanner cannot
+# read is a statement it never classifies, so the gate counts extraction
+# failures and fails when more than EXTRACTION_FAILURE_BUDGET of the call sites
+# in the tree could not be resolved to SQL text.
+#
+# What a call site's argument can be, in this codebase:
+#   * an inline literal      — `sqlx::query("…")`, `sqlx::query(r#"…"#)`
+#   * concatenated literals  — `sqlx::query("SELECT … " "FROM t")`
+#   * a macro-built literal  — `sqlx::query(&format!("SELECT {COLS} FROM …"))`
+#   * a branch of literals   — `sqlx::query(match x { Some(_) => "…", None => "…" })`
+#   * a binding              — `const SQL: &str = r#"…"#;` / `let sql = if c { "…" } else { "…" };`
+#   * the compile-time macros — `sqlx::query!("…")`, `query_as!`, `query_scalar!`
+#   * a runtime variable     — `sqlx::query(statement)`: genuinely unresolvable
+#     and therefore reported as an extraction failure.
 # ---------------------------------------------------------------------------
 
-QUERY_RE = re.compile(
-    r'sqlx::query(?:_as|_scalar|scalar)?\s*(?:<[^>]*>)?\s*\(\s*(r?)(#?")',
+EXTRACTION_FAILURE_BUDGET = 0.02  # 2% of call sites
+
+# `sqlx::query`, `query_as`, `query_scalar`, the `!` macro forms, and the
+# turbofish spellings (`sqlx::query_scalar::<_, bool>`). Group 1 is the opening
+# paren, so the argument span can be found by bracket matching.
+CALL_RE = re.compile(
+    r'sqlx::query(?:_as|_scalar|scalar)?!?(?:::<[^<>]*>)?\s*(\()',
     re.DOTALL,
 )
 
-def extract_statements(text, path):
-    """Yield (line, sql) for every sqlx::query* call with an inline literal."""
-    out = []
-    for m in QUERY_RE.finditer(text):
-        raw, hashmark = m.group(1), m.group(2)
-        start = m.end()
-        if raw == "r" and hashmark == "#\"":
-            end = text.find('"#', start)
-            body = text[start:end] if end != -1 else ""
+IDENT_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
+SIMPLE_ESCAPES = {
+    "n": "\n", "t": "\t", "r": "\r", "0": "\0",
+    "\\": "\\", '"': '"', "'": "'",
+}
+
+
+def skip_ws_and_comments(text, i):
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r\n":
+            i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j == -1 else j + 1
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j == -1 else j + 2
         else:
-            # plain "..." — may be continued by adjacent literals; keep it
-            # simple and take the single literal (house style writes one
-            # literal per call; multi-literal concatenations are counted
-            # by the extraction-failure check below)
-            eol = text.find('"', start)
-            body = text[start:eol] if eol != -1 else ""
-            # Rust adjacent-literal concatenation: "a" "b"
-            while eol != -1:
-                nxt = text[eol + 1:eol + 40].lstrip()
-                if nxt.startswith('"'):
-                    start2 = eol + 1 + text[eol + 1:eol + 40].index('"') + 1
-                    eol2 = text.find('"', start2)
-                    body += "\n" + text[start2:eol2]
-                    eol = eol2
-                else:
-                    break
-        line = text.count("\n", 0, m.start()) + 1
-        if body.strip():
-            out.append((line, body))
+            break
+    return i
+
+
+def starts_raw_string(text, i):
+    """True when a raw string literal (`r"…"`, `r#"…"#`) starts at `i`."""
+    if text[i] != "r":
+        return False
+    if i > 0 and (text[i - 1].isalnum() or text[i - 1] == "_"):
+        return False  # e.g. the `r` of `for"…"` is not a raw-string prefix
+    j = i + 1
+    while j < len(text) and text[j] == "#":
+        j += 1
+    return j < len(text) and text[j] == '"'
+
+
+def read_string_literal(text, i):
+    """Return (value, end_offset) for the Rust string literal at `i`, or None."""
+    n = len(text)
+    if i >= n:
+        return None
+    if starts_raw_string(text, i):
+        j = i + 1
+        while text[j] == "#":
+            j += 1
+        terminator = '"' + "#" * (j - i - 1)
+        end = text.find(terminator, j + 1)
+        if end == -1:
+            return None
+        return (text[j + 1:end], end + len(terminator))
+    if text[i] != '"':
+        return None
+    out = []
+    j = i + 1
+    while j < n:
+        ch = text[j]
+        if ch == "\\" and j + 1 < n:
+            out.append(SIMPLE_ESCAPES.get(text[j + 1], text[j + 1]))
+            j += 2
+            continue
+        if ch == '"':
+            return ("".join(out), j + 1)
+        # A newline is legal inside a Rust string literal — most statements in
+        # this codebase are written across several lines. Only an EOF without a
+        # closing quote aborts (the `return None` below).
+        out.append(ch)
+        j += 1
+    return None
+
+
+def read_concatenated_literal(text, i):
+    """Rust glues adjacent string literals: `"a" "b"` is one `&'static str`."""
+    parts = []
+    while True:
+        j = skip_ws_and_comments(text, i)
+        literal = read_string_literal(text, j)
+        if literal is None:
+            break
+        parts.append(literal[0])
+        i = literal[1]
+    if not parts:
+        return None
+    return ("\n".join(parts), i)
+
+
+def literal_at(text, i):
+    j = skip_ws_and_comments(text, i)
+    if text.startswith("&", j):
+        j = skip_ws_and_comments(text, j + 1)
+    return read_string_literal(text, j)
+
+
+def bracket_span(text, i, opener="(", closer=")"):
+    """Index of the `closer` matching the `opener` at `i`, or -1."""
+    n = len(text)
+    if i >= n or text[i] != opener:
+        return -1
+    depth = 0
+    while i < n:
+        ch = text[i]
+        if ch == '"' or starts_raw_string(text, i):
+            literal = read_string_literal(text, i)
+            if literal is not None:
+                i = literal[1]
+                continue
+        if ch == "'":
+            j = i + 1
+            while j < n and text[j] != "'":
+                if text[j] == "\\":
+                    j += 1
+                j += 1
+            i = j + 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def collect_literals(text, start, end):
+    """Every string literal in `text[start:end]`, in source order."""
+    out = []
+    i = start
+    while i < end:
+        literal = read_string_literal(text, i)
+        if literal is not None:
+            out.append(literal[0])
+            i = literal[1]
+            continue
+        i += 1
     return out
+
+
+def find_binding(text, name):
+    """Span of the initializer of `const|static|let [mut] NAME = …;`."""
+    pattern = (
+        r"\b(?:const|static|let(?:\s+mut)?)\b\s+"
+        + re.escape(name)
+        + r"\b\s*(?::[^=;{]*)?=\s*"
+    )
+    for m in re.finditer(pattern, text):
+        start = m.end()
+        end = expression_end(text, start)
+        if end != -1:
+            return (start, end)
+    return None
+
+
+def expression_end(text, start):
+    """End of the expression starting at `start` (the `;` closes it at depth 0)."""
+    n = len(text)
+    i = start
+    depth = 0
+    while i < n:
+        ch = text[i]
+        if ch == '"' or starts_raw_string(text, i):
+            literal = read_string_literal(text, i)
+            if literal is not None:
+                i = literal[1]
+                continue
+        if ch == "'":
+            j = i + 1
+            while j < n and text[j] != "'":
+                if text[j] == "\\":
+                    j += 1
+                j += 1
+            i = j + 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            return i
+        i += 1
+    return -1
+
+
+def extract_sql_at(text, i, depth=0):
+    """
+    Best-effort SQL text for the call argument starting at `i`.
+
+    Returns (sql, end_offset). `sql` is None when the argument is built at
+    runtime and cannot be resolved statically — the caller records that as an
+    extraction failure so the gate can see the blind spot.
+    """
+    i = skip_ws_and_comments(text, i)
+    if text.startswith("&", i):
+        i = skip_ws_and_comments(text, i + 1)
+
+    # (a) an inline literal, including Rust's adjacent-literal concatenation.
+    literal = read_concatenated_literal(text, i)
+    if literal is not None:
+        return literal[0], literal[1]
+
+    # (b) a macro-built literal: format!(…) / concat!(…). Interpolated
+    #     placeholders ({}, {COLS}) stay in the text — they are reported by the
+    #     G9 probe below and the statement is still classified.
+    for macro in ("format!", "concat!"):
+        if text.startswith(macro, i):
+            paren = text.find("(", i + len(macro) - 1)
+            if paren != -1:
+                inner_end = bracket_span(text, paren)
+                if inner_end != -1:
+                    parts = collect_literals(text, paren + 1, inner_end)
+                    if parts:
+                        return "\n".join(parts), inner_end + 1
+
+    # (c) `match … { Some(_) => "…", None => "…" }`: every arm is a statement
+    #     that can ship, so every arm is classified.
+    if re.match(r"match\b\s*[\(\s]", text[i:i + 8] + " "):
+        brace = text.find("{", i)
+        if brace != -1:
+            brace_end = bracket_span(text, brace, "{", "}")
+            if brace_end != -1:
+                parts = collect_literals(text, i, brace_end)
+                if parts:
+                    return "\n".join(parts), brace_end + 1
+
+    # (d) a binding in this file: `const SQL: &str = r#"…"#;` or
+    #     `let sql = if c { "…" } else { "…" };`.
+    if depth < 3:
+        m = IDENT_RE.match(text, i)
+        if m:
+            bound = find_binding(text, m.group(0))
+            if bound is not None:
+                start, end = bound
+                parts = collect_literals(text, start, end)
+                if parts:
+                    return "\n".join(parts), m.end()
+                nested, _ = extract_sql_at(text, start, depth + 1)
+                if nested:
+                    return nested, m.end()
+
+    return None, i
+
+
+def in_line_comment(text, pos):
+    line_start = text.rfind("\n", 0, pos) + 1
+    return text[line_start:pos].lstrip().startswith("//")
+
+
+def extract_statements(text, path, rel):
+    """
+    Yield (line, sql) for every sqlx::query* call site, and append
+    (line, None) to `unresolved` for every site that could not be read.
+    """
+    out = []
+    for m in CALL_RE.finditer(text):
+        if in_line_comment(text, m.start()):
+            continue  # documentation, not a call
+        line = text.count("\n", 0, m.start()) + 1
+        paren = m.start(1)
+        arg_end = bracket_span(text, paren)
+        arg_end = len(text) if arg_end == -1 else arg_end
+        sql, _ = extract_sql_at(text, paren + 1)
+        if sql is None:
+            # Last resort: any literal anywhere in the argument list (an
+            # if/else or a block expression the parser did not recognise).
+            parts = collect_literals(text, paren + 1, arg_end)
+            sql = "\n".join(parts) if parts else None
+        if sql is None or not sql.strip():
+            UNRESOLVED.append((line, rel))
+            continue
+        out.append((line, sql))
+    return out
+
+
+UNRESOLVED = []
+
 
 def test_span(text):
     """Line where #[cfg(test)] starts, or None."""
     m = re.search(r'#\[cfg\(test\)\]', text)
     return text.count("\n", 0, m.start()) + 1 if m else None
 
+
 TABLE_RE = re.compile(r'(?i)\b(?:from|into|update|join|delete\s+from)\s+([a-z_][a-z0-9_]*)')
+
 
 def org_enforced(sql):
     """True only when organization_id is a PREDICATE, an INSERT column, or
@@ -202,7 +494,7 @@ def org_enforced(sql):
     (SELECT organization_id FROM t with no WHERE is NOT org-scoped)."""
     if re.search(r'(?i)organization_id\s*(=|<>|!=|\bIN\b|\bIS\b)', sql):
         return True
-    ins = re.search(r'(?i)\binsert\s+into\s+[a-z_][a-z0-9_]*[\s\\\\]*\(([^)]*)\)', sql)
+    ins = re.search(r'(?i)\binsert\s+into\s+[a-z_][a-z0-9_]*[\s\\]*\(([^)]*)\)', sql)
     if ins and "organization_id" in ins.group(1).lower():
         return True
     arb = re.search(r'(?i)\bon\s+conflict\s*\(([^)]*)\)', sql)
@@ -210,23 +502,31 @@ def org_enforced(sql):
         return True
     return False
 
+
 ORG_OK = re.compile(r'(?i)organization_id')  # projection-presence (for reports only)
 
 findings = []   # dicts: group, cls, file, line, table, sql, rationale
-extraction_failures = []
 per_file_statements = 0
+call_sites = 0
 
-rs_files = sorted(set(list(root.glob("crates/*/src/**/*.rs")) + list(root.glob("crates/*/tests/*.rs"))))
+if (root / "crates").is_dir():
+    rs_files = sorted(set(list(root.glob("crates/*/src/**/*.rs")) + list(root.glob("crates/*/tests/*.rs"))))
+else:
+    # A fixture tree: every Rust file under the given root is in scope.
+    rs_files = sorted(root.glob("**/*.rs"))
 if not rs_files:
-    print("[forensic-sql] no Rust sources found under crates/ — refusing to report a clean sweep", file=sys.stderr)
+    print("[forensic-sql] no Rust sources found — refusing to report a clean sweep", file=sys.stderr)
     sys.exit(2)
 
 for path in rs_files:
     text = path.read_text(errors="replace")
     rel = str(path.relative_to(root))
-    is_test_file = "/tests/" in str(path)
+    # Test-file detection is relative to the swept root, so a fixture tree
+    # under tests/release/… is judged by its own layout rather than by where it
+    # happens to sit in the repository.
+    is_test_file = "/tests/" in rel or rel.startswith("tests/")
     tspan = test_span(text)
-    stmts = extract_statements(text, path)
+    stmts = extract_statements(text, path, rel)
     per_file_statements += len(stmts)
 
     for line, sql in stmts:
@@ -317,7 +617,7 @@ for path in rs_files:
             record(g, cls, t, why)
 
     # G9 — interpolation probes (whole file, independent of extraction)
-    for m in re.finditer(r'(format!\s*\(\s*r?#"?(?:\s*(?:SELECT|INSERT|UPDATE|DELETE)[^"]*)")', text):
+    for m in re.finditer(r'(format!\s*\(\s*r?#\"?(?:\s*(?:SELECT|INSERT|UPDATE|DELETE)[^\"]*)\")', text):
         line = text.count("\n", 0, m.start()) + 1
         tspan_l = tspan
         cosmetic = is_test_file or (tspan_l is not None and line >= tspan_l)
@@ -327,15 +627,16 @@ for path in rs_files:
             "why": "SQL assembled by format! — parameters must be bound, never interpolated",
         })
 
-# sqlx::query call sites whose SQL could not be extracted (variable-built
-# SQL). Tolerated bound: 0 in this codebase.
-total_query_calls = 0
+# Every call site in the tree, counted the same way it is extracted, so the
+# coverage ratio below compares like with like.
 for path in rs_files:
     text = path.read_text(errors="replace")
-    total_query_calls += len(re.findall(r'sqlx::query', text))
-if per_file_statements < total_query_calls - 40:
-    print(f"[forensic-sql] extraction coverage too low: {per_file_statements}/{total_query_calls} sqlx::query sites", file=sys.stderr)
-    extraction_failures.append(f"{per_file_statements}/{total_query_calls}")
+    call_sites += sum(
+        1 for m in CALL_RE.finditer(text) if not in_line_comment(text, m.start())
+    )
+
+UNRESOLVED.sort(key=lambda item: (item[1], item[0]))
+failure_ratio = (len(UNRESOLVED) / call_sites) if call_sites else 0.0
 
 # ---------------------------------------------------------------------------
 # Report
@@ -345,7 +646,7 @@ CLASS_NAME = {1: "tenant-safe", 2: "intentional-global", 3: "operator-only",
 
 print("# FORENSIC SQL SWEEP (generated by scripts/forensic-sql-scan.sh)")
 print()
-print(f"Rust files swept: {len(rs_files)}   sqlx::query sites: {total_query_calls}   statements extracted: {per_file_statements}")
+print(f"Rust files swept: {len(rs_files)}   sqlx::query call sites: {call_sites}   statements extracted: {per_file_statements}")
 print()
 print("Pattern groups swept:")
 for g in GROUPS:
@@ -370,9 +671,21 @@ for c in (1, 2, 3, 4, 5):
     print(f"  class {c} ({CLASS_NAME[c]}): {counts.get(c, 0)}")
 class4 = [f for f in findings if f["class"] == 4]
 
-if extraction_failures:
-    print()
-    print("[forensic-sql] EXTRACTION FAILURES:", *extraction_failures, file=sys.stderr)
+# ---------------------------------------------------------------------------
+# Extraction coverage: a statement the scanner cannot read is a statement it
+# never classifies, so a blind spot above the budget fails the gate (exit 2)
+# instead of being printed as a warning nobody reads.
+# ---------------------------------------------------------------------------
+print()
+print("## Extraction coverage")
+print(f"  call sites     : {call_sites}")
+print(f"  extracted      : {per_file_statements}")
+print(f"  unparsed       : {len(UNRESOLVED)} ({failure_ratio * 100:.2f}% — budget {EXTRACTION_FAILURE_BUDGET * 100:.0f}%)")
+if UNRESOLVED:
+    print("  unparsed statements (file:line) — SQL is built at runtime and escapes static analysis:")
+    for line, rel in UNRESOLVED:
+        print(f"    {rel}:{line}")
+    print("[forensic-sql] EXTRACTION FAILURES:", f"{len(UNRESOLVED)}/{call_sites}", file=sys.stderr)
 
 print()
 if class4:
@@ -380,6 +693,16 @@ if class4:
     for f in class4:
         print(f"  {f['file']}:{f['line']} {f['table']} :: {f['sql']}")
     sys.exit(1)
+
+if failure_ratio > EXTRACTION_FAILURE_BUDGET:
+    print(
+        f"[forensic-sql] FAIL — extraction coverage too low: {len(UNRESOLVED)}/{call_sites} "
+        f"call sites unparsed ({failure_ratio * 100:.2f}% > {EXTRACTION_FAILURE_BUDGET * 100:.0f}% budget). "
+        "The tenant-isolation contract is not proven for the statements listed above.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
 print("[forensic-sql] PASS — zero class-4 findings; every tenant-table statement is org-scoped in SQL, sanctioned global, operator-only, or test-only")
 sys.exit(0)
 PY

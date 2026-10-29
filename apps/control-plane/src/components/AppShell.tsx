@@ -176,6 +176,13 @@ export function AppShell({ children }: { children?: React.ReactNode; title?: str
     user,
   );
 
+  // The Operator group is shown only to platform administrators:
+  // `permissions.operator.read` is `user.platform_admin && !suspended` and
+  // nothing else. A tenant owner/admin/operator membership is a tenant
+  // capability and grants no operator authority — the backend authorizes every
+  // /operator route from the operator API key, so a tenant admin would see a
+  // console that answers 401 on every call. Authority itself comes from the
+  // key, collected by OperatorGuard before any operator request is made.
   const navGroups = permissions.operator.read
     ? [...COMMERCIAL_NAV, OPERATOR_NAV]
     : COMMERCIAL_NAV;

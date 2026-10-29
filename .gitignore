@@ -9,7 +9,10 @@
 .env
 .env.*
 !.env.template
-keys/
+# Anchored: the rule protects a root-level secrets directory. Unanchored,
+# `keys/` also swallowed apps/control-plane/src/app/operator/keys/, which is
+# the operator API-key management PAGE, not a key store.
+/keys/
 *.keypair.json
 # `cargo build-sbf` / `solana-keygen` output: target/deploy/<name>-keypair.json
 *-keypair.json

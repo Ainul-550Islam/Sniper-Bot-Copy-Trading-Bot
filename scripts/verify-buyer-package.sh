@@ -34,7 +34,6 @@ need_supply_chain() {
   echo "MISSING $name (looked at $ROOT/$name and $ROOT/../$sub/$name)"; FAIL=1
 }
 need_supply_chain "sbom.json" sbom
-need_supply_chain "sbom.cyclonedx.json" sbom
 need_supply_chain "licenses.json" licenses
 need_supply_chain "licenses.csv" licenses
 
@@ -93,7 +92,7 @@ if [ -d "$ROOT/apps/control-plane/.next" ]; then echo "WARN .next present (not s
 
 # buyer-release package artifacts (checked when a package has been built)
 if [ -d "$ROOT/buyer-release" ]; then
-  for p in "sbom/sbom.json" "sbom/sbom.cyclonedx.json" "licenses/licenses.json" "licenses/licenses.csv" "checksums/SHA256SUMS"; do
+  for p in "sbom/sbom.json" "licenses/licenses.json" "licenses/licenses.csv" "checksums/SHA256SUMS"; do
     if [ ! -f "$ROOT/buyer-release/$p" ]; then echo "MISSING buyer-release/$p"; FAIL=1; else echo "OK buyer-release/$p"; fi
   done
   # The buyer docs run `cd <PKG> && sha256sum -c checksums/SHA256SUMS`. A line the tool cannot
@@ -155,7 +154,7 @@ if [ -d "$ROOT/buyer-release" ]; then
     echo "MISSING buyer-release/checksums/SOURCE-TREE.sha256"; FAIL=1
   fi
   # Every repository file must appear byte-identical in buyer-release/source. The four root
-  # supply-chain artifacts (licenses.csv/json, sbom.json/sbom.cyclonedx.json) are relocated
+  # supply-chain artifacts (licenses.csv/json, sbom.json) are relocated
   # by design — they are excluded from source/ and packaged under sbom/ + licenses/ (checked above).
   # 2026-09-27 Batch 10: generated build output (e.g. apps/control-plane/.next/ from the documented
   # buyer flow `npm ci && npm run build` in docs/BUYER-VERIFICATION-SCRIPT.md) is excluded from the
@@ -179,7 +178,7 @@ excluded_files = {
     "FILE-VERIFICATION-REPORT.md", "dump.rdb",
 }
 generated_dirs = {".next", ".turbo", ".vercel", "out", "dist", "build", "coverage", ".venv", ".cache"}
-relocated = {"licenses.csv", "licenses.json", "sbom.json", "sbom.cyclonedx.json"}
+relocated = {"licenses.csv", "licenses.json", "sbom.json"}
 # TypeScript's incremental build metadata is generated state, not buyer source.
 # Keep it out of the package mirror even when a local typecheck/build created it.
 report = []

@@ -119,7 +119,9 @@ fi
 echo "[7/8] SBOM/license artifacts"
 if [ -f "$ROOT/sbom.json" ]; then pass "sbom.json exists"; sha=$(sha256sum "$ROOT/sbom.json" | awk '{print $1}'); echo "    sbom sha256=$sha size=$(wc -c < "$ROOT/sbom.json")"; else fail "sbom.json missing (run scripts/generate-sbom.sh)"; fi
 if [ -f "$ROOT/licenses.json" ]; then pass "licenses.json exists"; else fail "licenses.json missing (run scripts/generate-license-report.sh)"; fi
-if [ -f "$ROOT/sbom.cyclonedx.json" ]; then pass "sbom.cyclonedx.json exists"; fi
+# One canonical SBOM only: the byte-identical sbom.cyclonedx.json duplicate was
+# removed, and its reappearance is a regression, not a bonus artifact.
+if [ -f "$ROOT/sbom.cyclonedx.json" ]; then fail "sbom.cyclonedx.json must not exist (sbom.json is the single canonical SBOM)"; else pass "no duplicate SBOM (sbom.json is the only one)"; fi
 
 # 8. buyer package (build if not exists, then verify)
 echo "[8/8] buyer package"

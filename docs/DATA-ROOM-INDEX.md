@@ -34,7 +34,7 @@ This index is the single entry point to the complete transaction evidence set. E
 ## 4. Security
 - `docs/SECURITY.md`, `docs/SECURITY-THREAT-MODEL.md` *(new)*, `docs/SECURITY-CONTROLS-MATRIX.md` *(new)*, `docs/PENETRATION-TEST-READINESS.md` *(new)*
 - `docs/SECURITY-BOUNDARY-MAP.md`, `crates/server/src/security/{cors_policy.rs,headers.rs,security_headers.rs,tenant_context.rs,legacy_websocket_guard.rs,websocket.rs}` (6 files)
-- Supply chain: `sbom.json`, `sbom.cyclonedx.json`, `licenses.json`, `licenses.csv` (generated 2026-09-24), `deny.toml`
+- Supply chain: `sbom.json` (CycloneDX, the one canonical SBOM), `licenses.json`, `licenses.csv` (generated 2026-09-24), `deny.toml`
 
 ## 5. Deployment & Operations
 - `docs/DEPLOYMENT.md`, `docs/DEPLOYMENT-ENVIRONMENT-MATRIX.md` *(new)*, `docs/PRODUCTION-READINESS-MATRIX.md` *(new)*

@@ -46,7 +46,7 @@
 * `docs/BACKUP-RESTORE.md` · `crates/server/src/backup/{export_manifest,restore_manifest,preflight,commands}.rs` (5 files incl. `mod.rs`) · `docs/OPERATIONS-RUNBOOK.md` (§ backup/restore)
 
 ## 10. SBOM
-* `sbom.json` (200 components, 34,758 B, sha256 `fd837e42…`) · `sbom.cyclonedx.json` (CycloneDX, sha256 `fd837e42…`) · `crates/server/src/ops/sbom_report.rs` · delivered copy under `buyer-release/sbom/`
+* `sbom.json` (200 components, 34,758 B, CycloneDX 1.5, sha256 `fd837e42…`) · `crates/server/src/ops/sbom_report.rs` · delivered copy under `buyer-release/sbom/` — this is the only SBOM; a byte-identical `sbom.cyclonedx.json` duplicate was removed
 
 ## 11. License report
 * `licenses.json` (707 entries, 108,621 B, sha256 `c1c051ca…`) · `licenses.csv` · `crates/server/src/ops/license_report.rs` · `docs/OPEN-SOURCE-COMPLIANCE.md` · `docs/THIRD-PARTY-SOFTWARE-INVENTORY.md` · delivered copies under `buyer-release/licenses/`

@@ -5,7 +5,7 @@
 ## Generation
 
 ```bash
-bash scripts/generate-sbom.sh        # → sbom.json (34758 B, 200 components, sha fd837e42…), sbom.cyclonedx.json
+bash scripts/generate-sbom.sh        # → sbom.json (34758 B, 200 components, CycloneDX 1.5, sha fd837e42…)
 bash scripts/generate-license-report.sh # → licenses.json (107K, 707 entries, sha c1c051…), licenses.csv
 cat licenses.json | jq '.[] | select(.license=="UNKNOWN") | .name' # unknown check
 ```
@@ -49,7 +49,7 @@ Full list: `apps/control-plane/package.json` dependencies + `licenses.json` fron
 ## SBOM Artifacts (per-artifact sha256+size+timestamp independently)
 
 - `sbom.json` 34758 B, sha `fd837e4260f8d0fedb9574feaf7d71c7b26a5d475eff4208424a455f3c8bd055`, CycloneDX 1.5, generated 2026-09-24T02:34:27Z
-- `sbom.cyclonedx.json` same
+- `sbom.json` is the single canonical SBOM; a byte-identical `sbom.cyclonedx.json` duplicate was removed
 - `licenses.json` 108621 B, sha `c1c051ca3f0436043a5b6433b120461301c0eb1d2baee19a41c01220e3b31a59`, 707 entries
 - `buyer-release/sbom/sbom.json` + `buyer-release/licenses/licenses.json` same, checksums in `buyer-release/checksums/SHA256SUMS`
 

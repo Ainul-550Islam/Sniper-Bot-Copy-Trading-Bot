@@ -1,5 +1,5 @@
 import type { NextConfig } from "next";
-import { buildSecurityHeaders } from "./src/lib/security-headers";
+import { buildStaticSecurityHeaders } from "./src/lib/security-headers";
 
 /**
  * The API origin is the ONLY thing this app reads from the environment.
@@ -10,8 +10,8 @@ import { buildSecurityHeaders } from "./src/lib/security-headers";
  * - NEXT_PUBLIC_API_ORIGIN → an explicit origin for a split deployment.
  *
  * There is deliberately NO secret of any kind in client configuration:
- * signing keys, webhook secrets and the deployment key never reach the
- * browser in any form.
+ * signing keys, webhook secrets, the deployment key and the operator API key
+ * never reach the browser in any form.
  */
 const apiOrigin = process.env.NEXT_PUBLIC_API_ORIGIN ?? "";
 const isProd = process.env.NODE_ENV === "production";
@@ -29,10 +29,14 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_API_ORIGIN: apiOrigin,
   },
   async headers() {
+    // Static headers only (XFO, nosniff, referrer, permissions policy, COOP,
+    // CORP, HSTS in production). The Content-Security-Policy is per-request —
+    // it carries a fresh nonce — and is emitted by `src/proxy.ts` instead; a
+    // CSP built once at build time could only be a static, nonce-less policy.
     return [
       {
         source: "/:path*",
-        headers: buildSecurityHeaders({ apiOrigin, isProd }),
+        headers: buildStaticSecurityHeaders({ isProd }),
       },
     ];
   },

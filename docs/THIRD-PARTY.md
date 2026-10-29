@@ -118,7 +118,7 @@ cargo deny check --config ../../deny.toml   # or copy deny.toml alongside
 
 # Optional SBOM:
 cargo install cargo-cyclonedx --locked
-cargo cyclonedx --workspace --all > sbom.cyclonedx.json
+cargo cyclonedx --workspace --all > sbom.json
 ```
 
 `scripts/release-check.sh` runs the audit/deny gates for both projects

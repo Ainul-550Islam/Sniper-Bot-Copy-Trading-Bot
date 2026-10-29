@@ -30,7 +30,7 @@ bad()  { FAIL=$((FAIL+1)); printf 'FAIL  %s\n' "$1"; }
 REQUIRED_FILES="
 VERSION LICENSE SECURITY.md README.md CHANGELOG.md
 Cargo.toml Cargo.lock rust-toolchain.toml deny.toml release-manifest.json
-sbom.json sbom.cyclonedx.json licenses.json licenses.csv
+sbom.json licenses.json licenses.csv
 Dockerfile docker-compose.yml .dockerignore .env.template config.toml.example .gitignore
 .github/workflows/ci.yml scripts/release-check.sh scripts/verify-delivery.sh
 programs/staking-suite/Cargo.toml programs/staking-suite/Cargo.lock
@@ -75,7 +75,7 @@ missing=""
 # the file is reported missing (fail-closed) — round-5 fix.
 relocated_path() {
   case "$1" in
-    sbom.json|sbom.cyclonedx.json) [ -f "../sbom/$1" ] && [ -f "../manifests/release-manifest.json" ] && echo "../sbom/$1" ;;
+    sbom.json) [ -f "../sbom/$1" ] && [ -f "../manifests/release-manifest.json" ] && echo "../sbom/$1" ;;
     licenses.json|licenses.csv) [ -f "../licenses/$1" ] && [ -f "../manifests/release-manifest.json" ] && echo "../licenses/$1" ;;
   esac
 }
@@ -217,6 +217,44 @@ if [ -z "$junk_hits" ]; then
 else
   bad "tracked junk files present:
 $junk_hits"
+fi
+
+# ------------------------------------------ 7. single canonical SBOM (D3) --
+# The CycloneDX SBOM used to be emitted twice: once as `sbom.json` and once as
+# a byte-identical `sbom.cyclonedx.json`. Two copies of the same bill of
+# materials are a liability in a transaction data room — they drift, and a
+# buyer cannot tell which one was audited. `sbom.json` is now the only SBOM,
+# and it is the CycloneDX document. Both halves are checked: the duplicate is
+# gone, and the survivor really is a CycloneDX BOM with components.
+sbom_problems=""
+if [ -e sbom.cyclonedx.json ]; then
+  sbom_problems="$sbom_problems sbom.cyclonedx.json-must-not-exist"
+fi
+if [ ! -f sbom.json ]; then
+  sbom_problems="$sbom_problems sbom.json-missing"
+else
+  sbom_check="$(python3 - <<'PY'
+import json
+try:
+    with open("sbom.json", encoding="utf-8") as fh:
+        bom = json.load(fh)
+except Exception as exc:  # unreadable / not JSON
+    print(f"sbom.json-unreadable:{exc.__class__.__name__}")
+    raise SystemExit
+problems = []
+if bom.get("bomFormat") != "CycloneDX":
+    problems.append(f"bomFormat-is-{bom.get('bomFormat')!r}-not-CycloneDX")
+if not isinstance(bom.get("components"), list) or not bom.get("components"):
+    problems.append("components-missing-or-empty")
+print(" ".join(problems))
+PY
+)"
+  [ -n "$sbom_check" ] && sbom_problems="$sbom_problems $sbom_check"
+fi
+if [ -z "$sbom_problems" ]; then
+  ok "single canonical SBOM: sbom.json is CycloneDX with components, no duplicate"
+else
+  bad "canonical SBOM violations:$sbom_problems"
 fi
 
 # ------------------------------------------------------------- summary ----

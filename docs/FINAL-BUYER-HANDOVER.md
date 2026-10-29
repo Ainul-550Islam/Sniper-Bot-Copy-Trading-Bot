@@ -63,7 +63,7 @@
 * **EXTERNAL AUDITOR VERIFIES:** `bash scripts/run-external-validation.sh all-safe` 6/6 NOT_RUN (redacted evidence)
 
 ## K. SBOM/licenses
-* **SELLER DELIVERS:** `sbom.json` 34K 200 comps `fd837e42…`, `sbom.cyclonedx.json` `fd837e42…`, `licenses.json` 107K 707 entries `c1c051ca…`, `crates/server/src/ops/{sbom_report,license_report}.rs`
+* **SELLER DELIVERS:** `sbom.json` 34K 200 comps `fd837e42…` (the one canonical CycloneDX SBOM), `licenses.json` 107K 707 entries `c1c051ca…`, `crates/server/src/ops/{sbom_report,license_report}.rs`
 * **BUYER VERIFIES:** `sha256sum sbom.json licenses.json` match `buyer-release/checksums/SHA256SUMS` (run `cd buyer-release && sha256sum -c checksums/SHA256SUMS`; the per-file values are also inside `checksums/all-files.sha256`)
 * **LEGAL-REVIEW:** UNKNOWN (3) stays UNKNOWN — not guessed, `docs/OPEN-SOURCE-COMPLIANCE.md` → LEGAL REVIEW
 

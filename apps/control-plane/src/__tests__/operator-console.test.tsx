@@ -5,11 +5,33 @@ import { KillSwitchPanel } from "../components/operator/KillSwitchPanel";
 import { ModeSwitcher } from "../components/operator/ModeSwitcher";
 import { ModuleToggleTable } from "../components/operator/ModuleToggleTable";
 import { KeyList } from "../components/operator/KeyList";
+import OperatorKeysPage from "../app/operator/keys/page";
+import {
+  clearOperatorKey,
+  setOperatorKey,
+} from "../lib/operator-session";
+
+/** The key unlocking this console in the page tests: in-memory only. */
+const OPERATOR_KEY = "operator-key-material-0123456789abcdef";
+
+/**
+ * Assertions in this file follow `crypto.subtle` hashing and mocked fetches, so
+ * they land a microtask or two later than the interaction. The default
+ * `waitFor` timeout (1s) is tight enough to trip on a loaded or slow CI
+ * machine, which turns a passing suite into a flaky one; this wrapper keeps the
+ * semantic ("wait until true") and widens the window.
+ */
+const SETTLE_TIMEOUT_MS = 5000;
+async function settle(assertion: () => void): Promise<void> {
+  await waitFor(assertion, { timeout: SETTLE_TIMEOUT_MS });
+}
 
 const killSystemMock = vi.fn();
 const setModeMock = vi.fn();
 const disableModuleMock = vi.fn();
 const addKeyMock = vi.fn();
+const getKeysMock = vi.fn();
+const revokeKeyMock = vi.fn();
 
 vi.mock("@/lib/api/operator-api", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("@/lib/api/operator-api");
@@ -19,16 +41,21 @@ vi.mock("@/lib/api/operator-api", async () => {
     setMode: (mode: string) => setModeMock(mode),
     disableModule: (name: string) => disableModuleMock(name),
     addKey: (input: unknown) => addKeyMock(input),
+    getKeys: () => getKeysMock(),
+    revokeKey: (hash: string) => revokeKeyMock(hash),
   };
 });
 
 describe("operator console components", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getKeysMock.mockResolvedValue({ keys: [] });
+    revokeKeyMock.mockResolvedValue({ ok: true, revoked: "revoked-hash" });
   });
 
   afterEach(() => {
     cleanup();
+    clearOperatorKey();
     vi.restoreAllMocks();
   });
 
@@ -58,7 +85,7 @@ describe("operator console components", () => {
 
       // Clicking calls the kill system endpoint
       fireEvent.click(confirmButton);
-      await waitFor(() => {
+      await settle(() => {
         expect(killSystemMock).toHaveBeenCalledTimes(1);
       });
     });
@@ -89,7 +116,7 @@ describe("operator console components", () => {
       expect((confirmButton as HTMLButtonElement).disabled).toBe(false);
 
       fireEvent.click(confirmButton);
-      await waitFor(() => {
+      await settle(() => {
         expect(setModeMock).toHaveBeenCalledWith("live");
       });
     });
@@ -133,7 +160,7 @@ describe("operator console components", () => {
       expect((confirmButton as HTMLButtonElement).disabled).toBe(false);
 
       fireEvent.click(confirmButton);
-      await waitFor(() => {
+      await settle(() => {
         expect(disableModuleMock).toHaveBeenCalledWith("sniper");
       });
     });
@@ -179,7 +206,7 @@ describe("operator console components", () => {
       const submitButton = screen.getByRole("button", { name: /Register Key/i });
       fireEvent.click(submitButton);
 
-      await waitFor(() => {
+      await settle(() => {
         expect(addKeyMock).toHaveBeenCalledWith({
           label: "ci-key",
           key: testSecret,
@@ -191,6 +218,146 @@ describe("operator console components", () => {
       expect(secretInput.value).toBe("");
       // Secret text is never in DOM
       expect(screen.queryByText(testSecret)).toBeNull();
+    });
+  });
+
+  describe("/operator/keys page (Round 2, defect D2)", () => {
+    const KEY_HASH =
+      "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e";
+    const SECRET = "super-secret-key-material-min-24-chars";
+
+    it("lists hashes only and never renders plaintext key material", async () => {
+      setOperatorKey(OPERATOR_KEY);
+      getKeysMock.mockResolvedValue({
+        keys: [
+          {
+            label: "production-deployer",
+            role: "operator",
+            hash: KEY_HASH,
+            key_hash: KEY_HASH,
+            source: "database",
+            enabled: true,
+            created_at: "2026-10-20T00:00:00.000Z",
+          },
+        ],
+      });
+
+      render(<OperatorKeysPage />);
+
+      await settle(() => {
+        expect(getKeysMock).toHaveBeenCalledTimes(1);
+      });
+      await settle(() => {
+        expect(screen.getByText("production-deployer")).toBeTruthy();
+      });
+
+      // The list shows a truncated HASH, never the key.
+      expect(screen.getByText(/a591a6d40bf42040/)).toBeTruthy();
+
+      // The secret the operator types is rendered nowhere.
+      const secretInput = screen.getByLabelText(/Key Secret/i) as HTMLInputElement;
+      expect(secretInput.type).toBe("password");
+      fireEvent.change(screen.getByLabelText(/Key Label/i), {
+        target: { value: "ci-key" },
+      });
+      fireEvent.change(secretInput, { target: { value: SECRET } });
+      addKeyMock.mockResolvedValue({
+        ok: true,
+        label: "ci-key",
+        role: "operator",
+        hash: KEY_HASH,
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Register Key/i }));
+
+      await settle(() => {
+        expect(addKeyMock).toHaveBeenCalledWith({
+          label: "ci-key",
+          key: SECRET,
+          role: "operator",
+        });
+      });
+
+      // Cleared straight after submit, and never echoed into the document.
+      await settle(() => {
+        expect(secretInput.value).toBe("");
+      });
+      expect(document.body.textContent).not.toContain(SECRET);
+      // Nor is the key currently unlocking the console rendered: only its hash.
+      expect(document.body.textContent).not.toContain(OPERATOR_KEY);
+    });
+
+    it("makes revoking the key in use harder than revoking any other key", async () => {
+      setOperatorKey(OPERATOR_KEY);
+      const inUseHash = Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            "SHA-256",
+            new TextEncoder().encode(OPERATOR_KEY),
+          ),
+        ),
+      )
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+
+      getKeysMock.mockResolvedValue({
+        keys: [
+          {
+            label: "this-console",
+            role: "owner",
+            hash: inUseHash,
+            key_hash: inUseHash,
+            source: "runtime",
+            enabled: true,
+          },
+          {
+            label: "someone-else",
+            role: "operator",
+            hash: KEY_HASH,
+            key_hash: KEY_HASH,
+            source: "runtime",
+            enabled: true,
+          },
+        ],
+      });
+
+      render(<OperatorKeysPage />);
+      await settle(() => {
+        expect(screen.getByText("this-console")).toBeTruthy();
+      });
+      // The key currently in use is marked, so the operator can see the stake.
+      await settle(() => {
+        expect(screen.getByText("In use")).toBeTruthy();
+      });
+
+      const revokeButtons = screen.getAllByRole("button", { name: "Revoke" });
+      expect(revokeButtons.length).toBe(2);
+
+      // A different key: the ordinary typed phrase unlocks the button.
+      fireEvent.click(revokeButtons[1] as HTMLElement);
+      const otherConfirm = screen.getByLabelText(/Type REVOKE someone-else to confirm/i);
+      fireEvent.change(otherConfirm, { target: { value: "REVOKE someone-else" } });
+      fireEvent.click(screen.getByRole("button", { name: "Revoke key" }));
+      await settle(() => {
+        expect(revokeKeyMock).toHaveBeenCalledWith(KEY_HASH);
+      });
+
+      // The key in use: the ordinary phrase is NOT enough — it needs the extra
+      // "REVOKE MY KEY …" text.
+      fireEvent.click(screen.getAllByRole("button", { name: "Revoke" })[0] as HTMLElement);
+      const inUseConfirm = screen.getByLabelText(
+        /Type REVOKE MY KEY this-console to confirm/i,
+      );
+      fireEvent.change(inUseConfirm, { target: { value: "REVOKE this-console" } });
+      const inUseButton = screen.getByRole("button", { name: "Revoke the key in use" });
+      expect((inUseButton as HTMLButtonElement).disabled).toBe(true);
+      expect(revokeKeyMock).toHaveBeenCalledTimes(1);
+
+      fireEvent.change(inUseConfirm, { target: { value: "REVOKE MY KEY this-console" } });
+      expect((inUseButton as HTMLButtonElement).disabled).toBe(false);
+      fireEvent.click(inUseButton);
+      await settle(() => {
+        expect(revokeKeyMock).toHaveBeenCalledWith(inUseHash);
+      });
     });
   });
 });

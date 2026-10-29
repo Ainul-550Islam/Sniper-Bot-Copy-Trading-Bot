@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -12,6 +12,13 @@ const SRC = join(APP, "src");
 
 function read(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8");
+}
+
+/** Comments and doc-blocks describe rules; only executable code is asserted. */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
 }
 
 function sourceFiles(directory) {
@@ -134,13 +141,109 @@ test("team members path is owned by the shared client and explicitly documented"
   assert.doesNotMatch(page, /\/api\/saas\/organizations|\brequest\s*</);
 });
 
-test("next.config.ts uses buildSecurityHeaders and operator-api exists", () => {
+test("next.config.ts uses buildStaticSecurityHeaders and operator-api exists", () => {
   const nextConfig = read("apps/control-plane/next.config.ts");
-  assert.match(nextConfig, /buildSecurityHeaders/);
-  assert.match(nextConfig, /import\s*\{\s*buildSecurityHeaders\s*\}\s*from\s*"\.\/src\/lib\/security-headers"/);
+  assert.match(nextConfig, /buildStaticSecurityHeaders/);
+  assert.match(
+    nextConfig,
+    /import\s*\{\s*buildStaticSecurityHeaders\s*\}\s*from\s*"\.\/src\/lib\/security-headers"/,
+  );
+  // The CSP is per-request (nonce) and therefore owned by src/proxy.ts, never
+  // by the build-time headers() block.
+  const executableConfig = stripComments(nextConfig);
+  assert.doesNotMatch(executableConfig, /buildCsp/);
+  assert.doesNotMatch(executableConfig, /"Content-Security-Policy"/);
 
   const operatorApi = read("apps/control-plane/src/lib/api/operator-api.ts");
   assert.match(operatorApi, /export\s+const\s+operatorApi\s*=/);
   assert.match(operatorApi, /export\s+async\s+function\s+getHealth\(/);
   assert.match(operatorApi, /export\s+async\s+function\s+killSystem\(/);
+});
+
+test("operator-api authenticates with x-api-key and never the tenant session", () => {
+  const operatorApi = read("apps/control-plane/src/lib/api/operator-api.ts");
+
+  // One private wrapper owns the credential; every operator function calls it.
+  assert.match(operatorApi, /async\s+function\s+opRequest<T>\(/);
+  assert.match(operatorApi, /"x-api-key":\s*key/);
+  assert.match(operatorApi, /anonymous:\s*true/);
+  assert.match(operatorApi, /class\s+OperatorKeyRequiredError\s+extends\s+Error/);
+  assert.match(operatorApi, /error\.status\s*===\s*401/);
+  assert.match(operatorApi, /clearOperatorKey\(error\.reason\)/);
+
+  // `opRequest` is the only place allowed to call the shared client: going
+  // direct would attach the tenant session token (Authorization) and the
+  // x-organization hint, which the operator plane rejects with 401.
+  const withoutWrapper = stripComments(operatorApi).replace(
+    /async\s+function\s+opRequest<T>[\s\S]*?\n\}/,
+    "",
+  );
+  assert.doesNotMatch(withoutWrapper, /request</);
+
+  // Every exported operator function must go through opRequest.
+  const exportedCalls =
+    stripComments(operatorApi).match(
+      /(?:^|\n)export\s+async\s+function\s+\w+\([\s\S]*?\n}\n/g,
+    ) ?? [];
+  assert.ok(exportedCalls.length >= 26, "operator function surface unexpectedly shrank");
+  for (const fn of exportedCalls) {
+    assert.match(fn, /opRequest</, `operator function must use opRequest: ${fn.slice(0, 60)}`);
+  }
+});
+
+test("operator key is held in memory only and the /operator/keys page exists", () => {
+  const session = read("apps/control-plane/src/lib/operator-session.ts");
+  const executableSession = stripComments(session);
+
+  // No persistence of any kind, and no credential in a URL or a log line.
+  assert.doesNotMatch(
+    executableSession,
+    /\b(?:window\.)?(localStorage|sessionStorage|indexedDB|document\.cookie)\b/,
+  );
+  assert.doesNotMatch(executableSession, /console\.\w+/);
+  assert.match(executableSession, /OPERATOR_KEY_IDLE_TTL_MS\s*=\s*15\s*\*\s*60\s*\*\s*1000/);
+  assert.match(executableSession, /clearOperatorKey\(\)/);
+
+  // The unlock prompt, the guard and the keys page must all exist.
+  assert.match(
+    read("apps/control-plane/src/components/operator/OperatorKeyPrompt.tsx"),
+    /type="password"/,
+  );
+  assert.match(
+    read("apps/control-plane/src/components/operator/OperatorGuard.tsx"),
+    /OperatorKeyPrompt/,
+  );
+  const keysPage = read("apps/control-plane/src/app/operator/keys/page.tsx");
+  assert.match(keysPage, /getKeys\(/);
+  assert.match(keysPage, /<KeyList/);
+  assert.match(keysPage, /protectedHash/);
+
+  // Every Operator nav href resolves to a real page.
+  const appShell = read("apps/control-plane/src/components/AppShell.tsx");
+  const navBlock = /const OPERATOR_NAV: NavGroup = \{([\s\S]*?)\n\};/.exec(appShell);
+  assert.ok(navBlock, "OPERATOR_NAV block must exist");
+  const hrefs = [...navBlock[1].matchAll(/href:\s*"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(hrefs.length >= 10, "operator nav unexpectedly shrank");
+  for (const href of hrefs) {
+    const file = `apps/control-plane/src/app${href === "/" ? "" : href}/page.tsx`;
+    assert.ok(
+      existsSync(join(ROOT, file)),
+      `operator nav href ${href} has no page at ${file}`,
+    );
+  }
+});
+
+test("production CSP is nonce-based and never allows inline scripts", () => {
+  const headers = read("apps/control-plane/src/lib/security-headers.ts");
+  assert.match(headers, /export\s+function\s+buildCsp\(/);
+  assert.match(headers, /export\s+function\s+buildStaticSecurityHeaders\(/);
+  assert.match(headers, /'nonce-\$\{nonce\}'/);
+  assert.match(headers, /'strict-dynamic'/);
+  assert.doesNotMatch(headers, /scriptSrcList\.push\("\s*'unsafe-inline'"/);
+
+  const proxy = read("apps/control-plane/src/proxy.ts");
+  assert.match(proxy, /export\s+function\s+proxy\(/);
+  assert.match(proxy, /crypto\.getRandomValues/);
+  assert.match(proxy, /response\.headers\.set\(\s*\n?\s*"Content-Security-Policy"/);
+  assert.match(proxy, /_next\/static/);
 });

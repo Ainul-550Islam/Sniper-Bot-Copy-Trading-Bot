@@ -21,7 +21,7 @@ Upon execution of the commercial transaction and receipt of the agreed purchase 
 
 The transferring party represents and warrants that:
 - **Clean Chain of Title:** The source code contains no unauthorized third-party proprietary code.
-- **Open Source Compliance:** All third-party dependencies are licensed under permissive open-source licenses (MIT, Apache-2.0, BSD-3-Clause) as verified in `sbom.cyclonedx.json` and `licenses.json`.
+- **Open Source Compliance:** All third-party dependencies are licensed under permissive open-source licenses (MIT, Apache-2.0, BSD-3-Clause) as verified in `sbom.json` (CycloneDX) and `licenses.json`.
 - **Zero Malicious Code:** The codebase contains no intentional backdoors, telemetry spyware, or unauthorized logic.
 - **Fail-Closed Custody:** The custody architecture requires explicit KMS/signer authorization and maintains complete tenant isolation.
 

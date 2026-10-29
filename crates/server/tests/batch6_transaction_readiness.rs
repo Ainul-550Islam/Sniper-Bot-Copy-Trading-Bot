@@ -113,6 +113,15 @@ fn webhook_matrix_distinguishes_fixture_vs_live() {
 }
 
 // --- SBOM / license crosswalk ---
+//
+// ONE canonical SBOM: `sbom.json` at the repository root, written by
+// `scripts/generate-sbom.sh` and referenced by `scripts/verify-delivery.sh`,
+// `docs/THIRD-PARTY-SOFTWARE-INVENTORY.md` and the release manifest. A second,
+// byte-identical CycloneDX copy (`sbom.cyclonedx.json`) used to be emitted by
+// the generator and asserted here; it was deleted because two SBOMs means two
+// things to keep in sync and two things for a buyer to checksum. The canonical
+// file is CycloneDX 1.5 (`bomFormat` + `components`), so nothing downstream
+// lost a format — only a duplicate.
 #[test]
 fn sbom_license_crosswalk_files_exist() {
     let root = repo_root();
@@ -125,8 +134,8 @@ fn sbom_license_crosswalk_files_exist() {
         "licenses.json missing"
     );
     assert!(
-        Path::new(&format!("{root}/sbom.cyclonedx.json")).exists(),
-        "sbom.cyclonedx.json missing"
+        !Path::new(&format!("{root}/sbom.cyclonedx.json")).exists(),
+        "sbom.cyclonedx.json is a removed duplicate — sbom.json is the one canonical SBOM"
     );
     let lic = std::fs::read_to_string(format!("{root}/licenses.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&lic).unwrap();
@@ -140,6 +149,19 @@ fn sbom_license_crosswalk_files_exist() {
     assert!(
         sv.get("components").is_some() || sv.get("bomFormat").is_some(),
         "sbom.json should have components/bomFormat"
+    );
+    // The canonical SBOM carries the CycloneDX envelope the deleted duplicate
+    // used to provide, so dropping the duplicate dropped no format.
+    assert_eq!(
+        sv.get("bomFormat").and_then(|v| v.as_str()),
+        Some("CycloneDX"),
+        "sbom.json must be a CycloneDX document"
+    );
+    assert!(
+        sv.get("components")
+            .and_then(|v| v.as_array())
+            .is_some_and(|c| !c.is_empty()),
+        "sbom.json must list components"
     );
 }
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { TypedConfirm } from "@/components/lifecycle/TypedConfirm";
 import {
   addKey,
   revokeKey,
@@ -12,18 +13,31 @@ function getErrorMessage(err: unknown): string {
   return String(err);
 }
 
+/** Stable display id for a key row: the backend's SHA-256 hash. */
+function hashOf(key: OperatorKey, index: number): string {
+  return key.hash || key.key_hash || `key-${index}`;
+}
+
 export interface KeyListProps {
   keys: OperatorKey[];
   onRefresh: () => Promise<void> | void;
+  /**
+   * SHA-256 hex of the operator key currently unlocking this console, when it
+   * can be computed (see `operatorKeyHash`). Revoking that key locks the
+   * operator out of every route, so it needs a stronger typed phrase than any
+   * other key.
+   */
+  protectedHash?: string | null;
 }
 
-export function KeyList({ keys, onRefresh }: KeyListProps) {
+export function KeyList({ keys, onRefresh, protectedHash = null }: KeyListProps) {
   const [label, setLabel] = useState("");
   const [role, setRole] = useState("operator");
   const [secretKey, setSecretKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<{ hash: string; label: string } | null>(null);
 
   const handleAddKey = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,7 +58,9 @@ export function KeyList({ keys, onRefresh }: KeyListProps) {
         role,
       });
 
-      // Clear the secret field immediately after submit
+      // Clear the secret field immediately after submit — on success AND on
+      // failure. The plaintext exists only for the lifetime of this call and is
+      // never rendered back to the operator.
       setSecretKey("");
       setLabel("");
       setSuccess(`Key '${res.label}' added successfully with role '${res.role}'. Hash: ${res.hash || res.key_hash || "created"}`);
@@ -59,12 +75,12 @@ export function KeyList({ keys, onRefresh }: KeyListProps) {
   };
 
   const handleRevoke = async (hash: string) => {
-    if (!confirm(`Are you sure you want to revoke key with hash ${hash}?`)) return;
     setBusy(true);
     setError(null);
     try {
       await revokeKey(hash);
-      setSuccess(`Key with hash ${hash} revoked.`);
+      setRevokeTarget(null);
+      setSuccess(`Key with hash ${hash.slice(0, 16)}… revoked.`);
       await onRefresh();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -72,6 +88,9 @@ export function KeyList({ keys, onRefresh }: KeyListProps) {
       setBusy(false);
     }
   };
+
+  const target = revokeTarget;
+  const targetIsInUse = target !== null && target.hash === protectedHash;
 
   return (
     <div className="stack">
@@ -172,7 +191,8 @@ export function KeyList({ keys, onRefresh }: KeyListProps) {
               </tr>
             ) : (
               keys.map((k, idx) => {
-                const hashValue = k.hash || k.key_hash || `key-${idx}`;
+                const hashValue = hashOf(k, idx);
+                const inUse = hashValue === protectedHash;
                 return (
                   <tr key={hashValue}>
                     <td><strong>{k.label}</strong></td>
@@ -188,9 +208,13 @@ export function KeyList({ keys, onRefresh }: KeyListProps) {
                       <span className="muted small">{k.source || "runtime"}</span>
                     </td>
                     <td>
-                      <span className={`tag ${k.enabled !== false ? "tag--active" : "tag--danger"}`}>
-                        {k.enabled !== false ? "Active" : "Revoked"}
-                      </span>
+                      {inUse ? (
+                        <span className="tag tag--active">In use</span>
+                      ) : (
+                        <span className={`tag ${k.enabled !== false ? "tag--active" : "tag--danger"}`}>
+                          {k.enabled !== false ? "Active" : "Revoked"}
+                        </span>
+                      )}
                     </td>
                     <td className="small muted">
                       {k.created_at ? new Date(k.created_at).toLocaleDateString() : "—"}
@@ -201,7 +225,7 @@ export function KeyList({ keys, onRefresh }: KeyListProps) {
                           type="button"
                           className="danger"
                           disabled={busy}
-                          onClick={() => void handleRevoke(hashValue)}
+                          onClick={() => setRevokeTarget({ hash: hashValue, label: k.label })}
                         >
                           Revoke
                         </button>
@@ -213,7 +237,38 @@ export function KeyList({ keys, onRefresh }: KeyListProps) {
             )}
           </tbody>
         </table>
+        <p className="muted small" style={{ padding: "0.75rem 1rem", margin: 0 }}>
+          Only the key hash is ever listed or returned by the API. Plaintext key material
+          exists solely for the lifetime of the &ldquo;Register Key&rdquo; request and is
+          never displayed, logged or retained.
+        </p>
       </div>
+
+      {target && (
+        <div className="card">
+          <TypedConfirm
+            title={targetIsInUse ? "Revoke the key in use" : "Revoke operator key"}
+            description={
+              targetIsInUse
+                ? `This is the key currently unlocking this console. Revoking it returns 401 on every operator route immediately and locks the console until another owner key is entered. Label: ${target.label} · hash ${target.hash.slice(0, 16)}…`
+                : `Permanently revoke '${target.label}' (hash ${target.hash.slice(0, 16)}…). Every client presenting this key is refused from the next request onward.`
+            }
+            expected={
+              targetIsInUse
+                ? `REVOKE MY KEY ${target.label}`
+                : `REVOKE ${target.label}`
+            }
+            confirmLabel={targetIsInUse ? "Revoke the key in use" : "Revoke key"}
+            busy={busy}
+            onConfirm={() => void handleRevoke(target.hash)}
+          />
+          <div style={{ marginTop: "0.75rem" }}>
+            <button type="button" disabled={busy} onClick={() => setRevokeTarget(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
