@@ -2,7 +2,7 @@
 # sync-stat-markers.sh — copy generated stat values into buyer/doc markers.
 #
 # docs/STATS.md is written by scripts/generate-stats.sh and is the ONLY source of
-# repository numbers. Other docs embed the same numbers as
+# repository numbers. README.md and the other docs embed the same numbers as
 #   <!-- stat:KEY -->VALUE<!-- /stat -->
 # This script rewrites VALUE from docs/STATS.md for every marker whose KEY exists
 # there. It never invents a number, never edits text outside a marker, and is
@@ -35,7 +35,14 @@ if not values:
 
 changed = 0
 unknown = set()
-for path in sorted((root / "docs").rglob("*.md")):
+# tests/release/stats_current.sh checks README.md as well as docs/*.md, so
+# the writer must cover the same marker-bearing surface as the checker.
+marker_paths = []
+readme_path = root / "README.md"
+if readme_path.is_file():
+    marker_paths.append(readme_path)
+marker_paths.extend(sorted((root / "docs").rglob("*.md")))
+for path in marker_paths:
     text = path.read_text(encoding="utf-8")
     if "<!-- stat:" not in text:
         continue

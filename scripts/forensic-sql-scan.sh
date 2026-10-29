@@ -109,6 +109,31 @@ SANCTIONED_GLOBAL = [
      "operator version scan (all_versions): enumerates every organization's config version for operator tooling; tenant-facing reads always resolve one org first"),
 ]
 
+# Statement-specific identity-plane sanctions, adjudicated by the
+# integration-cleanup batch on 2026-10-28 and documented in
+# docs/FORENSIC-SQL-RESEARCH-2026.md. Unlike SANCTIONED_GLOBAL above, an
+# entry here is not a file/table exemption: it matches only when the exact
+# normalized SQL fragment in the third element is present. Changing one of
+# these statements therefore revokes its sanction and returns it to class 4
+# until the replacement statement is reviewed. Every statement below runs
+# before a trustworthy tenant context exists, resolves a globally unique
+# identity or bearer credential, and is followed by tenant-scoped writes or
+# canonical-user checks in the same flow.
+IDENTITY_PLANE_SANCTIONS = [
+    ("auth_flows", "invites", "SELECT id, organization_id, email, role, invited_by FROM invites WHERE token_hash = $1 AND status = 'pending' AND expires_at > now() FOR UPDATE",
+     "public invitation acceptance: the SHA-256 token hash is the bearer credential and uniquely resolves the locked invitation; organization_id is read from that row rather than accepted from the caller, and every later write uses the locked organization"),
+    ("auth_flows", "saas_runtime_records", "SELECT id, record FROM saas_runtime_records WHERE kind = 'user' AND lookup_key = $1 FOR UPDATE",
+     "invited-account resolution: the email comes from the locked invitation row, user records are global identities keyed by the globally unique normalized email lookup key, and membership/session writes use the invitation's organization"),
+    ("auth_flows", "users", "INSERT INTO users (id, email, email_verified, display_name, password_hash, status, platform_admin, created_at, updated_at, last_login_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, email_verified=EXCLUDED.email_verified, display_name=EXCLUDED.display_name, password_hash=EXCLUDED.password_hash, status=EXCLUDED.status, platform_admin=EXCLUDED.platform_admin, updated_at=EXCLUDED.updated_at, last_login_at=EXCLUDED.last_login_at",
+     "global identity projection during invitation acceptance: users has no organization_id column; the tenant relationship is written separately to organization_members with the locked invitation organization in the same transaction"),
+    ("postgres", "users", "INSERT INTO users (id, email, email_verified, display_name, password_hash, status, platform_admin, created_at, updated_at, last_login_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO UPDATE SET email=EXCLUDED.email, email_verified=EXCLUDED.email_verified, display_name=EXCLUDED.display_name, password_hash=EXCLUDED.password_hash, status=EXCLUDED.status, platform_admin=EXCLUDED.platform_admin, updated_at=EXCLUDED.updated_at, last_login_at=EXCLUDED.last_login_at",
+     "canonical global identity projection: users is keyed by globally unique user id and email and has no organization_id column; membership remains the tenant relationship and carries the organization predicate"),
+    ("email_verification", "users", "SELECT id, email_verified, status FROM users WHERE lower(email) = lower($1)",
+     "enumeration-safe verification request: a global account must be resolved by email before any tenant context exists; the endpoint returns the same accepted response for unknown addresses and binds any issued token to the resolved user id"),
+    ("password_reset", "users", "SELECT id, status FROM users WHERE lower(email) = lower($1)",
+     "enumeration-safe password-reset request: a global account must be resolved by email before any tenant context exists; the endpoint returns the same accepted response for unknown addresses and binds any issued token to the resolved user id"),
+]
+
 GROUPS = [
     "G1  SELECT on a tenant table without an organization_id predicate",
     "G2  INSERT into a tenant table without the organization_id column",
@@ -217,6 +242,11 @@ for path in rs_files:
 
         stem = path.stem
         sanctioned = any(s[0] == stem and s[1] in tables for s in SANCTIONED_GLOBAL)
+        normalized_sql = " ".join(sql.split())
+        identity_sanctions = [
+            s for s in IDENTITY_PLANE_SANCTIONS
+            if s[0] == stem and s[1] in tables and s[2] in normalized_sql
+        ]
 
         def record(group, cls, table, rationale):
             findings.append({
@@ -231,6 +261,10 @@ for path in rs_files:
             for s in SANCTIONED_GLOBAL:
                 if s[0] == stem and s[1] in tables:
                     record("G10", 2, s[1], s[2])
+            continue
+        if identity_sanctions and not org_enforced(sql):
+            for s in identity_sanctions:
+                record("G10", 2, s[1], s[3])
             continue
 
         # G10-companion — operator-plane tables (class 3): the deployment
