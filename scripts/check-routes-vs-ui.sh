@@ -37,6 +37,15 @@ pairs=(
   "/api/saas/wallet-pools|wallet-pools"
   "/api/saas/data-lifecycle|data-lifecycle"
   "/api/saas/custody/profiles|custody"
+  "/api/modules|modules"
+  "/api/kill|kill-switch"
+  "/api/mode|mode"
+  "/api/keys|keys"
+  "/api/audit|audit"
+  "/api/journal|journal"
+  "/api/reconciliation/findings|reconciliation"
+  "/api/recovery/failed|recovery"
+  "/api/config|config"
 )
 
 failed=0
@@ -94,7 +103,29 @@ for entry in UI_EXEMPT_RAW:
     path, _, reason = entry.partition("|")
     UI_EXEMPT[path.rstrip("/")] = reason
 
-SCOPES = ("/api/saas/", "/api/tenant/")
+SCOPES = (
+    "/api/saas/",
+    "/api/tenant/",
+    "/api/health",
+    "/api/mode",
+    "/api/modules",
+    "/api/kill",
+    "/api/resume",
+    "/api/risk/kill-switch",
+    "/api/keys",
+    "/api/audit",
+    "/api/journal",
+    "/api/db",
+    "/api/config",
+    "/api/reconciliation/findings",
+    "/api/recovery/failed",
+    "/api/executions",
+    "/api/trades",
+    "/api/wallets",
+    "/api/accounting/events",
+    "/api/events",
+    "/api/orders",
+)
 
 def in_scope(path: str) -> bool:
     return any(path.startswith(s) for s in SCOPES)

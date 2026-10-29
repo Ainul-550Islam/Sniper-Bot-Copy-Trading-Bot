@@ -13,6 +13,7 @@ import {
   selectOrganization,
   sessionStore,
 } from "@/lib/auth";
+import { getPermissions, type MembershipRole } from "@/lib/permissions";
 
 export interface NavGroup {
   title: string;
@@ -97,6 +98,22 @@ const COMMERCIAL_NAV: NavGroup[] = [
   },
 ];
 
+const OPERATOR_NAV: NavGroup = {
+  title: "Operator",
+  items: [
+    { href: "/operator", label: "System Overview" },
+    { href: "/operator/modules", label: "Modules" },
+    { href: "/operator/mode", label: "Execution Mode" },
+    { href: "/operator/kill-switch", label: "Kill Switch" },
+    { href: "/operator/keys", label: "API Keys" },
+    { href: "/operator/audit", label: "Audit Chain" },
+    { href: "/operator/journal", label: "Intent Journal" },
+    { href: "/operator/reconciliation", label: "Reconciliation" },
+    { href: "/operator/recovery", label: "Recovery Queue" },
+    { href: "/operator/config", label: "Runtime Config" },
+  ],
+};
+
 /** Live countdown of the in-memory session's remaining life. */
 function SessionBadge() {
   const [remaining, setRemaining] = useState(msUntilExpiry());
@@ -151,6 +168,18 @@ export function AppShell({ children }: { children?: React.ReactNode; title?: str
   const user = state.user;
   if (!user) return null;
 
+  const currentOrg =
+    state.organizations.find((o) => o.organization_id === state.selectedOrganizationId) ??
+    state.organizations[0];
+  const permissions = getPermissions(
+    { role: (currentOrg?.role?.toLowerCase() as MembershipRole) ?? "viewer" },
+    user,
+  );
+
+  const navGroups = permissions.operator.read
+    ? [...COMMERCIAL_NAV, OPERATOR_NAV]
+    : COMMERCIAL_NAV;
+
   return (
     <div className="shell">
       <header className="shell__header">
@@ -177,7 +206,7 @@ export function AppShell({ children }: { children?: React.ReactNode; title?: str
 
       <div className="shell__body">
         <nav aria-label="Sections" className="shell__nav">
-          {COMMERCIAL_NAV.map((group) => (
+          {navGroups.map((group) => (
             <div key={group.title}>
               <h3>{group.title}</h3>
               <ul>

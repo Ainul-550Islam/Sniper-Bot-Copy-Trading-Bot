@@ -18,6 +18,61 @@ components:
             $ref: '#/components/schemas/Error'
       description: Missing, malformed or expired credential.
   schemas:
+    AccountingEventRecord:
+      properties:
+        asset:
+          type: string
+        correlation_id:
+          type:
+          - string
+          - 'null'
+        counterparty_wallet:
+          type:
+          - string
+          - 'null'
+        detail:
+          type: string
+        event_id:
+          type: string
+        fee:
+          type: number
+        kind:
+          type: string
+        position_id:
+          type:
+          - string
+          - 'null'
+        price:
+          type:
+          - number
+          - 'null'
+        quantity:
+          type: number
+        quote_amount:
+          type: number
+        quote_asset:
+          type: string
+        reference_id:
+          type: string
+        side:
+          type:
+          - string
+          - 'null'
+        strategy:
+          type: string
+        ts:
+          format: date-time
+          type: string
+        venue:
+          type: string
+        wallet:
+          type: string
+      required:
+      - kind
+      - wallet
+      - quote_asset
+      - reference_id
+      type: object
     AlertItem:
       properties:
         category:
@@ -91,6 +146,56 @@ components:
       - role
       - created_at
       - usable
+      type: object
+    AuditRecord:
+      properties:
+        action:
+          type: string
+        actor:
+          type: string
+        chained:
+          type: boolean
+        detail:
+          additionalProperties: true
+          type: object
+        hash:
+          type: string
+        id:
+          type: integer
+        outcome:
+          type: string
+        target:
+          type:
+          - string
+          - 'null'
+        ts:
+          format: date-time
+          type: string
+      required:
+      - id
+      - ts
+      - actor
+      - action
+      - outcome
+      - chained
+      type: object
+    AuditVerifyResult:
+      properties:
+        at_id:
+          type: integer
+        entries:
+          type: integer
+        error:
+          type: string
+        status:
+          enum:
+          - intact
+          - broken
+          - not_chained
+          - unknown
+          type: string
+      required:
+      - status
       type: object
     BacktestRecord:
       properties:
@@ -690,6 +795,46 @@ components:
       - error
       - reason
       type: object
+    ExecutionRecord:
+      properties:
+        attempts:
+          type: integer
+        created_at:
+          format: date-time
+          type: string
+        error:
+          type:
+          - string
+          - 'null'
+        fee:
+          type: number
+        intent_id:
+          type: string
+        price:
+          type:
+          - number
+          - 'null'
+        quantity:
+          type: number
+        side:
+          type: string
+        signature:
+          type:
+          - string
+          - 'null'
+        state:
+          type: string
+        symbol:
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+        venue:
+          type: string
+      required:
+      - intent_id
+      - state
+      type: object
     ExportEnvelope:
       properties:
         data:
@@ -913,6 +1058,103 @@ components:
       - applied_count
       - summary
       type: object
+    ModuleStatus:
+      properties:
+        connected:
+          type: boolean
+        consecutive_errors:
+          type: integer
+        detail:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type: boolean
+        events_seen:
+          type: integer
+        healthy:
+          type: boolean
+        last_error:
+          type:
+          - string
+          - 'null'
+        last_event:
+          format: date-time
+          type:
+          - string
+          - 'null'
+        last_heartbeat:
+          format: date-time
+          type:
+          - string
+          - 'null'
+        module:
+          type: string
+        orders_failed:
+          type: integer
+        orders_filled:
+          type: integer
+        orders_rejected_by_risk:
+          type: integer
+        orders_sent:
+          type: integer
+        realized_pnl:
+          type: number
+        running:
+          type: boolean
+        signals_generated:
+          type: integer
+        unrealized_pnl:
+          type: number
+      required:
+      - module
+      - enabled
+      - running
+      - healthy
+      - connected
+      - events_seen
+      - signals_generated
+      - orders_sent
+      - orders_filled
+      - orders_failed
+      - orders_rejected_by_risk
+      - realized_pnl
+      - unrealized_pnl
+      - consecutive_errors
+      type: object
+    OperatorKey:
+      properties:
+        created_at:
+          format: date-time
+          type: string
+        enabled:
+          type: boolean
+        hash:
+          description: Key fingerprint / identifier (never secret material).
+          type: string
+        label:
+          type: string
+        last_used_at:
+          format: date-time
+          type:
+          - string
+          - 'null'
+        role:
+          enum:
+          - owner
+          - operator
+          - readonly
+          type: string
+        source:
+          enum:
+          - runtime
+          - database
+          type: string
+      required:
+      - label
+      - role
+      - hash
+      type: object
     Organization:
       properties:
         created_at:
@@ -1074,6 +1316,53 @@ components:
       - organization_id
       - action
       - reason
+      type: object
+    ReconciliationFinding:
+      properties:
+        actual:
+          type: number
+        asset:
+          type:
+          - string
+          - 'null'
+        detail:
+          type: string
+        event_id:
+          type:
+          - string
+          - 'null'
+        expected:
+          type: number
+        finding_id:
+          type: string
+        kind:
+          type: string
+        module:
+          type:
+          - string
+          - 'null'
+        order_id:
+          type:
+          - string
+          - 'null'
+        position_id:
+          type:
+          - string
+          - 'null'
+        trade_id:
+          type:
+          - string
+          - 'null'
+        venue:
+          type:
+          - string
+          - 'null'
+      required:
+      - finding_id
+      - kind
+      - expected
+      - actual
+      - detail
       type: object
     RiskDashboardState:
       properties:
@@ -1527,9 +1816,167 @@ info:
     Billing/usage reads are served through the deterministic exports (`/api/saas/exports?kind=subscription|usage|...`);
     there are no separate plan-catalogue or usage endpoints.
   title: Sniper Suite SaaS Control Plane
-  version: 2.2.0
+  version: 2.3.0
 openapi: 3.1.0
 paths:
+  /api/accounting/events:
+    get:
+      operationId: operator.listAccountingEvents
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  by_kind:
+                    additionalProperties:
+                      type: integer
+                    type: object
+                  count:
+                    type: integer
+                  events:
+                    items:
+                      $ref: '#/components/schemas/AccountingEventRecord'
+                    type: array
+                  pending:
+                    type: integer
+                  total:
+                    type: integer
+                required:
+                - count
+                - total
+                - by_kind
+                - pending
+                - events
+                type: object
+          description: Accounting events.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: List recent financial ledger events.
+      tags:
+      - operator
+    parameters:
+    - in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+    post:
+      operationId: operator.postAccountingEvent
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                asset:
+                  type: string
+                correlation_id:
+                  type: string
+                counterparty_wallet:
+                  type: string
+                detail:
+                  type: string
+                fee:
+                  type: number
+                kind:
+                  enum:
+                  - deposit
+                  - withdrawal
+                  - transfer
+                  - funding_adjustment
+                  - fee
+                  - correction
+                  type: string
+                position_id:
+                  type: string
+                price:
+                  type: number
+                quantity:
+                  type: number
+                quote_amount:
+                  type: number
+                quote_asset:
+                  type: string
+                reference_id:
+                  type: string
+                side:
+                  enum:
+                  - buy
+                  - sell
+                  type: string
+                strategy:
+                  type: string
+                venue:
+                  type: string
+                wallet:
+                  type: string
+              required:
+              - kind
+              - wallet
+              - quote_asset
+              - reference_id
+              type: object
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  effect:
+                    additionalProperties: true
+                    type: object
+                  event_id:
+                    type: string
+                  ok:
+                    type: boolean
+                  outcome:
+                    enum:
+                    - new
+                    - duplicate
+                    type: string
+                required:
+                - ok
+                - outcome
+                - event_id
+                type: object
+          description: Accounting event booked.
+        '400':
+          content:
+            application/json:
+              schema:
+                properties:
+                  ok:
+                    type: boolean
+                  outcome:
+                    enum:
+                    - rejected
+                    type: string
+                  reason:
+                    type: string
+                required:
+                - ok
+                - outcome
+                - reason
+                type: object
+          description: Event rejected by ledger validation.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Book an operator-entered financial accounting event.
+      tags:
+      - operator
   /api/accounting/findings:
     get:
       description: Read-only accounting reconciliation findings.
@@ -1560,6 +2007,241 @@ paths:
           $ref: '#/components/responses/Unauthorized'
       tags:
       - operator
+  /api/audit:
+    get:
+      operationId: operator.listAudit
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  count:
+                    type: integer
+                  durable:
+                    type: boolean
+                  records:
+                    items:
+                      $ref: '#/components/schemas/AuditRecord'
+                    type: array
+                required:
+                - durable
+                - count
+                - records
+                type: object
+          description: Recent audit records.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: List immutable audit trail records with cryptographic chaining.
+      tags:
+      - operator
+    parameters:
+    - in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+  /api/audit/verify:
+    get:
+      operationId: operator.verifyAudit
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditVerifyResult'
+          description: Audit verification result.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Verify cryptographic hash integrity across the recorded audit chain.
+      tags:
+      - operator
+  /api/config:
+    get:
+      operationId: operator.configView
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+          description: Redacted runtime configuration snapshot.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Secrets-redacted view of runtime bot and server configuration.
+      tags:
+      - operator
+  /api/db:
+    get:
+      operationId: operator.dbStatus
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  audit_durable:
+                    type: boolean
+                  database:
+                    enum:
+                    - connected
+                    - disabled
+                    type: string
+                  dedup_backend:
+                    type: string
+                  migrations_applied:
+                    type: integer
+                  pool:
+                    properties:
+                      active:
+                        type: integer
+                      idle:
+                        type: integer
+                      max:
+                        type: integer
+                      size:
+                        type: integer
+                    type: object
+                required:
+                - database
+                - dedup_backend
+                type: object
+          description: Database status.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Database pool statistics, migration count, and deduplication backend.
+      tags:
+      - operator
+  /api/events:
+    get:
+      operationId: operator.eventsWs
+      responses:
+        '101':
+          description: Switching Protocols to WebSocket connection
+        '401':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Live system event stream WebSocket connection.
+      tags:
+      - operator
+    parameters:
+    - description: Authentication key for WebSocket clients
+      in: query
+      name: key
+      required: false
+      schema:
+        type: string
+  /api/executions:
+    get:
+      operationId: operator.listExecutions
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  count:
+                    type: integer
+                  executions:
+                    items:
+                      $ref: '#/components/schemas/ExecutionRecord'
+                    type: array
+                  states:
+                    additionalProperties:
+                      type: integer
+                    type: object
+                required:
+                - count
+                - states
+                - executions
+                type: object
+          description: Execution ledger list.
+        '400':
+          $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: List transaction intents and attempts from the execution lifecycle ledger.
+      tags:
+      - operator
+    parameters:
+    - in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+    - in: query
+      name: state
+      required: false
+      schema:
+        type: string
+    - in: query
+      name: open
+      required: false
+      schema:
+        type: boolean
+  /api/executions/{id}:
+    get:
+      operationId: operator.getExecution
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionRecord'
+          description: Execution record.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Inspect execution lifecycle record by intent ID or transaction signature.
+      tags:
+      - operator
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema:
+        type: string
   /api/ha:
     get:
       description: 'High-availability state: leader, replicas, failover readiness.'
@@ -1573,6 +2255,417 @@ paths:
           description: HA state.
         '401':
           $ref: '#/components/responses/Unauthorized'
+      tags:
+      - operator
+  /api/health:
+    get:
+      operationId: operator.health
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  ok:
+                    type: boolean
+                required:
+                - ok
+                type: object
+          description: Service is alive.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: System health and liveness probe.
+      tags:
+      - operator
+  /api/journal:
+    get:
+      operationId: operator.journalStatus
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  available:
+                    type: boolean
+                  dir:
+                    type: string
+                  events_bytes:
+                    type: integer
+                  positions_bytes:
+                    type: integer
+                  trades_bytes:
+                    type: integer
+                required:
+                - available
+                type: object
+          description: Journal status.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Inspect intent journal storage sizes and disk availability.
+      tags:
+      - operator
+    post:
+      operationId: operator.rotateJournal
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  errors:
+                    items:
+                      type: string
+                    type: array
+                  ok:
+                    type: boolean
+                  rotated:
+                    items:
+                      type: string
+                    type: array
+                required:
+                - ok
+                - rotated
+                - errors
+                type: object
+          description: Journal rotation outcome.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Rotate and archive raw JSONL intent journals.
+      tags:
+      - operator
+  /api/keys:
+    get:
+      operationId: operator.listKeys
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  keys:
+                    items:
+                      $ref: '#/components/schemas/OperatorKey'
+                    type: array
+                required:
+                - keys
+                type: object
+          description: List of API keys.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: List registered operator and owner API keys without secret material.
+      tags:
+      - operator
+    post:
+      operationId: operator.addKey
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                key:
+                  minLength: 24
+                  type: string
+                  writeOnly: true
+                label:
+                  type: string
+                role:
+                  enum:
+                  - owner
+                  - operator
+                  - readonly
+                  type: string
+              required:
+              - label
+              - key
+              - role
+              type: object
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  hash:
+                    description: Key fingerprint
+                    type: string
+                  label:
+                    type: string
+                  ok:
+                    type: boolean
+                  role:
+                    type: string
+                required:
+                - ok
+                - label
+                - role
+                - hash
+                type: object
+          description: Key registered.
+        '400':
+          $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Register a new API key. Key secret is hashed immediately and never stored or returned in
+        plaintext.
+      tags:
+      - operator
+  /api/keys/{hash}:
+    delete:
+      operationId: operator.revokeKey
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  ok:
+                    type: boolean
+                  revoked:
+                    type: string
+                required:
+                - ok
+                - revoked
+                type: object
+          description: Key revoked.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Revoke an API key by hash fingerprint.
+      tags:
+      - operator
+    parameters:
+    - in: path
+      name: hash
+      required: true
+      schema:
+        type: string
+  /api/kill:
+    post:
+      operationId: operator.kill
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  kill_switch:
+                    type: boolean
+                  ok:
+                    type: boolean
+                required:
+                - ok
+                - kill_switch
+                type: object
+          description: Emergency stop engaged.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Engage emergency stop kill switch immediately suspending all trading.
+      tags:
+      - operator
+  /api/mode:
+    post:
+      operationId: operator.setMode
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                mode:
+                  enum:
+                  - paper
+                  - simulate
+                  - sim
+                  - live
+                  type: string
+              required:
+              - mode
+              type: object
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  live_allowed:
+                    type: boolean
+                  mode:
+                    type: string
+                  note:
+                    type: string
+                  ok:
+                    type: boolean
+                required:
+                - ok
+                - mode
+                - live_allowed
+                type: object
+          description: Execution mode updated.
+        '400':
+          $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Set bot execution mode (paper, simulate, live). Live execution requires owner authorization.
+      tags:
+      - operator
+  /api/modules:
+    get:
+      operationId: operator.listModules
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/ModuleStatus'
+                type: array
+          description: List of bot module runtime statuses.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: List runtime status and telemetry for all trading bot modules.
+      tags:
+      - operator
+  /api/modules/{name}/disable:
+    parameters:
+    - in: path
+      name: name
+      required: true
+      schema:
+        type: string
+    post:
+      operationId: operator.disableModule
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  enabled:
+                    type: boolean
+                  module:
+                    type: string
+                  ok:
+                    type: boolean
+                required:
+                - ok
+                - module
+                - enabled
+                type: object
+          description: Module disabled.
+        '400':
+          $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Disable a specific bot module runtime.
+      tags:
+      - operator
+  /api/modules/{name}/enable:
+    parameters:
+    - in: path
+      name: name
+      required: true
+      schema:
+        type: string
+    post:
+      operationId: operator.enableModule
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  enabled:
+                    type: boolean
+                  module:
+                    type: string
+                  ok:
+                    type: boolean
+                required:
+                - ok
+                - module
+                - enabled
+                type: object
+          description: Module enabled.
+        '400':
+          $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Enable a specific bot module runtime.
       tags:
       - operator
   /api/ops/migration-health:
@@ -1623,6 +2716,38 @@ paths:
           $ref: '#/components/responses/Unauthorized'
       tags:
       - operator
+  /api/orders/{id}:
+    get:
+      operationId: operator.getOrder
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+          description: Order record.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Inspect order details from order management system or durable archive.
+      tags:
+      - operator
+    parameters:
+    - in: path
+      name: id
+      required: true
+      schema:
+        type: string
   /api/positions:
     get:
       description: Read-only operator view of all positions.
@@ -1638,6 +2763,109 @@ paths:
           $ref: '#/components/responses/Unauthorized'
       tags:
       - operator
+  /api/reconciliation/findings:
+    get:
+      operationId: operator.reconciliationFindings
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  count:
+                    type: integer
+                  findings:
+                    items:
+                      $ref: '#/components/schemas/ReconciliationFinding'
+                    type: array
+                required:
+                - count
+                - findings
+                type: object
+          description: Reconciliation findings list.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Recent accounting and ledger reconciliation discrepancy findings.
+      tags:
+      - operator
+    parameters:
+    - in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+  /api/recovery/failed:
+    get:
+      operationId: operator.recoveryFailed
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  available:
+                    type: boolean
+                  count:
+                    type: integer
+                  items:
+                    items:
+                      additionalProperties: true
+                      type: object
+                    type: array
+                required:
+                - available
+                type: object
+          description: Recovery queue items.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Items in the execution dead-letter and recovery queue.
+      tags:
+      - operator
+  /api/resume:
+    post:
+      operationId: operator.resume
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  kill_switch:
+                    type: boolean
+                  ok:
+                    type: boolean
+                required:
+                - ok
+                - kill_switch
+                type: object
+          description: System resumed.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Resume trading system and clear emergency halt.
+      tags:
+      - operator
   /api/risk/global:
     get:
       description: Read-only global risk state (limits, gates, kill-switch position).
@@ -1651,6 +2879,62 @@ paths:
           description: Global risk state.
         '401':
           $ref: '#/components/responses/Unauthorized'
+      tags:
+      - operator
+  /api/risk/kill-switch:
+    post:
+      operationId: operator.setRiskKillSwitch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                engaged:
+                  type: boolean
+                reason:
+                  type: string
+                scope:
+                  description: venue:<venue> or strategy:<label>
+                  type: string
+              required:
+              - scope
+              - engaged
+              type: object
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  active:
+                    type: boolean
+                  ok:
+                    type: boolean
+                  outcome:
+                    type: string
+                  scope:
+                    type: string
+                required:
+                - ok
+                - scope
+                - outcome
+                - active
+                type: object
+          description: Kill switch state updated.
+        '400':
+          $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '409':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Engage or release a scoped venue or strategy kill switch.
       tags:
       - operator
   /api/saas/activity:
@@ -6098,6 +7382,69 @@ paths:
           $ref: '#/components/responses/Unauthorized'
       tags:
       - tenant
+  /api/trades:
+    get:
+      operationId: operator.listTrades
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  additionalProperties: true
+                  type: object
+                type: array
+          description: Recent trades array.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: Recent settled trade executions across all bot modules.
+      tags:
+      - operator
+    parameters:
+    - in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+  /api/wallets:
+    get:
+      operationId: operator.listWallets
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  available:
+                    type: boolean
+                  wallets:
+                    items:
+                      additionalProperties: true
+                      type: object
+                    type: array
+                required:
+                - available
+                type: object
+          description: Wallets registry list.
+        '401':
+          $ref: '#/components/schemas/Error'
+        '403':
+          $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      summary: List system and custody wallets stored in the persistent database.
+      tags:
+      - operator
 security:
 - bearerAuth: []
 servers:

@@ -133,3 +133,14 @@ test("team members path is owned by the shared client and explicitly documented"
   assert.match(page, /res\.members/);
   assert.doesNotMatch(page, /\/api\/saas\/organizations|\brequest\s*</);
 });
+
+test("next.config.ts uses buildSecurityHeaders and operator-api exists", () => {
+  const nextConfig = read("apps/control-plane/next.config.ts");
+  assert.match(nextConfig, /buildSecurityHeaders/);
+  assert.match(nextConfig, /import\s*\{\s*buildSecurityHeaders\s*\}\s*from\s*"\.\/src\/lib\/security-headers"/);
+
+  const operatorApi = read("apps/control-plane/src/lib/api/operator-api.ts");
+  assert.match(operatorApi, /export\s+const\s+operatorApi\s*=/);
+  assert.match(operatorApi, /export\s+async\s+function\s+getHealth\(/);
+  assert.match(operatorApi, /export\s+async\s+function\s+killSystem\(/);
+});

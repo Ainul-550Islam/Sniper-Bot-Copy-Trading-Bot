@@ -36,7 +36,7 @@ root = Path(os.environ["ROOT"])
 spec_path = Path(os.environ["SPEC"])
 SRC = root / "crates/server/src"
 
-SCOPES = ("/api/saas/", "/api/tenant/")
+SCOPES = ("/api/",)
 
 def in_scope(p: str) -> bool:
     return any(p.startswith(s) for s in SCOPES)
@@ -87,7 +87,7 @@ def is_registered(path: str) -> bool:
 
 ghost_paths = sorted(p for p in documented_scoped if not is_registered(p))
 
-print(f"check-openapi-coverage: scope = /api/saas/** + /api/tenant/**")
+print(f"check-openapi-coverage: scope = /api/** (saas + tenant + operator)")
 print(f"  registered scoped routes : {len(registered_scoped)}")
 print(f"  documented scoped paths  : {len(documented_scoped)}")
 

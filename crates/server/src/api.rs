@@ -841,6 +841,7 @@ async fn keys_list(State(state): State<ApiState>, headers: HeaderMap) -> Respons
                 json!({
                     "label": p.label,
                     "role": p.role.as_str(),
+                    "hash": p.key_hash,
                     "key_hash": p.key_hash,
                     "source": "runtime",
                 })
@@ -854,6 +855,7 @@ async fn keys_list(State(state): State<ApiState>, headers: HeaderMap) -> Respons
                 runtime.push(json!({
                     "label": r.label,
                     "role": r.role,
+                    "hash": r.key_hash,
                     "key_hash": r.key_hash,
                     "enabled": r.enabled,
                     "created_at": r.created_at.to_rfc3339(),
@@ -928,7 +930,7 @@ async fn keys_add(
             json!({ "role": role.as_str(), "key_hash": hash }),
         )
         .await;
-    Json(json!({ "ok": true, "label": body.label, "role": role.as_str(), "key_hash": hash }))
+    Json(json!({ "ok": true, "label": body.label, "role": role.as_str(), "hash": hash, "key_hash": hash }))
         .into_response()
 }
 

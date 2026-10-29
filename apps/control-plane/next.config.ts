@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { buildSecurityHeaders } from "./src/lib/security-headers";
 
 /**
  * The API origin is the ONLY thing this app reads from the environment.
@@ -13,6 +14,7 @@ import type { NextConfig } from "next";
  * browser in any form.
  */
 const apiOrigin = process.env.NEXT_PUBLIC_API_ORIGIN ?? "";
+const isProd = process.env.NODE_ENV === "production";
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -29,13 +31,8 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        // Belt-and-braces: the backend already sends these on every
-        // response; the Next layer repeats the essentials for static assets.
         source: "/:path*",
-        headers: [
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-        ],
+        headers: buildSecurityHeaders({ apiOrigin, isProd }),
       },
     ];
   },

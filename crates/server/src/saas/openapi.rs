@@ -51,7 +51,7 @@ use serde_json::{json, Value};
 /// honest value to put in them. A conforming 1.x client breaks on this,
 /// which is exactly what a MAJOR bump is for. See
 /// `docs/API-VERSIONING.md` and the CHANGELOG entry for the migration.
-pub const API_VERSION: &str = "2.2.0";
+pub const API_VERSION: &str = "2.3.0";
 
 /// One reusable non-success response.
 fn error_ref() -> Value {
@@ -749,6 +749,738 @@ fn merge_api_fragments(doc: &mut Value) {
         merge_object(doc, &["paths"], paths, name, "path");
         merge_object(doc, &["components", "schemas"], schemas, name, "schema");
     }
+
+    merge_object(doc, &["paths"], operator_paths(), "operator", "path");
+    merge_object(doc, &["components", "schemas"], operator_schemas(), "operator", "schema");
+}
+
+fn operator_schemas() -> Value {
+    json!({
+        "ModuleStatus": {
+            "type": "object",
+            "required": [
+                "module", "enabled", "running", "healthy", "connected",
+                "events_seen", "signals_generated", "orders_sent", "orders_filled",
+                "orders_failed", "orders_rejected_by_risk", "realized_pnl",
+                "unrealized_pnl", "consecutive_errors"
+            ],
+            "properties": {
+                "module": { "type": "string" },
+                "enabled": { "type": "boolean" },
+                "running": { "type": "boolean" },
+                "healthy": { "type": "boolean" },
+                "connected": { "type": "boolean" },
+                "events_seen": { "type": "integer" },
+                "signals_generated": { "type": "integer" },
+                "orders_sent": { "type": "integer" },
+                "orders_filled": { "type": "integer" },
+                "orders_failed": { "type": "integer" },
+                "orders_rejected_by_risk": { "type": "integer" },
+                "realized_pnl": { "type": "number" },
+                "unrealized_pnl": { "type": "number" },
+                "consecutive_errors": { "type": "integer" },
+                "last_error": { "type": ["string", "null"] },
+                "last_heartbeat": { "type": ["string", "null"], "format": "date-time" },
+                "last_event": { "type": ["string", "null"], "format": "date-time" },
+                "detail": { "type": ["string", "null"] }
+            }
+        },
+        "OperatorKey": {
+            "type": "object",
+            "required": ["label", "role", "hash"],
+            "properties": {
+                "label": { "type": "string" },
+                "role": { "type": "string", "enum": ["owner", "operator", "readonly"] },
+                "hash": { "type": "string", "description": "Key fingerprint / identifier (never secret material)." },
+                "source": { "type": "string", "enum": ["runtime", "database"] },
+                "enabled": { "type": "boolean" },
+                "created_at": { "type": "string", "format": "date-time" },
+                "last_used_at": { "type": ["string", "null"], "format": "date-time" }
+            }
+        },
+        "AuditRecord": {
+            "type": "object",
+            "required": ["id", "ts", "actor", "action", "outcome", "chained"],
+            "properties": {
+                "id": { "type": "integer" },
+                "ts": { "type": "string", "format": "date-time" },
+                "actor": { "type": "string" },
+                "action": { "type": "string" },
+                "target": { "type": ["string", "null"] },
+                "outcome": { "type": "string" },
+                "detail": { "type": "object", "additionalProperties": true },
+                "hash": { "type": "string" },
+                "chained": { "type": "boolean" }
+            }
+        },
+        "AuditVerifyResult": {
+            "type": "object",
+            "required": ["status"],
+            "properties": {
+                "status": { "type": "string", "enum": ["intact", "broken", "not_chained", "unknown"] },
+                "entries": { "type": "integer" },
+                "at_id": { "type": "integer" },
+                "error": { "type": "string" }
+            }
+        },
+        "ReconciliationFinding": {
+            "type": "object",
+            "required": ["finding_id", "kind", "expected", "actual", "detail"],
+            "properties": {
+                "finding_id": { "type": "string" },
+                "kind": { "type": "string" },
+                "module": { "type": ["string", "null"] },
+                "venue": { "type": ["string", "null"] },
+                "asset": { "type": ["string", "null"] },
+                "position_id": { "type": ["string", "null"] },
+                "event_id": { "type": ["string", "null"] },
+                "trade_id": { "type": ["string", "null"] },
+                "order_id": { "type": ["string", "null"] },
+                "expected": { "type": "number" },
+                "actual": { "type": "number" },
+                "detail": { "type": "string" }
+            }
+        },
+        "ExecutionRecord": {
+            "type": "object",
+            "required": ["intent_id", "state"],
+            "properties": {
+                "intent_id": { "type": "string" },
+                "state": { "type": "string" },
+                "signature": { "type": ["string", "null"] },
+                "venue": { "type": "string" },
+                "symbol": { "type": "string" },
+                "side": { "type": "string" },
+                "quantity": { "type": "number" },
+                "price": { "type": ["number", "null"] },
+                "fee": { "type": "number" },
+                "attempts": { "type": "integer" },
+                "error": { "type": ["string", "null"] },
+                "created_at": { "type": "string", "format": "date-time" },
+                "updated_at": { "type": "string", "format": "date-time" }
+            }
+        },
+        "AccountingEventRecord": {
+            "type": "object",
+            "required": ["kind", "wallet", "quote_asset", "reference_id"],
+            "properties": {
+                "event_id": { "type": "string" },
+                "kind": { "type": "string" },
+                "wallet": { "type": "string" },
+                "asset": { "type": "string" },
+                "quote_asset": { "type": "string" },
+                "side": { "type": ["string", "null"] },
+                "quantity": { "type": "number" },
+                "price": { "type": ["number", "null"] },
+                "quote_amount": { "type": "number" },
+                "fee": { "type": "number" },
+                "venue": { "type": "string" },
+                "strategy": { "type": "string" },
+                "reference_id": { "type": "string" },
+                "correlation_id": { "type": ["string", "null"] },
+                "position_id": { "type": ["string", "null"] },
+                "counterparty_wallet": { "type": ["string", "null"] },
+                "ts": { "type": "string", "format": "date-time" },
+                "detail": { "type": "string" }
+            }
+        }
+    })
+}
+
+fn operator_paths() -> Value {
+    json!({
+        "/api/health": {
+            "get": operation(
+                "operator.health",
+                "System health and liveness probe.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Service is alive.", json!({ "type": "object", "required": ["ok"], "properties": { "ok": { "type": "boolean" } } })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/mode": {
+            "post": operation(
+                "operator.setMode",
+                "Set bot execution mode (paper, simulate, live). Live execution requires owner authorization.",
+                &["operator"],
+                true,
+                json!({
+                    "type": "object",
+                    "required": ["mode"],
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["paper", "simulate", "sim", "live"] }
+                    }
+                }),
+                json!({
+                    "200": json_response("Execution mode updated.", json!({
+                        "type": "object",
+                        "required": ["ok", "mode", "live_allowed"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "mode": { "type": "string" },
+                            "live_allowed": { "type": "boolean" },
+                            "note": { "type": "string" }
+                        }
+                    })),
+                    "400": error_ref(), "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/modules": {
+            "get": operation(
+                "operator.listModules",
+                "List runtime status and telemetry for all trading bot modules.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("List of bot module runtime statuses.", json!({
+                        "type": "array",
+                        "items": { "$ref": "#/components/schemas/ModuleStatus" }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/modules/{name}/enable": {
+            "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }],
+            "post": operation(
+                "operator.enableModule",
+                "Enable a specific bot module runtime.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Module enabled.", json!({
+                        "type": "object",
+                        "required": ["ok", "module", "enabled"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "module": { "type": "string" },
+                            "enabled": { "type": "boolean" }
+                        }
+                    })),
+                    "400": error_ref(), "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/modules/{name}/disable": {
+            "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }],
+            "post": operation(
+                "operator.disableModule",
+                "Disable a specific bot module runtime.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Module disabled.", json!({
+                        "type": "object",
+                        "required": ["ok", "module", "enabled"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "module": { "type": "string" },
+                            "enabled": { "type": "boolean" }
+                        }
+                    })),
+                    "400": error_ref(), "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/kill": {
+            "post": operation(
+                "operator.kill",
+                "Engage emergency stop kill switch immediately suspending all trading.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Emergency stop engaged.", json!({
+                        "type": "object",
+                        "required": ["ok", "kill_switch"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "kill_switch": { "type": "boolean" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/resume": {
+            "post": operation(
+                "operator.resume",
+                "Resume trading system and clear emergency halt.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("System resumed.", json!({
+                        "type": "object",
+                        "required": ["ok", "kill_switch"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "kill_switch": { "type": "boolean" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/risk/kill-switch": {
+            "post": operation(
+                "operator.setRiskKillSwitch",
+                "Engage or release a scoped venue or strategy kill switch.",
+                &["operator"],
+                true,
+                json!({
+                    "type": "object",
+                    "required": ["scope", "engaged"],
+                    "properties": {
+                        "scope": { "type": "string", "description": "venue:<venue> or strategy:<label>" },
+                        "engaged": { "type": "boolean" },
+                        "reason": { "type": "string" }
+                    }
+                }),
+                json!({
+                    "200": json_response("Kill switch state updated.", json!({
+                        "type": "object",
+                        "required": ["ok", "scope", "outcome", "active"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "scope": { "type": "string" },
+                            "outcome": { "type": "string" },
+                            "active": { "type": "boolean" }
+                        }
+                    })),
+                    "400": error_ref(), "401": error_ref(), "403": error_ref(), "409": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/keys": {
+            "get": operation(
+                "operator.listKeys",
+                "List registered operator and owner API keys without secret material.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("List of API keys.", json!({
+                        "type": "object",
+                        "required": ["keys"],
+                        "properties": {
+                            "keys": { "type": "array", "items": { "$ref": "#/components/schemas/OperatorKey" } }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            ),
+            "post": operation(
+                "operator.addKey",
+                "Register a new API key. Key secret is hashed immediately and never stored or returned in plaintext.",
+                &["operator"],
+                true,
+                json!({
+                    "type": "object",
+                    "required": ["label", "key", "role"],
+                    "properties": {
+                        "label": { "type": "string" },
+                        "key": { "type": "string", "writeOnly": true, "minLength": 24 },
+                        "role": { "type": "string", "enum": ["owner", "operator", "readonly"] }
+                    }
+                }),
+                json!({
+                    "200": json_response("Key registered.", json!({
+                        "type": "object",
+                        "required": ["ok", "label", "role", "hash"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "label": { "type": "string" },
+                            "role": { "type": "string" },
+                            "hash": { "type": "string", "description": "Key fingerprint" }
+                        }
+                    })),
+                    "400": error_ref(), "401": error_ref(), "403": error_ref(), "429": error_ref(), "503": error_ref()
+                })
+            )
+        },
+        "/api/keys/{hash}": {
+            "parameters": [{ "name": "hash", "in": "path", "required": true, "schema": { "type": "string" } }],
+            "delete": operation(
+                "operator.revokeKey",
+                "Revoke an API key by hash fingerprint.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Key revoked.", json!({
+                        "type": "object",
+                        "required": ["ok", "revoked"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "revoked": { "type": "string" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "404": error_ref(), "429": error_ref(), "503": error_ref()
+                })
+            )
+        },
+        "/api/audit": {
+            "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }],
+            "get": operation(
+                "operator.listAudit",
+                "List immutable audit trail records with cryptographic chaining.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Recent audit records.", json!({
+                        "type": "object",
+                        "required": ["durable", "count", "records"],
+                        "properties": {
+                            "durable": { "type": "boolean" },
+                            "count": { "type": "integer" },
+                            "records": { "type": "array", "items": { "$ref": "#/components/schemas/AuditRecord" } }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/audit/verify": {
+            "get": operation(
+                "operator.verifyAudit",
+                "Verify cryptographic hash integrity across the recorded audit chain.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Audit verification result.", json!({
+                        "$ref": "#/components/schemas/AuditVerifyResult"
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/journal": {
+            "get": operation(
+                "operator.journalStatus",
+                "Inspect intent journal storage sizes and disk availability.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Journal status.", json!({
+                        "type": "object",
+                        "required": ["available"],
+                        "properties": {
+                            "available": { "type": "boolean" },
+                            "dir": { "type": "string" },
+                            "trades_bytes": { "type": "integer" },
+                            "positions_bytes": { "type": "integer" },
+                            "events_bytes": { "type": "integer" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            ),
+            "post": operation(
+                "operator.rotateJournal",
+                "Rotate and archive raw JSONL intent journals.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Journal rotation outcome.", json!({
+                        "type": "object",
+                        "required": ["ok", "rotated", "errors"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "rotated": { "type": "array", "items": { "type": "string" } },
+                            "errors": { "type": "array", "items": { "type": "string" } }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref(), "503": error_ref()
+                })
+            )
+        },
+        "/api/db": {
+            "get": operation(
+                "operator.dbStatus",
+                "Database pool statistics, migration count, and deduplication backend.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Database status.", json!({
+                        "type": "object",
+                        "required": ["database", "dedup_backend"],
+                        "properties": {
+                            "database": { "type": "string", "enum": ["connected", "disabled"] },
+                            "pool": {
+                                "type": "object",
+                                "properties": {
+                                    "size": { "type": "integer" },
+                                    "idle": { "type": "integer" },
+                                    "active": { "type": "integer" },
+                                    "max": { "type": "integer" }
+                                }
+                            },
+                            "migrations_applied": { "type": "integer" },
+                            "dedup_backend": { "type": "string" },
+                            "audit_durable": { "type": "boolean" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/config": {
+            "get": operation(
+                "operator.configView",
+                "Secrets-redacted view of runtime bot and server configuration.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Redacted runtime configuration snapshot.", json!({
+                        "type": "object",
+                        "additionalProperties": true
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/reconciliation/findings": {
+            "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }],
+            "get": operation(
+                "operator.reconciliationFindings",
+                "Recent accounting and ledger reconciliation discrepancy findings.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Reconciliation findings list.", json!({
+                        "type": "object",
+                        "required": ["count", "findings"],
+                        "properties": {
+                            "count": { "type": "integer" },
+                            "findings": { "type": "array", "items": { "$ref": "#/components/schemas/ReconciliationFinding" } }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref(), "503": error_ref()
+                })
+            )
+        },
+        "/api/recovery/failed": {
+            "get": operation(
+                "operator.recoveryFailed",
+                "Items in the execution dead-letter and recovery queue.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Recovery queue items.", json!({
+                        "type": "object",
+                        "required": ["available"],
+                        "properties": {
+                            "available": { "type": "boolean" },
+                            "count": { "type": "integer" },
+                            "items": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref(), "503": error_ref()
+                })
+            )
+        },
+        "/api/executions": {
+            "parameters": [
+                { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } },
+                { "name": "state", "in": "query", "required": false, "schema": { "type": "string" } },
+                { "name": "open", "in": "query", "required": false, "schema": { "type": "boolean" } }
+            ],
+            "get": operation(
+                "operator.listExecutions",
+                "List transaction intents and attempts from the execution lifecycle ledger.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Execution ledger list.", json!({
+                        "type": "object",
+                        "required": ["count", "states", "executions"],
+                        "properties": {
+                            "count": { "type": "integer" },
+                            "states": { "type": "object", "additionalProperties": { "type": "integer" } },
+                            "executions": { "type": "array", "items": { "$ref": "#/components/schemas/ExecutionRecord" } }
+                        }
+                    })),
+                    "400": error_ref(), "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/executions/{id}": {
+            "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+            "get": operation(
+                "operator.getExecution",
+                "Inspect execution lifecycle record by intent ID or transaction signature.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Execution record.", json!({
+                        "$ref": "#/components/schemas/ExecutionRecord"
+                    })),
+                    "401": error_ref(), "403": error_ref(), "404": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/trades": {
+            "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }],
+            "get": operation(
+                "operator.listTrades",
+                "Recent settled trade executions across all bot modules.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Recent trades array.", json!({
+                        "type": "array",
+                        "items": { "type": "object", "additionalProperties": true }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/wallets": {
+            "get": operation(
+                "operator.listWallets",
+                "List system and custody wallets stored in the persistent database.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Wallets registry list.", json!({
+                        "type": "object",
+                        "required": ["available"],
+                        "properties": {
+                            "available": { "type": "boolean" },
+                            "wallets": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref(), "503": error_ref()
+                })
+            )
+        },
+        "/api/accounting/events": {
+            "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }],
+            "get": operation(
+                "operator.listAccountingEvents",
+                "List recent financial ledger events.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Accounting events.", json!({
+                        "type": "object",
+                        "required": ["count", "total", "by_kind", "pending", "events"],
+                        "properties": {
+                            "count": { "type": "integer" },
+                            "total": { "type": "integer" },
+                            "by_kind": { "type": "object", "additionalProperties": { "type": "integer" } },
+                            "pending": { "type": "integer" },
+                            "events": { "type": "array", "items": { "$ref": "#/components/schemas/AccountingEventRecord" } }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            ),
+            "post": operation(
+                "operator.postAccountingEvent",
+                "Book an operator-entered financial accounting event.",
+                &["operator"],
+                true,
+                json!({
+                    "type": "object",
+                    "required": ["kind", "wallet", "quote_asset", "reference_id"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["deposit", "withdrawal", "transfer", "funding_adjustment", "fee", "correction"] },
+                        "wallet": { "type": "string" },
+                        "quote_asset": { "type": "string" },
+                        "reference_id": { "type": "string" },
+                        "asset": { "type": "string" },
+                        "side": { "type": "string", "enum": ["buy", "sell"] },
+                        "quantity": { "type": "number" },
+                        "price": { "type": "number" },
+                        "quote_amount": { "type": "number" },
+                        "fee": { "type": "number" },
+                        "correlation_id": { "type": "string" },
+                        "position_id": { "type": "string" },
+                        "counterparty_wallet": { "type": "string" },
+                        "venue": { "type": "string" },
+                        "strategy": { "type": "string" },
+                        "detail": { "type": "string" }
+                    }
+                }),
+                json!({
+                    "200": json_response("Accounting event booked.", json!({
+                        "type": "object",
+                        "required": ["ok", "outcome", "event_id"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "outcome": { "type": "string", "enum": ["new", "duplicate"] },
+                            "event_id": { "type": "string" },
+                            "effect": { "type": "object", "additionalProperties": true }
+                        }
+                    })),
+                    "400": json_response("Event rejected by ledger validation.", json!({
+                        "type": "object",
+                        "required": ["ok", "outcome", "reason"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "outcome": { "type": "string", "enum": ["rejected"] },
+                            "reason": { "type": "string" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/events": {
+            "parameters": [{ "name": "key", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Authentication key for WebSocket clients" }],
+            "get": operation(
+                "operator.eventsWs",
+                "Live system event stream WebSocket connection.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "101": { "description": "Switching Protocols to WebSocket connection" },
+                    "401": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/orders/{id}": {
+            "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+            "get": operation(
+                "operator.getOrder",
+                "Inspect order details from order management system or durable archive.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Order record.", json!({
+                        "type": "object",
+                        "additionalProperties": true
+                    })),
+                    "401": error_ref(), "403": error_ref(), "404": error_ref(), "429": error_ref(), "503": error_ref()
+                })
+            )
+        }
+    })
 }
 
 /// Merge `incoming` into the object at `pointer`, refusing to overwrite.
@@ -833,17 +1565,16 @@ mod tests {
 
     #[test]
     fn internal_endpoints_are_not_in_the_public_contract() {
-        let text = serde_json::to_string(&document()).unwrap();
+        let doc = document();
+        let paths = doc["paths"].as_object().unwrap();
         for internal in [
-            "/api/kill",
-            "/api/journal",
+            "/metrics",
+            "/ready",
+            "/health",
             "/api/metrics",
-            "/api/keys",
-            "/api/db",
-            "/api/resume",
         ] {
             assert!(
-                !text.contains(internal),
+                !paths.contains_key(internal),
                 "internal endpoint {internal} leaked into the contract"
             );
         }

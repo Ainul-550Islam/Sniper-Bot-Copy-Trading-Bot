@@ -189,4 +189,42 @@ describe("api-contract", () => {
       "/api/saas/team/members/{p}",
     );
   });
+
+  it("operator endpoints are present in OpenAPI and referenced by operator-api", () => {
+    const operatorApiSource = readFileSync(join(SRC, "lib/api/operator-api.ts"), "utf8");
+    const operatorLiterals = extractApiLiterals(operatorApiSource);
+    expect(operatorLiterals.length).toBeGreaterThanOrEqual(20);
+
+    const operatorEndpoints = [
+      "/api/health",
+      "/api/mode",
+      "/api/modules",
+      "/api/modules/{p}/enable",
+      "/api/modules/{p}/disable",
+      "/api/kill",
+      "/api/resume",
+      "/api/risk/kill-switch",
+      "/api/keys",
+      "/api/keys/{p}",
+      "/api/audit",
+      "/api/audit/verify",
+      "/api/journal",
+      "/api/db",
+      "/api/config",
+      "/api/reconciliation/findings",
+      "/api/recovery/failed",
+      "/api/executions",
+      "/api/executions/{p}",
+      "/api/trades",
+      "/api/wallets",
+      "/api/accounting/events",
+      "/api/events",
+      "/api/orders/{p}",
+    ];
+
+    for (const ep of operatorEndpoints) {
+      const documented = specPaths.some((sp) => segmentsMatch(ep, sp));
+      expect(documented, `Operator endpoint ${ep} must be documented in OpenAPI spec`).toBe(true);
+    }
+  });
 });
