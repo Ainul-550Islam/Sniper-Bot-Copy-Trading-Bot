@@ -51,7 +51,7 @@ use serde_json::{json, Value};
 /// honest value to put in them. A conforming 1.x client breaks on this,
 /// which is exactly what a MAJOR bump is for. See
 /// `docs/API-VERSIONING.md` and the CHANGELOG entry for the migration.
-pub const API_VERSION: &str = "2.3.0";
+pub const API_VERSION: &str = "2.4.0";
 
 /// One reusable non-success response.
 fn error_ref() -> Value {
@@ -87,6 +87,20 @@ fn operation(
             "content": { "application/json": { "schema": request } },
         });
     }
+    op
+}
+
+/// A genuinely public operation: unlike an omitted operation-level security
+/// declaration, an empty array overrides the document-wide bearer default.
+fn public_operation(
+    id: &str,
+    summary: &str,
+    tags: &[&str],
+    request: Value,
+    responses: Value,
+) -> Value {
+    let mut op = operation(id, summary, tags, false, request, responses);
+    op["security"] = json!([]);
     op
 }
 
@@ -186,6 +200,23 @@ pub fn base_document() -> Value {
                         "created_at": { "type": "string", "format": "date-time" },
                         "last_login_at": { "type": ["string", "null"], "format": "date-time" },
                     },
+                },
+                "UserSessionView": {
+                    "type": "object",
+                    "description": "Non-secret metadata for one of the authenticated user's sessions.",
+                    "required": ["id", "prefix", "user_agent", "ip", "created_at", "last_seen_at", "expires_at", "revoked_at", "state", "current"],
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "prefix": { "type": "string", "description": "Non-secret token prefix for recognizing a session." },
+                        "user_agent": { "type": "string" },
+                        "ip": { "type": "string" },
+                        "created_at": { "type": "string", "format": "date-time" },
+                        "last_seen_at": { "type": "string", "format": "date-time" },
+                        "expires_at": { "type": "string", "format": "date-time" },
+                        "revoked_at": { "type": ["string", "null"], "format": "date-time" },
+                        "state": { "type": "string", "enum": ["active", "expired", "revoked"] },
+                        "current": { "type": "boolean", "description": "Whether this is the session authenticating the request." }
+                    }
                 },
                 "Organization": {
                     "type": "object",
@@ -338,6 +369,41 @@ pub fn base_document() -> Value {
                 "post": operation(
                     "saas.logout", "Revoke the presented session.", &["auth"], true, json!(null),
                     guarded_responses("Session revoked.", json!({ "type": "object", "properties": { "ok": { "type": "boolean" } } })),
+                ),
+            },
+            "/api/saas/users/me/sessions": {
+                "get": operation(
+                    "saas.listSessions",
+                    "List non-secret session metadata for the authenticated user's own sessions.",
+                    &["auth"], true, json!(null),
+                    guarded_responses("Session inventory for the authenticated user.", json!({
+                        "type": "object",
+                        "required": ["items", "count"],
+                        "properties": {
+                            "items": { "type": "array", "items": { "$ref": "#/components/schemas/UserSessionView" } },
+                            "count": { "type": "integer" }
+                        }
+                    })),
+                ),
+            },
+            "/api/saas/users/me/sessions/{id}": {
+                "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                "delete": operation(
+                    "saas.revokeUserSession",
+                    "Revoke one session owned by the authenticated user; another user's session is indistinguishable from a missing session.",
+                    &["auth"], true, json!(null),
+                    json!({
+                        "200": json_response("Revocation result.", json!({
+                            "type": "object",
+                            "required": ["ok", "session_id", "revoked"],
+                            "properties": {
+                                "ok": { "type": "boolean" },
+                                "session_id": { "type": "string", "format": "uuid" },
+                                "revoked": { "type": "boolean", "description": "False if the session was already revoked." }
+                            }
+                        })),
+                        "401": error_ref(), "403": error_ref(), "404": error_ref(), "429": error_ref(), "503": error_ref()
+                    }),
                 ),
             },
             "/api/saas/password-reset/request": {
@@ -751,7 +817,13 @@ fn merge_api_fragments(doc: &mut Value) {
     }
 
     merge_object(doc, &["paths"], operator_paths(), "operator", "path");
-    merge_object(doc, &["components", "schemas"], operator_schemas(), "operator", "schema");
+    merge_object(
+        doc,
+        &["components", "schemas"],
+        operator_schemas(),
+        "operator",
+        "schema",
+    );
 }
 
 fn operator_schemas() -> Value {
@@ -890,11 +962,10 @@ fn operator_schemas() -> Value {
 fn operator_paths() -> Value {
     json!({
         "/api/health": {
-            "get": operation(
+            "get": public_operation(
                 "operator.health",
                 "System health and liveness probe.",
                 &["operator"],
-                true,
                 json!(null),
                 json!({
                     "200": json_response("Service is alive.", json!({ "type": "object", "required": ["ok"], "properties": { "ok": { "type": "boolean" } } })),
@@ -1567,12 +1638,7 @@ mod tests {
     fn internal_endpoints_are_not_in_the_public_contract() {
         let doc = document();
         let paths = doc["paths"].as_object().unwrap();
-        for internal in [
-            "/metrics",
-            "/ready",
-            "/health",
-            "/api/metrics",
-        ] {
+        for internal in ["/metrics", "/ready", "/health", "/api/metrics"] {
             assert!(
                 !paths.contains_key(internal),
                 "internal endpoint {internal} leaked into the contract"

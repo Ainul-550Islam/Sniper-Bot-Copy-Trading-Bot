@@ -20,6 +20,9 @@
 
 use std::time::Duration as StdDuration;
 
+use bot_core::tenant::rls_context::{
+    current_request_tenant, scope_tenant_context, with_system_scope, with_tenant_scope,
+};
 use sqlx::{PgPool, Row};
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -62,18 +65,27 @@ pub enum RunOutcome {
     AlreadyRecorded,
 }
 
+fn bound_tenant() -> Result<Uuid, sqlx::Error> {
+    current_request_tenant()
+        .ok_or_else(|| sqlx::Error::Protocol("DCA worker requires a tenant scope".into()))
+}
+
 /// Claim due schedules under a lease.
 pub async fn claim_due(
     pool: &PgPool,
     worker_id: &str,
     lease_secs: f64,
 ) -> Result<Vec<DueSchedule>, sqlx::Error> {
-    let rows = sqlx::query(
-        "UPDATE dca_schedules \
+    let organization_id = bound_tenant()?;
+    let worker_id = worker_id.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| {
+        Box::pin(async move {
+            let rows = sqlx::query(
+                "UPDATE dca_schedules \
          SET lease_owner = $1, lease_expires_at = now() + make_interval(secs => $2::float8) \
-         WHERE id IN ( \
+         WHERE organization_id = $5 AND id IN ( \
              SELECT id FROM dca_schedules \
-             WHERE status = 'active' \
+             WHERE organization_id = $5 AND status = 'active' \
                AND next_run_at <= now() \
                AND (lease_expires_at IS NULL OR lease_expires_at < now()) \
                AND attempts < $3 \
@@ -83,27 +95,31 @@ pub async fn claim_due(
          RETURNING id, organization_id, mint, amount_per_run_sol::float8 AS amount_per_run_sol, \
                    budget_sol::float8 AS budget_sol, spent_sol::float8 AS spent_sol, \
                    interval_secs, next_run_at",
-    )
-    .bind(worker_id)
-    .bind(lease_secs)
-    .bind(MAX_ATTEMPTS)
-    .bind(CLAIM_BATCH)
-    .fetch_all(pool)
-    .await?;
+            )
+            .bind(worker_id)
+            .bind(lease_secs)
+            .bind(MAX_ATTEMPTS)
+            .bind(CLAIM_BATCH)
+            .bind(organization_id)
+            .fetch_all(&mut *connection)
+            .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| DueSchedule {
-            id: row.get("id"),
-            organization_id: row.get("organization_id"),
-            mint: row.get("mint"),
-            amount_per_run_sol: row.get("amount_per_run_sol"),
-            budget_sol: row.get("budget_sol"),
-            spent_sol: row.get("spent_sol"),
-            interval_secs: row.get("interval_secs"),
-            next_run_at: row.get("next_run_at"),
+            Ok(rows
+                .iter()
+                .map(|row| DueSchedule {
+                    id: row.get("id"),
+                    organization_id: row.get("organization_id"),
+                    mint: row.get("mint"),
+                    amount_per_run_sol: row.get("amount_per_run_sol"),
+                    budget_sol: row.get("budget_sol"),
+                    spent_sol: row.get("spent_sol"),
+                    interval_secs: row.get("interval_secs"),
+                    next_run_at: row.get("next_run_at"),
+                })
+                .collect())
         })
-        .collect())
+    })
+    .await
 }
 
 /// Record the due slot as one atomic unit under the lease we hold.
@@ -115,6 +131,13 @@ pub async fn record_slot(
     schedule: &DueSchedule,
     worker_id: &str,
 ) -> Result<RunOutcome, sqlx::Error> {
+    let organization_id = bound_tenant()?;
+    if organization_id != schedule.organization_id {
+        return Err(sqlx::Error::Protocol("DCA schedule tenant mismatch".into()));
+    }
+    let schedule = schedule.clone();
+    let worker_id = worker_id.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| Box::pin(async move {
     let remaining = (schedule.budget_sol - schedule.spent_sol).max(0.0);
     if remaining <= 0.0 {
         sqlx::query(
@@ -124,7 +147,7 @@ pub async fn record_slot(
         .bind(&schedule.id)
         .bind(schedule.organization_id)
         .bind(worker_id)
-        .execute(pool)
+        .execute(&mut *connection)
         .await?;
         return Ok(RunOutcome::BudgetExhausted);
     }
@@ -156,8 +179,8 @@ pub async fn record_slot(
     )
     .bind(&schedule.id)
     .bind(schedule.organization_id)
-    .bind(worker_id)
-    .fetch_optional(pool)
+    .bind(worker_id.clone())
+    .fetch_optional(&mut *connection)
     .await?;
 
     match row {
@@ -173,11 +196,12 @@ pub async fn record_slot(
             .bind(&schedule.id)
             .bind(schedule.organization_id)
             .bind(worker_id)
-            .execute(pool)
+            .execute(&mut *connection)
             .await?;
             Ok(RunOutcome::AlreadyRecorded)
         }
     }
+    })).await
 }
 
 /// Record a failed tick for one schedule and release the lease.
@@ -187,23 +211,71 @@ pub async fn record_failure(
     worker_id: &str,
     reason: &str,
 ) -> Result<u64, sqlx::Error> {
-    let clamped: String = reason.chars().take(512).collect();
-    sqlx::query(
-        "UPDATE dca_schedules SET attempts = attempts + 1, last_error = $4, \
+    let organization_id = bound_tenant()?;
+    if organization_id != schedule.organization_id {
+        return Err(sqlx::Error::Protocol("DCA schedule tenant mismatch".into()));
+    }
+    let schedule = schedule.clone();
+    let worker_id = worker_id.to_owned();
+    let reason = reason.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| {
+        Box::pin(async move {
+            let clamped: String = reason.chars().take(512).collect();
+            sqlx::query(
+                "UPDATE dca_schedules SET attempts = attempts + 1, last_error = $4, \
              lease_owner = NULL, lease_expires_at = NULL \
          WHERE id = $1 AND organization_id = $2 AND lease_owner = $3",
-    )
-    .bind(&schedule.id)
-    .bind(schedule.organization_id)
-    .bind(worker_id)
-    .bind(clamped)
-    .execute(pool)
+            )
+            .bind(&schedule.id)
+            .bind(schedule.organization_id)
+            .bind(worker_id)
+            .bind(clamped)
+            .execute(&mut *connection)
+            .await
+            .map(|r| r.rows_affected())
+        })
+    })
     .await
-    .map(|r| r.rows_affected())
 }
 
-/// One pass over the due schedules. Per-schedule errors are counted, not fatal.
-pub async fn tick_once(pool: &PgPool, cfg: &DcaWorkerConfig) -> Result<DcaTickReport, sqlx::Error> {
+/// One pass over all tenants. A pre-bound task runs only its own tenant.
+/// The privileged pool is used only to discover organization identifiers;
+/// all schedule and run queries use the non-bypass tenant pool.
+pub async fn tick_once(
+    pool: &PgPool,
+    system_pool: &PgPool,
+    cfg: &DcaWorkerConfig,
+) -> Result<DcaTickReport, sqlx::Error> {
+    let tenants = match current_request_tenant() {
+        Some(organization_id) => vec![organization_id],
+        None => {
+            with_system_scope(
+                system_pool,
+                "discover organizations for DCA scheduling",
+                |connection| {
+                    Box::pin(async move {
+                        sqlx::query_scalar::<_, Uuid>("SELECT id FROM organizations ORDER BY id")
+                            .fetch_all(connection)
+                            .await
+                    })
+                },
+            )
+            .await?
+        }
+    };
+    let mut total = DcaTickReport::default();
+    for organization_id in tenants {
+        let report = scope_tenant_context(organization_id, tick_tenant(pool, cfg)).await?;
+        total.claimed += report.claimed;
+        total.recorded += report.recorded;
+        total.completed += report.completed;
+        total.already_recorded += report.already_recorded;
+        total.failed += report.failed;
+    }
+    Ok(total)
+}
+
+async fn tick_tenant(pool: &PgPool, cfg: &DcaWorkerConfig) -> Result<DcaTickReport, sqlx::Error> {
     let due = claim_due(pool, &cfg.worker_id, cfg.lease_secs).await?;
     let mut report = DcaTickReport {
         claimed: due.len(),
@@ -239,12 +311,17 @@ pub struct DcaTickReport {
 }
 
 /// Run until `stop` flips to `true`. Storage errors back off; the loop does not exit.
-pub async fn run(pool: PgPool, cfg: DcaWorkerConfig, mut stop: watch::Receiver<bool>) {
+pub async fn run(
+    pool: PgPool,
+    system_pool: PgPool,
+    cfg: DcaWorkerConfig,
+    mut stop: watch::Receiver<bool>,
+) {
     loop {
         if *stop.borrow() {
             break;
         }
-        let pause = match tick_once(&pool, &cfg).await {
+        let pause = match tick_once(&pool, &system_pool, &cfg).await {
             Ok(_) => cfg.tick,
             Err(error) => {
                 tracing::error!(error = %error, "dca tick failed; backing off");

@@ -16,19 +16,19 @@
 //!   role;
 //! * changing a password revokes every existing session of that user.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{Duration, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::Row;
 
 use bot_core::authorization::AccessRequest;
 use bot_core::membership::Permission;
 use bot_core::session::token::{generate_token, hash_password, verify_password};
-use bot_core::session::{SessionRecord, DEFAULT_SESSION_TTL_HOURS};
+use bot_core::session::{SessionId, SessionRecord, DEFAULT_SESSION_TTL_HOURS};
 use bot_core::tenant::{User, UserId, UserStatus};
 
 use super::middleware::{authorize_request, deny_response};
@@ -751,6 +751,196 @@ pub async fn update_profile(
         "sessions_revoked": revoked,
     }))
     .into_response()
+}
+
+/// Safe metadata for one of the authenticated user's sessions.
+///
+/// Deliberately excludes the stored token hash and revocation reason: neither
+/// is needed by the control plane, and a session list must never become a
+/// credential or internal-audit data endpoint.
+#[derive(Debug, Serialize)]
+struct SessionListItem {
+    id: String,
+    prefix: String,
+    user_agent: String,
+    ip: String,
+    created_at: chrono::DateTime<Utc>,
+    last_seen_at: chrono::DateTime<Utc>,
+    expires_at: chrono::DateTime<Utc>,
+    revoked_at: Option<chrono::DateTime<Utc>>,
+    state: String,
+    current: bool,
+}
+
+/// `GET /api/saas/users/me/sessions` — list only the authenticated user's sessions.
+pub async fn list_sessions(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    let ctx = match authorize_request(
+        &state,
+        &headers,
+        AccessRequest::read(Permission::TenantRead),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(d) => return deny_response(&state, &d).await,
+    };
+    let bot_core::authorization::Principal::UserSession { session_id } =
+        &ctx.authorization.principal
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "user_session_required",
+                "reason": "session inventory is available only to a user session",
+            })),
+        )
+            .into_response();
+    };
+    let Some(user) = ctx.user.as_ref() else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "user_session_required",
+                "reason": "the credential is not tied to a user account",
+            })),
+        )
+            .into_response();
+    };
+    let sessions = match state.saas.sessions_of_user(user.id).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, user = %user.id, "user sessions could not be loaded");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "session_storage_unavailable",
+                    "reason": "authoritative session records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
+    let now = Utc::now();
+    let items: Vec<SessionListItem> = sessions
+        .into_iter()
+        .map(|session| {
+            let state = session.state(now).as_str().to_string();
+            let current = session.id.to_string() == *session_id;
+            SessionListItem {
+                id: session.id.to_string(),
+                prefix: session.token_prefix,
+                user_agent: session.user_agent,
+                ip: session.ip,
+                created_at: session.created_at,
+                last_seen_at: session.last_seen_at,
+                expires_at: session.expires_at,
+                revoked_at: session.revoked_at,
+                state,
+                current,
+            }
+        })
+        .collect();
+    let count = items.len();
+    Json(json!({ "items": items, "count": count })).into_response()
+}
+
+/// `DELETE /api/saas/users/me/sessions/:id` — revoke one of the user's sessions.
+pub async fn revoke_session(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(raw_id): Path<String>,
+) -> Response {
+    let ctx = match authorize_request(
+        &state,
+        &headers,
+        AccessRequest::read(Permission::TenantRead),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(d) => return deny_response(&state, &d).await,
+    };
+    let bot_core::authorization::Principal::UserSession { .. } = &ctx.authorization.principal
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "user_session_required",
+                "reason": "session revocation is available only to a user session",
+            })),
+        )
+            .into_response();
+    };
+    let Some(user) = ctx.user.as_ref() else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "user_session_required",
+                "reason": "the credential is not tied to a user account",
+            })),
+        )
+            .into_response();
+    };
+    let Some(target_id) = SessionId::parse(&raw_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "session_not_found",
+                "reason": "session was not found",
+            })),
+        )
+            .into_response();
+    };
+    let sessions = match state.saas.sessions_of_user(user.id).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, user = %user.id, "user sessions could not be loaded for revocation");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "session_storage_unavailable",
+                    "reason": "authoritative session records could not be loaded",
+                })),
+            )
+                .into_response();
+        }
+    };
+    let Some(mut target) = sessions.into_iter().find(|session| session.id == target_id) else {
+        // A missing or another user's id gets the same response, so this
+        // endpoint cannot be used to enumerate account session identifiers.
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "session_not_found",
+                "reason": "session was not found",
+            })),
+        )
+            .into_response();
+    };
+    let target_id_text = target.id.to_string();
+    let revoked = target.revoke("revoked from security settings", Utc::now());
+    if revoked {
+        if let Err(error) = state.saas.update_session(&target).await {
+            tracing::error!(error = %error, session = %target.id, "session revocation failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "session_storage_unavailable",
+                    "reason": "session could not be revoked",
+                })),
+            )
+                .into_response();
+        }
+        state
+            .audit
+            .success(
+                &ctx.actor_label(),
+                "saas.session.revoked",
+                Some(&target_id_text),
+            )
+            .await;
+    }
+    Json(json!({ "ok": true, "session_id": target.id, "revoked": revoked })).into_response()
 }
 
 /// `POST /api/saas/users/me/logout` — revoke the presented session.

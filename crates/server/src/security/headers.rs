@@ -4,7 +4,7 @@
 //!
 //! | Header | Value | Why |
 //! |---|---|---|
-//! | `Content-Security-Policy` | `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'` | no external origins, no wildcard hosts; `'unsafe-inline'` exists ONLY because the embedded dashboard (TASK 4) ships exactly one inline `<script>`, so the dashboard keeps working unchanged |
+//! | `Content-Security-Policy` | `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'` | no external origins or wildcard hosts; scripts are same-origin assets; inline styles remain allowed |
 //! | `X-Content-Type-Options` | `nosniff` | no MIME confusion on API JSON |
 //! | `Referrer-Policy` | `strict-origin-when-cross-origin` | never leak paths (and any accidental query strings) cross-origin |
 //! | `X-Frame-Options` | `DENY` | belt-and-braces alongside `frame-ancestors 'none'` |
@@ -21,7 +21,7 @@ use axum::response::Response;
 
 /// The Content-Security-Policy applied to every response.
 pub const CSP: &str = "default-src 'self'; \
-script-src 'self' 'unsafe-inline'; \
+script-src 'self'; \
 style-src 'self' 'unsafe-inline'; \
 img-src 'self' data:; \
 connect-src 'self'; \
@@ -166,14 +166,14 @@ mod tests {
         let h = res.headers();
         assert!(h.get(header::CACHE_CONTROL).is_none());
         assert!(h.get(header::CONTENT_SECURITY_POLICY).is_some());
-        // The one inline dashboard script must keep running: 'unsafe-inline'
-        // is present in script-src by documented necessity.
+        // Scripts are same-origin assets; inline scripts are forbidden.
         let csp = h
             .get(header::CONTENT_SECURITY_POLICY)
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(csp.contains("script-src 'self' 'unsafe-inline'"));
+        assert!(csp.contains("script-src 'self';"));
+        assert!(csp.contains("style-src 'self' 'unsafe-inline'"));
         assert!(!csp.contains('*'), "no wildcard sources");
     }
 

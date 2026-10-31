@@ -17,6 +17,38 @@ export interface SecurityPosture {
   require_signed_commits: boolean;
 }
 
+export interface UserSessionView {
+  id: string;
+  prefix: string;
+  user_agent: string;
+  ip: string;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  state: "active" | "expired" | "revoked";
+  current: boolean;
+}
+
+export interface UserSessionsResponse {
+  items: UserSessionView[];
+  count: number;
+}
+
+export async function getUserSessions(): Promise<UserSessionsResponse> {
+  return request<UserSessionsResponse>("/api/saas/users/me/sessions");
+}
+
+export async function revokeUserSession(id: string): Promise<{
+  ok: boolean;
+  session_id: string;
+  revoked: boolean;
+}> {
+  return request(`/api/saas/users/me/sessions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getSecurityStatus(): Promise<SecurityPosture> {
   return request<SecurityPosture>("/api/saas/security/status");
 }

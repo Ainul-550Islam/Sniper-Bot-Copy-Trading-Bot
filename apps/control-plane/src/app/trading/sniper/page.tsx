@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import ModuleActionButton from "@/components/trading/ModuleActionButton";
+import SavedStrategiesPanel from "@/components/trading/SavedStrategiesPanel";
 import {
   classifyTradingError,
   customerTrading,
@@ -169,6 +170,8 @@ export default function SniperPage() {
             </div>
           )}
         </section>
+
+        <SavedStrategiesPanel module="sniper" />
 
         {/* Strategy Parameters Preview */}
         {config && (

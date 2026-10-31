@@ -1,162 +1,58 @@
 "use client";
 
-/**
- * Polymarket CLOB Strategy Configuration (SECOND.md §56).
- *
- * Automated CTF order book market making, binary event spread capture,
- * and max position exposure limits.
- */
-
 import { useState } from "react";
 import AppShell from "@/components/AppShell";
 import { createStrategy } from "@/lib/api/strategy-api";
+import { units, whole } from "@/lib/strategy-form";
 
+/** Creates a paper profile using the server's PolymarketStrategyParams. */
 export default function PolymarketConfigPage() {
-  const [name, setName] = useState("Election 2024 Spread Capture");
-  const [marketSlugs, setMarketSlugs] = useState("presidential-election-winner-2024");
-  const [maxPositionUsd, setMaxPositionUsd] = useState(5000);
-  const [spreadThresholdBps, setSpreadThresholdBps] = useState(30);
-  const [clobOrderType, setClobOrderType] = useState("");
+  const [name, setName] = useState("");
+  const [conditions, setConditions] = useState("");
+  const [position, setPosition] = useState("");
+  const [exposure, setExposure] = useState("");
+  const [spread, setSpread] = useState("");
+  const [reprice, setReprice] = useState("");
+  const [orderType, setOrderType] = useState("limit");
+  const [cancel, setCancel] = useState(true);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<{ message: string; ok: boolean } | null>(null);
-
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
     setLoading(true);
     setStatus(null);
-
-    const slugs = marketSlugs
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
     try {
-      await createStrategy({
-        module_family: "polymarket",
-        name,
-        description: "Polymarket binary prediction outcome market maker & arbitrage strategy",
-        parameters: {
-          market_slugs: slugs,
-          max_position_usd: maxPositionUsd,
-          spread_threshold_bps: spreadThresholdBps,
-          clob_order_type: clobOrderType,
-        },
-      });
+      await createStrategy({ module_family: "polymarket", name, description: "Polymarket strategy profile", parameters: {
+        active_condition_ids: conditions.split("\n").map((s) => s.trim()).filter(Boolean),
+        max_position_size_usdc_units: units(position, 6, "Maximum position"),
+        max_market_exposure_usdc_units: units(exposure, 6, "Maximum market exposure", true),
+        spread_threshold_bps: whole(spread, "Spread threshold", 0, 10000),
+        reprice_interval_seconds: whole(reprice, "Reprice interval", 0, 31536000),
+        cancel_stale_orders: cancel,
+        dry_run: true,
+        order_type: orderType,
+      } });
       setStatus({ message: "Polymarket strategy saved to the authenticated tenant.", ok: true });
     } catch (err: unknown) {
       setStatus({ message: err instanceof Error ? err.message : "Failed to save configuration", ok: false });
-    } finally {
-      setLoading(false);
-    }
-  };
-
+    } finally { setLoading(false); }
+  }
   return (
     <AppShell title="Polymarket Configuration">
-      <div style={{ marginBottom: "1.5rem" }}>
-        <h1 style={{ margin: 0 }}>Polymarket CLOB Strategy Configuration</h1>
-        <p style={{ margin: "0.25rem 0 0", color: "var(--muted)", fontSize: "0.9rem" }}>
-          Configure market-making spread thresholds, max dollar risk, and CTF order routing.
-        </p>
-      </div>
-
-      {status && (
-        <div
-          className="card"
-          style={{
-            color: status.ok ? "var(--ok)" : "var(--bad)",
-            background: status.ok ? "var(--ok-glow)" : "var(--bad-glow)",
-            marginBottom: "1.5rem",
-          }}
-        >
-          {status.message}
-        </div>
-      )}
-
-      <div className="card">
-        <form onSubmit={handleSave}>
-          <div style={{ marginBottom: "1.5rem" }}>
-            <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
-              Strategy Profile Name
-            </label>
-            <input
-              type="text"
-              required
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="input"
-              style={{ width: "100%", maxWidth: "480px" }}
-            />
-          </div>
-
-          <div style={{ marginBottom: "1.5rem" }}>
-            <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
-              Target Market Condition Slugs (One per line)
-            </label>
-            <textarea
-              rows={3}
-              required
-              value={marketSlugs}
-              onChange={(e) => setMarketSlugs(e.target.value)}
-              placeholder="presidential-election-winner-2024&#10;fed-interest-rates-nov-2024"
-              className="input"
-              style={{ width: "100%", fontFamily: "var(--mono)", fontSize: "0.85rem" }}
-            />
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1.5rem", marginBottom: "1.5rem" }}>
-            <div>
-              <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
-                Max Dollar Exposure (USD)
-              </label>
-              <input
-                type="number"
-                min="100"
-                step="500"
-                value={maxPositionUsd}
-                onChange={(e) => setMaxPositionUsd(Number(e.target.value))}
-                className="input"
-                style={{ width: "100%" }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
-                Min Spread Threshold (BPS)
-              </label>
-              <input
-                type="number"
-                min="5"
-                max="500"
-                value={spreadThresholdBps}
-                onChange={(e) => setSpreadThresholdBps(Number(e.target.value))}
-                className="input"
-                style={{ width: "100%" }}
-              />
-              <span style={{ fontSize: "0.75rem", color: "var(--muted)" }}>30 BPS = 0.30 cents</span>
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", color: "var(--muted)" }}>
-                CLOB Order Type
-              </label>
-              <select
-                value={clobOrderType}
-                onChange={(e) => setClobOrderType(e.target.value)}
-                className="select"
-                style={{ width: "100%" }}
-              >
-                <option value="GTC">GTC (Good &apos;Til Cancelled)</option>
-                <option value="FAK">FAK (Fill and Kill / IOC)</option>
-                <option value="FOK">FOK (Fill or Kill)</option>
-              </select>
-            </div>
-          </div>
-
-          <button type="submit" disabled={loading} className="btn btn-primary">
-            {loading ? "Saving..." : "Save Polymarket Strategy"}
-          </button>
-        </form>
-      </div>
+      <h1>Polymarket CLOB Strategy Configuration</h1>
+      <p className="muted">Save a paper strategy profile; activation and module runtime configuration are separate operations.</p>
+      {status && <p role="status" style={{ color: status.ok ? "var(--ok)" : "var(--bad)" }}>{status.message}</p>}
+      <form onSubmit={save} className="card stack">
+        <label>Strategy Profile Name<input required value={name} onChange={(e) => setName(e.target.value)} className="input" /></label>
+        <label>Market Condition IDs (one per line)<textarea value={conditions} onChange={(e) => setConditions(e.target.value)} rows={3} className="input" /></label>
+        <label>Maximum Position (USDC)<input required inputMode="decimal" value={position} onChange={(e) => setPosition(e.target.value)} className="input" /></label>
+        <label>Maximum Market Exposure (USDC)<input required inputMode="decimal" value={exposure} onChange={(e) => setExposure(e.target.value)} className="input" /></label>
+        <label>Spread Threshold (BPS)<input required inputMode="numeric" value={spread} onChange={(e) => setSpread(e.target.value)} className="input" /></label>
+        <label>Reprice Interval (seconds)<input required inputMode="numeric" value={reprice} onChange={(e) => setReprice(e.target.value)} className="input" /></label>
+        <label>Order Type<select value={orderType} onChange={(e) => setOrderType(e.target.value)} className="select"><option value="limit">Limit</option><option value="gtc">GTC</option><option value="fok">FOK</option></select></label>
+        <label><input type="checkbox" checked={cancel} onChange={(e) => setCancel(e.target.checked)} /> Cancel stale orders</label>
+        <button type="submit" disabled={loading} className="btn btn-primary">{loading ? "Saving..." : "Save Polymarket Strategy"}</button>
+      </form>
     </AppShell>
   );
 }

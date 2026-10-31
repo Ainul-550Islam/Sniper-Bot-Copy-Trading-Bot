@@ -10,26 +10,22 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import ModuleActionButton from "@/components/trading/ModuleActionButton";
+import SavedStrategiesPanel from "@/components/trading/SavedStrategiesPanel";
 import {
   classifyTradingError,
   customerTrading,
   isRetryable,
   ModuleStatusResponse,
   CopyConfig,
+  TenantCopyLeader,
   TradingSurfaceState,
   tradingStateMessage,
 } from "@/lib/customer-trading-api";
 
-interface LeaderRow {
-  address: string;
-  followed_since?: string;
-  note?: string;
-}
-
 export default function CopyPage() {
   const [status, setStatus] = useState<ModuleStatusResponse | null>(null);
   const [config, setConfig] = useState<CopyConfig | null>(null);
-  const [leaders, setLeaders] = useState<LeaderRow[]>([]);
+  const [leaders, setLeaders] = useState<TenantCopyLeader[]>([]);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
 
   const loadData = useCallback(async () => {
@@ -178,24 +174,27 @@ export default function CopyPage() {
           )}
         </section>
 
+        <SavedStrategiesPanel module="copy" />
+
         {/* Tracked Leaders Table */}
         <section className="card">
           <div className="row-between">
             <h2>Tracked Leader Wallets</h2>
             <Link href="/trading/copy/config">
-              <button className="small">+ Add / Manage Wallets</button>
+              <button className="small">+ Edit Profile Notes</button>
             </Link>
           </div>
           {leaders.length === 0 ? (
             <p className="muted" style={{ marginTop: "1rem" }}>
-              No leader wallets configured yet. Add target Solana wallet public keys to begin automated copy mirroring.
+              No leader wallets configured yet. The server-managed watch list is read-only here; addresses saved as strategy profile notes do not add tracked leaders or activate copy mirroring.
             </p>
           ) : (
             <table style={{ marginTop: "1rem" }}>
               <thead>
                 <tr>
                   <th>Solana Address</th>
-                  <th>Label / Note</th>
+                  <th>Label</th>
+                  <th>Status</th>
                   <th>Followed Since</th>
                   <th>Actions</th>
                 </tr>
@@ -206,8 +205,9 @@ export default function CopyPage() {
                     <td>
                       <code>{l.address}</code>
                     </td>
-                    <td>{l.note || "—"}</td>
-                    <td>{l.followed_since ? new Date(l.followed_since).toLocaleDateString() : "—"}</td>
+                    <td>{l.label || "—"}</td>
+                    <td>{l.status}</td>
+                    <td>{new Date(l.followed_at).toLocaleDateString()}</td>
                     <td>
                       <Link href={`https://solscan.io/account/${l.address}`} target="_blank" rel="noreferrer">
                         <button className="link">Solscan ↗</button>

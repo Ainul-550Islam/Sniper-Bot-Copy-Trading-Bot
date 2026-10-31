@@ -120,9 +120,28 @@ pub fn routes() -> Router<ApiState> {
         )
 }
 
-/// Compatibility cache for custody domain records. PostgreSQL is authoritative whenever attached; this cache is used only for the no-database test/development mode and is refreshed before database-backed reads or mutations.
+// Memory stores exist only for explicitly database-free development/test mode.
+// Database-backed requests instead use a fresh, request-local snapshot loaded
+// from PostgreSQL; the global maps are never read or written as DB authority.
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Mutex, OnceLock};
+
+#[derive(Default)]
+struct RequestCustody {
+    profiles: HashMap<CustodyProfileId, CustodyProfile>,
+    signers: HashMap<SignerId, SignerRecord>,
+}
+
+tokio::task_local! {
+    static REQUEST_CUSTODY: RefCell<Option<RequestCustody>>;
+}
+
+/// Establish request-local custody state for the router and rotation API.
+pub(crate) async fn scope_custody_context<F: Future>(future: F) -> F::Output {
+    REQUEST_CUSTODY.scope(RefCell::new(None), future).await
+}
 
 fn profiles_store() -> &'static Mutex<HashMap<CustodyProfileId, CustodyProfile>> {
     static S: OnceLock<Mutex<HashMap<CustodyProfileId, CustodyProfile>>> = OnceLock::new();
@@ -133,17 +152,56 @@ fn signers_store() -> &'static Mutex<HashMap<SignerId, SignerRecord>> {
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Tenant-scoped profile lookup, shared with the rotation API (§F/P0:
-/// rotation must resolve the REAL profile, never invent one).
+fn profile_records() -> Vec<CustodyProfile> {
+    REQUEST_CUSTODY
+        .try_with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|snapshot| snapshot.profiles.values().cloned().collect())
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            profiles_store()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .cloned()
+                .collect()
+        })
+}
+
+fn signer_records() -> Vec<SignerRecord> {
+    REQUEST_CUSTODY
+        .try_with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|snapshot| snapshot.signers.values().cloned().collect())
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            signers_store()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .cloned()
+                .collect()
+        })
+}
+
+/// Tenant-scoped profile lookup, shared with the rotation API.
 pub(crate) fn find_profile(org: OrganizationId, id: CustodyProfileId) -> Option<CustodyProfile> {
-    let map = profiles_store().lock().expect("mutex").clone();
-    map.get(&id).filter(|p| p.organization_id == org).cloned()
+    profile_records()
+        .into_iter()
+        .find(|p| p.id == id && p.organization_id == org)
 }
 
 /// Tenant-scoped signer lookup, shared with the rotation API.
 pub(crate) fn find_signer(org: OrganizationId, id: SignerId) -> Option<SignerRecord> {
-    let map = signers_store().lock().expect("mutex").clone();
-    map.get(&id).filter(|s| s.organization_id == org).cloned()
+    signer_records()
+        .into_iter()
+        .find(|s| s.id == id && s.organization_id == org)
 }
 
 /// The relational custody tables foreign-key onto `organizations(id)`,
@@ -235,10 +293,9 @@ pub(crate) async fn record_durable_custody_audit(
     Ok(())
 }
 
-/// Refresh the process cache from the durable custody tables before any
-/// handler relies on the legacy domain-model lookup helpers. The cache is
-/// retained for the no-database test/development mode, but an attached
-/// PostgreSQL database is authoritative across restarts and replicas.
+/// Read the durable custody tables into the current request only. The
+/// compatibility lookup functions never consult a process-global cache when
+/// a database is attached; a later request always re-reads PostgreSQL.
 pub(crate) async fn hydrate_from_database(
     state: &ApiState,
     organization_id: OrganizationId,
@@ -353,20 +410,19 @@ pub(crate) async fn hydrate_from_database(
         });
     }
 
-    {
-        let mut map = profiles_store().lock().expect("mutex");
-        map.retain(|_, profile| profile.organization_id != organization_id);
-        for profile in profiles {
-            map.insert(profile.id, profile);
-        }
-    }
-    {
-        let mut map = signers_store().lock().expect("mutex");
-        map.retain(|_, signer| signer.organization_id != organization_id);
-        for signer in signers {
-            map.insert(signer.id, signer);
-        }
-    }
+    let snapshot = RequestCustody {
+        profiles: profiles
+            .into_iter()
+            .map(|profile| (profile.id, profile))
+            .collect(),
+        signers: signers
+            .into_iter()
+            .map(|signer| (signer.id, signer))
+            .collect(),
+    };
+    REQUEST_CUSTODY
+        .try_with(|slot| *slot.borrow_mut() = Some(snapshot))
+        .map_err(|_| custody_storage_error("custody request scope is unavailable"))?;
     Ok(())
 }
 
@@ -440,8 +496,8 @@ async fn create_profile(
             }
         }
     }
-    {
-        let mut map = profiles_store().lock().expect("mutex");
+    if state.db.is_none() {
+        let mut map = profiles_store().lock().unwrap_or_else(|e| e.into_inner());
         map.insert(profile.id, profile.clone());
     }
     if let Err(reason) = record_durable_custody_audit(
@@ -495,20 +551,17 @@ async fn list_profiles(State(state): State<ApiState>, headers: HeaderMap) -> Res
     if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
         return response;
     }
-    let map = profiles_store().lock().expect("mutex");
-    let profiles: Vec<CustodyProfileView> = map
-        .values()
+    let all_signers = signer_records();
+    let profiles: Vec<CustodyProfileView> = profile_records()
+        .into_iter()
         .filter(|p| p.organization_id == ctx.organization.id)
         .map(|p| {
-            let signers: Vec<SignerView> = {
-                let s_map = signers_store().lock().expect("mutex");
-                s_map
-                    .values()
-                    .filter(|s| s.custody_profile_id == p.id)
-                    .cloned()
-                    .map(SignerView::from)
-                    .collect()
-            };
+            let signers: Vec<SignerView> = all_signers
+                .iter()
+                .filter(|s| s.organization_id == p.organization_id && s.custody_profile_id == p.id)
+                .cloned()
+                .map(SignerView::from)
+                .collect();
             CustodyProfileView {
                 id: p.id.to_string(),
                 organization_id: p.organization_id.to_string(),
@@ -606,8 +659,8 @@ async fn activate_profile(
             }
         }
     }
-    {
-        let mut map = profiles_store().lock().expect("mutex");
+    if state.db.is_none() {
+        let mut map = profiles_store().lock().unwrap_or_else(|e| e.into_inner());
         map.insert(pid, profile.clone());
     }
     if let Err(reason) = record_durable_custody_audit(
@@ -723,8 +776,8 @@ async fn revoke_profile(
             }
         }
     }
-    {
-        let mut map = profiles_store().lock().expect("mutex");
+    if state.db.is_none() {
+        let mut map = profiles_store().lock().unwrap_or_else(|e| e.into_inner());
         map.insert(pid, profile.clone());
     }
     if let Err(reason) = record_durable_custody_audit(
@@ -880,8 +933,8 @@ async fn create_signer(
             }
         }
     }
-    {
-        let mut map = signers_store().lock().expect("mutex");
+    if state.db.is_none() {
+        let mut map = signers_store().lock().unwrap_or_else(|e| e.into_inner());
         map.insert(signer.id, signer.clone());
     }
     if let Err(reason) = record_durable_custody_audit(
@@ -931,11 +984,9 @@ async fn list_signers(State(state): State<ApiState>, headers: HeaderMap) -> Resp
     if let Err(response) = hydrate_from_database(&state, ctx.organization.id).await {
         return response;
     }
-    let map = signers_store().lock().expect("mutex");
-    let signers: Vec<SignerView> = map
-        .values()
+    let signers: Vec<SignerView> = signer_records()
+        .into_iter()
         .filter(|s| s.organization_id == ctx.organization.id)
-        .cloned()
         .map(SignerView::from)
         .collect();
     (
@@ -973,11 +1024,9 @@ async fn list_profile_signers(
                 .into_response()
         }
     };
-    let map = signers_store().lock().expect("mutex");
-    let signers: Vec<SignerView> = map
-        .values()
+    let signers: Vec<SignerView> = signer_records()
+        .into_iter()
         .filter(|s| s.organization_id == ctx.organization.id && s.custody_profile_id == pid)
-        .cloned()
         .map(SignerView::from)
         .collect();
     (
@@ -1088,8 +1137,8 @@ async fn activate_signer(
             }
         }
     }
-    {
-        let mut map = signers_store().lock().expect("mutex");
+    if state.db.is_none() {
+        let mut map = signers_store().lock().unwrap_or_else(|e| e.into_inner());
         map.insert(sid, signer.clone());
     }
     if let Err(reason) = record_durable_custody_audit(
@@ -1198,8 +1247,8 @@ async fn revoke_signer(
             }
         }
     }
-    {
-        let mut map = signers_store().lock().expect("mutex");
+    if state.db.is_none() {
+        let mut map = signers_store().lock().unwrap_or_else(|e| e.into_inner());
         map.insert(sid, signer.clone());
     }
     if let Err(reason) = record_durable_custody_audit(
@@ -1312,8 +1361,8 @@ async fn attach_capability(
                 }
             }
         }
-        {
-            let mut map = signers_store().lock().expect("mutex");
+        if state.db.is_none() {
+            let mut map = signers_store().lock().unwrap_or_else(|e| e.into_inner());
             map.insert(sid, signer.clone());
         }
         if let Err(reason) = record_durable_custody_audit(

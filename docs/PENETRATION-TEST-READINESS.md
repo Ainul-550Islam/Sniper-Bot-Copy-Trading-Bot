@@ -65,7 +65,7 @@
 ## 8. Artifacts to Provide to Tester
 
 - `docs/SECURITY-THREAT-MODEL.md`, `docs/SECURITY-CONTROLS-MATRIX.md`, `docs/API-COMPATIBILITY-MATRIX.md`, `docs/WEBHOOK-COMPATIBILITY-MATRIX.md`
-- `release-manifest.json` (<!-- stat:migrations -->67<!-- /stat --> migrations, <!-- stat:rust_files -->766<!-- /stat --> Rust files, <!-- stat:test_attrs_plain -->2578<!-- /stat --> `#[test]` attributes), `sbom.json`, `licenses.json`
+- `release-manifest.json` (<!-- stat:migrations -->68<!-- /stat --> migrations, <!-- stat:rust_files -->771<!-- /stat --> Rust files, <!-- stat:test_attrs_plain -->2581<!-- /stat --> `#[test]` attributes), `sbom.json`, `licenses.json`
 - `scripts/verify-delivery.sh` (PASS) + `scripts/build-release-package.sh` (package excludes secrets)
 
 ## 9. Success Criteria (for buyer to set)

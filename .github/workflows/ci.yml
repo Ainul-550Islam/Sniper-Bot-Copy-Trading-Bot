@@ -67,8 +67,13 @@ jobs:
           --health-retries 12
     env:
       POSTGRES_URL: postgres://sniper:sniper@localhost:5432/sniper
+      POSTGRES_DDL_URL: postgres://sniper:sniper@localhost:5432/sniper
       POSTGRES_MIGRATION_URL: postgres://sniper:sniper@localhost:5432/sniper_migrations
+      POSTGRES_APP_URL: postgres://sniper_app:sniper_app_test@localhost:5432/sniper
+      POSTGRES_SYSTEM_URL: postgres://sniper_system:sniper_system_test@localhost:5432/sniper
       REDIS_URL: redis://localhost:6379
+      REQUIRE_SERVICES: "1"
+      REQUIRE_POSTGRES: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -104,6 +109,19 @@ jobs:
       # refuses POSTGRES_URL as a fallback.
       - name: create isolated clean-migration database
         run: psql "postgres://sniper:sniper@localhost:5432/postgres" --command 'CREATE DATABASE sniper_migrations'
+
+      - name: create non-superuser RLS login principals
+        run: |
+          psql "$POSTGRES_DDL_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'sniper_app') THEN
+              CREATE ROLE sniper_app LOGIN PASSWORD 'sniper_app_test' NOSUPERUSER NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'sniper_system') THEN
+              CREATE ROLE sniper_system LOGIN PASSWORD 'sniper_system_test' NOSUPERUSER NOBYPASSRLS;
+            END IF;
+          END $$;
+          SQL
 
       # POSTGRES_URL / REDIS_URL are set job-wide, so the gated integration
       # tests run against the service containers (single-threaded: the DB
@@ -193,6 +211,54 @@ jobs:
         run: |
           cp .env.template .env
           POSTGRES_PASSWORD=ci-only docker compose config -q
+
+  services-tests:
+    name: PostgreSQL 16 and Redis 7 integration gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sniper
+          POSTGRES_PASSWORD: sniper
+          POSTGRES_DB: sniper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sniper -d sniper"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      POSTGRES_URL: postgres://sniper:sniper@localhost:5432/sniper
+      POSTGRES_DDL_URL: postgres://sniper:sniper@localhost:5432/sniper
+      POSTGRES_APP_URL: postgres://sniper_app:sniper_app_test@localhost:5432/sniper
+      POSTGRES_SYSTEM_URL: postgres://sniper_system:sniper_system_test@localhost:5432/sniper
+      REDIS_URL: redis://localhost:6379
+      REQUIRE_SERVICES: "1"
+      REQUIRE_POSTGRES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: app
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run service-backed binaries and reject zero tests
+        run: ./scripts/test-with-services.sh --existing
 
   # ------------------------------------------------------- integrity-gates --
   # GAP MAP v2 (Part 5) — offline, cargo-free honesty and contract gates.

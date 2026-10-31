@@ -12,6 +12,7 @@ export default function OperatorModulesPage() {
   const loadModules = useCallback(async () => {
     try {
       const data = await getModules();
+      if (!Array.isArray(data)) throw new Error("Invalid modules response");
       setModules(data);
       setError(null);
     } catch (err) {
@@ -48,7 +49,7 @@ export default function OperatorModulesPage() {
         </div>
       )}
 
-      <ModuleToggleTable modules={modules} onRefresh={loadModules} />
+      {!loading && !error && <ModuleToggleTable modules={modules} onRefresh={loadModules} />}
     </article>
   );
 }

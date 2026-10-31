@@ -109,8 +109,8 @@ async fn both_migrations_are_recorded_and_idempotent() {
     assert!(descriptions.iter().any(|d| d == "telegram_trade_commands"));
     assert_eq!(
         versions.last().copied(),
-        Some(67),
-        "0067 must be the newest migration in the graph"
+        Some(68),
+        "0068 must be the newest migration in the graph"
     );
 }
 

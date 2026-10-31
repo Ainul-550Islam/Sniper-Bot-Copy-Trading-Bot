@@ -15,7 +15,8 @@ export default function OperatorReconciliationPage() {
   const loadFindings = useCallback(async () => {
     try {
       const res = await getReconciliationFindings(100);
-      setFindings(res.findings || []);
+      if (!Array.isArray(res.findings)) throw new Error("Invalid reconciliation findings response");
+      setFindings(res.findings);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -50,7 +51,7 @@ export default function OperatorReconciliationPage() {
         </div>
       )}
 
-      <FindingsTable findings={findings} />
+      {!loading && !error && <FindingsTable findings={findings} />}
     </article>
   );
 }

@@ -2,22 +2,22 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { KillSwitchPanel } from "@/components/operator/KillSwitchPanel";
-import { operator } from "@/lib/api";
+import { getStatus } from "@/lib/api/operator-api";
 
 export default function OperatorKillSwitchPage() {
-  const [killSwitchActive, setKillSwitchActive] = useState<boolean>(false);
+  const [killSwitchActive, setKillSwitchActive] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
-      const summary = (await operator.status()) as {
-        kill_switch?: boolean;
-      };
-      if (summary?.kill_switch !== undefined) {
-        setKillSwitchActive(Boolean(summary.kill_switch));
-      }
-    } catch {
-      // Keep default on unattached backend
+      const summary = await getStatus();
+      if (typeof summary.kill_switch !== "boolean") throw new Error("Invalid kill switch status");
+      setKillSwitchActive(summary.kill_switch);
+      setError(null);
+    } catch (err) {
+      setKillSwitchActive(null);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -44,10 +44,11 @@ export default function OperatorKillSwitchPage() {
         </div>
       </div>
 
-      <KillSwitchPanel
+      {error && <p role="alert">{error}</p>}
+      {!loading && !error && killSwitchActive !== null && <KillSwitchPanel
         killSwitchActive={killSwitchActive}
         onRefresh={loadStatus}
-      />
+      />}
     </article>
   );
 }

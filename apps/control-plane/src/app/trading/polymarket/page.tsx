@@ -11,6 +11,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import ModuleActionButton from "@/components/trading/ModuleActionButton";
+import SavedStrategiesPanel from "@/components/trading/SavedStrategiesPanel";
 import {
   classifyTradingError,
   customerTrading,
@@ -193,6 +194,8 @@ export default function PolymarketPage() {
           )}
         </section>
 
+        <SavedStrategiesPanel module="polymarket" />
+
         {/* Orders Table */}
         <section className="card">
           <h2>Polymarket V3 Mirror Order Book</h2>
@@ -222,10 +225,10 @@ export default function PolymarketPage() {
                     <td>{o.market ?? "—"}</td>
                     <td>
                       <span className={`tag ${o.side === "BUY" ? "tag--active" : "tag--warning"}`}>
-                        {o.side ?? "BUY"}
+                        {o.side ?? "—"}
                       </span>
                     </td>
-                    <td>{o.status ?? "open"}</td>
+                    <td>{o.status ?? "—"}</td>
                     <td>{o.created_at ? new Date(o.created_at).toLocaleString() : "—"}</td>
                   </tr>
                 ))}

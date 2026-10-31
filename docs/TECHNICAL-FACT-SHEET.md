@@ -60,7 +60,7 @@ comparisons, no projections.
 
 | Fact | Value |
 |---|---|
-| Authoritative store | PostgreSQL ≥ 16; sqlx; <!-- stat:migrations -->67<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0067<!-- /stat -->`) embedded in the binary |
+| Authoritative store | PostgreSQL ≥ 16; sqlx; <!-- stat:migrations -->68<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0068<!-- /stat -->`) embedded in the binary |
 | Non-authoritative store | Redis 7 (checked against 7.2.10): dedup L2, claims coordination, cache — may die without losing money-relevant truth |
 | Local journal | JSONL intent journal with rotation + corrupt-line tolerance |
 | Dedup | 3 levels: memory / Redis / Postgres, deterministic idempotency keys |
@@ -101,7 +101,7 @@ comparisons, no projections.
 
 ## Test inventory (static)
 
-Static test inventory: <!-- stat:test_attrs_plain -->2578<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->1026<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+Static test inventory: <!-- stat:test_attrs_plain -->2581<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->1030<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
 
 Previous freeze/hardening pass-count tables quoted run results without
 shipping run logs and have been removed. Harnesses exist for the workspace

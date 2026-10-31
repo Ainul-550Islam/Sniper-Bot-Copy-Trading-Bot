@@ -158,6 +158,25 @@ else
   bad "hygiene violations:$dirty"
 fi
 
+# These paths are local shell/install state and must be absent even if ignored.
+for junk_path in .cargo/env .config/solana/install/config.yml run-part2.sh run-tests.out; do
+  if [ -e "$junk_path" ] || [ -L "$junk_path" ]; then
+    bad "junk path must not exist: $junk_path"
+  else
+    ok "junk path absent: $junk_path"
+  fi
+done
+
+# STATS is generated, not an independent assertion: compare its exact marker
+# against the current route tree, failing on a missing or malformed marker.
+page_count="$(find apps/control-plane/src/app -type f -name page.tsx | wc -l | tr -d ' ')"
+stats_pages="$(sed -n 's/.*<!-- stat:control_plane_pages -->\([0-9][0-9]*\)<!-- \/stat -->.*/\1/p' docs/STATS.md)"
+if [ -n "$stats_pages" ] && [ "$stats_pages" = "$page_count" ]; then
+  ok "STATS control-plane page count matches $page_count"
+else
+  bad "STATS page count mismatch: stats=${stats_pages:-missing} actual=$page_count"
+fi
+
 # ------------------------------------------------------- 5. markdown links --
 if ! command -v python3 >/dev/null 2>&1; then
   bad "python3 not available — cannot verify markdown links (fail-closed)"

@@ -31,6 +31,12 @@ import { clearOperatorKey, getOperatorKey } from "../operator-session";
 
 export { ApiError };
 
+export interface StatusResponse {
+  execution_mode: string;
+  live_allowed: boolean;
+  kill_switch: boolean;
+}
+
 export interface HealthResponse {
   ok: boolean;
 }
@@ -304,6 +310,10 @@ async function opRequest<T>(path: string, options: RequestOptions = {}): Promise
 // Operator API Functions
 // ---------------------------------------------------------------------------
 
+export async function getStatus(): Promise<StatusResponse> {
+  return opRequest<StatusResponse>("/api/status");
+}
+
 export async function getHealth(): Promise<HealthResponse> {
   return opRequest<HealthResponse>("/api/health");
 }
@@ -450,6 +460,7 @@ export function getEventsWsPath(): string {
 }
 
 export const operatorApi = {
+  getStatus,
   getHealth,
   setMode,
   getModules,

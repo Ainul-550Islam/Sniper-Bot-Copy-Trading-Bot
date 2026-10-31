@@ -23,7 +23,7 @@ re-audit, and `PROMPT-3-RESULT.md`).
   embedded dashboard) plus a Next.js 16 tenant console
   (`apps/control-plane`). Evidence: `crates/`, `apps/`,
   `docs/ARCHITECTURE.md`.
-- PostgreSQL = durable financial truth (**<!-- stat:migrations -->67<!-- /stat --> forward-only migrations**, high water `<!-- stat:migrations_high_water -->0067<!-- /stat -->`); Redis = non-authoritative coordination/cache; JSONL intent
+- PostgreSQL = durable financial truth (**<!-- stat:migrations -->68<!-- /stat --> forward-only migrations**, high water `<!-- stat:migrations_high_water -->0068<!-- /stat -->`); Redis = non-authoritative coordination/cache; JSONL intent
   journal for crash recovery. Evidence: `crates/core/migrations/`,
   `docs/BACKUP-RESTORE.md`, `release-manifest.json`.
 - Tenant-scoped trading data plane: 17 trading-truth PK/arbiter surfaces are
@@ -91,7 +91,7 @@ re-audit, and `PROMPT-3-RESULT.md`).
 
 ## Test evidence (facts; labels matter)
 
-- Static test inventory: <!-- stat:test_attrs_plain -->2578<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->1026<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
+- Static test inventory: <!-- stat:test_attrs_plain -->2581<!-- /stat --> #[test] and <!-- stat:test_attrs_tokio -->1030<!-- /stat --> #[tokio::test] functions (a count, not a pass/fail result). External validations: <!-- stat:evidence_passed -->1<!-- /stat --> PASSED / <!-- stat:evidence_not_run -->18<!-- /stat --> NOT_RUN.
 - No test-run logs ship in this repository. Earlier pass/fail figures
   (workspace, db_integration, saas-sdk, staking validator e2e) were quoted
   without logs and have been removed; run `cargo test --workspace` yourself

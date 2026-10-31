@@ -75,7 +75,7 @@ deploy/backups/
 
 # Rustup shell shim and Solana CLI install state: never tracked.
 .cargo/env
-.config/solana/install/
+.config/solana/
 
 # Sandbox/agent state and local tooling output: never shipped.
 .config/

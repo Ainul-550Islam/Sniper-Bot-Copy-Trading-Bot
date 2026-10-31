@@ -13,7 +13,8 @@ export default function OperatorRecoveryPage() {
   const loadRecovery = useCallback(async () => {
     try {
       const res = await getRecoveryFailed();
-      setItems((res.items as FailedItem[]) || []);
+      if (!Array.isArray(res.items) || typeof res.available !== "boolean") throw new Error("Invalid recovery response");
+      setItems(res.items as FailedItem[]);
       setAvailable(Boolean(res.available));
       setError(null);
     } catch (err) {
@@ -49,7 +50,7 @@ export default function OperatorRecoveryPage() {
         </div>
       )}
 
-      <FailedTable items={items} available={available} />
+      {!loading && !error && <FailedTable items={items} available={available} />}
     </article>
   );
 }

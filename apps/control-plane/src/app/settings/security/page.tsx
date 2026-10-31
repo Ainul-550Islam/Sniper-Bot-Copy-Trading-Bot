@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import AppShell from "@/components/AppShell";
 import SecurityForm from "@/components/settings/security-form";
+import CurrentSessionPanel from "@/components/settings/CurrentSessionPanel";
 import { ErrorState } from "@/components/common/ErrorState";
 import { getSecurityStatus, SecurityPosture } from "@/lib/api/security-api";
 
@@ -53,6 +54,7 @@ export default function SecuritySettingsPage() {
           onRefresh={loadSecurity}
         />
       )}
+      <CurrentSessionPanel />
     </AppShell>
   );
 }

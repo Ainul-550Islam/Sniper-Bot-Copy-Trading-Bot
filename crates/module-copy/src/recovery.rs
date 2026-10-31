@@ -102,12 +102,21 @@ impl MemoryCopyStore {
 
     /// Leader lifecycle events, oldest first.
     pub fn leader_events(&self) -> Vec<LeaderEventRecord> {
-        self.inner.lock().unwrap().leader_events.clone()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .leader_events
+            .clone()
     }
 
     /// One journaled event.
     pub fn event(&self, event_id: &str) -> Option<CopyEventRecord> {
-        self.inner.lock().unwrap().events.get(event_id).cloned()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .events
+            .get(event_id)
+            .cloned()
     }
 
     /// Every journaled event, oldest first.
@@ -115,7 +124,7 @@ impl MemoryCopyStore {
         let mut v: Vec<CopyEventRecord> = self
             .inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .events
             .values()
             .cloned()
@@ -130,13 +139,24 @@ impl MemoryCopyStore {
 
     /// One link.
     pub fn link(&self, position_id: &str) -> Option<CopyLinkRecord> {
-        self.inner.lock().unwrap().links.get(position_id).cloned()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .links
+            .get(position_id)
+            .cloned()
     }
 
     /// Every link (any status), oldest first.
     pub fn links(&self) -> Vec<CopyLinkRecord> {
-        let mut v: Vec<CopyLinkRecord> =
-            self.inner.lock().unwrap().links.values().cloned().collect();
+        let mut v: Vec<CopyLinkRecord> = self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .links
+            .values()
+            .cloned()
+            .collect();
         v.sort_by(|a, b| {
             a.opened_at
                 .cmp(&b.opened_at)
@@ -149,7 +169,7 @@ impl MemoryCopyStore {
 #[async_trait]
 impl CopyStore for MemoryCopyStore {
     async fn upsert_leader(&self, rec: LeaderRecord) -> bool {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match g.leaders.get_mut(&rec.address) {
             Some(cur) => {
                 let followed_at = cur.followed_at.min(rec.followed_at);
@@ -179,14 +199,14 @@ impl CopyStore for MemoryCopyStore {
     }
 
     async fn append_leader_event(&self, rec: LeaderEventRecord) -> bool {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let id = g.leader_events.len() as i64 + 1;
         g.leader_events.push(LeaderEventRecord { id, ..rec });
         true
     }
 
     async fn load_leaders(&self) -> Option<Vec<LeaderRecord>> {
-        let g = self.inner.lock().unwrap();
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut v: Vec<LeaderRecord> = g.leaders.values().cloned().collect();
         v.sort_by(|a, b| {
             a.followed_at
@@ -197,7 +217,7 @@ impl CopyStore for MemoryCopyStore {
     }
 
     async fn record_event(&self, rec: CopyEventRecord) -> bool {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match g.events.get_mut(&rec.event_id) {
             Some(cur) => {
                 let created_at = cur.created_at;
@@ -235,7 +255,7 @@ impl CopyStore for MemoryCopyStore {
         let mut v: Vec<CopyEventRecord> = self
             .inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .events
             .values()
             .filter(|e| e.observed_at >= since)
@@ -251,7 +271,7 @@ impl CopyStore for MemoryCopyStore {
     }
 
     async fn upsert_link(&self, rec: CopyLinkRecord) -> bool {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match g.links.get_mut(&rec.position_id) {
             Some(cur) => {
                 let opened_at = cur.opened_at;
@@ -278,7 +298,7 @@ impl CopyStore for MemoryCopyStore {
         let mut v: Vec<CopyLinkRecord> = self
             .inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .links
             .values()
             .filter(|l| l.status == "open")
@@ -299,7 +319,7 @@ impl CopyStore for MemoryCopyStore {
         exit_event_id: Option<&str>,
         note: Option<&str>,
     ) -> bool {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match g.links.get_mut(position_id) {
             Some(l) if l.status == "open" => {
                 l.status = status.to_string();
@@ -612,6 +632,20 @@ pub fn plan_recovery(inputs: &RecoveryInputs) -> RecoveryPlan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn poisoned_memory_store_remains_usable() {
+        use super::MemoryCopyStore;
+        use std::sync::Arc;
+        let store = Arc::new(MemoryCopyStore::new());
+        let worker = Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _guard = worker.inner.lock().unwrap_or_else(|e| e.into_inner());
+            panic!("intentionally poison the lock");
+        })
+        .join();
+        assert!(store.leader_events().is_empty());
+    }
+
     use super::*;
     use bot_core::models::{ExecutionMode, TradeSource, Venue};
 

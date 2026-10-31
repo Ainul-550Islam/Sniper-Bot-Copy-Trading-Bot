@@ -2328,6 +2328,69 @@
         ],
         "type": "object"
       },
+      "UserSessionView": {
+        "description": "Non-secret metadata for one of the authenticated user's sessions.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "current": {
+            "description": "Whether this is the session authenticating the request.",
+            "type": "boolean"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ip": {
+            "type": "string"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Non-secret token prefix for recognizing a session.",
+            "type": "string"
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "enum": [
+              "active",
+              "expired",
+              "revoked"
+            ],
+            "type": "string"
+          },
+          "user_agent": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "prefix",
+          "user_agent",
+          "ip",
+          "created_at",
+          "last_seen_at",
+          "expires_at",
+          "revoked_at",
+          "state",
+          "current"
+        ],
+        "type": "object"
+      },
       "WalletBinding": {
         "description": "A tenant's authorized wallet binding. Public address only — no signing material exists in the SaaS layer.",
         "properties": {
@@ -2456,7 +2519,7 @@
   "info": {
     "description": "Multi-tenant SaaS contract over the TASK 7A control plane. Trading truth (orders, fills, positions, risk, ledger, HA) remains owned by the TASK 1–6 engines and is exposed read-only to tenants. Billing/usage reads are served through the deterministic exports (`/api/saas/exports?kind=subscription|usage|...`); there are no separate plan-catalogue or usage endpoints.",
     "title": "Sniper Suite SaaS Control Plane",
-    "version": "2.3.0"
+    "version": "2.4.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3182,11 +3245,7 @@
             "$ref": "#/components/schemas/Error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
+        "security": [],
         "summary": "System health and liveness probe.",
         "tags": [
           "operator"
@@ -8362,6 +8421,126 @@
           "auth"
         ]
       }
+    },
+    "/api/saas/users/me/sessions": {
+      "get": {
+        "operationId": "saas.listSessions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "items": {
+                      "items": {
+                        "$ref": "#/components/schemas/UserSessionView"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Session inventory for the authenticated user."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List non-secret session metadata for the authenticated user's own sessions.",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/saas/users/me/sessions/{id}": {
+      "delete": {
+        "operationId": "saas.revokeUserSession",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "revoked": {
+                      "description": "False if the session was already revoked.",
+                      "type": "boolean"
+                    },
+                    "session_id": {
+                      "format": "uuid",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "session_id",
+                    "revoked"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Revocation result."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "404": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "503": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Revoke one session owned by the authenticated user; another user's session is indistinguishable from a missing session.",
+        "tags": [
+          "auth"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "format": "uuid",
+            "type": "string"
+          }
+        }
+      ]
     },
     "/api/saas/wallet-access": {
       "get": {

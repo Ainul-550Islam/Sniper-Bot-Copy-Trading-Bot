@@ -50,7 +50,7 @@ use bot_core::models::{BotModule, ExecutionMode};
 use bot_core::obs::health::HealthRegistry;
 use bot_core::state::Shared;
 
-use crate::dashboard::DASHBOARD_HTML;
+use crate::dashboard::{DASHBOARD_HTML, DASHBOARD_JS};
 use crate::obs;
 use crate::ws::event_to_json;
 
@@ -136,6 +136,8 @@ impl ApiState {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(root))
+        .route("/dashboard", get(root))
+        .route("/dashboard/app.js", get(dashboard_script))
         .route("/health", get(obs::health_live))
         .route("/ready", get(obs::ready))
         .route("/metrics", get(obs::metrics_endpoint))
@@ -201,7 +203,10 @@ async fn tenant_rls_request_scope(
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    bot_core::tenant::rls_context::scope_request_context(next.run(request)).await
+    bot_core::tenant::rls_context::scope_request_context(
+        crate::saas::custody::scope_custody_context(next.run(request)),
+    )
+    .await
 }
 
 /// Per-IP token bucket over every matched route (DoS guard). The
@@ -386,6 +391,21 @@ fn actor_of(principal: Option<&Principal>) -> String {
 async fn root(State(state): State<ApiState>) -> Response {
     if state.serve_dashboard {
         Html(DASHBOARD_HTML).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "dashboard disabled").into_response()
+    }
+}
+
+async fn dashboard_script(State(state): State<ApiState>) -> Response {
+    if state.serve_dashboard {
+        (
+            [(
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            )],
+            DASHBOARD_JS,
+        )
+            .into_response()
     } else {
         (StatusCode::NOT_FOUND, "dashboard disabled").into_response()
     }

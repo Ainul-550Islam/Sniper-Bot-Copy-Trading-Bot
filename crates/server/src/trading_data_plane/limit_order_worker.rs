@@ -25,6 +25,9 @@
 use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
+use bot_core::tenant::rls_context::{
+    current_request_tenant, scope_tenant_context, with_system_scope, with_tenant_scope,
+};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use tokio::sync::watch;
@@ -155,19 +158,27 @@ pub struct TickReport {
     pub failed: usize,
 }
 
+fn bound_tenant() -> Result<Uuid, sqlx::Error> {
+    current_request_tenant()
+        .ok_or_else(|| sqlx::Error::Protocol("limit-order worker requires a tenant scope".into()))
+}
+
 /// Claim up to [`CLAIM_BATCH`] due rows under a lease.
 pub async fn claim_due(
     pool: &PgPool,
     worker_id: &str,
     lease_secs: f64,
 ) -> Result<Vec<ClaimedOrder>, sqlx::Error> {
+    let organization_id = bound_tenant()?;
+    let worker_id = worker_id.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| Box::pin(async move {
     let rows = sqlx::query(
         "UPDATE limit_orders \
          SET lease_owner = $1, \
              lease_expires_at = now() + make_interval(secs => $2::float8) \
-         WHERE id IN ( \
+         WHERE organization_id = $5 AND id IN ( \
              SELECT id FROM limit_orders \
-             WHERE status = 'active' \
+             WHERE organization_id = $5 AND status = 'active' \
                AND (lease_expires_at IS NULL OR lease_expires_at < now()) \
                AND attempts < $3 \
              ORDER BY created_at, id \
@@ -177,11 +188,12 @@ pub async fn claim_due(
                    price_sol::float8 AS price_sol, amount::float8 AS amount, \
                    created_at, expires_at, attempts",
     )
-    .bind(worker_id)
+    .bind(&worker_id)
     .bind(lease_secs)
     .bind(MAX_HANDOFF_ATTEMPTS)
     .bind(CLAIM_BATCH)
-    .fetch_all(pool)
+    .bind(organization_id)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut claimed = Vec::with_capacity(rows.len());
@@ -211,6 +223,7 @@ pub async fn claim_due(
         });
     }
     Ok(claimed)
+    })).await
 }
 
 /// Release a lease we hold without changing the order (price not met).
@@ -219,16 +232,27 @@ async fn release_lease(
     order: &ClaimedOrder,
     worker_id: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE limit_orders SET lease_owner = NULL, lease_expires_at = NULL \
+    let organization_id = bound_tenant()?;
+    if organization_id != order.organization_id {
+        return Err(sqlx::Error::Protocol("limit order tenant mismatch".into()));
+    }
+    let order = order.clone();
+    let worker_id = worker_id.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE limit_orders SET lease_owner = NULL, lease_expires_at = NULL \
          WHERE id = $1 AND organization_id = $2 AND lease_owner = $3",
-    )
-    .bind(&order.id)
-    .bind(order.organization_id)
-    .bind(worker_id)
-    .execute(pool)
+            )
+            .bind(&order.id)
+            .bind(order.organization_id)
+            .bind(&worker_id)
+            .execute(&mut *connection)
+            .await
+            .map(|_| ())
+        })
+    })
     .await
-    .map(|_| ())
 }
 
 /// Mark an order expired under the lease we hold.
@@ -237,17 +261,28 @@ async fn mark_expired(
     order: &ClaimedOrder,
     worker_id: &str,
 ) -> Result<u64, sqlx::Error> {
-    sqlx::query(
-        "UPDATE limit_orders \
+    let organization_id = bound_tenant()?;
+    if organization_id != order.organization_id {
+        return Err(sqlx::Error::Protocol("limit order tenant mismatch".into()));
+    }
+    let order = order.clone();
+    let worker_id = worker_id.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE limit_orders \
          SET status = 'expired', resolved_at = now(), lease_owner = NULL, lease_expires_at = NULL \
          WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 AND status = 'active'",
-    )
-    .bind(&order.id)
-    .bind(order.organization_id)
-    .bind(worker_id)
-    .execute(pool)
+            )
+            .bind(&order.id)
+            .bind(order.organization_id)
+            .bind(&worker_id)
+            .execute(&mut *connection)
+            .await
+            .map(|r| r.rows_affected())
+        })
+    })
     .await
-    .map(|r| r.rows_affected())
 }
 
 /// Mark an order triggered under the lease we hold, after a successful hand-off.
@@ -256,18 +291,29 @@ async fn mark_triggered(
     order: &ClaimedOrder,
     worker_id: &str,
 ) -> Result<u64, sqlx::Error> {
-    sqlx::query(
-        "UPDATE limit_orders \
+    let organization_id = bound_tenant()?;
+    if organization_id != order.organization_id {
+        return Err(sqlx::Error::Protocol("limit order tenant mismatch".into()));
+    }
+    let order = order.clone();
+    let worker_id = worker_id.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE limit_orders \
          SET status = 'triggered', resolved_at = now(), executed_at = now(), \
              lease_owner = NULL, lease_expires_at = NULL \
          WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 AND status = 'active'",
-    )
-    .bind(&order.id)
-    .bind(order.organization_id)
-    .bind(worker_id)
-    .execute(pool)
+            )
+            .bind(&order.id)
+            .bind(order.organization_id)
+            .bind(&worker_id)
+            .execute(&mut *connection)
+            .await
+            .map(|r| r.rows_affected())
+        })
+    })
     .await
-    .map(|r| r.rows_affected())
 }
 
 /// Record a failed hand-off and release the lease.
@@ -277,23 +323,74 @@ async fn record_handoff_failure(
     worker_id: &str,
     reason: &str,
 ) -> Result<u64, sqlx::Error> {
-    sqlx::query(
-        "UPDATE limit_orders \
+    let organization_id = bound_tenant()?;
+    if organization_id != order.organization_id {
+        return Err(sqlx::Error::Protocol("limit order tenant mismatch".into()));
+    }
+    let order = order.clone();
+    let worker_id = worker_id.to_owned();
+    let reason = reason.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE limit_orders \
          SET attempts = attempts + 1, last_error = $4, lease_owner = NULL, lease_expires_at = NULL \
          WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 AND status = 'active'",
-    )
-    .bind(&order.id)
-    .bind(order.organization_id)
-    .bind(worker_id)
-    .bind(clamp_error(reason))
-    .execute(pool)
+            )
+            .bind(&order.id)
+            .bind(order.organization_id)
+            .bind(&worker_id)
+            .bind(clamp_error(&reason))
+            .execute(&mut *connection)
+            .await
+            .map(|r| r.rows_affected())
+        })
+    })
     .await
-    .map(|r| r.rows_affected())
 }
 
-/// One full pass: claim, decide, act. Per-order errors are counted and do not
-/// abort the pass, so one bad row cannot starve the rest of the batch.
+/// One pass over all organizations. A task already bound to a tenant can
+/// only tick that tenant; the system pool discovers identifiers, never rows
+/// from a tenant trading table.
 pub async fn tick_once(
+    pool: &PgPool,
+    system_pool: &PgPool,
+    cfg: &WorkerConfig,
+    now: DateTime<Utc>,
+    marks: &dyn MarkSource,
+    sink: &dyn TriggerSink,
+) -> Result<TickReport, sqlx::Error> {
+    let tenants = match current_request_tenant() {
+        Some(organization_id) => vec![organization_id],
+        None => {
+            with_system_scope(
+                system_pool,
+                "discover organizations for limit-order scheduling",
+                |connection| {
+                    Box::pin(async move {
+                        sqlx::query_scalar::<_, Uuid>("SELECT id FROM organizations ORDER BY id")
+                            .fetch_all(connection)
+                            .await
+                    })
+                },
+            )
+            .await?
+        }
+    };
+    let mut total = TickReport::default();
+    for organization_id in tenants {
+        let report =
+            scope_tenant_context(organization_id, tick_tenant(pool, cfg, now, marks, sink)).await?;
+        total.claimed += report.claimed;
+        total.fired += report.fired;
+        total.expired += report.expired;
+        total.waiting += report.waiting;
+        total.failed += report.failed;
+    }
+    Ok(total)
+}
+
+async fn tick_tenant(
     pool: &PgPool,
     cfg: &WorkerConfig,
     now: DateTime<Utc>,
@@ -356,6 +453,7 @@ pub async fn tick_once(
 /// loop never exits on a transient failure.
 pub async fn run(
     pool: PgPool,
+    system_pool: PgPool,
     cfg: WorkerConfig,
     marks: std::sync::Arc<dyn MarkSource>,
     sink: std::sync::Arc<dyn TriggerSink>,
@@ -365,7 +463,16 @@ pub async fn run(
         if *stop.borrow() {
             break;
         }
-        let pause = match tick_once(&pool, &cfg, Utc::now(), marks.as_ref(), sink.as_ref()).await {
+        let pause = match tick_once(
+            &pool,
+            &system_pool,
+            &cfg,
+            Utc::now(),
+            marks.as_ref(),
+            sink.as_ref(),
+        )
+        .await
+        {
             Ok(_) => cfg.tick,
             Err(error) => {
                 tracing::error!(error = %error, "limit-order tick failed; backing off");

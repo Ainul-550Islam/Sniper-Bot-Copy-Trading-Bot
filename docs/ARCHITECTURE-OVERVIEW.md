@@ -1,6 +1,6 @@
 # Architecture Overview — sniper-suite 0.1.0 (2026-10-06)
 
-> **Current values:** Version 0.1.0 · <!-- stat:migrations -->67<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0067<!-- /stat -->`) · <!-- stat:rust_files -->766<!-- /stat --> Rust files under `crates/` · <!-- stat:crates -->8<!-- /stat --> workspace members · <!-- stat:docs_canonical -->159<!-- /stat --> docs · <!-- stat:test_attrs_plain -->2578<!-- /stat --> `#[test]` attributes
+> **Current values:** Version 0.1.0 · <!-- stat:migrations -->68<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0068<!-- /stat -->`) · <!-- stat:rust_files -->771<!-- /stat --> Rust files under `crates/` · <!-- stat:crates -->8<!-- /stat --> workspace members · <!-- stat:docs_canonical -->159<!-- /stat --> docs · <!-- stat:test_attrs_plain -->2581<!-- /stat --> `#[test]` attributes
 
 ## 1. Workspace & Crates
 

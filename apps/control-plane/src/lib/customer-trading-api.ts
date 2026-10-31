@@ -339,6 +339,28 @@ export interface SniperConfig {
   updated_at: string;
 }
 
+export interface TenantCopyLeader {
+  organization_id: string;
+  address: string;
+  label: string;
+  status: "active" | "paused" | "removed";
+  source: string;
+  followed_at: string;
+  status_since: string;
+  events_seen: number;
+  mirrored: number;
+  rejected: number;
+  last_event_at: string | null;
+  last_slot: number | null;
+  updated_at: string;
+}
+
+/** `GET /api/tenant/copy/leaders` — the exact server `TenantLeader` wire shape. */
+export interface TenantCopyLeadersResponse {
+  organization_id: string;
+  items: TenantCopyLeader[];
+}
+
 export interface CopyConfig {
   organization_id: string;
   max_exposure_usd: number;
@@ -529,7 +551,7 @@ export const customerTrading = {
     ),
 
   // --- copy trading specific -----------------------------------------------
-  copyLeaders: () => tenantRequest<{ organization_id: string; items: Array<{ address: string; followed_since?: string; note?: string }> }>("/api/tenant/copy/leaders"),
+  copyLeaders: () => tenantRequest<TenantCopyLeadersResponse>("/api/tenant/copy/leaders"),
   copyLeaderDetail: (address: string) => tenantRequest<{ leader: Record<string, unknown>; events: unknown[] }>(`/api/tenant/copy/leaders/${encodeURIComponent(address)}`),
   copyLinks: () => tenantRequest<{ organization_id: string; items: unknown[] }>("/api/tenant/copy/links"),
 

@@ -255,11 +255,29 @@ impl Sniper {
                 match self.mark_position(&position).await {
                     Ok(mark) if mark.is_finite() && mark > 0.0 => {
                         self.exits.mark_ok(&position.id);
-                        position.last_mark = mark;
-                        position.trailing_high_water =
-                            Some(position.trailing_high_water.map_or(mark, |h| h.max(mark)));
-                        position.updated_at = Utc::now();
-                        self.state.upsert_position(position.clone()).await;
+                        // Update only the live record under the state write
+                        // lock. A concurrent sweeper may already have closed
+                        // this position; replacing it with our stale snapshot
+                        // would resurrect an exited position.
+                        let updated = self
+                            .state
+                            .with_position(&position.id, |current| {
+                                if current.status.is_terminal() {
+                                    return;
+                                }
+                                current.last_mark = mark;
+                                current.trailing_high_water = Some(
+                                    current
+                                        .trailing_high_water
+                                        .map_or(mark, |high| high.max(mark)),
+                                );
+                            })
+                            .await;
+                        let Some(updated) = updated.filter(|current| !current.status.is_terminal())
+                        else {
+                            continue;
+                        };
+                        position = updated;
                         self.state
                             .set_unrealized(BotModule::Sniper, position.unrealised())
                             .await;

@@ -26,7 +26,7 @@ export function FindingsTable({ findings }: FindingsTableProps) {
           {findings.length === 0 ? (
             <tr>
               <td colSpan={8} className="muted" style={{ textAlign: "center", padding: "2rem" }}>
-                No active reconciliation findings. All ledgers in sync.
+                No findings were returned.
               </td>
             </tr>
           ) : (

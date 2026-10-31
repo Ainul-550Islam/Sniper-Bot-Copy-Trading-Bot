@@ -9,7 +9,7 @@
 //! | file | concern |
 //! |---|---|
 //! | `middleware.rs` | authenticate → resolve tenant → role → permission → entitlement; the DENY rules |
-//! | `users.rs` | register, login, current user, safe profile updates, logout |
+//! | `users.rs` | register, login, current user, safe profile updates, session inventory/revocation, logout |
 //! | `organizations.rs` | create (through the provisioning state machine), read, update, members, suspension |
 //! | `api_keys.rs` | tenant-scoped keys: create (secret shown once), list, revoke, restart-safe lookup |
 //! | `postgres.rs` | PostgreSQL runtime-record repository and atomic plan assignment |
@@ -110,6 +110,11 @@ pub fn routes() -> Router<ApiState> {
         .route("/api/saas/users/me", get(users::current_user))
         .route("/api/saas/users/me", patch(users::update_profile))
         .route("/api/saas/users/me/logout", post(users::logout))
+        .route("/api/saas/users/me/sessions", get(users::list_sessions))
+        .route(
+            "/api/saas/users/me/sessions/:id",
+            delete(users::revoke_session),
+        )
         // --- organizations ----------------------------------------------
         .route(
             "/api/saas/organizations",

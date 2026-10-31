@@ -54,15 +54,16 @@ fi
 # Files that are host/tooling state, never source. Each is untracked (and its
 # working copy removed) only if it is actually tracked right now.
 JUNK=(
-  ".cargo/bin/rustup"
+  # Explicit round-one cleanup: these four paths must not ship.
   ".cargo/env"
   ".config/solana/install/config.yml"
+  "run-part2.sh"
+  "run-tests.out"
+  ".cargo/bin/rustup"
   "rustup-init.sh"
   "core-launch.out"
-  "run-tests.out"
   "run-core.sh"
   "run-p2b.sh"
-  "run-part2.sh"
   "run-tests.sh"
   "run_baseline.sh"
   "run_baseline2.sh"
@@ -79,6 +80,7 @@ IGNORE=(
   "rustup-init.sh"
   ".cargo/env"
   ".config/"
+  ".config/solana/"
 )
 
 # Files that reference the audit report by path. They must point at the archive

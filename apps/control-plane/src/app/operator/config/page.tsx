@@ -101,7 +101,7 @@ export default function OperatorConfigPage() {
             fontSize: "0.85rem",
           }}
         >
-          {config ? JSON.stringify(config, null, 2) : "Loading configuration…"}
+          {config ? JSON.stringify(config, null, 2) : loading ? "Loading configuration…" : "Configuration unavailable."}
         </pre>
       </div>
     </article>

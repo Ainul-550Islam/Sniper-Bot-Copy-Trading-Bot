@@ -8,8 +8,9 @@
 
 use std::cell::Cell;
 use std::future::Future;
+use std::pin::Pin;
 
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 tokio::task_local! {
@@ -149,6 +150,50 @@ impl<'a> SystemScope<'a> {
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
         self.transaction.rollback().await
     }
+}
+
+/// A scoped operation borrows only the connection belonging to its transaction.
+pub type ScopedFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'a>>;
+
+/// Run non-request work under a non-bypass role and exactly one tenant.
+/// The SQLx transaction guard rolls back on errors, cancellation, and unwind;
+/// PostgreSQL restores transaction-local role/GUC settings on commit or rollback.
+pub async fn with_tenant_scope<T, F>(
+    pool: &PgPool,
+    organization_id: Uuid,
+    operation: F,
+) -> Result<T, sqlx::Error>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> ScopedFuture<'c, T>,
+{
+    if current_request_tenant().is_some_and(|bound| bound != organization_id) {
+        return Err(sqlx::Error::Protocol("conflicting tenant scope".into()));
+    }
+    let mut scope = TenantScope::begin(pool, organization_id).await?;
+    let result = operation(scope.transaction()).await?;
+    scope.commit().await?;
+    Ok(result)
+}
+
+/// Run a reviewed privileged operation, emitting its static reason to the audit log.
+pub async fn with_system_scope<T, F>(
+    pool: &PgPool,
+    reason: &'static str,
+    operation: F,
+) -> Result<T, sqlx::Error>
+where
+    F: for<'c> FnOnce(&'c mut PgConnection) -> ScopedFuture<'c, T>,
+{
+    if reason.trim().is_empty() {
+        return Err(sqlx::Error::Protocol(
+            "system scope requires a reason".into(),
+        ));
+    }
+    let mut scope = SystemScope::begin(pool).await?;
+    tracing::info!(target: "audit", role = "bot_system", reason, "background system scope");
+    let result = operation(scope.transaction()).await?;
+    scope.commit().await?;
+    Ok(result)
 }
 
 async fn install_local_role(

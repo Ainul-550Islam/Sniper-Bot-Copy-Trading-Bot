@@ -2,23 +2,25 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { ModeSwitcher } from "@/components/operator/ModeSwitcher";
-import { operator } from "@/lib/api";
+import { getStatus } from "@/lib/api/operator-api";
 
 export default function OperatorModePage() {
-  const [currentMode, setCurrentMode] = useState<string>("paper");
-  const [liveAllowed, setLiveAllowed] = useState<boolean>(false);
+  const [currentMode, setCurrentMode] = useState<string | null>(null);
+  const [liveAllowed, setLiveAllowed] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
-      const summary = (await operator.status()) as {
-        mode?: string;
-        live_allowed?: boolean;
-      };
-      if (summary?.mode) setCurrentMode(summary.mode);
-      if (summary?.live_allowed !== undefined) setLiveAllowed(summary.live_allowed);
-    } catch {
-      // In loopback / dev or minimal mock environments, keep default
+      const summary = await getStatus();
+      if (typeof summary.execution_mode !== "string" || !summary.execution_mode || typeof summary.live_allowed !== "boolean") throw new Error("Invalid execution mode status");
+      setCurrentMode(summary.execution_mode);
+      setLiveAllowed(summary.live_allowed);
+      setError(null);
+    } catch (err) {
+      setCurrentMode(null);
+      setLiveAllowed(null);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -45,14 +47,15 @@ export default function OperatorModePage() {
         </div>
       </div>
 
-      <ModeSwitcher
+      {error && <p role="alert">{error}</p>}
+      {!loading && !error && currentMode !== null && liveAllowed !== null && <ModeSwitcher
         currentMode={currentMode}
         liveAllowed={liveAllowed}
         onModeChanged={(res) => {
           setCurrentMode(res.mode);
           setLiveAllowed(res.live_allowed);
         }}
-      />
+      />}
     </article>
   );
 }

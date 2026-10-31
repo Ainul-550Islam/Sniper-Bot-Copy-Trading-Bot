@@ -16,7 +16,7 @@ NPM ?= npm
 SUITE ?= sniper-suite
 UI ?= apps/control-plane
 
-.PHONY: help init up down migrate run test gates e2e clean frontend-deps
+.PHONY: help init up down migrate run test gates e2e clean frontend-deps test-services-up test-services test-services-down
 
 help: ## List every target (no toolchain, docker or network required)
 	@awk 'BEGIN {FS = ":.*?## "} /^[A-Za-z0-9_.-]+:.*?## / {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -59,6 +59,15 @@ test: ## Full test sweep: fmt, clippy -D warnings, workspace tests, UI typecheck
 	@$(NPM) --prefix $(UI) run typecheck
 	@$(NPM) --prefix $(UI) run lint
 	@$(NPM) --prefix $(UI) run test:unit
+
+test-services-up: ## Start disposable PostgreSQL 16 and Redis 7 test services
+	@$(COMPOSE) -f docker-compose.test.yml -p sniper-round1-test up -d --wait
+
+test-services: ## Run all service-backed integration gates and tear down the test stack
+	@COMPOSE="$(COMPOSE)" ./scripts/test-with-services.sh
+
+test-services-down: ## Stop and remove the disposable test stack and its data
+	@$(COMPOSE) -f docker-compose.test.yml -p sniper-round1-test down --volumes --remove-orphans
 
 gates: ## Every cargo-free repository gate (hygiene, migrations, openapi, routes, secrets, contracts)
 	@bash scripts/forbid-fake-data.sh

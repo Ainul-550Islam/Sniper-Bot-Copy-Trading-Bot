@@ -1,0 +1,5 @@
+.cargo/env
+.config/solana/install/config.yml
+FINAL-REPORT.md
+run-part2.sh
+run-tests.out

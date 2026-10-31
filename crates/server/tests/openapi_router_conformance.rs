@@ -65,7 +65,9 @@ fn test_state() -> ApiState {
     ApiState {
         audit: AuditTrail::new(None, shared.events.clone()),
         shared,
-        api_key: None,
+        // Configure the legacy key guard so anonymous route probes exercise
+        // the same fail-closed authentication contract as a real deployment.
+        api_key: Some("test-api-key".into()),
         auth: None,
         limiter: RateLimiter::new(0),
         sensitive_limiter: RateLimiter::new(0),

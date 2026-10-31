@@ -48,7 +48,7 @@ export default function OperatorJournalPage() {
         </div>
       )}
 
-      <JournalTable status={status} onRefresh={loadJournal} />
+      {!loading && !error && status && <JournalTable status={status} onRefresh={loadJournal} />}
     </article>
   );
 }

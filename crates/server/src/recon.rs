@@ -47,6 +47,9 @@ use bot_core::reconciliation::{
 };
 use bot_core::recovery::{IntentSink, ReconVerdict, TruthSource};
 use bot_core::state::Shared;
+use bot_core::tenant::rls_context::{
+    current_request_tenant, scope_tenant_context, with_system_scope,
+};
 use solana_kit::rpc::{ConfirmOutcome, Rpc};
 use solana_kit::tokens::token_balances_for_owner;
 use solana_sdk::signature::Signature;
@@ -102,23 +105,23 @@ impl SolanaTxTruth {
 
     /// The LOCAL side of the matrix: what our durable records claim about
     /// this signature.
-    async fn local_state(&self, signature: &str) -> LocalExecutionState {
-        match TransactionRepo::new(self.db.clone())
-            .get_status(signature)
-            .await
-        {
-            Ok(Some(status)) => match status.as_str() {
-                "confirmed" | "finalized" => LocalExecutionState::RecordedConfirmed,
-                "failed" | "not_found" => LocalExecutionState::RecordedFailed,
-                _ => LocalExecutionState::SubmittedUnconfirmed,
+    async fn local_state(
+        &self,
+        signature: &str,
+    ) -> Result<LocalExecutionState, bot_core::db::TimedDbError> {
+        Ok(
+            match TransactionRepo::new(self.db.clone())
+                .get_status(signature)
+                .await?
+            {
+                Some(status) => match status.as_str() {
+                    "confirmed" | "finalized" => LocalExecutionState::RecordedConfirmed,
+                    "failed" | "not_found" => LocalExecutionState::RecordedFailed,
+                    _ => LocalExecutionState::SubmittedUnconfirmed,
+                },
+                None => LocalExecutionState::NoLocalRecord,
             },
-            // No row (write lost before crash) but a claim exists → we know
-            // we sent something and have no record of the outcome.
-            Ok(None) => LocalExecutionState::NoLocalRecord,
-            // DB unreadable: stay conservative — treat as unconfirmed; the
-            // worker's retry/backoff covers transient DB faults.
-            Err(_) => LocalExecutionState::SubmittedUnconfirmed,
-        }
+        )
     }
 
     async fn finish_order(&self, signature: &str, filled: bool, detail: &str) {
@@ -226,16 +229,23 @@ impl DbIntentSink {
 #[async_trait]
 impl IntentSink for DbIntentSink {
     async fn record(&self, rec: IntentRecord) {
-        if let Err(e) = IntentRepo::new(self.db.clone()).record(&rec).await {
+        if let Err(e) = deployment_scoped(&self.db, async {
+            IntentRepo::new(self.db.clone()).record(&rec).await
+        })
+        .await
+        {
             warn!(intent = %rec.intent_id, error = %e, "intent journal record failed");
             Self::meter_error("record");
         }
     }
 
     async fn link(&self, intent_id: &str, signature: &str) {
-        if let Err(e) = IntentRepo::new(self.db.clone())
-            .link(intent_id, signature)
-            .await
+        if let Err(e) = deployment_scoped(&self.db, async {
+            IntentRepo::new(self.db.clone())
+                .link(intent_id, signature)
+                .await
+        })
+        .await
         {
             warn!(%intent_id, error = %e, "intent journal link failed");
             Self::meter_error("link");
@@ -243,10 +253,62 @@ impl IntentSink for DbIntentSink {
     }
 
     async fn abandon(&self, intent_id: &str) {
-        if let Err(e) = IntentRepo::new(self.db.clone()).abandon(intent_id).await {
+        if let Err(e) = deployment_scoped(&self.db, async {
+            IntentRepo::new(self.db.clone()).abandon(intent_id).await
+        })
+        .await
+        {
             warn!(%intent_id, error = %e, "intent journal abandon failed");
             Self::meter_error("abandon");
         }
+    }
+}
+
+/// Legacy journals belong to the deployment organization, never an unbound pool.
+async fn deployment_id(db: &Database) -> Result<uuid::Uuid, bot_core::db::TimedDbError> {
+    let system = db.system_pool().ok_or_else(|| {
+        bot_core::db::TimedDbError::Error(sqlx::Error::Protocol(
+            "legacy journal requires RLS-enabled database pools".into(),
+        ))
+    })?;
+    let org = with_system_scope(
+        system,
+        "resolve deployment organization for legacy reconciliation",
+        |connection| {
+            Box::pin(async move {
+                sqlx::query_scalar("SELECT public.deployment_organization_id()")
+                    .fetch_one(connection)
+                    .await
+            })
+        },
+    )
+    .await
+    .map_err(bot_core::db::TimedDbError::Error)?;
+    if current_request_tenant().is_some_and(|bound| bound != org) {
+        return Err(bot_core::db::TimedDbError::Error(sqlx::Error::Protocol(
+            "conflicting deployment tenant".into(),
+        )));
+    }
+    Ok(org)
+}
+
+async fn deployment_scoped<T>(
+    db: &Database,
+    operation: impl std::future::Future<Output = Result<T, bot_core::db::TimedDbError>>,
+) -> Result<T, bot_core::db::TimedDbError> {
+    let org = deployment_id(db).await?;
+    scope_tenant_context(org, operation).await
+}
+
+async fn deployment_recon_scoped(
+    db: &Database,
+    operation: impl std::future::Future<Output = ReconVerdict>,
+) -> ReconVerdict {
+    match deployment_id(db).await {
+        Ok(org) => scope_tenant_context(org, operation).await,
+        Err(error) => ReconVerdict::Retry {
+            reason: format!("reconciliation tenant scope unavailable: {error}"),
+        },
     }
 }
 
@@ -281,7 +343,7 @@ impl DbCopyStore {
 #[async_trait]
 impl module_copy::recovery::CopyStore for DbCopyStore {
     async fn upsert_leader(&self, rec: bot_core::db::copy::LeaderRecord) -> bool {
-        match self.repo().upsert_leader(&rec).await {
+        match deployment_scoped(&self.db, async { self.repo().upsert_leader(&rec).await }).await {
             Ok(()) => true,
             Err(e) => {
                 warn!(leader = %rec.address, error = %e, "copy leader upsert failed");
@@ -292,7 +354,11 @@ impl module_copy::recovery::CopyStore for DbCopyStore {
     }
 
     async fn append_leader_event(&self, rec: bot_core::db::copy::LeaderEventRecord) -> bool {
-        match self.repo().append_leader_event(&rec).await {
+        match deployment_scoped(&self.db, async {
+            self.repo().append_leader_event(&rec).await
+        })
+        .await
+        {
             Ok(()) => true,
             Err(e) => {
                 warn!(leader = %rec.address, event = %rec.event, error = %e, "copy leader event append failed");
@@ -303,7 +369,7 @@ impl module_copy::recovery::CopyStore for DbCopyStore {
     }
 
     async fn load_leaders(&self) -> Option<Vec<bot_core::db::copy::LeaderRecord>> {
-        match self.repo().list_leaders().await {
+        match deployment_scoped(&self.db, async { self.repo().list_leaders().await }).await {
             Ok(rows) => Some(rows),
             Err(e) => {
                 warn!(error = %e, "copy leader load failed");
@@ -314,7 +380,7 @@ impl module_copy::recovery::CopyStore for DbCopyStore {
     }
 
     async fn record_event(&self, rec: bot_core::db::copy::CopyEventRecord) -> bool {
-        match self.repo().record_event(&rec).await {
+        match deployment_scoped(&self.db, async { self.repo().record_event(&rec).await }).await {
             Ok(()) => true,
             Err(e) => {
                 warn!(event = %rec.event_id, error = %e, "copy event journal failed");
@@ -329,10 +395,12 @@ impl module_copy::recovery::CopyStore for DbCopyStore {
         since: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Option<Vec<bot_core::db::copy::CopyEventRecord>> {
-        match self
-            .repo()
-            .events_since(since, limit.min(i64::MAX as usize) as i64)
-            .await
+        match deployment_scoped(&self.db, async {
+            self.repo()
+                .events_since(since, limit.min(i64::MAX as usize) as i64)
+                .await
+        })
+        .await
         {
             Ok(rows) => Some(rows),
             Err(e) => {
@@ -344,7 +412,7 @@ impl module_copy::recovery::CopyStore for DbCopyStore {
     }
 
     async fn upsert_link(&self, rec: bot_core::db::copy::CopyLinkRecord) -> bool {
-        match self.repo().upsert_link(&rec).await {
+        match deployment_scoped(&self.db, async { self.repo().upsert_link(&rec).await }).await {
             Ok(()) => true,
             Err(e) => {
                 warn!(position = %rec.position_id, error = %e, "copy link upsert failed");
@@ -355,7 +423,7 @@ impl module_copy::recovery::CopyStore for DbCopyStore {
     }
 
     async fn open_links(&self) -> Option<Vec<bot_core::db::copy::CopyLinkRecord>> {
-        match self.repo().open_links().await {
+        match deployment_scoped(&self.db, async { self.repo().open_links().await }).await {
             Ok(rows) => Some(rows),
             Err(e) => {
                 warn!(error = %e, "copy link read failed");
@@ -372,10 +440,12 @@ impl module_copy::recovery::CopyStore for DbCopyStore {
         exit_event_id: Option<&str>,
         note: Option<&str>,
     ) -> bool {
-        match self
-            .repo()
-            .close_link(position_id, status, exit_event_id, note)
-            .await
+        match deployment_scoped(&self.db, async {
+            self.repo()
+                .close_link(position_id, status, exit_event_id, note)
+                .await
+        })
+        .await
         {
             Ok(changed) => changed,
             Err(e) => {
@@ -419,7 +489,7 @@ impl DbPolyStore {
 #[async_trait]
 impl module_polymarket::store::PolyStore for DbPolyStore {
     async fn record_signal(&self, rec: bot_core::db::polymarket::PolySignalRecord) -> bool {
-        match self.repo().record_signal(&rec).await {
+        match deployment_scoped(&self.db, async { self.repo().record_signal(&rec).await }).await {
             Ok(()) => true,
             Err(e) => {
                 warn!(signal = %rec.signal_id, error = %e, "poly signal journal failed");
@@ -430,7 +500,7 @@ impl module_polymarket::store::PolyStore for DbPolyStore {
     }
 
     async fn upsert_order(&self, rec: bot_core::db::polymarket::PolyOrderRecord) -> bool {
-        match self.repo().upsert_order(&rec).await {
+        match deployment_scoped(&self.db, async { self.repo().upsert_order(&rec).await }).await {
             Ok(()) => true,
             Err(e) => {
                 warn!(order = %rec.venue_order_id, error = %e, "poly order journal failed");
@@ -441,7 +511,7 @@ impl module_polymarket::store::PolyStore for DbPolyStore {
     }
 
     async fn open_orders(&self) -> Option<Vec<bot_core::db::polymarket::PolyOrderRecord>> {
-        match self.repo().open_orders().await {
+        match deployment_scoped(&self.db, async { self.repo().open_orders().await }).await {
             Ok(rows) => Some(rows),
             Err(e) => {
                 warn!(error = %e, "poly open-order journal read failed");
@@ -452,7 +522,7 @@ impl module_polymarket::store::PolyStore for DbPolyStore {
     }
 
     async fn record_fill(&self, rec: bot_core::db::polymarket::PolyFillRecord) -> Option<bool> {
-        match self.repo().record_fill(&rec).await {
+        match deployment_scoped(&self.db, async { self.repo().record_fill(&rec).await }).await {
             Ok(inserted) => Some(inserted),
             Err(e) => {
                 warn!(fill = %rec.fill_id, error = %e, "poly fill journal failed");
@@ -463,7 +533,7 @@ impl module_polymarket::store::PolyStore for DbPolyStore {
     }
 
     async fn append_finding(&self, rec: bot_core::db::polymarket::PolyReconFindingRecord) -> bool {
-        match self.repo().append_finding(&rec).await {
+        match deployment_scoped(&self.db, async { self.repo().append_finding(&rec).await }).await {
             Ok(()) => true,
             Err(e) => {
                 warn!(kind = %rec.kind, error = %e, "poly recon finding journal failed");
@@ -496,6 +566,7 @@ impl TruthSource for IntentTruth {
     }
 
     async fn resolve(&self, subject: &str) -> ReconVerdict {
+        deployment_recon_scoped(&self.db, async {
         match IntentRepo::new(self.db.clone()).get(subject).await {
             Err(e) => {
                 meter_read_error("postgres");
@@ -532,6 +603,8 @@ impl TruthSource for IntentTruth {
                 }
             },
         }
+
+        }).await
     }
 }
 
@@ -542,107 +615,123 @@ impl TruthSource for SolanaTxTruth {
     }
 
     async fn resolve(&self, subject: &str) -> ReconVerdict {
-        let Ok(signature) = Signature::from_str(subject) else {
-            return ReconVerdict::GiveUp {
-                reason: "subject is not a valid signature".into(),
+        deployment_recon_scoped(&self.db, async {
+            let Ok(signature) = Signature::from_str(subject) else {
+                return ReconVerdict::GiveUp {
+                    reason: "subject is not a valid signature".into(),
+                };
             };
-        };
-        let tx_repo = TransactionRepo::new(self.db.clone());
+            let tx_repo = TransactionRepo::new(self.db.clone());
 
-        // ---- external observation -----------------------------------------
-        let probe = self.probe(&signature).await;
-        let external = match &probe {
-            Ok(ConfirmOutcome::Confirmed { .. }) => {
-                ExternalState::Observed(ExternalExecutionState::Succeeded)
-            }
-            Ok(ConfirmOutcome::Failed { .. }) => {
-                ExternalState::Observed(ExternalExecutionState::FailedOnExternal)
-            }
-            // The blockhash outlived its validity window with no trace of the
-            // signature: the transaction can never land — a definitive
-            // "will not fill", handled exactly like a chain failure.
-            Ok(ConfirmOutcome::Expired { .. }) => {
-                ExternalState::Observed(ExternalExecutionState::FailedOnExternal)
-            }
-            // Not visible yet: could be pending OR never-landed; the worker's
-            // attempt budget decides when "still nothing" becomes a park.
-            Ok(ConfirmOutcome::Timeout) => ExternalState::Observed(ExternalExecutionState::Pending),
-            Err(reason) => {
-                meter_read_error("solana_rpc");
-                ExternalState::Unavailable {
-                    reason: reason.clone(),
+            // ---- external observation -----------------------------------------
+            let probe = self.probe(&signature).await;
+            let external = match &probe {
+                Ok(ConfirmOutcome::Confirmed { .. }) => {
+                    ExternalState::Observed(ExternalExecutionState::Succeeded)
                 }
-            }
-        };
+                Ok(ConfirmOutcome::Failed { .. }) => {
+                    ExternalState::Observed(ExternalExecutionState::FailedOnExternal)
+                }
+                // The blockhash outlived its validity window with no trace of the
+                // signature: the transaction can never land — a definitive
+                // "will not fill", handled exactly like a chain failure.
+                Ok(ConfirmOutcome::Expired { .. }) => {
+                    ExternalState::Observed(ExternalExecutionState::FailedOnExternal)
+                }
+                // Not visible yet: could be pending OR never-landed; the worker's
+                // attempt budget decides when "still nothing" becomes a park.
+                Ok(ConfirmOutcome::Timeout) => {
+                    ExternalState::Observed(ExternalExecutionState::Pending)
+                }
+                Err(reason) => {
+                    meter_read_error("solana_rpc");
+                    ExternalState::Unavailable {
+                        reason: reason.clone(),
+                    }
+                }
+            };
 
-        let local = self.local_state(subject).await;
-        let outcome = classify_execution(local, external.clone());
-        meter_outcome("transaction", &outcome);
+            let local = match self.local_state(subject).await {
+                Ok(local) => local,
+                Err(error) => {
+                    return ReconVerdict::Retry {
+                        reason: format!("transaction state unavailable: {error}"),
+                    }
+                }
+            };
+            let outcome = classify_execution(local, external.clone());
+            meter_outcome("transaction", &outcome);
 
-        // ---- act on the external truth -------------------------------------
-        match external {
-            ExternalState::Observed(ExternalExecutionState::Succeeded) => {
-                let (slot, detail) = match &probe {
-                    Ok(ConfirmOutcome::Confirmed { slot, fee, .. }) => (
-                        Some(*slot as i64),
-                        format!("confirmed slot={slot} fee={fee}"),
-                    ),
-                    _ => (None, "confirmed on chain".into()),
-                };
-                if let Err(e) = tx_repo.set_status(subject, "confirmed", slot, None).await {
-                    debug!(error = %e, "tx status persistence failed");
+            // ---- act on the external truth -------------------------------------
+            match external {
+                ExternalState::Observed(ExternalExecutionState::Succeeded) => {
+                    let (slot, detail) = match &probe {
+                        Ok(ConfirmOutcome::Confirmed { slot, fee, .. }) => (
+                            Some(*slot as i64),
+                            format!("confirmed slot={slot} fee={fee}"),
+                        ),
+                        _ => (None, "confirmed on chain".into()),
+                    };
+                    if let Err(e) = tx_repo.set_status(subject, "confirmed", slot, None).await {
+                        return ReconVerdict::Retry {
+                            reason: format!("transaction status persistence failed: {e}"),
+                        };
+                    }
+                    self.finish_order(subject, true, &detail).await;
+                    ReconVerdict::Resolved { status: detail }
                 }
-                self.finish_order(subject, true, &detail).await;
-                ReconVerdict::Resolved { status: detail }
-            }
-            ExternalState::Observed(ExternalExecutionState::FailedOnExternal) => {
-                if local == LocalExecutionState::RecordedConfirmed {
-                    // Books say success, chain says failure: fill effects were
-                    // already applied — mechanical correction is unsafe (§Y).
-                    let reason = format!(
-                        "transaction {subject} recorded CONFIRMED locally but failed on chain"
-                    );
-                    self.flag_divergence(
-                        "recon_conflict",
-                        &reason,
-                        serde_json::json!({ "signature": subject }),
-                    )
-                    .await;
-                    return ReconVerdict::GiveUp { reason };
-                }
-                let err = match &probe {
-                    Ok(ConfirmOutcome::Failed { error, .. }) => error.clone(),
-                    Ok(ConfirmOutcome::Expired {
-                        last_valid_block_height,
-                        block_height,
-                    }) => format!(
-                        "blockhash expired: block height {block_height} passed last valid \
+                ExternalState::Observed(ExternalExecutionState::FailedOnExternal) => {
+                    if local == LocalExecutionState::RecordedConfirmed {
+                        // Books say success, chain says failure: fill effects were
+                        // already applied — mechanical correction is unsafe (§Y).
+                        let reason = format!(
+                            "transaction {subject} recorded CONFIRMED locally but failed on chain"
+                        );
+                        self.flag_divergence(
+                            "recon_conflict",
+                            &reason,
+                            serde_json::json!({ "signature": subject }),
+                        )
+                        .await;
+                        return ReconVerdict::GiveUp { reason };
+                    }
+                    let err = match &probe {
+                        Ok(ConfirmOutcome::Failed { error, .. }) => error.clone(),
+                        Ok(ConfirmOutcome::Expired {
+                            last_valid_block_height,
+                            block_height,
+                        }) => format!(
+                            "blockhash expired: block height {block_height} passed last valid \
                          {last_valid_block_height} with no trace of the signature"
-                    ),
-                    _ => "failed on chain".into(),
-                };
-                if let Err(e) = tx_repo
-                    .set_status(subject, "failed", None, Some(&err))
-                    .await
-                {
-                    debug!(error = %e, "tx status persistence failed");
+                        ),
+                        _ => "failed on chain".into(),
+                    };
+                    if let Err(e) = tx_repo
+                        .set_status(subject, "failed", None, Some(&err))
+                        .await
+                    {
+                        return ReconVerdict::Retry {
+                            reason: format!("transaction status persistence failed: {e}"),
+                        };
+                    }
+                    self.finish_order(subject, false, &format!("failed on chain: {err}"))
+                        .await;
+                    ReconVerdict::Resolved {
+                        status: "failed".into(),
+                    }
                 }
-                self.finish_order(subject, false, &format!("failed on chain: {err}"))
-                    .await;
-                ReconVerdict::Resolved {
-                    status: "failed".into(),
-                }
+                ExternalState::Observed(ExternalExecutionState::Pending) => ReconVerdict::Retry {
+                    reason: "signature not resolved on chain yet".into(),
+                },
+                ExternalState::Observed(ExternalExecutionState::NotFound) => ReconVerdict::Retry {
+                    reason: "no external trace yet".into(),
+                },
+                ExternalState::Unavailable { reason } => ReconVerdict::Retry {
+                    reason: format!("external state unavailable: {reason}"),
+                },
             }
-            ExternalState::Observed(ExternalExecutionState::Pending) => ReconVerdict::Retry {
-                reason: "signature not resolved on chain yet".into(),
-            },
-            ExternalState::Observed(ExternalExecutionState::NotFound) => ReconVerdict::Retry {
-                reason: "no external trace yet".into(),
-            },
-            ExternalState::Unavailable { reason } => ReconVerdict::Retry {
-                reason: format!("external state unavailable: {reason}"),
-            },
-        }
+        })
+        .await
     }
 }
 
@@ -704,6 +793,7 @@ impl TruthSource for PolymarketOrderTruth {
     }
 
     async fn resolve(&self, subject: &str) -> ReconVerdict {
+        deployment_recon_scoped(&self.db, async {
         let bot = self.bot.lock().await;
         let response = match bot.order_status(subject).await {
             Ok(Some(v)) => v,
@@ -846,6 +936,8 @@ impl TruthSource for PolymarketOrderTruth {
                 .await;
         }
         verdict
+
+        }).await
     }
 }
 
@@ -886,75 +978,79 @@ impl TruthSource for SolanaPositionTruth {
     }
 
     async fn resolve(&self, subject: &str) -> ReconVerdict {
-        let position = match self.state.position(subject).await {
-            Some(p) => p,
-            None => match PositionRepo::new(self.db.clone()).get(subject).await {
-                Ok(Some(p)) => p,
-                _ => {
-                    return ReconVerdict::GiveUp {
-                        reason: "position does not exist".into(),
+        deployment_recon_scoped(&self.db, async {
+            let position = match self.state.position(subject).await {
+                Some(p) => p,
+                None => match PositionRepo::new(self.db.clone()).get(subject).await {
+                    Ok(Some(p)) => p,
+                    _ => {
+                        return ReconVerdict::GiveUp {
+                            reason: "position does not exist".into(),
+                        }
+                    }
+                },
+            };
+            if position.mode != ExecutionMode::Live {
+                return ReconVerdict::Resolved {
+                    status: format!("{} positions have no chain truth", position.mode.as_str()),
+                };
+            }
+            let Ok(mint) = solana_sdk::pubkey::Pubkey::from_str(&position.symbol) else {
+                return ReconVerdict::GiveUp {
+                    reason: "symbol is not a mint address".into(),
+                };
+            };
+            let Ok(owner) = solana_sdk::pubkey::Pubkey::from_str(&self.wallet) else {
+                return ReconVerdict::Retry {
+                    reason: "wallet pubkey unavailable".into(),
+                };
+            };
+
+            // ---- external observation (§D/§O: aggregated, identity-validated;
+            // Err = unreadable, NOT zero) ----------------------------------------
+            let external = match token_balances_for_owner(&self.rpc, &owner, &mint).await {
+                Ok(r) => ExternalState::Observed(BalanceObservation {
+                    raw_total: r.raw_total,
+                    ui_total: r.ui_total,
+                    decimals: r.decimals,
+                    accounts: r.accounts,
+                }),
+                Err(e) => {
+                    meter_read_error("solana_position");
+                    ExternalState::Unavailable {
+                        reason: e.to_string(),
                     }
                 }
-            },
-        };
-        if position.mode != ExecutionMode::Live {
-            return ReconVerdict::Resolved {
-                status: format!("{} positions have no chain truth", position.mode.as_str()),
             };
-        }
-        let Ok(mint) = solana_sdk::pubkey::Pubkey::from_str(&position.symbol) else {
-            return ReconVerdict::GiveUp {
-                reason: "symbol is not a mint address".into(),
-            };
-        };
-        let Ok(owner) = solana_sdk::pubkey::Pubkey::from_str(&self.wallet) else {
-            return ReconVerdict::Retry {
-                reason: "wallet pubkey unavailable".into(),
-            };
-        };
 
-        // ---- external observation (§D/§O: aggregated, identity-validated;
-        // Err = unreadable, NOT zero) ----------------------------------------
-        let external = match token_balances_for_owner(&self.rpc, &owner, &mint).await {
-            Ok(r) => ExternalState::Observed(BalanceObservation {
-                raw_total: r.raw_total,
-                ui_total: r.ui_total,
-                decimals: r.decimals,
-                accounts: r.accounts,
-            }),
-            Err(e) => {
-                meter_read_error("solana_position");
-                ExternalState::Unavailable {
-                    reason: e.to_string(),
-                }
-            }
-        };
+            // ---- local snapshot --------------------------------------------------
+            // Money in flight for this position? The entry signature's claim is
+            // the durable marker; while it is active, divergences are expected.
+            let unresolved = match &position.entry_signature {
+                Some(sig) if !sig.is_empty() => ReconRepo::new(self.db.clone())
+                    .is_active("transaction", sig)
+                    .await
+                    .unwrap_or(false),
+                _ => false,
+            };
+            let fills = fills_for_position(&self.db, subject).await;
+            let snapshot = PositionSnapshot {
+                id: subject.to_string(),
+                qty: position.qty,
+                open: matches!(
+                    position.status,
+                    PositionStatus::Open | PositionStatus::Closing
+                ),
+                has_unresolved_execution: unresolved,
+                fills: fills.clone(),
+            };
 
-        // ---- local snapshot --------------------------------------------------
-        // Money in flight for this position? The entry signature's claim is
-        // the durable marker; while it is active, divergences are expected.
-        let unresolved = match &position.entry_signature {
-            Some(sig) if !sig.is_empty() => ReconRepo::new(self.db.clone())
-                .is_active("transaction", sig)
+            let outcome = compare_position(&snapshot, &external, QuantityTolerance::default());
+            meter_outcome("position", &outcome);
+            settle_position_outcome(&self.state, &self.db, subject, &position, outcome, &fills)
                 .await
-                .unwrap_or(false),
-            _ => false,
-        };
-        let fills = fills_for_position(&self.db, subject).await;
-        let snapshot = PositionSnapshot {
-            id: subject.to_string(),
-            qty: position.qty,
-            open: matches!(
-                position.status,
-                PositionStatus::Open | PositionStatus::Closing
-            ),
-            has_unresolved_execution: unresolved,
-            fills: fills.clone(),
-        };
-
-        let outcome = compare_position(&snapshot, &external, QuantityTolerance::default());
-        meter_outcome("position", &outcome);
-        settle_position_outcome(&self.state, &self.db, subject, &position, outcome, &fills).await
+        })
+        .await
     }
 }
 
@@ -1243,82 +1339,87 @@ impl TruthSource for PolymarketPositionTruth {
     }
 
     async fn resolve(&self, subject: &str) -> ReconVerdict {
-        let position = match self.state.position(subject).await {
-            Some(p) => p,
-            None => match PositionRepo::new(self.db.clone()).get(subject).await {
-                Ok(Some(p)) => p,
-                _ => {
-                    return ReconVerdict::GiveUp {
-                        reason: "position does not exist".into(),
+        deployment_recon_scoped(&self.db, async {
+            let position = match self.state.position(subject).await {
+                Some(p) => p,
+                None => match PositionRepo::new(self.db.clone()).get(subject).await {
+                    Ok(Some(p)) => p,
+                    _ => {
+                        return ReconVerdict::GiveUp {
+                            reason: "position does not exist".into(),
+                        }
                     }
-                }
-            },
-        };
-        if position.mode != ExecutionMode::Live {
-            return ReconVerdict::Resolved {
-                status: format!("{} positions have no chain truth", position.mode.as_str()),
+                },
             };
-        }
-        if !matches!(position.venue, bot_core::models::Venue::PolymarketClob) {
-            return ReconVerdict::GiveUp {
-                reason: format!("position {subject} is not a Polymarket position"),
-            };
-        }
-
-        // ---- external observation (§O: Err = unreadable, NOT zero) ----------
-        let observed = {
-            let bot = self.bot.lock().await;
-            bot.ctf_balance(&position.symbol).await
-        };
-        let external = match observed {
-            Ok(Some(raw)) => ExternalState::Observed(ctf_balance_observation(raw)),
-            Ok(None) => {
-                meter_outcome(
-                    "polymarket_position",
-                    &ReconOutcome::ExternalStateUnavailable {
-                        reason: String::new(),
-                    },
-                );
+            if position.mode != ExecutionMode::Live {
                 return ReconVerdict::Resolved {
-                    status: "unverifiable: CTF reader not configured ([polymarket].ctf_rpc_url)"
-                        .into(),
+                    status: format!("{} positions have no chain truth", position.mode.as_str()),
                 };
             }
-            Err(e) => {
-                meter_read_error("polygon_ctf");
-                ExternalState::Unavailable {
-                    reason: e.to_string(),
-                }
+            if !matches!(position.venue, bot_core::models::Venue::PolymarketClob) {
+                return ReconVerdict::GiveUp {
+                    reason: format!("position {subject} is not a Polymarket position"),
+                };
             }
-        };
 
-        // ---- local snapshot --------------------------------------------------
-        // Money in flight for this token? Any non-terminal OMS order of the
-        // Polymarket module on the same outcome token (resting, partially
-        // matched, or ambiguous) — while one exists, divergences are expected.
-        let unresolved = match self.state.orders() {
-            Some(mgr) => mgr.list(1000).await.iter().any(|o| {
-                o.module == bot_core::models::BotModule::Polymarket
-                    && o.symbol == position.symbol
-                    && !o.status.is_terminal()
-            }),
-            None => false,
-        };
-        let fills = fills_for_position(&self.db, subject).await;
-        let snapshot = PositionSnapshot {
-            id: subject.to_string(),
-            qty: position.qty,
-            open: matches!(
-                position.status,
-                PositionStatus::Open | PositionStatus::Closing
-            ),
-            has_unresolved_execution: unresolved,
-            fills: fills.clone(),
-        };
+            // ---- external observation (§O: Err = unreadable, NOT zero) ----------
+            let observed = {
+                let bot = self.bot.lock().await;
+                bot.ctf_balance(&position.symbol).await
+            };
+            let external = match observed {
+                Ok(Some(raw)) => ExternalState::Observed(ctf_balance_observation(raw)),
+                Ok(None) => {
+                    meter_outcome(
+                        "polymarket_position",
+                        &ReconOutcome::ExternalStateUnavailable {
+                            reason: String::new(),
+                        },
+                    );
+                    return ReconVerdict::Resolved {
+                        status:
+                            "unverifiable: CTF reader not configured ([polymarket].ctf_rpc_url)"
+                                .into(),
+                    };
+                }
+                Err(e) => {
+                    meter_read_error("polygon_ctf");
+                    ExternalState::Unavailable {
+                        reason: e.to_string(),
+                    }
+                }
+            };
 
-        let outcome = compare_position(&snapshot, &external, QuantityTolerance::default());
-        meter_outcome("polymarket_position", &outcome);
-        settle_position_outcome(&self.state, &self.db, subject, &position, outcome, &fills).await
+            // ---- local snapshot --------------------------------------------------
+            // Money in flight for this token? Any non-terminal OMS order of the
+            // Polymarket module on the same outcome token (resting, partially
+            // matched, or ambiguous) — while one exists, divergences are expected.
+            let unresolved = match self.state.orders() {
+                Some(mgr) => mgr.list(1000).await.iter().any(|o| {
+                    o.module == bot_core::models::BotModule::Polymarket
+                        && o.symbol == position.symbol
+                        && !o.status.is_terminal()
+                }),
+                None => false,
+            };
+            let fills = fills_for_position(&self.db, subject).await;
+            let snapshot = PositionSnapshot {
+                id: subject.to_string(),
+                qty: position.qty,
+                open: matches!(
+                    position.status,
+                    PositionStatus::Open | PositionStatus::Closing
+                ),
+                has_unresolved_execution: unresolved,
+                fills: fills.clone(),
+            };
+
+            let outcome = compare_position(&snapshot, &external, QuantityTolerance::default());
+            meter_outcome("polymarket_position", &outcome);
+            settle_position_outcome(&self.state, &self.db, subject, &position, outcome, &fills)
+                .await
+        })
+        .await
     }
 }
 
