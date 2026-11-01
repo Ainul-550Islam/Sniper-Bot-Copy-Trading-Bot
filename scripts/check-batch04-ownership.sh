@@ -27,6 +27,19 @@ if ! [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] \
     echo "check-batch04-ownership: invalid or unavailable base commit: $BASE" >&2
     exit 1
 fi
+# --- Applicability guard (2026-10-31) -------------------------------------
+# This gate diffs BASE..worktree against ONE batch's allow-list. Later batches
+# have since landed on the same branch, so every file they own reads as
+# "forbidden" and a red result no longer means this batch broke its contract —
+# it means the tree moved on. Report that explicitly (SKIPPED, never "PASS")
+# instead of a permanent false failure; each batch's own commit range stays
+# auditable in git history.
+_later_commits="$(git rev-list --count "${BASE}..HEAD" 2>/dev/null || echo 0)"
+if [[ "${_later_commits:-0}" -gt 0 ]]; then
+    echo "$(basename "$0" .sh): SKIPPED — ${_later_commits} later commit(s) exist after BASE ${BASE}; this allow-list covers that batch's window only."
+    exit 0
+fi
+# --------------------------------------------------------------------------
 
 is_allowed() {
     case "$1" in

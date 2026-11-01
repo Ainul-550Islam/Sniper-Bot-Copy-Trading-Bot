@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # helm_image_contract.sh — regression test for the Helm immutable-image contract.
 #
-# Static checks only (helm is not installed in every environment, so `helm
-# template` is NOT_RUN here and is listed separately in the release evidence).
+# Static checks always run. When the `helm` binary is present the test ALSO
+# renders the chart — lint + template with a digest, and template with the empty
+# default to prove the chart fails closed. Where helm is absent those two steps
+# report NOT_RUN instead of pretending to pass.
 #   1. values.yaml has an empty image.digest and no mutable image.tag key;
 #   2. the sniper-suite.image helper enforces sha256:<64 lowercase hex> and
 #      fails the render when the digest is missing or malformed;
@@ -33,4 +35,20 @@ if grep -rn '\.Values\.image\.tag' "$CHART/templates" >/dev/null 2>&1; then
   fail "a template still builds an image from .Values.image.tag"
 fi
 
-echo "[helm-image-contract] PASS — digest-only image contract holds (helm template: NOT_RUN, helm not installed)"
+if command -v helm >/dev/null 2>&1; then
+    # A syntactically valid digest that is NOT a published image: it only
+    # exercises the render path, and is never referenced as a real image.
+    TEST_DIGEST="sha256:$(printf 'sniper-suite-chart-render-test' | sha256sum | cut -d' ' -f1)"
+    helm lint "$CHART" --set image.digest="$TEST_DIGEST" >/dev/null \
+        || fail "helm lint failed with a valid digest"
+    rendered="$(helm template sniper "$CHART" --set image.digest="$TEST_DIGEST" --set migrationJob.enabled=true)"
+    grep -qF "image: \"sniper-suite@$TEST_DIGEST\"" <<<"$rendered" || fail "deployment did not render the digest-pinned image"
+    [ "$(grep -cF "sniper-suite@$TEST_DIGEST" <<<"$rendered")" -ge 2 ] \
+        || fail "migration Job did not render the digest-pinned image"
+    if helm template sniper "$CHART" >/dev/null 2>&1; then
+        fail "chart rendered with an EMPTY image.digest — the fail-closed contract is broken"
+    fi
+    echo "[helm-image-contract] PASS — digest-only image contract holds (helm $(helm version --short 2>/dev/null): lint PASS, template PASS, empty-digest render REFUSED)"
+else
+    echo "[helm-image-contract] PASS — digest-only image contract holds (helm template: NOT_RUN, helm not installed)"
+fi

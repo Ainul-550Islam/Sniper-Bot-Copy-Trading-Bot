@@ -1029,6 +1029,34 @@ pub struct PolymarketConfig {
     pub use_user_websocket: bool,
     /// Cancel every resting order when the module shuts down.
     pub cancel_on_shutdown: bool,
+    /// Wallets whose Polymarket trades are mirrored (copy-follow).
+    ///
+    /// Empty (the default) means the copy engine is never constructed, so no
+    /// leader feed is polled and no order is ever produced from one.
+    #[serde(default)]
+    pub copy_followed_wallets: Vec<String>,
+    /// How often the leader-trade feed is polled for each followed wallet.
+    #[serde(default = "default_copy_poll_secs")]
+    pub copy_poll_interval_secs: u64,
+    /// Copy sizing: mirror the leader's USDC stake times this multiplier
+    /// (1.0 = same size). The result is still clamped by
+    /// `copy_min_stake_usd` / `copy_max_stake_usd`.
+    #[serde(default = "default_copy_size_multiplier")]
+    pub copy_size_multiplier: f64,
+    /// Floor on the USDC stake of ONE mirrored copy trade.
+    #[serde(default = "default_copy_min_stake_usd")]
+    pub copy_min_stake_usd: f64,
+    /// Ceiling on the USDC stake of ONE mirrored copy trade.
+    #[serde(default = "default_copy_max_stake_usd")]
+    pub copy_max_stake_usd: f64,
+    /// Never pay more than this price for a mirrored outcome token (the
+    /// chase cap: leaders moving a thin book must not drag followers into
+    /// 0.98s).
+    #[serde(default = "default_copy_max_price")]
+    pub copy_max_price: f64,
+    /// Slippage tolerance over the leader's fill price, in basis points.
+    #[serde(default = "default_copy_slippage_bps")]
+    pub copy_slippage_tolerance_bps: u32,
 }
 
 impl Default for PolymarketConfig {
@@ -1072,6 +1100,13 @@ impl Default for PolymarketConfig {
             reconcile_cancel_orphans: false,
             use_user_websocket: true,
             cancel_on_shutdown: true,
+            copy_followed_wallets: Vec::new(),
+            copy_poll_interval_secs: default_copy_poll_secs(),
+            copy_size_multiplier: default_copy_size_multiplier(),
+            copy_min_stake_usd: default_copy_min_stake_usd(),
+            copy_max_stake_usd: default_copy_max_stake_usd(),
+            copy_max_price: default_copy_max_price(),
+            copy_slippage_tolerance_bps: default_copy_slippage_bps(),
         }
     }
 }
@@ -3689,6 +3724,36 @@ pub fn default_config_toml() -> String {
     )
 }
 
+/// Default leader-trade poll interval for the copy-follow feed (seconds).
+fn default_copy_poll_secs() -> u64 {
+    15
+}
+
+/// Default multiplier applied to a leader's stake when mirroring.
+fn default_copy_size_multiplier() -> f64 {
+    1.0
+}
+
+/// Default floor for one mirrored copy trade (USDC).
+fn default_copy_min_stake_usd() -> f64 {
+    1.0
+}
+
+/// Default ceiling for one mirrored copy trade (USDC).
+fn default_copy_max_stake_usd() -> f64 {
+    25.0
+}
+
+/// Default chase cap for mirrored copy entries (probability units).
+fn default_copy_max_price() -> f64 {
+    0.95
+}
+
+/// Default slippage tolerance over the leader's fill for copy entries (bps).
+fn default_copy_slippage_bps() -> u32 {
+    300
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3883,6 +3948,15 @@ priority_fee_micro_lamports = 250000
             "cancel_on_shutdown",
             "reconcile_interval_secs",
             "reconcile_cancel_orphans",
+            // Copy-follow (`[polymarket]`): documented so an operator cannot
+            // enable the engine without seeing every bound it applies.
+            "copy_followed_wallets",
+            "copy_poll_interval_secs",
+            "copy_size_multiplier",
+            "copy_min_stake_usd",
+            "copy_max_stake_usd",
+            "copy_max_price",
+            "copy_slippage_tolerance_bps",
             // TASK 5 `[global_risk]` keys.
             "reference_asset",
             "capital_base_ref",

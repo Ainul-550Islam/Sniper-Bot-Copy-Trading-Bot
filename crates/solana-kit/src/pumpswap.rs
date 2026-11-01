@@ -983,8 +983,8 @@ pub fn plan_sell(
 /// Two `memcmp` filters do the work server-side.
 pub async fn find_pools_for_mint(rpc: &Rpc, base_mint: &Pubkey) -> BotResult<Vec<Pubkey>> {
     use solana_account_decoder::UiAccountEncoding;
-    use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
-    use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
+    use solana_rpc_client_api::config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
+    use solana_rpc_client_api::filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
 
     let config = RpcProgramAccountsConfig {
         filters: Some(vec![

@@ -234,7 +234,7 @@ pub fn order_digest(
 /// Derive the 20-byte Ethereum address for a signing key (lowercase, `0x`).
 pub fn address_from_signing_key(key: &SigningKey) -> String {
     let verifying = VerifyingKey::from(key);
-    let point = verifying.to_encoded_point(false); // uncompressed: 0x04 || X || Y
+    let point = verifying.to_sec1_point(false); // uncompressed: 0x04 || X || Y
     let hash = keccak256(&point.as_bytes()[1..]); // drop the 0x04 prefix
     format!("0x{}", hex::encode(&hash[12..]))
 }
@@ -242,9 +242,9 @@ pub fn address_from_signing_key(key: &SigningKey) -> String {
 /// Sign a 32-byte digest, returning the 65-byte `r || s || v` signature
 /// (`v` in {27, 28}), with `s` normalised to the low half of the curve order.
 pub fn sign_digest(key: &SigningKey, digest: &[u8; 32]) -> PolyResult<[u8; 65]> {
-    let (sig, recid): (Signature, RecoveryId) = key
-        .sign_prehash_recoverable(digest)
-        .map_err(|e| PolyError::invalid(format!("signing failed: {e}")))?;
+    // ecdsa 0.17: `sign_prehash_recoverable` is infallible for a fully
+    // specified key (RFC 6979 retries internally).
+    let (sig, recid): (Signature, RecoveryId) = key.sign_prehash_recoverable(digest);
     let mut out = [0u8; 65];
     out[..64].copy_from_slice(&sig.to_bytes());
     out[64] = 27 + recid.to_byte();
@@ -422,7 +422,7 @@ mod tests {
         let recid = RecoveryId::from_byte(sig[64] - 27).unwrap();
         let signature = Signature::from_slice(&sig[..64]).unwrap();
         let recovered = VerifyingKey::recover_from_prehash(&digest, &signature, recid).unwrap();
-        let point = recovered.to_encoded_point(false);
+        let point = recovered.to_sec1_point(false);
         let hash = keccak256(&point.as_bytes()[1..]);
         let recovered_addr = format!("0x{}", hex::encode(&hash[12..]));
         assert_eq!(recovered_addr, signer_addr);

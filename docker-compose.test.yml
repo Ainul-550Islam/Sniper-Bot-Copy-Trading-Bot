@@ -1,7 +1,7 @@
 # Ephemeral integration-test services. These credentials are for tests only.
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea  # postgres:16-alpine — digest-pinned, see deploy/release/base-images.lock.json
     environment:
       POSTGRES_USER: sniper
       POSTGRES_PASSWORD: sniper
@@ -16,7 +16,7 @@ services:
       timeout: 3s
       retries: 30
   redis:
-    image: redis:7-alpine
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499  # redis:7-alpine — digest-pinned, see deploy/release/base-images.lock.json
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
       - "127.0.0.1:63799:6379"

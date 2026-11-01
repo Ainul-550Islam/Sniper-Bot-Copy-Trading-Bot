@@ -1,0 +1,22 @@
+=== LIVE Solana mainnet-beta, read-only, via crates/solana-kit — 2026-11-01T03:13:53Z
+endpoint: https://api.mainnet-beta.solana.com (anonymous)
+
+{"jsonrpc":"2.0","result":"ok","id":1}
+
+{"jsonrpc":"2.0","result":{"feature-set":3383571666,"solana-core":"4.3.2"},"id":1}
+
+--- cargo test -p solana-kit --test live_mainnet_readonly -- --ignored
+     Running tests/live_mainnet_readonly.rs (target/debug/deps/live_mainnet_readonly-ae210df0231b89a6)
+
+running 4 tests
+test live_mainnet_balances_and_fees_are_real_numbers ... LIVE mainnet USDC mint lamports=558550303855 fee_samples=150 fee_p50=Some(0) fee_max=Some(0)
+ok
+test live_mainnet_blockhash_is_real_and_valid ... LIVE mainnet blockhash=BxnML3gnnkWSey4qP6ctc93TzW3wvbysj9JeMTkPuQC4 last_valid_block_height=441958643
+ok
+test live_mainnet_health_version_and_slot ... LIVE mainnet slot=463936752 block_height=441958532 version=4.3.2
+ok
+test live_mainnet_reads_the_real_usdc_mint ... LIVE mainnet USDC mint decimals=6 owner=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA data_len=82
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.84s
+

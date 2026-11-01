@@ -9,7 +9,7 @@
 //! move to another provider, and how long to wait.
 //!
 //! Design notes
-//! * Each provider owns a `solana_client` `RpcClient` built on a custom
+//! * Each provider owns a `solana-rpc-client` `RpcClient` built on a custom
 //!   [`RpcSender`]. The stock HTTP sender silently sleeps on HTTP 429 (up to
 //!   five times, up to `Retry-After` = 120 s **each**) — invisible to the
 //!   caller and fatal for a sniper. Ours returns 429 immediately, carrying
@@ -32,13 +32,15 @@ use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use solana_client::client_error::{ClientError, ClientErrorKind, Result as ClientResult};
-use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_client::RpcClientConfig;
-use solana_client::rpc_custom_error;
-use solana_client::rpc_request::{RpcError, RpcRequest, RpcResponseErrorData};
-use solana_client::rpc_response::RpcSimulateTransactionResult;
-use solana_client::rpc_sender::{RpcSender, RpcTransportStats};
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use solana_rpc_client::rpc_client::RpcClientConfig;
+use solana_rpc_client::rpc_sender::{RpcSender, RpcTransportStats};
+use solana_rpc_client_api::client_error::{
+    Error as ClientError, ErrorKind as ClientErrorKind, Result as ClientResult,
+};
+use solana_rpc_client_api::custom_error as rpc_custom_error;
+use solana_rpc_client_api::request::{RpcError, RpcRequest, RpcResponseErrorData};
+use solana_rpc_client_api::response::RpcSimulateTransactionResult;
 use solana_sdk::commitment_config::CommitmentConfig;
 use tracing::{debug, warn};
 
@@ -231,7 +233,7 @@ impl RpcErrorClass {
     }
 }
 
-/// Classify a `solana_client` error.
+/// Classify a `solana-rpc-client` error.
 pub fn classify_client_error(e: &ClientError) -> RpcErrorClass {
     match &e.kind {
         ClientErrorKind::Reqwest(err) => {
@@ -277,7 +279,7 @@ pub fn classify_client_error(e: &ClientError) -> RpcErrorClass {
     }
 }
 
-/// JSON-RPC error codes, per `solana_client::rpc_custom_error`.
+/// JSON-RPC error codes, per `solana_rpc_client_api::custom_error`.
 pub fn classify_rpc_code(code: i64, message: &str) -> RpcErrorClass {
     use rpc_custom_error::*;
     match code {
@@ -416,7 +418,7 @@ fn parse_retry_after(m: &str) -> Option<Duration> {
 // ------------------------------------------------------------------------
 
 /// JSON-RPC transport that never sleeps on the caller's behalf. Identical
-/// wire behaviour to `solana_client`'s HTTP sender except that HTTP 429 is
+/// wire behaviour to `solana-rpc-client`'s HTTP sender except that HTTP 429 is
 /// returned immediately as `ClientErrorKind::Custom("http 429 … retry-after=N")`.
 pub struct MeteredSender {
     client: reqwest::Client,

@@ -324,10 +324,16 @@ fn all_25_batch6_docs_exist() {
     // documents. Bumping this pin is the deliberate act of acknowledging the
     // new document set.
     // Include the generated STATS.md in this total, as docs_files in the
-    // release manifest does; the canonical count excluding it is 159.
+    // release manifest does.
+    // 2026-11-01: 160 -> 167 — the delivery passes added the FINAL-DELIVERY,
+    // KNOWN-LIMITATIONS and buyer-handover documents and this pin was not
+    // bumped with them, so the assertion had been failing on any tree newer
+    // than 2026-10-28. Found by running the whole workspace's tests in one
+    // pass instead of crate by crate. It must stay equal to `docs_files` in
+    // release-manifest.json, which `tests/release/manifest_current.sh` checks.
     assert_eq!(
-        count, 160,
-        "docs/*.md should equal the current document count (160)"
+        count, 167,
+        "docs/*.md should equal the current document count (167)"
     );
 }
 

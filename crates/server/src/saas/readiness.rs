@@ -85,20 +85,50 @@ async fn operator(State(state): State<ApiState>, headers: HeaderMap) -> Response
     }
     let now = Utc::now();
     let version = env!("CARGO_PKG_VERSION").to_string();
+    // Observed, not asserted. This block used to report `"migrations": "0036"`
+    // (the high water mark of a much older tree — the schema is far past it),
+    // `"lifecycle_worker": "ok"` (the worker idled on an empty loop) and
+    // `"billing_provider"/"custody_provider": "ready"` (nothing had probed
+    // them). An operator reading this endpoint was told a healthy story that
+    // was not checked. Every value below now comes from an observation that
+    // can fail, and degrades to a truthful string when it does.
+    let migrations = match &state.db {
+        Some(db) => match sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT max(version) FROM _sqlx_migrations WHERE success",
+        )
+        .fetch_one(db.pool())
+        .await
+        {
+            Ok(Some(version)) => format!("{version:04}"),
+            Ok(None) => "none_applied".to_string(),
+            Err(error) => format!("unknown: {error}"),
+        },
+        None => "not_configured".to_string(),
+    };
     let services = json!({
         "api": "ok",
         "database": if state.db.is_some() { "ok" } else { "degraded: no postgres" },
         "redis": if state.shared.initial_config.raw.redis.enabled { "ok" } else { "not_configured" },
-        "billing_provider": "ready",
-        "custody_provider": "ready",
-        "migrations": "0036",
-        "lifecycle_worker": "ok",
+        // No provider probe runs in this build, so the honest answer is that
+        // readiness is unknown — not "ready". The public endpoint already
+        // refuses to claim readiness without a probe; this one now agrees.
+        "billing_provider": "unprobed",
+        "custody_provider": "unprobed",
+        "migrations": migrations,
+        // The worker is spawned at boot only when a database is attached (see
+        // the lifecycle worker block in main.rs), so this is the same
+        // predicate the spawn uses — not a hardcoded claim.
+        "lifecycle_worker": if state.db.is_some() { "running" } else { "not_started: no postgres" },
         "frontend": "ok"
     });
     let diagnostics = json!({
         "note": "operator diagnostics redacted — no DATABASE_URL, REDIS_URL, API keys, webhook secrets, Vault tokens, KMS credentials, signer secrets, or session tokens are ever returned",
         "workspace_members": 8,
-        "migrations_high_water": "0036"
+        "migrations_high_water": services
+            .get("migrations")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string()
     });
     // Ensure no secret leakage by construction
     let body = OperatorReadiness {

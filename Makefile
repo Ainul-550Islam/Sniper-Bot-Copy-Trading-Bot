@@ -78,12 +78,16 @@ gates: ## Every cargo-free repository gate (hygiene, migrations, openapi, routes
 	@bash scripts/check-routes-vs-ui.sh
 	@bash scripts/scan-secrets.sh
 	@bash tests/release/helm_image_contract.sh
+	@bash tests/release/container_assets_live.sh
 	@bash tests/release/marketing_claims.sh
 	@echo "  note: tests/release/stats_current.sh and manifest_current.sh are the"
 	@echo "        release step's job (they recheck docs/STATS.md and"
 	@echo "        release-manifest.json after scripts/generate-stats.sh /"
 	@echo "        update-release-manifest.sh run); tests/release/buyer_*.sh need the"
 	@echo "        generated buyer-release/ tree, which is not in this repository."
+	@echo "  note: container_assets_live.sh uses hadolint + docker compose + the live"
+	@echo "        registry when they are installed and prints SKIP (not a failure)"
+	@echo "        for each section it cannot run. It never builds an image."
 
 e2e: ## Playwright end-to-end run of the control plane (it builds and serves the UI itself)
 	@test -d $(UI)/node_modules || { echo "no $(UI)/node_modules — run 'make frontend-deps' first"; exit 1; }

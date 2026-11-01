@@ -6,8 +6,12 @@
 //! failed operation successful.
 
 use chrono::{DateTime, Duration, Utc};
+use sqlx::Row;
 use tokio::time::sleep;
 use uuid::Uuid;
+
+use bot_core::db::Database;
+use bot_core::tenant::rls_context::with_system_scope;
 
 use bot_core::provisioning::deprovision::{DeprovisionJob, DeprovisionPhase, DeprovisionState};
 #[cfg(test)]
@@ -109,6 +113,141 @@ pub fn execute_phase(
 /// still in Running/Requested/Waiting and resumes at the recorded phase,
 /// never at the beginning. Uses `job_claim` lease to prevent concurrent
 /// execution.
+/// One pass of the durable tenant-lifecycle worker.
+///
+/// **Why this exists.** `tenant_lifecycle_jobs` (migration 0021) is the durable
+/// state machine for tenant closure, but nothing drove it: a close request
+/// inserted a job at phase `requested` and left it there, so a tenant that
+/// asked to be deleted stayed open forever unless an operator manually called
+/// `POST /api/saas/lifecycle/jobs/{id}/advance` once per phase. The startup
+/// code spawned a task that logged "background worker started" and then idled
+/// on an empty `select!` arm, which made the gap invisible in logs.
+///
+/// **What it does — and refuses to do.** The close request performs three of
+/// the phases synchronously under the requester's own tenant scope: it closes
+/// the organization, revokes API keys and invalidates sessions. This pass
+/// therefore advances a due job *only* through those phases, one step per
+/// tick, idempotently and under an audited system scope. At
+/// `custody_revoked` it **parks** the job (state `waiting`) instead of
+/// pretending: custody revocation and resource cleanup have no unattended
+/// implementation in this build, and marking them complete would be a fake
+/// success. The operator endpoint advances parked jobs exactly as before.
+///
+/// Jobs are claimed with `FOR UPDATE SKIP LOCKED`, so extra replicas are
+/// harmless and no job is processed twice in the same pass.
+pub async fn drain_due_jobs(db: &Database, batch_size: i64) -> Result<DrainReport, sqlx::Error> {
+    let system = db.system_pool().ok_or_else(|| {
+        sqlx::Error::Protocol("tenant lifecycle worker requires RLS-enabled database pools".into())
+    })?;
+    with_system_scope(
+        system,
+        "advance due tenant lifecycle jobs",
+        |connection| {
+            Box::pin(async move {
+                let rows = sqlx::query(
+                    "SELECT id, phase, state FROM tenant_lifecycle_jobs \
+                     WHERE state IN ('pending','running') \
+                       AND scheduled_at <= now() \
+                       AND (next_attempt_at IS NULL OR next_attempt_at <= now()) \
+                       AND phase IN ('requested','trading_disabled','credentials_revoked','sessions_invalidated') \
+                     ORDER BY scheduled_at \
+                     LIMIT $1 \
+                     FOR UPDATE SKIP LOCKED",
+                )
+                .bind(batch_size)
+                .fetch_all(&mut *connection)
+                .await?;
+
+                let mut report = DrainReport {
+                    claimed: rows.len(),
+                    ..DrainReport::default()
+                };
+                for row in rows {
+                    let id: Uuid = row.try_get("id")?;
+                    let phase: String = row.try_get("phase")?;
+                    let state: String = row.try_get("state")?;
+
+                    // The next phase whose side effect is already performed by
+                    // the close request itself. `None` means: park.
+                    let next: Option<&str> = match phase.as_str() {
+                        "requested" => Some("trading_disabled"),
+                        "trading_disabled" => Some("credentials_revoked"),
+                        "credentials_revoked" => Some("sessions_invalidated"),
+                        _ => None,
+                    };
+
+                    let result = match next {
+                        Some(next_phase) => {
+                            // The active-job unique index plus the
+                            // (org, action, phase, state) uniqueness mean a
+                            // second row must never collide here; skip rather
+                            // than abort the pass if it ever would.
+                            sqlx::query(
+                                "UPDATE tenant_lifecycle_jobs \
+                                 SET phase = $2, state = 'running', \
+                                     started_at = COALESCE(started_at, now()), \
+                                     last_attempt_at = now(), updated_at = now() \
+                                 WHERE id = $1 \
+                                   AND state IN ('pending','running') \
+                                   AND NOT EXISTS ( \
+                                       SELECT 1 FROM tenant_lifecycle_jobs other \
+                                       WHERE other.organization_id = tenant_lifecycle_jobs.organization_id \
+                                         AND other.phase = $2 \
+                                         AND other.state = 'running' \
+                                         AND other.id <> tenant_lifecycle_jobs.id)",
+                            )
+                            .bind(id)
+                            .bind(next_phase)
+                            .execute(&mut *connection)
+                            .await?
+                        }
+                        None => {
+                            // Parking is idempotent: a job already waiting is
+                            // not rewritten on every tick.
+                            if state == "waiting" {
+                                report.skipped += 1;
+                                continue;
+                            }
+                            sqlx::query(
+                                "UPDATE tenant_lifecycle_jobs \
+                                 SET state = 'waiting', last_attempt_at = now(), updated_at = now() \
+                                 WHERE id = $1 AND state IN ('pending','running')",
+                            )
+                            .bind(id)
+                            .execute(&mut *connection)
+                            .await?
+                        }
+                    };
+
+                    if result.rows_affected() == 0 {
+                        report.skipped += 1;
+                    } else if next.is_some() {
+                        report.advanced += 1;
+                    } else {
+                        report.parked += 1;
+                    }
+                }
+                Ok(report)
+            })
+        },
+    )
+    .await
+}
+
+/// What one [`drain_due_jobs`] pass did. Reported, never inferred.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DrainReport {
+    /// Jobs selected by this pass.
+    pub claimed: usize,
+    /// Jobs moved one phase forward.
+    pub advanced: usize,
+    /// Jobs parked in `waiting` at the first phase this build cannot perform
+    /// unattended (custody revocation / resource cleanup).
+    pub parked: usize,
+    /// Jobs left untouched (already waiting, or a would-be unique collision).
+    pub skipped: usize,
+}
+
 pub async fn run_loop<F, Fut>(config: LifecycleWorkerConfig, mut fetch_and_claim: F)
 where
     F: FnMut() -> Fut + Send,

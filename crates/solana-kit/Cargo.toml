@@ -31,11 +31,15 @@ once_cell.workspace = true
 rand.workspace = true
 ed25519-dalek.workspace = true
 solana-sdk.workspace = true
-solana-client.workspace = true
+solana-rpc-client.workspace = true
+solana-rpc-client-api.workspace = true
 solana-system-interface.workspace = true
 solana-program.workspace = true
 solana-transaction-status.workspace = true
 solana-account-decoder.workspace = true
+tonic.workspace = true
+yellowstone-grpc-proto.workspace = true
+tokio-stream.workspace = true
 spl-token.workspace = true
 spl-associated-token-account.workspace = true
 
@@ -46,3 +50,4 @@ path = "src/lib.rs"
 [dev-dependencies]
 sha2 = "0.10"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio-stream.workspace = true

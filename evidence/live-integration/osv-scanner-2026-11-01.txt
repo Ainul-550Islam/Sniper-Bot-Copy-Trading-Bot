@@ -1,0 +1,42 @@
+=== Independent dependency scan — osv-scanner osv-scanner version: 1.9.1 — 2026-11-01T04:35:39Z
+
+Scanned /home/user/repo/Cargo.lock file and found 675 packages
+Scanned /home/user/repo/apps/control-plane/package-lock.json file and found 540 packages
++-------------------------------------+------+-----------+----------------------+---------+--------------------------------------+
+| OSV URL                             | CVSS | ECOSYSTEM | PACKAGE              | VERSION | SOURCE                               |
++-------------------------------------+------+-----------+----------------------+---------+--------------------------------------+
+| https://osv.dev/RUSTSEC-2021-0145   |      | crates.io | atty                 | 0.2.14  | Cargo.lock                           |
+| https://osv.dev/GHSA-g98v-hv3f-hcfr |      |           |                      |         |                                      |
+| https://osv.dev/RUSTSEC-2024-0375   |      | crates.io | atty                 | 0.2.14  | Cargo.lock                           |
+| https://osv.dev/RUSTSEC-2025-0141   |      | crates.io | bincode              | 1.3.3   | Cargo.lock                           |
+| https://osv.dev/GHSA-fjx5-qpf4-xjf2 |      | crates.io | borsh                | 0.10.4  | Cargo.lock                           |
+| https://osv.dev/RUSTSEC-2024-0344   | 2.9  | crates.io | curve25519-dalek     | 3.2.0   | Cargo.lock                           |
+| https://osv.dev/GHSA-x4gp-pqpj-f43q |      |           |                      |         |                                      |
+| https://osv.dev/RUSTSEC-2024-0388   |      | crates.io | derivative           | 2.2.0   | Cargo.lock                           |
+| https://osv.dev/RUSTSEC-2022-0093   | 5.9  | crates.io | ed25519-dalek        | 1.0.1   | Cargo.lock                           |
+| https://osv.dev/GHSA-w5vr-6qhr-36cc |      |           |                      |         |                                      |
+| https://osv.dev/RUSTSEC-2025-0161   |      | crates.io | libsecp256k1         | 0.6.0   | Cargo.lock                           |
+| https://osv.dev/RUSTSEC-2026-0186   |      | crates.io | memmap2              | 0.5.10  | Cargo.lock                           |
+| https://osv.dev/RUSTSEC-2025-0119   |      | crates.io | number_prefix        | 0.4.0   | Cargo.lock                           |
+| https://osv.dev/RUSTSEC-2024-0436   |      | crates.io | paste                | 1.0.15  | Cargo.lock                           |
+| https://osv.dev/RUSTSEC-2026-0097   |      | crates.io | rand                 | 0.7.3   | Cargo.lock                           |
+| https://osv.dev/GHSA-cq8v-f236-94qc |      |           |                      |         |                                      |
+| https://osv.dev/RUSTSEC-2023-0071   | 5.9  | crates.io | rsa                  | 0.9.10  | Cargo.lock                           |
+| https://osv.dev/GHSA-82fw-gwwq-j7x9 | 5.9  | npm       | @vitest/mocker (dev) | 2.1.9   | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-qxg6-89mg-rqv8 | 4.7  | npm       | @vitest/mocker (dev) | 2.1.9   | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-67mh-4wv8-2f99 | 5.3  | npm       | esbuild (dev)        | 0.21.5  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-g3hv-75wg-m249 | 6.9  | npm       | minimatch (dev)      | 10.2.6  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-g3hv-75wg-m249 | 6.9  | npm       | minimatch (dev)      | 3.1.5   | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-5gmw-xhrv-c9v3 | 9.5  | npm       | tinypool (dev)       | 1.1.1   | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-85c8-ppgw-ccpr | 9.5  | npm       | tinypool (dev)       | 1.1.1   | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-4w7w-66w2-5vf9 | 6.3  | npm       | vite (dev)           | 5.4.21  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-587h-7wmj-h5pm | 7.5  | npm       | vite (dev)           | 5.4.21  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-698v-4r3x-3vcv | 6.3  | npm       | vite (dev)           | 5.4.21  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-9jrq-w75r-8gcw | 2.1  | npm       | vite (dev)           | 5.4.21  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-fx2h-pf6j-xcff | 6.9  | npm       | vite (dev)           | 5.4.21  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-r825-w8mm-5pxw | 6.3  | npm       | vite (dev)           | 5.4.21  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-rq7h-c2jc-7f22 | 6.3  | npm       | vite (dev)           | 5.4.21  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-v6wh-96g9-6wx3 | 5.5  | npm       | vite (dev)           | 5.4.21  | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-5xrq-8626-4rwp | 9.8  | npm       | vitest (dev)         | 2.1.9   | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-82fw-gwwq-j7x9 | 5.9  | npm       | vitest (dev)         | 2.1.9   | apps/control-plane/package-lock.json |
+| https://osv.dev/GHSA-mrhx-c7xc-m3w5 | 8.2  | npm       | zod (dev)            | 4.6.5   | apps/control-plane/package-lock.json |

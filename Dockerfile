@@ -28,6 +28,13 @@
 FROM rust@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 
 # Solana/reqwest builds want these native tools present.
+#
+# hadolint DL3008 (pin apt versions) is suppressed deliberately: the base image
+# is digest-pinned, but Debian's apt sources are not a frozen snapshot, so
+# `pkg-config=0.29.2-1` style pins start failing the day bookworm moves. The
+# digest pin fixes the distro; the package set is `--no-install-recommends` and
+# reviewed. Suppression is explicit and reasoned, not silent.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libudev-dev \
@@ -52,6 +59,8 @@ RUN cargo build --release -p sniper-suite --bin sniper-suite
 # debian:bookworm-slim — digest-pinned, see the note on the builder stage.
 FROM debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
+# (same reason as the builder stage above: Debian apt sources are not frozen)
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libudev0 \

@@ -29,6 +29,7 @@ pub mod events;
 pub mod execute;
 pub mod fee_transfer;
 pub mod fees;
+pub mod geyser;
 pub mod holders;
 pub mod jupiter;
 pub mod landing;

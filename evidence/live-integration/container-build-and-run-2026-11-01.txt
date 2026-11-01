@@ -1,0 +1,69 @@
+=== REAL CONTAINER BUILD + RUN — 2026-11-01T04:35:21Z
+host: podman 5.4.2 / crun / overlay; no docker daemon (none exists here)
+
+--- base image is the deliverable's own pin:
+FROM docker.io/library/debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+
+--- build:
+STEP 1/9: FROM docker.io/library/debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+STEP 2/9: RUN apt-get update && apt-get install -y --no-install-recommends         ca-certificates         curl     && rm -rf /var/lib/apt/lists/*     && useradd --create-home --uid 10001 sniper
+STEP 3/9: WORKDIR /app
+STEP 4/9: COPY sniper-suite /usr/local/bin/sniper-suite
+STEP 5/9: COPY config.toml /app/config.toml
+STEP 6/9: RUN mkdir -p /app/data && chown -R sniper:sniper /app
+STEP 7/9: USER 10001:10001
+STEP 8/9: EXPOSE 8080
+STEP 9/9: ENTRYPOINT ["/usr/local/bin/sniper-suite"]
+COMMIT sniper-suite:validation
+Successfully tagged localhost/sniper-suite:validation
+
+--- image:
+localhost/sniper-suite:validation 203 MB c06604ae830f
+docker.io/library/debian:<none> 77.9 MB db9f02c6bde9
+
+--- running container:
+sniper-ctr | localhost/sniper-suite:validation | Up 22 seconds
+
+--- non-root identity inside the container:
+uid=10001(sniper) gid=10001(sniper) groups=10001(sniper)
+
+--- real HTTP against the real server in the container:
+GET /api/health -> 200
+{"ok":true}
+GET / -> 200
+
+--- boot facts from the container log:
+2026-11-01T04:35:01.468953Z  INFO starting sniper-suite mode=paper live_allowed=false cluster=mainnet-beta wallet=4erTQmcYa2pwadAYPWG3mXBy2fFFxJzBvUCES8HMi4x7 database="postgres" redis="off" dedup="memory" auth_keys="on"
+2026-11-01T04:35:01.547788Z  WARN AUDIT PERSISTENCE FAILED — record kept in ring + journal only error=error returned from database: new row violates row-level security policy for table "audit_events" action="startup" actor="system"
+2026-11-01T04:35:01.803766Z  INFO lease acquired role=reconciliation generation=9 takeover=true
+2026-11-01T04:35:01.811228Z  INFO lease acquired role=recovery generation=9 takeover=true
+2026-11-01T04:35:01.876589Z  INFO lease acquired role=state_sync generation=9 takeover=true
+2026-11-01T04:35:01.879628Z  INFO lease acquired role=accounting_maintenance generation=13 takeover=true
+2026-11-01T04:35:01.908306Z  INFO background system scope role="bot_system" reason="runtime registry: resolve the tenant's live runtime"
+2026-11-01T04:35:01.945317Z  INFO background system scope role="bot_system" reason="runtime registry: look up the tenant's runtime generation"
+
+=== NEXT.JS CONTROL-PLANE IMAGE — 2026-11-01T05:12:27Z
+image: localhost/control-plane:validation 305 MB bc3ad222e29a
+base: the Dockerfile's own pin node@sha256:43ac6c60b8f8…
+stages built: 3/3 (deps: npm ci, build: npm run build, runtime: .next/standalone)
+container user: uid=1000(node) gid=1000(node) groups=1000(node)
+GET / -> 200
+first 160 bytes of the served dashboard:
+<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="stylesheet" href="/_
+
+=== RELEASE-PROFILE IMAGE — 2026-11-01T10:00:26Z
+built from the SHIPPED release profile (Cargo.toml: opt-level=3, lto="thin", codegen-units=1, strip=true)
+  cargo build --release -p sniper-suite --bin sniper-suite --locked -j 2
+  -> Finished `release` profile [optimized] target(s) in 17m 40s; binary 29 MB (debug was 106 MB)
+image: localhost/sniper-suite:release-validation 123 MB 4cd5cd2130d5
+base: debian@sha256:3783cc… (the shipped Dockerfile's pin), non-root uid 10001
+container user: uid=10001(sniper) gid=10001(sniper) groups=10001(sniper)
+  2026-11-01T10:00:10.937730Z  INFO starting sniper-suite mode=paper live_allowed=false cluster=mainnet-beta wallet=FfRDZXXqMPobgxH49vWFV45wo59mwiRMX33gKjdXB6o9 database="postgres" redis="off" dedup="memory" auth_keys="on"
+  2026-11-01T10:00:11.055561Z  INFO tenant runtime registry: read-back confirmed runtime=3fcb2847-3c35-4274-b216-34b0c3a9324f
+  2026-11-01T10:00:11.058635Z  INFO control API + dashboard listening (role keys required for mutating routes and the event stream) addr=0.0.0.0:8080
+  GET /api/health -> 200
+  body: {"ok":true}
+
+  What remains unproven: the Dockerfile's own multi-stage RUN (the binary was compiled on the
+  host and COPYed into the same pinned base) and the default LTO=thin+codegen-units=1 build
+  INSIDE a build container — the profile is identical, the build host is not.

@@ -14,16 +14,18 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde_json::json;
-use solana_client::client_error::ClientError;
-use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
-use solana_client::rpc_config::{
+use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use solana_rpc_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
+use solana_rpc_client_api::client_error::Error as ClientError;
+use solana_rpc_client_api::config::{
     RpcAccountInfoConfig, RpcBlockConfig, RpcProgramAccountsConfig, RpcSendTransactionConfig,
     RpcSignaturesForAddressConfig, RpcSimulateTransactionConfig, RpcTransactionConfig,
 };
-use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
-use solana_client::rpc_request::RpcRequest;
-use solana_client::rpc_response::{Response, RpcSimulateTransactionResult, RpcTokenAccountBalance};
+use solana_rpc_client_api::filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
+use solana_rpc_client_api::request::RpcRequest;
+use solana_rpc_client_api::response::{
+    Response, RpcSimulateTransactionResult, RpcTokenAccountBalance,
+};
 use solana_sdk::account::Account;
 use solana_sdk::commitment_config::{CommitmentConfig, CommitmentLevel};
 use solana_sdk::hash::Hash;

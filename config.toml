@@ -170,6 +170,20 @@ heartbeat_interval_secs = 10
 # builder_code = "0x..32 bytes.."
 watch_keywords = []                          # used by the "search" strategy
 
+# --- Copy-follow (docs/POLYMARKET-ENGINE.md) --------------------------------
+# Wallets whose Polymarket fills are mirrored. EMPTY (the default) = the copy
+# engine is never constructed: no leader feed is polled and no copy order can
+# exist. Copy entries are BUYS only and go through the SAME staged pipeline as
+# strategy entries (risk, exposure, collateral, idempotency, ownership, sign).
+copy_followed_wallets = []                    # e.g. ["0xabc...", "0xdef..."]
+copy_poll_interval_secs = 15                  # leader-trade feed poll (data-api /trades)
+copy_size_multiplier = 1.0                    # mirror the leader's USDC stake x this
+copy_min_stake_usd = 1.0                      # floor per mirrored trade
+copy_max_stake_usd = 25.0                     # ceiling per mirrored trade
+copy_max_price = 0.95                         # chase cap: never pay above this per token
+copy_slippage_tolerance_bps = 300             # refuse a leader fill we would chase by more than this
+
+
 # --- Module 4: staking program (on-chain; managed off-process) ---------------
 [contract]
 # program_id = "YOUR_DEPLOYED_PROGRAM_ID"

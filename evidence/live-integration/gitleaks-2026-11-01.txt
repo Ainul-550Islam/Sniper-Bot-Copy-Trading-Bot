@@ -1,0 +1,11 @@
+=== Third-party secret scan — gitleaks 8.28.0 — 2026-11-01T04:35:36Z
+scan scope: the delivered tree only (git index; no .git in the ZIP)
+
+--- baseline, default rules, repo allowlist absent:
+    37 findings — all test placeholders, public on-chain identifiers, or the
+    custody detector's own PEM markers. Full per-finding triage in .gitleaks.toml.
+
+--- with the reviewed allowlist (.gitleaks.toml):
+
+4:35AM INF scanned ~16497106 bytes (16.50 MB) in 2.69s
+4:35AM INF no leaks found

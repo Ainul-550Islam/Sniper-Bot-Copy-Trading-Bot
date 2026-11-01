@@ -1,0 +1,64 @@
+# gitleaks configuration — a precise allowlist, not a blanket exclusion.
+#
+# Why this file exists: `gitleaks detect --no-git` (gitleaks 8.28.0, a
+# third-party scanner installed for the 2026-11-01 independent-tooling pass)
+# reported 37 findings on the delivered tree. Every one of them was inspected
+# by hand and every one is a test placeholder, a public identifier, or the
+# secret *detector's own* marker string — there is no credential in this
+# repository. The allowlist below encodes exactly those cases, item by item,
+# so that a genuinely new secret still fails the scan.
+#
+# Re-run with:
+#   gitleaks detect --source . --no-git --redact --verbose
+#
+# Anything added here must carry a reason. A path allowlist is scoped to test
+# and fixture trees only — never to production source.
+
+title = "sniper-suite gitleaks policy"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders, public identifiers and detector literals reviewed on 2026-11-01"
+
+# 1. Test and fixture trees. Every finding in these paths was a literal
+#    placeholder written to exercise a code path ("operator-key-material-…",
+#    "a-strong-passphrase-…", "Sup3r-Secret-Passphrase-42", the base64 of
+#    "secret-key-for-mock-test", a synthetic Raydium pool fixture made of
+#    public keys). Tests must contain fake credentials; that is their job.
+paths = [
+  '''(?i)\.?/?.*/tests?/.*''',
+  '''(?i)\.?/?.*/__tests__/.*''',
+  '''(?i)\.?/?.*/e2e/.*''',
+  '''(?i)\.?/?.*\.(test|spec)\.(ts|tsx|js|jsx)''',
+  '''(?i)\.?/?.*/fixtures?/.*''',
+]
+
+# 2. Named placeholders that also appear in production-adjacent files, where a
+#    path allowlist would be too blunt. Each of these strings is a fake.
+regexes = [
+  # Obvious test keys / passphrases used by unit tests outside a tests/ dir.
+  '''mock-key''',
+  '''c2VjcmV0LWtleS1mb3ItbW9jay10ZXN0''', # base64("secret-key-for-mock-test")
+  '''paddle_test_[0-9]+''',
+  '''sk_test_12345678''',
+  '''sk_test_snipermock[0-9]*''',
+  '''owner-key-1234567890[0-9]*''',
+  '''abcdef123456''',
+  '''a-strong-passphrase-[0-9]+''',
+  '''dGhlIHNhbXBsZSBub25jZQ==''', # RFC 6455's published WebSocket handshake nonce
+  # PEM *marker* literals inside the custody secret detector itself
+  # (crates/core/src/custody/credentials.rs). The detector has unit test
+  # `private_key_material_rejected` proving these are recognised and refused.
+  '''-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----''',
+  # Fake credentials used by unit tests that live inside a src/ test module,
+  # where the path allowlist above cannot reach: they exist to prove the
+  # scrubber redacts them (module-telegram `scrub_removes_nonce_and_token_material`)
+  # and to parse a synthetic PumpPortal frame.
+  '''5J8tGmYq3kR9wVbN2xPzL7cDfH4uEsA1nM6yT0iKoBvQ''',
+  '''123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw''',
+  '''4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf''', # synthetic bonding-curve pubkey
+  # Public, on-chain identifiers — not secrets.
+  '''0x4D97DCd97eC945f40cF65F87097ACe5EA0476045''', # Polymarket Conditional Tokens (public contract)
+]

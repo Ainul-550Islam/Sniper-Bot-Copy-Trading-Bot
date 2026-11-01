@@ -1,0 +1,45 @@
+=== FULL-WORKSPACE TEST CAMPAIGN — 2026-11-01T12:30:53Z
+
+goal: make `cargo test --workspace --all-targets` — the one command this project had
+never completed — actually run, and report what it finds instead of working around it.
+
+--- 1. the disk blocker, removed
+cargo build --release -p sniper-suite --bin sniper-suite --locked -j 2  -> Finished in 17m 40s, binary 29 MB
+(CARGO_INCREMENTAL=0 on later runs: the 7 GB target/debug/incremental directory was what had
+ been filling the 25 GB disk; with it off and CARGO_PROFILE_TEST_DEBUG=0 the whole test set links)
+
+--- 2. every test target compiled+linked in ONE cargo invocation
+cargo test --workspace --all-targets --locked --no-run  -> exit 0, 181 test executables
+
+--- 3. the runs, and the pre-existing defects each one surfaced
+
+run A (no database):        79 suites, 3608 passed, 1 failed
+   -> crates/server/tests/backtest_truth_columns.rs needs POSTGRES_URL (by design, not a bug)
+run B (POSTGRES_URL set):   3 failures in crates/core/tests/db_integration.rs
+   -> audit-chain tests assert a GLOBAL chain property but delete their own rows: parallel
+      execution of the three of them produced a false break. FIXED (process-wide mutex).
+run C (fresh database):     1 failure — replay fixture race
+   -> regenerate_replay_fixtures truncated files with fs::write while another test read them.
+      FIXED (write-then-rename is atomic).
+run D:                      1 failure — batch6 docs count
+   -> the test pinned docs/*.md == 160; the tree has 167. The pin was never bumped when the
+      delivery documents were added. FIXED (pin updated to 167 with the date and the reason).
+run E:                      1 failure — session::token prefix assertion (flaky, ~1 run in 64)
+   -> the token body is base64url, which can itself begin with '_'; the assertion assumed it
+      could not. REPLACED, and a real defect behind it fixed too: public_prefix() splits the
+      namespace at the FIRST '_', so a body containing '_' produced a prefix that spanned a
+      namespace that does not exist. generate_token now maps '_' to '-' in the body.
+
+--- 4. what is still open, with the exact assertion
+cargo test --workspace --all-targets -j 2 -- --test-threads=1
+  suite 32 of 79: module-copy/tests/two_replica_mirror.rs
+  assert_ne!(a_err, b_err) — "exactly one replica may pass the claim gate"
+  both replicas got past the claim gate and died at the RPC instead.
+  same test against the same (dirty) database, alone: 6 runs, 6 passes.
+  -> left OPEN and reported. It looks load/ordering sensitive; a copy-trading claim gate
+     that can admit two replicas is money-relevant, so it is not being papered over.
+
+--- 5. static gates on the same tree
+cargo check   --workspace --all-targets --locked  -> Finished, 0 diagnostics
+cargo clippy  --workspace --all-targets --locked  -> 0 warnings, 0 errors
+cargo fmt --all --check                          -> clean

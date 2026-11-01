@@ -114,6 +114,11 @@ pub struct VenueScript {
     pub markets: Vec<Value>,
     /// Order books served by `GET /book`.
     pub books: HashMap<String, (f64, f64)>,
+    /// Rows served by the public data API's `GET /trades` (leader feed).
+    pub leader_trades: Vec<Value>,
+    /// When true, `GET /trades` answers HTTP 500 — a failed feed, which must
+    /// surface as an error and never as "no trades".
+    pub leader_trades_fail: bool,
 }
 
 #[derive(Clone)]
@@ -134,6 +139,34 @@ impl MockVenue {
     /// JSON-RPC endpoint for the collateral / CTF readers.
     pub fn rpc_url(&self) -> String {
         format!("http://{}/rpc", self.addr)
+    }
+    /// Base URL of the public data API (`/trades`) that feeds the copy engine.
+    pub fn data_url(&self) -> String {
+        format!("http://{}/data-api", self.addr)
+    }
+
+    /// Script the leader-trade page the data API returns.
+    pub fn set_leader_trades(&self, rows: Vec<Value>) {
+        let mut s = self.script.lock().unwrap();
+        s.leader_trades = rows;
+        s.leader_trades_fail = false;
+    }
+
+    /// Make the leader feed fail (HTTP 500).
+    pub fn fail_leader_trades(&self) {
+        self.script.lock().unwrap().leader_trades_fail = true;
+    }
+
+    /// Requests the copy feed made to `GET /trades`, with their query strings.
+    pub fn leader_trade_queries(&self) -> Vec<Option<String>> {
+        self.script
+            .lock()
+            .unwrap()
+            .captures
+            .iter()
+            .filter(|c| c.path == "/data-api/trades")
+            .map(|c| c.query.clone())
+            .collect()
     }
 
     pub fn set_post(&self, b: PostBehaviour) {
@@ -588,8 +621,27 @@ pub async fn mock_venue() -> MockVenue {
         Json(json!({"jsonrpc": "2.0", "id": body["id"].clone(), "result": result}))
     }
 
+    async fn data_api_trades(
+        State(st): State<S>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        RawQuery(_q): RawQuery,
+    ) -> impl IntoResponse {
+        capture(&st, &method, &uri, &headers, "");
+        let s = st.lock().unwrap();
+        if s.leader_trades_fail {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "boom"})),
+            );
+        }
+        (StatusCode::OK, Json(Value::Array(s.leader_trades.clone())))
+    }
+
     let app = Router::new()
         .route("/gamma/markets", get(gamma_markets))
+        .route("/data-api/trades", get(data_api_trades))
         .route("/clob/time", get(clob_time))
         .route("/clob/book", get(clob_book))
         .route("/clob/markets/:cid", get(clob_market))
@@ -626,6 +678,7 @@ pub fn base_config(venue: &MockVenue) -> Config {
     cfg.polymarket.enabled = true;
     cfg.polymarket.clob_url = venue.clob_url();
     cfg.polymarket.gamma_url = venue.gamma_url();
+    cfg.polymarket.data_url = venue.data_url();
     cfg.polymarket.ctf_rpc_url = venue.rpc_url();
     cfg.polymarket.ws_url = format!("ws://{}/ws/", venue.addr);
     cfg.polymarket.use_websocket = false;

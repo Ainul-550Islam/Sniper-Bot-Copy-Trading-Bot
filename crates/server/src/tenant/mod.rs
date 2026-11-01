@@ -59,6 +59,7 @@ pub mod binding_guard;
 pub mod context;
 pub mod context_guard;
 pub mod context_resolver;
+pub mod control_plane;
 pub mod decision;
 pub mod entitlement_guard;
 pub mod fence_guard;

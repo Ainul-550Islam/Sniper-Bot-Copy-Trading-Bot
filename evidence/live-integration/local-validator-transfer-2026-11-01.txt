@@ -1,0 +1,16 @@
+=== Funded wallet + real transfer on a real Solana validator — 2026-11-01T04:36:32Z
+validator: Agave 4.3.2 (solana-test-validator, --reset, ledger /home/user/solana-ledger)
+note: the public devnet/testnet faucet is closed (HTTP 410), so the funding step runs on a local cluster whose faucet is real
+
+
+running 2 tests
+test live_devnet_airdrop_sign_send_confirm ... devnet wallet (throwaway): A9ys36Qg5fNVuAEuJnZwrf6dmuwFFv6mj9SQknfDHQVx
+devnet airdrop requested: 34QUsygMvukuJvwhzNFPcz3a287bsCFtW8Qa43b5qg8xBLw4FgusGXgm25xc6EYZFGddBZ5t2Vc6mRjF5TQmzQw7 (attempt 1)
+devnet balance after airdrop: 1000000000 lamports
+devnet transfer LANDED: 3TzTmn1CMMJqSRCxfUoqQgF5PeBF83gFRmXXcByXFzYJkCxxUTPR8qf4v4KgE8UhzWiF9ddM6oahPTejKLLK78BU slot=1289 fee=5000
+ok
+test live_devnet_unfunded_transfer_is_refused ... devnet did not confirm the unfunded transfer: Timeout
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.12s
+

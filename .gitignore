@@ -97,3 +97,6 @@ bots/**/*.sqlite
 /core-launch.out
 /run-tests.out
 *.out
+
+# release-package output (built into the repo root by build-release-package.sh)
+/sniper-suite-*-src.zip

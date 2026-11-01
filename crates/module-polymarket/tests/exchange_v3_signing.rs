@@ -92,7 +92,7 @@ fn a_position_limit_order_signs_against_exchange_v3() {
         eip712::order_digest(CHAIN, V3_DOMAIN_VERSION, V3_EXCHANGE_ADDRESS, &bundle.order).unwrap();
     let recovered = k256::ecdsa::VerifyingKey::recover_from_prehash(&digest, &sig, recid)
         .expect("signature must recover");
-    let point = recovered.to_encoded_point(false);
+    let point = recovered.to_sec1_point(false);
     let hash = eip712::keccak256(&point.as_bytes()[1..]);
     let recovered_addr = format!("0x{}", hex::encode(&hash[12..]));
     assert_eq!(recovered_addr, signer);

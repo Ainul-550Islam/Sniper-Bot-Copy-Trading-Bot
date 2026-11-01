@@ -287,12 +287,36 @@ pub async fn session_user(
 /// land. An operator's later plan change is never clobbered: the plan is
 /// only assigned when the organization has no subscription at all.
 pub async fn ensure_deployment_organization(store: &SaasStore) -> BotResult<Option<Organization>> {
+    ensure_deployment_organization_with_id(store, None).await
+}
+
+/// Bootstrap the deployment organization, adopting `resolved_id` when the
+/// schema has already created the row.
+///
+/// **Why the hint exists.** Migration 0024 installs
+/// `public.deployment_organization_id()`, which CREATES the
+/// `slug = 'deployment'` row with `gen_random_uuid()` when it is missing, and
+/// that function is the column DEFAULT of every legacy tenant-keyed table. Any
+/// deployment-global write during startup can therefore create the row before
+/// this function runs. The identity lookup below reads the SaaS document
+/// store's lookup table, which the SQL twin does not write, so it reports
+/// "absent" and a second organization was minted with a different id: the
+/// projection into `organizations` then violates
+/// `organizations_slug_key` (`ON CONFLICT (id)` cannot absorb a slug
+/// collision) and process startup aborted. Resolving the id through the SQL
+/// twin first keeps one id for the deployment tenant across both layers.
+pub async fn ensure_deployment_organization_with_id(
+    store: &SaasStore,
+    resolved_id: Option<OrganizationId>,
+) -> BotResult<Option<Organization>> {
     let org = match store.organization_by_slug(DEPLOYMENT_ORG_SLUG).await? {
         Some(existing) => existing,
         None => {
             let now = Utc::now();
             let org = Organization::new(
-                OrganizationId::new(),
+                // `Default for OrganizationId` is `OrganizationId::new()`
+                // (a fresh random uuid), so this is the same mint as before.
+                resolved_id.unwrap_or_default(),
                 DEPLOYMENT_ORG_SLUG,
                 "Deployment",
                 None,

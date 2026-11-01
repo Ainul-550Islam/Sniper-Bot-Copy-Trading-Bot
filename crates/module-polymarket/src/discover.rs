@@ -146,7 +146,11 @@ impl PolyBot {
     }
 
     /// Build a per-token quote map for a market: websocket first, REST fallback.
-    async fn quotes_for(
+    ///
+    /// Shared with the copy-follow poller ([`crate::copy_run`]): a mirrored
+    /// leader trade is priced through exactly the same websocket-then-REST
+    /// path as a strategy entry, so both see one quote source.
+    pub(crate) async fn quotes_for(
         &self,
         market: &PolyMarket,
         _poly: &PolymarketConfig,

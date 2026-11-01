@@ -255,6 +255,13 @@ impl CopyEngine {
         &self.config
     }
 
+    /// Has this venue trade id already been evaluated? Read-only peek used by
+    /// the poller to avoid fetching quotes for a replayed page row; the
+    /// authoritative dedup still happens inside [`CopyEngine::evaluate`].
+    pub fn seen(&self, trade_id: &str) -> bool {
+        self.seen.contains(trade_id)
+    }
+
     /// Is this wallet followed?
     pub fn follows(&self, wallet: &str) -> bool {
         self.followed.contains(&wallet.to_ascii_lowercase())

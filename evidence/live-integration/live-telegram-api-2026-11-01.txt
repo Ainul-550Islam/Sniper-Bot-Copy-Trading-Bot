@@ -1,0 +1,18 @@
+=== LIVE Telegram Bot API (api.telegram.org) — 2026-11-01T03:19:26Z
+
+raw GET /bot<placeholder>/getUpdates -> HTTP 401
+{"ok":false,"error_code":401,"description":"Unauthorized"}
+--- cargo test -p module-telegram --test live_telegram_api -- --ignored
+    Finished `test` profile [unoptimized] target(s) in 45.69s
+     Running tests/live_telegram_api.rs (target/debug/deps/live_telegram_api-ddd17696a288a510)
+
+running 3 tests
+test live_telegram_real_bot_token_round_trip ... SKIPPED: set TELEGRAM_LIVE_TOKEN (a real bot token) for the authenticated round trip
+ok
+test live_telegram_rejects_an_invalid_token_and_never_leaks_it ... LIVE telegram 401 path: http error: getUpdates not ok (401 Unauthorized): Unauthorized
+ok
+test live_telegram_send_message_fails_closed_and_redacted ... LIVE telegram sendMessage path: http error: sendMessage failed: Unauthorized
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+

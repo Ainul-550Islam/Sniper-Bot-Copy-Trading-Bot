@@ -522,7 +522,7 @@ pub async fn token_balances_for_owner(
     mint: &Pubkey,
 ) -> BotResult<TokenBalanceReading> {
     use base64::Engine as _;
-    let filter = solana_client::rpc_request::TokenAccountsFilter::Mint(*mint);
+    let filter = solana_rpc_client_api::request::TokenAccountsFilter::Mint(*mint);
     let accounts = rpc
         .raw()
         .get_token_accounts_by_owner(owner, filter)

@@ -129,7 +129,17 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       POSTGRES_APP_URL: postgres://sniper_app:${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
       POSTGRES_SYSTEM_URL: postgres://sniper_system:${POSTGRES_SYSTEM_PASSWORD:?set POSTGRES_SYSTEM_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
+      # Inert unless config.toml sets [redis] enabled = true — the shipped file keeps it
+      # false (fail-open by design: losing the cache must never lose money). Verified on
+      # 2026-11-01: with Redis healthy beside the bot, the boot line still reports
+      # redis="off" dedup="memory".
       REDIS_URL: redis://redis:6379
+      # The shipped config.toml binds the control API to 0.0.0.0, and the server
+      # REFUSES that without auth ("refusing to bind the control API to
+      # non-loopback host"). .env.template documented API_KEY but this file never
+      # forwarded it, so `docker compose up` crash-looped on a fresh .env —
+      # found on 2026-11-01 by actually bringing the stack up, not by reading it.
+      API_KEY: ${API_KEY:?set API_KEY in .env (the server refuses a 0.0.0.0 bind without auth)}
       WEBHOOK_SECRET_ENCRYPTION_KEY: ${WEBHOOK_SECRET_ENCRYPTION_KEY:?set WEBHOOK_SECRET_ENCRYPTION_KEY in .env}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}

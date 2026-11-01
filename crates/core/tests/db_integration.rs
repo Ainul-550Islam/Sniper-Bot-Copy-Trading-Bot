@@ -58,6 +58,22 @@ fn run_id() -> String {
     )
 }
 
+// The three audit-chain tests below assert a GLOBAL property (the hash chain over
+// audit_events has no gaps), while each of them appends rows and then deletes its own
+// rows again as cleanup. Run in parallel — the default when `cargo test` runs one
+// binary with several threads — one test's cleanup is visible to another test's
+// verify_chain(), which then reports a break that no production writer caused.
+// Found on 2026-11-01 by actually running `cargo test --workspace --all-targets`
+// (the crate-by-crate runs used a single binary at a time and never collided).
+// A process-wide mutex keeps the three of them serial without adding a dependency.
+static AUDIT_CHAIN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn chain_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    AUDIT_CHAIN_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[tokio::test]
 async fn migrations_apply_and_report() {
     let Some(db) = setup().await else { return };
@@ -162,6 +178,7 @@ async fn dedup_first_arrival_is_exactly_once_across_processes() {
 
 #[tokio::test]
 async fn audit_chain_verifies_and_detects_tampering() {
+    let _chain = chain_test_guard();
     let Some(db) = setup().await else { return };
     let run = run_id();
     let repo = AuditRepo::new(db.clone());
@@ -210,6 +227,7 @@ async fn audit_chain_verifies_and_detects_tampering() {
 
 #[tokio::test]
 async fn audit_chain_detects_reorder_missing_and_duplicate() {
+    let _chain = chain_test_guard();
     // Regression coverage demanded by the release audit (item: audit /
     // provenance): the hash chain must detect REORDERED, MISSING and
     // DUPLICATED rows — not just modified content (covered by
@@ -334,6 +352,7 @@ async fn audit_chain_detects_reorder_missing_and_duplicate() {
 
 #[tokio::test]
 async fn audit_chain_survives_concurrent_appends() {
+    let _chain = chain_test_guard();
     // Regression test for the chain-fork race: `AuditRepo::append` used to
     // take the head hash with `SELECT … ORDER BY id DESC LIMIT 1 FOR UPDATE`.
     // Under READ COMMITTED a blocked writer's snapshot never sees the row

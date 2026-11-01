@@ -1,0 +1,25 @@
+== hadolint (Haskell Dockerfile Linter 2.12.0)
+PASS  hadolint Dockerfile (no findings)
+PASS  hadolint apps/control-plane/Dockerfile (no findings)
+== docker compose (Docker Compose version v2.29.7)
+PASS  compose config: docker-compose.yml
+PASS  compose config: docker-compose.test.yml
+PASS  compose config: deploy/demo/docker-compose.demo.yml
+PASS  compose config: base + backup overlay
+PASS  compose config: base + backup + PITR overlays
+PASS  compose config: base + TLS overlay
+PASS  docker-compose.yml refuses to render without required env (fail-closed)
+== live registry manifest lookup
+library/debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251    digest   200  yes    OK
+library/nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10     digest   200  yes    OK
+library/node@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c      digest   200  yes    OK
+library/postgres:16-alpine                                                                tag      200  yes    OK
+library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea  digest   200  yes    OK
+library/redis:7-alpine                                                                    tag      200  yes    OK
+library/redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499     digest   200  yes    OK
+library/rust@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e      digest   200  yes    OK
+9 distinct image references (7 digest-pinned, 2 tag-only), 0 failure(s)
+NOTE: no image was built and no container was run — this verifies the base images against the live registries only.
+PASS  image digests resolve in the live registry
+----------------------------------------
+container_assets_live: PASS (no image built, no container run — by design)

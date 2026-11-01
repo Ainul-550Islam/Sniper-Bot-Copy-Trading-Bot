@@ -566,7 +566,17 @@ fn regenerate_replay_fixtures() {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        std::fs::write(&path, text).unwrap();
+        // Write-then-rename: this test runs in parallel with the readers of the
+        // same directory (`checked_in_fixtures_match_the_generator`,
+        // `replay_is_deterministic_and_never_touches_the_ledger`), and a plain
+        // `fs::write` truncates first — a reader that lands in that window parses
+        // an empty file and fails with `EOF while parsing a value at line 1
+        // column 0`. Found on 2026-11-01 by running `cargo test --workspace
+        // --all-targets` with default parallelism; renaming is atomic, so a reader
+        // now sees either the old bytes or the new bytes.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text).unwrap();
+        std::fs::rename(&tmp, &path).unwrap();
     }
 }
 

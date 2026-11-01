@@ -1,17 +1,17 @@
 SNIPER-SUITE — PROPRIETARY SOURCE CODE LICENSE AND SALE TERMS
 ==============================================================
 
-Copyright (c) 2026 [SELLER LEGAL ENTITY NAME] ("Licensor").
+Copyright (c) 2026 The Licensor, an individual sole proprietor ("Licensor").
 All rights reserved.
 
->>> ACTION REQUIRED BEFORE ANY TRANSFER OF THIS PACKAGE <<<
-This file is the proprietary-license replacement for the MIT license under
-which this repository was previously distributed. The bracketed placeholder
-MUST be replaced with the real legal-entity name (and counsel should review
-the final text together with legal/SOURCE-CODE-BILL-OF-SALE.md and
-legal/IP-ASSIGNMENT-TEMPLATE.md before the package is delivered to a buyer).
-Do NOT deliver this package while any "[SELLER LEGAL ENTITY NAME]"
-placeholder remains.
+HOW THE LICENSOR IS IDENTIFIED
+The Licensor is a natural person acting as a sole proprietor. The legal name is
+recorded exactly once, in legal/LICENSOR.txt, and is substituted into the
+copyright line above by scripts/build-release-package.sh when LICENSOR_NAME is
+set in the environment (the script echoes the resulting copyright line into the
+build log). Nothing else in this package needs editing to complete the name:
+the Bill of Sale (legal/SOURCE-CODE-BILL-OF-SALE.md) and the IP assignment
+(legal/IP-ASSIGNMENT-TEMPLATE.md) both refer to "the Licensor" as defined here.
 
 --------------------------------------------------------------------
 1. GRANT

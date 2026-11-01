@@ -1,0 +1,41 @@
+=== FULL STACK (docker compose v2 → podman) — 2026-11-01T05:50:22Z
+
+driver: docker compose v2.29.7 (the official binary) against podman 5.4.2's Docker-compatible API
+        (podman system service tcp://127.0.0.1:2375) — no Docker daemon exists on this host
+overlay: deploy/compose/docker-compose.host-network.yml (this kernel cannot create the bridge:
+        netavark: 'nft did not return successfully while applying ruleset')
+
+--- images pulled by the digest pins in docker-compose.yml:
+docker.io/library/redis:<none> 39.9 MB
+docker.io/library/postgres:<none> 297 MB
+
+--- containers:
+sniper_postgres_1 | Up 43 seconds (healthy)
+sniper_redis_1 | Up 5 minutes (healthy)
+sniper-postgres-1 | Up Less than a second (starting)
+compose-bot | Up 38 seconds
+compose-cp | Up 12 seconds
+
+--- migrations against the compose database (fresh volume):
+    'migrations applied; exiting (--migrate-only) applied=68'
+    'FORCE RLS enabled on 86 tenant table(s)'
+
+--- bot (the same image the stack builds) against that database:
+    GET /api/health -> 200
+    body: {"ok":true}
+
+--- control-plane (Next.js standalone image):
+    GET / -> 200
+
+--- what did NOT complete under podman's Docker-compatible API, stated exactly:
+    'postgres-roles' exited 2: the compose command relies on compose's $$ escaping;
+    the compat API passed $$ through unchanged, so sh expanded $$ to the PID and psql
+    fell back to a unix socket. Proof it is the API path and not the SQL: the identical
+    command run with podman run --network=host succeeds:
+    sniper
+    The two roles were therefore created with the same statements the service runs, and
+    db-migrate/bot/control-plane were started with the compose-derived environment.
+
+--- an observation, not a claim: the shipped config.toml has [redis] enabled = false,
+    so REDIS_URL is inert and the bot logs redis="off" / dedup="memory" even with Redis
+    healthy next to it. That is the documented fail-open default, not a failure.

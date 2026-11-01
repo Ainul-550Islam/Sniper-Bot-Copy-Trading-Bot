@@ -935,8 +935,8 @@ pub fn find_initialize2_log(logs: &[String]) -> Option<InitializeLogParams> {
 /// Discover Raydium v4 pools whose quote side is WSOL and whose base side is
 /// `base_mint`. Uses two `memcmp` filters so the RPC does the work.
 pub async fn find_pools_for_mint(rpc: &Rpc, base_mint: &Pubkey) -> BotResult<Vec<Pubkey>> {
-    use solana_client::rpc_config::RpcProgramAccountsConfig;
-    use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
+    use solana_rpc_client_api::config::RpcProgramAccountsConfig;
+    use solana_rpc_client_api::filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
 
     let config = RpcProgramAccountsConfig {
         filters: Some(vec![
@@ -950,7 +950,7 @@ pub async fn find_pools_for_mint(rpc: &Rpc, base_mint: &Pubkey) -> BotResult<Vec
                 MemcmpEncodedBytes::Bytes(WSOL_MINT.to_bytes().to_vec()),
             )),
         ]),
-        account_config: solana_client::rpc_config::RpcAccountInfoConfig {
+        account_config: solana_rpc_client_api::config::RpcAccountInfoConfig {
             encoding: Some(solana_account_decoder::UiAccountEncoding::Base64),
             data_slice: Some(solana_account_decoder::UiDataSliceConfig {
                 offset: 0,

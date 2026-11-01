@@ -61,7 +61,7 @@ frozen. The POST now uses the frozen signal's normalised type
 
 | File | Role |
 |---|---|
-| `crates/module-polymarket/src/lib.rs` | `PolyBot` construction (`new`, `with_ownership` / `with_store` / `with_signer` / `with_api_key`), accessors, and the supervised run loop (scan / poll / reconcile / user-event / shutdown ticks). One concern per file below — the same layout as `module-copy`. |
+| `crates/module-polymarket/src/lib.rs` | `PolyBot` construction (`new`, `with_ownership` / `with_store` / `with_signer` / `with_api_key`), accessors, and the supervised run loop (scan / poll / reconcile / **copy-follow** / user-event / shutdown ticks). One concern per file below — the same layout as `module-copy`. |
 | `src/discover.rs` | `scan_once` → `discover` (Gamma catalogue) → `quotes_for` (market-websocket cache, REST book fallback) → `process_market` (strategy verdicts, skips metered) → `build_signal` (frozen `OrderSignal`). |
 | `src/pipeline.rs` | `process_signal` / `run_pipeline`: the 17 stages, the ONE risk decision, the ONE idempotency key, the ownership claim, `sign_signal`, `post_live`, write-ahead journaling, `record_outcome` (journal + metrics + audit); `PipelineCtx`, the in-flight guard, `new_tracked`. |
 | `src/lifecycle.rs` | `apply_observation` (the single door for venue facts), `book_fill` (fill journal → trade → position → OMS), `poll_orders_once`, `apply_user_event`, `cancel_tracked_order` / `cancel_all_tracked` (venue-confirmed only), `finish_locally`, `confirm_fill_and_kill_quantity`, the tracker map and OMS transition helpers. |
@@ -73,6 +73,9 @@ frozen. The POST now uses the frozen signal's normalised type
 | `src/audit.rs` | `AUDIT_ACTOR`, the `poly.signal.* / poly.order.* / poly.recon.* / poly.recovery.*` vocabulary, `sanitize`. |
 | `src/venue.rs` | `ensure_api_key` (L1 → L2), `authed_client`, heartbeat, `order_status` (server reconciliation truth), kill-switch `cancel_all` / `flatten`. |
 | `src/strategy.rs` | `market_gate`, `quote_gate`, `evaluate_market` → `Vec<Verdict>` (`Enter(OrderDecision)` / `Skip{reason}`), `round_size`. Pure functions. |
+| `src/copy.rs` | `CopyEngine` (followed set, dedup ring, `evaluate` → `Follow(OrderSignal)` / `Skip(CopySkipReason)`), `CopyFollowConfig`, `LeaderTrade`. Pure with respect to money (§12a). |
+| `src/copy_feed.rs` | `CopyFeedClient::recent_trades` over the public data API's `/trades`, and the pure, total row parser. Failures are errors, never "no trades". |
+| `src/copy_run.rs` | `PolyBot::copy_poll_once` — the copy engine's production caller, driven by the `Tick::Copy` arm of the run loop: poll → resolve market → quote → `evaluate` → `process_signal`. |
 | `src/orders.rs` | `OrderSignal` (frozen intent), `intent_key`, `PolyStage`, `RejectReason`, `LocalOrderState` machine, `VenueOrderState` parsing, `TrackedOrder::apply_venue` (cumulative fill accounting), order building and EIP-712 signing (`sign_order_bundle`). |
 | `src/clob.rs` | L1/L2-authenticated CLOB client: `post_order`, `cancel_order(s)`, `order`, `open_orders`, `trades`, `heartbeat`, tick size, books. |
 | `src/ws.rs` | Public market feed (books) and the authenticated **user** channel: `run_user_feed`, `parse_user_message` → `UserEvent::{Order, Trade}`. |
@@ -494,6 +497,13 @@ Audit actions (actor `polymarket`): `poly.signal.<stage>`,
 | `cancel_on_shutdown` | `true` | cancel resting orders on stop |
 | `reconcile_interval_secs` | `60` | reconciliation cadence (0 = off) |
 | `reconcile_cancel_orphans` | `false` | cancel unknown venue orders (else report) |
+| `copy_followed_wallets` | `[]` | wallets whose fills are mirrored; **empty = the copy engine is never constructed** |
+| `copy_poll_interval_secs` | `15` | leader-trade feed poll cadence (min 5) |
+| `copy_size_multiplier` | `1.0` | mirrored stake = leader stake × this (clamped by the two floors below) |
+| `copy_min_stake_usd` | `1.0` | floor per mirrored trade |
+| `copy_max_stake_usd` | `25.0` | ceiling per mirrored trade |
+| `copy_max_price` | `0.95` | chase cap: never pay more than this per outcome token |
+| `copy_slippage_tolerance_bps` | `300` | refuse a leader fill the book has moved past by more than this |
 
 `[risk]` Polymarket keys (`0` = inherit / off): `poly_max_position_quote`,
 `poly_max_total_exposure_quote`, `poly_max_market_exposure_quote`,
@@ -519,6 +529,70 @@ not a config error: every market is skipped with `UNKNOWN_STRATEGY`.
 
 ---
 
+## 12a. Copy-follow (following other wallets' entries)
+
+The copy engine mirrors **selected leader wallets' BUYS** into the same staged
+pipeline as every strategy entry. It is a consumer of two previously
+disconnected pieces:
+
+| File | Role |
+|---|---|
+| `src/copy.rs` | `CopyEngine`: followed set, dedup ring, and the `evaluate` verdict (`Follow(OrderSignal)` or `Skip(CopySkipReason)`). Pure with respect to money — it commits nothing. |
+| `src/copy_feed.rs` | `CopyFeedClient`: the leader-trade source, `GET {data_url}/trades?user=<wallet>&limit=50` on Polymarket's public data API (no key). Pure, total row parser; a malformed body is an **error**, never "no trades". |
+| `src/copy_run.rs` | `PolyBot::copy_poll_once` — **the production call site**: poll → resolve market → quote → `evaluate` → `process_signal`. Owned by `PolyBot::run` on its own tick (`Tick::Copy`). |
+
+Construction is gated on configuration: `copy_followed_wallets = []` (the
+default) means `copy_engine_from_config` returns `None`, the leader feed is
+never polled and no copy order can exist. An **invalid** copy configuration
+(degenerate stake bounds, `max_price` outside `(0, 1]`, non-positive
+multiplier) disables the feature with a logged error — it never silently
+degrades into a different sizing rule.
+
+Per poll, for each followed wallet:
+
+1. `recent_trades(wallet, 50)` — a failed/HTTP-error/non-array response is
+   counted as `feed_errors` and logged; it is never read as "no trades".
+2. Dedup first (`CopyEngine::seen`): a replayed page row costs no book fetch,
+   and `evaluate` re-checks the dedup ring authoritatively, so **the same
+   leader fill can never be mirrored twice**.
+3. Market resolution: the scanner's `markets` cache first, then
+   `GammaClient::market_by_condition`; a market that cannot be resolved is
+   evaluated with no quote and counted, and stays eligible on the next poll.
+4. Pricing: `PolyBot::quotes_for` — the exact same websocket-cache-then-REST
+   path a strategy entry uses.
+5. `CopyEngine::evaluate`: buys only (a leader **sell** is the explicit
+   `LEADER_SELL` skip, never an implicit close), liquidity/spread/freshness
+   gates, the slippage tolerance over the leader's fill price, the chase cap,
+   then stake = leader stake × multiplier clamped to
+   `[copy_min_stake_usd, copy_max_stake_usd]`.
+6. `PolyBot::process_signal`: the mirrored `OrderSignal` (strategy label
+   `copy`) runs the full pipeline — market gates, quote gates, exposure, the
+   one shared risk decision, collateral verification, OMS idempotency,
+   ownership claim, signing, submission. **The copy path adds no gate of its
+   own and bypasses none.**
+
+Every non-follow is counted with its `CopySkipReason` label
+(`NOT_FOLLOWED_WALLET`, `DUPLICATE_TRADE`, `LEADER_SELL`, `LOW_LIQUIDITY`,
+`NO_QUOTE`, `ONE_SIDED_BOOK`, `CROSSED_BOOK`, `SPREAD_TOO_WIDE`,
+`STALE_QUOTE`, `ABOVE_MAX_PRICE`, `SLIPPAGE_EXCEEDED`, `SIZED_TOO_SMALL`,
+`INVALID_CONFIG`) on `poly_strategy_skips_total{strategy="copy"}` and in the
+`polymarket copy poll` log line; a mirrored trade whose market could not be
+resolved is refused explicitly (`UNRESOLVED_MARKET`) rather than guessed at.
+
+Data honesty: the trades endpoint reports no liquidity and no tick size. When
+the market resolves, the Gamma snapshot's `liquidity` is used (a published
+figure for that condition id) and the venue's own tick size is read from the
+CLOB — the same call `build_signal` makes. Nothing is invented when either
+lookup fails; the engine's gates then decide with the conservative value.
+
+**Limitation, stated plainly:** mirroring is entries-only and exit-blind. A
+followed leader's sell does not close our position (the module has no
+automated Polymarket exit at all, §14), and leader-quality screening
+(`leaders.rs` statistics / leaderboard) is not wired into the decision — you
+configure the wallet list you trust.
+
+---
+
 ## 13. Tests
 
 `cargo test -p module-polymarket -- --test-threads=1` (all suites use an
@@ -527,7 +601,7 @@ no network):
 
 | Suite | Tests | Covers |
 |---|---|---|
-| unit (`src/*`) | 94 | strategy verdicts and gates, intent identity, lifecycle state machine and fill accounting (incl. FAK `matched` semantics, late trade events after a poll, `associate_trades` re-basing, the EOA funder/signer guard), user-message parsing, EIP-712 vectors, clients |
+| unit (`src/*`) | 168 | strategy verdicts and gates, intent identity, lifecycle state machine and fill accounting (incl. FAK `matched` semantics, late trade events after a poll, `associate_trades` re-basing, the EOA funder/signer guard), user-message parsing, EIP-712 vectors, clients |
 | `tests/order_pipeline.rs` | 10 | every stage, gates, exposure caps, the single risk decision, collateral verification, `process_market` |
 | `tests/order_lifecycle.rs` | 11 | rest → poll → fill, TTL with partial fill, venue rejection, ambiguous submits (both resolutions), vanished orders, reprice/expiry cancels, refused cancels, unrecognised cancel answers (status re-read, never assumed), cancel-all confirmed per id, FAK `matched` booked only at the venue-reported quantity |
 | `tests/user_ws.rs` | 5 | cumulative order updates, per-trade deltas booked once, trade events a poll already captured never booked twice (named trades remembered, new trades still immediate), a real websocket server (auth frame, ordering, clean stop), bot-channel end to end |
@@ -535,7 +609,10 @@ no network):
 | `tests/reconciliation.rs` | 6 | orphans (report / cancel policy), missing-on-venue resolution, ambiguous resolution booked once, matched-size drift, position-without-order / stale, paper never calls the venue |
 | `tests/crash_recovery.rs` | 7 | journal re-adoption with booked quantity (no double booking), ambiguous held and resolved, OMS-only adoption, paper recovery without credentials, never-sent OMS orders failed, fills replayed after a restart booked once (per-trade replays discarded, cumulative catch-up without re-booking), write-ahead journaling before the POST |
 | `tests/strategy_sizing.rs` | 5 | both basket legs booked and deterministic, search sizing and rounding, GTD/FOK reaching the venue, exposure caps from the shared risk engine, concurrent-position cap and price band |
+| `tests/async_commit_pipeline.rs` | 7 | `matched` without settlement hashes resolved later from `GET /data/trades` (venue hash, never synthesized), `delayed` acceptances pending with zero amounts, order-gone, terminal-failed trades |
+| `tests/exchange_v3_signing.rs` | 8 | Exchange V3 position-backed signing (domain/version, tokenId carries the position id, neg-risk ignored for position orders, exactly one identifier), V2 token orders unchanged |
 | `tests/mock_clob_gamma.rs` | 5 | pre-existing client tests (kept) |
+| `tests/copy_follow.rs` | 8 | leader buy mirrored end to end through the pipeline (paper fill, `strategy="copy"`, position booked, feed asked for the followed wallet); the same page re-polled mirrors once; leader sell → `LEADER_SELL`; unfollowed wallet → `NOT_FOLLOWED_WALLET`; a runaway price → `SLIPPAGE_EXCEEDED`; HTTP 500 feed → `feed_errors` and no signal; no wallets → no feed request; malformed rows counted and the valid one still mirrored |
 
 Core: `crates/core/tests/db_integration.rs` covers migration 0014 and
 `PolyRepo` round-trips; `risk.rs` unit tests cover every `poly_*` cap.

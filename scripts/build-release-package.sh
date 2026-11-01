@@ -33,8 +33,20 @@ MAX_FILE_BYTES=$((5 * 1024 * 1024))
 echo "[build-release-package] sniper-suite $VERSION -> $OUT"
 
 cd "$ROOT"
-if ! git rev-parse --git-dir >/dev/null 2>&1; then
-    echo "ERROR: must run inside a git checkout (the package is built from the tracked file list)." >&2
+
+# The allow-list source. In a checkout it is the git index (uncommitted-but-
+# tracked work included). A DELIVERED ZIP has no .git, and refusing to build
+# there meant a buyer could never reproduce the package they were handed — so
+# the fallback is the shipped SNAPSHOT-MANIFEST.sha256, which lists exactly the
+# files the package ships, each with the hash that verifies it. Same allow-list
+# semantics, same guards, different source of the list.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    ALLOWLIST_SOURCE="git"
+elif [ -f "$ROOT/SNAPSHOT-MANIFEST.sha256" ]; then
+    ALLOWLIST_SOURCE="snapshot"
+    echo "[build-release-package] no .git — using SNAPSHOT-MANIFEST.sha256 as the allow-list"
+else
+    echo "ERROR: neither a git checkout nor SNAPSHOT-MANIFEST.sha256 is present; cannot build." >&2
     exit 1
 fi
 
@@ -47,7 +59,12 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 LIST="$STAGE/allowlist.txt"
-{ git ls-files --cached; git ls-files --others --exclude-standard; } \
+if [ "$ALLOWLIST_SOURCE" = "git" ]; then
+    { git ls-files --cached; git ls-files --others --exclude-standard; }
+else
+    # manifest lines are "<sha256>  <path>"; take everything after the two spaces
+    sed -n 's/^[0-9a-f]\{64\}  //p' "$ROOT/SNAPSHOT-MANIFEST.sha256"
+fi \
     | sort -u \
     | grep -v -E '^(docs/archive/|buyer-release/|\.git/)' \
     | grep -v -E '\.(dump|dump\.age)$' \
@@ -145,6 +162,35 @@ while IFS= read -r f; do
     mkdir -p "$OUT/$(dirname "$f")"
     cp -p "$ROOT/$f" "$OUT/$f"
 done < "$LIST"
+
+# ---------------------------------------------------------------------------
+# Step 3b — Licensor identity (single source of truth).
+#
+# LICENSE ships with the neutral wording "Copyright (c) 2026 The Licensor, an
+# individual sole proprietor". The legal name is set in exactly one place —
+# the LICENSOR_NAME environment variable, else legal/LICENSOR.txt — and is
+# substituted into the PACKAGED copy only. The tracked LICENSE is never
+# rewritten, so `git status` stays clean after a package build.
+# ---------------------------------------------------------------------------
+LICENSOR_NAME="${LICENSOR_NAME:-}"
+if [ -z "$LICENSOR_NAME" ] && [ -f "$OUT/legal/LICENSOR.txt" ]; then
+    LICENSOR_NAME="$(sed -n 's/^LICENSOR_NAME=//p' "$OUT/legal/LICENSOR.txt" | head -1 | sed 's/[[:space:]]*$//')"
+fi
+if [ -n "$LICENSOR_NAME" ] && [ -f "$OUT/LICENSE" ]; then
+    tmp_lic="$(mktemp)"
+    LICENSOR_NAME="$LICENSOR_NAME" awk '
+        /^Copyright \(c\) 2026 The Licensor, an individual sole proprietor/ {
+            print "Copyright (c) 2026 " ENVIRON["LICENSOR_NAME"] " (\"Licensor\")."
+            next
+        }
+        { print }
+    ' "$OUT/LICENSE" > "$tmp_lic"
+    cat "$tmp_lic" > "$OUT/LICENSE"
+    rm -f "$tmp_lic"
+    echo "[build-release-package] LICENSE copyright line: $(sed -n '4p' "$OUT/LICENSE")"
+else
+    echo "[build-release-package] NOTE: no LICENSOR_NAME (env or legal/LICENSOR.txt) — the package keeps the neutral 'The Licensor, an individual sole proprietor' copyright line."
+fi
 
 # ---------------------------------------------------------------------------
 # Step 4 — POST-BUILD gate over the WHOLE package output ($OUT), including

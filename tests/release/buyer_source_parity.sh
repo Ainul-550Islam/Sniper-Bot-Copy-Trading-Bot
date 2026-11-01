@@ -14,6 +14,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 COMPARE="$ROOT/scripts/compare-canonical-to-buyer-source.sh"
 
+# Self-provision (see buyer_parity.sh): build the generated mirror when the tree
+# arrived as a ZIP, then run the identical parity assertion.
+if [ ! -d "$ROOT/buyer-release/source" ] || [ -z "$(ls -A "$ROOT/buyer-release/source" 2>/dev/null)" ]; then
+  echo "[parity-test] buyer-release/source absent — building it from the canonical tree"
+  bash "$ROOT/scripts/rebuild-buyer-release.sh" || {
+    echo "[parity-test] FAIL — could not build the buyer mirror" >&2
+    exit 1
+  }
+fi
+
 echo "[parity-test] 1/2 — the real buyer tree must be in parity"
 if bash "$COMPARE"; then
   echo "[parity-test] real tree parity: OK"

@@ -1,0 +1,11 @@
+# Licensor identity — the ONE place the copyright holder's legal name is set.
+#
+# Format: a single line, "LICENSOR_NAME=<legal name>", e.g.
+#   LICENSOR_NAME=Jane Q. Doe
+#   LICENSOR_NAME=Doe Trading (sole proprietorship)
+#
+# scripts/build-release-package.sh reads this file (or the LICENSOR_NAME
+# environment variable, which wins) and rewrites the copyright line of LICENSE
+# in the packaging workspace only — the tracked LICENSE keeps the neutral
+# "The Licensor, an individual sole proprietor" wording.
+LICENSOR_NAME=

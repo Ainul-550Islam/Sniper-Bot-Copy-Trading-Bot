@@ -18,7 +18,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::Row;
+use sqlx::{Connection, Row};
 use tracing::warn;
 
 use bot_core::db::Database;
@@ -127,77 +127,131 @@ impl PgRuntimeStore {
 
     const COLS: &'static str = "id, organization_id, generation, status, worker_id, \
                                 started_at, heartbeat_at, lease_expires_at, stopped_at";
+
+    /// The pool these statements run on.
+    ///
+    /// `tenant_runtimes` is protected by the tenant RLS policy, and this store
+    /// is a PLATFORM service: it answers cross-tenant questions (which runtime
+    /// is live for org X, which runtimes went stale) that a tenant-scoped
+    /// session can never see. It therefore uses the privileged control-plane
+    /// identity when RLS is on — the same choice the SaaS repository makes
+    /// (`saas/postgres.rs`) — and the ordinary pool otherwise. Before this,
+    /// every registration on an RLS deployment died with
+    /// `new row violates row-level security policy for table "tenant_runtimes"`,
+    /// which is exactly why the registry had never been assembled in boot.
+    fn pool(&self) -> &sqlx::PgPool {
+        self.db.system_pool().unwrap_or_else(|| self.db.pool())
+    }
 }
 
 #[async_trait]
 impl RuntimeStore for PgRuntimeStore {
     async fn insert(&self, record: &TenantRuntimeRecord) -> BotResult<()> {
-        sqlx::query(
-            "INSERT INTO tenant_runtimes \
-             (id, organization_id, generation, status, worker_id, started_at, heartbeat_at, \
-              lease_expires_at, stopped_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        let record = record.clone();
+        let result = bot_core::tenant::rls_context::with_system_scope(
+            self.pool(),
+            "runtime registry: register a tenant runtime",
+            move |connection| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO tenant_runtimes \
+                         (id, organization_id, generation, status, worker_id, started_at, heartbeat_at, \
+                          lease_expires_at, stopped_at) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    )
+                    .bind(record.runtime_id.as_uuid())
+                    .bind(record.organization_id.as_uuid())
+                    .bind(record.generation.to_i64().unwrap_or(1))
+                    .bind(record.status.as_str())
+                    .bind(&record.worker_id)
+                    .bind(record.started_at)
+                    .bind(record.heartbeat_at)
+                    .bind(record.lease_expires_at)
+                    .bind(record.stopped_at)
+                    .execute(&mut *connection)
+                    .await
+                    .map(|_| ())
+                })
+            },
         )
-        .bind(record.runtime_id.as_uuid())
-        .bind(record.organization_id.as_uuid())
-        .bind(record.generation.to_i64().unwrap_or(1))
-        .bind(record.status.as_str())
-        .bind(&record.worker_id)
-        .bind(record.started_at)
-        .bind(record.heartbeat_at)
-        .bind(record.lease_expires_at)
-        .bind(record.stopped_at)
-        .execute(self.db.pool())
-        .await
-        .map_err(|e| {
+        .await;
+        result.map_err(|e| {
             let msg = e.to_string();
             if msg.contains("tenant_runtimes_one_live_per_org_idx") {
                 BotError::db("runtime registration refused: the tenant already has a live runtime")
             } else {
                 BotError::db(format!("runtime insert failed: {e}"))
             }
-        })?;
-        Ok(())
+        })
     }
 
     async fn live_for(
         &self,
         organization_id: OrganizationId,
     ) -> BotResult<Option<TenantRuntimeRecord>> {
-        let row = sqlx::query(&format!(
-            "SELECT {} FROM tenant_runtimes \
-             WHERE organization_id = $1 AND status IN ('provisioning','active') \
-             ORDER BY generation DESC LIMIT 1",
-            Self::COLS
-        ))
-        .bind(organization_id.as_uuid())
-        .fetch_optional(self.db.pool())
+        let row = bot_core::tenant::rls_context::with_system_scope(
+            self.pool(),
+            "runtime registry: resolve the tenant's live runtime",
+            move |connection| {
+                let sql = format!(
+                    "SELECT {} FROM tenant_runtimes \
+                     WHERE organization_id = $1 AND status IN ('provisioning','active') \
+                     ORDER BY generation DESC LIMIT 1",
+                    PgRuntimeStore::COLS
+                );
+                Box::pin(async move {
+                    sqlx::query(&sql)
+                        .bind(organization_id.as_uuid())
+                        .fetch_optional(&mut *connection)
+                        .await
+                })
+            },
+        )
         .await
         .map_err(|e| BotError::db(format!("runtime lookup failed: {e}")))?;
-        Ok(row.as_ref().map(Self::map_row))
+        Ok(row.as_ref().map(PgRuntimeStore::map_row))
     }
 
     async fn get(&self, runtime_id: RuntimeId) -> BotResult<Option<TenantRuntimeRecord>> {
-        let row = sqlx::query(&format!(
-            "SELECT {} FROM tenant_runtimes WHERE id = $1",
-            Self::COLS
-        ))
-        .bind(runtime_id.as_uuid())
-        .fetch_optional(self.db.pool())
+        let row = bot_core::tenant::rls_context::with_system_scope(
+            self.pool(),
+            "runtime registry: read one runtime row",
+            move |connection| {
+                let sql = format!(
+                    "SELECT {} FROM tenant_runtimes WHERE id = $1",
+                    PgRuntimeStore::COLS
+                );
+                Box::pin(async move {
+                    sqlx::query(&sql)
+                        .bind(runtime_id.as_uuid())
+                        .fetch_optional(&mut *connection)
+                        .await
+                })
+            },
+        )
         .await
         .map_err(|e| BotError::db(format!("runtime get failed: {e}")))?;
-        Ok(row.as_ref().map(Self::map_row))
+        Ok(row.as_ref().map(PgRuntimeStore::map_row))
     }
 
     async fn heartbeat(&self, runtime_id: RuntimeId, now: DateTime<Utc>) -> BotResult<bool> {
-        let row = sqlx::query(
-            "UPDATE tenant_runtimes SET heartbeat_at = $2 \
-             WHERE id = $1 AND status IN ('provisioning','active') \
-             RETURNING id",
+        let row = bot_core::tenant::rls_context::with_system_scope(
+            self.pool(),
+            "runtime registry: record a runtime heartbeat",
+            move |connection| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE tenant_runtimes SET heartbeat_at = $2 \
+                         WHERE id = $1 AND status IN ('provisioning','active') \
+                         RETURNING id",
+                    )
+                    .bind(runtime_id.as_uuid())
+                    .bind(now)
+                    .fetch_optional(&mut *connection)
+                    .await
+                })
+            },
         )
-        .bind(runtime_id.as_uuid())
-        .bind(now)
-        .fetch_optional(self.db.pool())
         .await
         .map_err(|e| BotError::db(format!("runtime heartbeat failed: {e}")))?;
         Ok(row.is_some())
@@ -210,28 +264,46 @@ impl RuntimeStore for PgRuntimeStore {
         now: DateTime<Utc>,
     ) -> BotResult<()> {
         let stopped_at = status.is_terminal().then_some(now);
-        sqlx::query(
-            "UPDATE tenant_runtimes SET status = $2, stopped_at = COALESCE($3, stopped_at) \
-             WHERE id = $1 AND status NOT IN ('stopped','retired')",
+        bot_core::tenant::rls_context::with_system_scope(
+            self.pool(),
+            "runtime registry: transition a runtime status",
+            move |connection| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE tenant_runtimes SET status = $2, stopped_at = COALESCE($3, stopped_at) \
+                         WHERE id = $1 AND status NOT IN ('stopped','retired')",
+                    )
+                    .bind(runtime_id.as_uuid())
+                    .bind(status.as_str())
+                    .bind(stopped_at)
+                    .execute(&mut *connection)
+                    .await
+                    .map(|_| ())
+                })
+            },
         )
-        .bind(runtime_id.as_uuid())
-        .bind(status.as_str())
-        .bind(stopped_at)
-        .execute(self.db.pool())
         .await
-        .map_err(|e| BotError::db(format!("runtime status change failed: {e}")))?;
-        Ok(())
+        .map_err(|e| BotError::db(format!("runtime status change failed: {e}")))
     }
 
     async fn max_generation(
         &self,
         organization_id: OrganizationId,
     ) -> BotResult<Option<RuntimeGeneration>> {
-        let row: Option<(Option<i64>,)> = sqlx::query_as(
-            "SELECT MAX(generation) FROM tenant_runtimes WHERE organization_id = $1",
+        let row: Option<(Option<i64>,)> = bot_core::tenant::rls_context::with_system_scope(
+            self.pool(),
+            "runtime registry: look up the tenant's runtime generation",
+            move |connection| {
+                Box::pin(async move {
+                    sqlx::query_as(
+                        "SELECT MAX(generation) FROM tenant_runtimes WHERE organization_id = $1",
+                    )
+                    .bind(organization_id.as_uuid())
+                    .fetch_optional(&mut *connection)
+                    .await
+                })
+            },
         )
-        .bind(organization_id.as_uuid())
-        .fetch_optional(self.db.pool())
         .await
         .map_err(|e| BotError::db(format!("runtime generation lookup failed: {e}")))?;
         Ok(row.and_then(|(g,)| g).and_then(RuntimeGeneration::from_i64))
@@ -244,70 +316,83 @@ impl RuntimeStore for PgRuntimeStore {
         worker_id: &str,
         now: DateTime<Utc>,
     ) -> BotResult<TenantRuntimeRecord> {
-        let mut tx = self
-            .db
-            .pool()
-            .begin()
-            .await
-            .map_err(|e| BotError::db(format!("runtime rotate begin failed: {e}")))?;
-        // Supersede the live runtime (if any).
-        sqlx::query(
-            "UPDATE tenant_runtimes SET status = 'stopped', stopped_at = $2 \
-             WHERE organization_id = $1 AND status IN ('provisioning','active')",
+        let worker_id = worker_id.to_string();
+        let record = bot_core::tenant::rls_context::with_system_scope(
+            self.pool(),
+            "runtime registry: rotate a tenant runtime",
+            move |connection| {
+                Box::pin(async move {
+                    let mut tx = connection.begin().await?;
+                    // Supersede the live runtime (if any).
+                    sqlx::query(
+                        "UPDATE tenant_runtimes SET status = 'stopped', stopped_at = $2 \
+                         WHERE organization_id = $1 AND status IN ('provisioning','active')",
+                    )
+                    .bind(organization_id.as_uuid())
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                    // Issue the next generation.
+                    let (max,): (i64,) = sqlx::query_as(
+                        "SELECT COALESCE(MAX(generation), 0) FROM tenant_runtimes \
+                         WHERE organization_id = $1",
+                    )
+                    .bind(organization_id.as_uuid())
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    let generation = RuntimeGeneration::from_i64(max.max(0))
+                        .and_then(|g| g.next())
+                        .unwrap_or_else(RuntimeGeneration::first);
+                    let record = TenantRuntimeRecord::new_active(
+                        organization_id,
+                        new_runtime_id,
+                        generation,
+                        worker_id,
+                        now,
+                    );
+                    sqlx::query(
+                        "INSERT INTO tenant_runtimes \
+                         (id, organization_id, generation, status, worker_id, started_at, heartbeat_at) \
+                         VALUES ($1, $2, $3, 'active', $4, $5, $5)",
+                    )
+                    .bind(record.runtime_id.as_uuid())
+                    .bind(record.organization_id.as_uuid())
+                    .bind(record.generation.to_i64().unwrap_or(1))
+                    .bind(&record.worker_id)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                    Ok(record)
+                })
+            },
         )
-        .bind(organization_id.as_uuid())
-        .bind(now)
-        .execute(&mut *tx)
         .await
-        .map_err(|e| BotError::db(format!("runtime rotate supersede failed: {e}")))?;
-        // Issue the next generation.
-        let (max,): (i64,) = sqlx::query_as(
-            "SELECT COALESCE(MAX(generation), 0) FROM tenant_runtimes WHERE organization_id = $1",
-        )
-        .bind(organization_id.as_uuid())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| BotError::db(format!("runtime rotate generation failed: {e}")))?;
-        let generation = RuntimeGeneration::from_i64(max.max(0))
-            .and_then(|g| g.next())
-            .unwrap_or_else(RuntimeGeneration::first);
-        let record = TenantRuntimeRecord::new_active(
-            organization_id,
-            new_runtime_id,
-            generation,
-            worker_id,
-            now,
-        );
-        sqlx::query(
-            "INSERT INTO tenant_runtimes \
-             (id, organization_id, generation, status, worker_id, started_at, heartbeat_at) \
-             VALUES ($1, $2, $3, 'active', $4, $5, $5)",
-        )
-        .bind(record.runtime_id.as_uuid())
-        .bind(record.organization_id.as_uuid())
-        .bind(record.generation.to_i64().unwrap_or(1))
-        .bind(&record.worker_id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| BotError::db(format!("runtime rotate insert failed: {e}")))?;
-        tx.commit()
-            .await
-            .map_err(|e| BotError::db(format!("runtime rotate commit failed: {e}")))?;
+        .map_err(|e| BotError::db(format!("runtime rotate failed: {e}")))?;
         Ok(record)
     }
 
     async fn stale_since(&self, cutoff: DateTime<Utc>) -> BotResult<Vec<TenantRuntimeRecord>> {
-        let rows = sqlx::query(&format!(
-            "SELECT {} FROM tenant_runtimes \
-             WHERE status IN ('provisioning','active') AND heartbeat_at < $1",
-            Self::COLS
-        ))
-        .bind(cutoff)
-        .fetch_all(self.db.pool())
+        let rows = bot_core::tenant::rls_context::with_system_scope(
+            self.pool(),
+            "runtime registry: reap stale runtimes",
+            move |connection| {
+                let sql = format!(
+                    "SELECT {} FROM tenant_runtimes \
+                     WHERE status IN ('provisioning','active') AND heartbeat_at < $1",
+                    PgRuntimeStore::COLS
+                );
+                Box::pin(async move {
+                    sqlx::query(&sql)
+                        .bind(cutoff)
+                        .fetch_all(&mut *connection)
+                        .await
+                })
+            },
+        )
         .await
         .map_err(|e| BotError::db(format!("runtime stale sweep failed: {e}")))?;
-        Ok(rows.iter().map(Self::map_row).collect())
+        Ok(rows.iter().map(PgRuntimeStore::map_row).collect())
     }
 }
 

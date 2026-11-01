@@ -27,8 +27,16 @@ if [ ! -d "$SOURCE" ]; then
   mkdir -p "$SOURCE"
 fi
 
-echo "[rebuild] refreshing release manifest (before the mirror, so the mirrored copy is the fresh one)"
-"$ROOT/scripts/update-release-manifest.sh"
+# The manifest is regenerated from `git ls-files`, so it can only be refreshed in a
+# real checkout. Inside the delivered ZIP (no .git) the SHIPPED release-manifest.json
+# is authoritative and is mirrored unchanged — the mirror walk below is pure Python
+# and needs no VCS, which is what lets a buyer verify package parity offline.
+if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "[rebuild] refreshing release manifest (before the mirror, so the mirrored copy is the fresh one)"
+  "$ROOT/scripts/update-release-manifest.sh"
+else
+  echo "[rebuild] no .git checkout — mirroring the shipped release-manifest.json as-is"
+fi
 
 echo "[rebuild] mirroring canonical -> buyer-release/source"
 python3 - "$ROOT" "$SOURCE" <<'PY'
@@ -129,6 +137,63 @@ for name, s in wanted.items():
     copied += 1
 print(f"[rebuild] package docs: copied={copied} unchanged={same} stale_removed={stale} total={len(wanted)}")
 PYDOC
+
+echo "[rebuild] materialising the package-level artifacts (manifests, sbom, licenses, evidence, handover papers)"
+python3 - "$ROOT" <<'PYPKG'
+import shutil
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+pkg = root / "buyer-release"
+
+# (package dir, canonical sources) — each entry is documented in the handover:
+#   manifests/  the release manifest + the per-file snapshot the ZIP verifies with
+#   sbom/       the CycloneDX inventory a buyer feeds to their own scanner
+#   licenses/   the license CSV/JSON behind LICENSE + THIRD-PARTY notices
+#   evidence/   the executed-run transcripts the report cites
+#   root        VERSION / LICENSE / CHANGELOG.md, asserted by buyer_parity.sh
+layout = {
+    "manifests": ["release-manifest.json", "SNAPSHOT-MANIFEST.sha256"],
+    "sbom": ["sbom.json"],
+    "licenses": ["licenses.csv", "licenses.json"],
+    "root": ["VERSION", "LICENSE", "CHANGELOG.md"],
+}
+
+copied = same = missing = 0
+for sub, files in layout.items():
+    for name in files:
+        src = root / name
+        if not src.is_file():
+            missing += 1
+            continue
+        dst = (pkg / name) if sub == "root" else (pkg / sub / name)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.is_file() and dst.read_bytes() == src.read_bytes():
+            same += 1
+            continue
+        shutil.copyfile(src, dst)
+        copied += 1
+
+# evidence/ is a tree (audits, external, live, live-integration): mirror it whole.
+ev_src, ev_dst = root / "evidence", pkg / "evidence"
+ev_copied = ev_same = 0
+for src in sorted(ev_src.rglob("*")):
+    if not src.is_file():
+        continue
+    dst = ev_dst / src.relative_to(ev_src)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.is_file() and dst.read_bytes() == src.read_bytes():
+        ev_same += 1
+        continue
+    shutil.copyfile(src, dst)
+    ev_copied += 1
+
+print(f"[rebuild] package artifacts: copied={copied} unchanged={same} missing={missing}; "
+      f"evidence: copied={ev_copied} unchanged={ev_same}")
+if missing:
+    raise SystemExit("[rebuild] ERROR — a canonical artifact is missing; package would be incomplete")
+PYPKG
 
 echo "[rebuild] regenerating package checksums (SOURCE-TREE, SHA256SUMS, all-files)"
 PKG="$ROOT/buyer-release"

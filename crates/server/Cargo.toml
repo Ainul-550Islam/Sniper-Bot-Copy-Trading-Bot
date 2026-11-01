@@ -38,7 +38,6 @@ chrono.workspace = true
 uuid.workspace = true
 dotenvy.workspace = true
 solana-sdk.workspace = true
-solana-client.workspace = true
 async-trait.workspace = true
 sqlx.workspace = true
 # TASK 7B: webhook signature verification (provider.rs boundary).

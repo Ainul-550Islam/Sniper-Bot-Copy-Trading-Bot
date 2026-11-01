@@ -165,7 +165,11 @@ test("backup status card shown on status page", async ({ page }) => {
   });
 
   await goToViaNav(page, "System Status");
-  await expect(page.getByText("Backup Status")).toBeVisible();
+  // The card heading is asserted by role: the loading placeholder
+  // ("Loading backup status…") also contains the substring "backup status",
+  // so a bare getByText() resolves to two nodes while the fetch is in flight
+  // and aborts the assertion in strict mode before the data arrives.
+  await expect(page.getByRole("heading", { name: "Backup Status" })).toBeVisible();
   await expect(page.getByText("Backups", { exact: true })).toBeVisible();
   await expect(page.getByText("synced")).toBeVisible();
 });

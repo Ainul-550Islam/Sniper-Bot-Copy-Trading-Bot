@@ -92,6 +92,8 @@ pub mod trade_resolution;
 // discovery/stats, and CLOB V2 builder-code attribution.
 pub mod builder;
 pub mod copy;
+pub mod copy_feed;
+pub mod copy_run;
 pub mod leaders;
 
 pub use audit::AUDIT_ACTOR;
@@ -461,6 +463,35 @@ impl PolyBot {
         let mut hb_started = false;
         let mut user_rx = self.user_rx.take();
 
+        // Copy-follow (P2). Constructed ONLY when the operator follows at
+        // least one wallet: an empty list means no leader feed is polled and
+        // no copy order can exist. An invalid copy configuration disables the
+        // feature with an error — it never degrades into different sizing.
+        let mut copy_engine = match Self::copy_engine_from_config(&poly) {
+            Ok(engine) => engine,
+            Err(reason) => {
+                warn!(
+                    reason,
+                    "polymarket copy-follow disabled: invalid configuration"
+                );
+                None
+            }
+        };
+        let copy_feed = copy_engine.as_ref().map(|engine| {
+            let base = if poly.data_url.trim().is_empty() {
+                copy_feed::POLYMARKET_DATA_API.to_string()
+            } else {
+                poly.data_url.clone()
+            };
+            info!(
+                wallets = engine.config().followed_wallets.len(),
+                poll_secs = poly.copy_poll_interval_secs.max(5),
+                feed = %base,
+                "polymarket copy-follow enabled (leader feed polling, mirrored entries only)"
+            );
+            copy_feed::CopyFeedClient::with_base_url(base)
+        });
+
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
             poly.scan_interval_secs.max(5),
         ));
@@ -473,12 +504,20 @@ impl PolyBot {
             poly.reconcile_interval_secs.max(1),
         ));
         recon.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The copy tick runs even when no wallet is followed (it then does
+        // nothing); keeping the interval unconditional keeps the select arms
+        // static, and `.max(5)` bounds the poll rate.
+        let mut copy_tick = tokio::time::interval(std::time::Duration::from_secs(
+            poly.copy_poll_interval_secs.max(5),
+        ));
+        copy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             enum Tick {
                 Scan,
                 Poll,
                 Recon,
+                Copy,
                 // Boxed: a user event (order + trade payloads) is far larger
                 // than the timer arms and the select runs every tick.
                 User(Box<UserEvent>),
@@ -488,6 +527,7 @@ impl PolyBot {
                 _ = ticker.tick() => Tick::Scan,
                 _ = poll.tick() => Tick::Poll,
                 _ = recon.tick() => Tick::Recon,
+                _ = copy_tick.tick() => Tick::Copy,
                 ev = recv_user_event(&mut user_rx) => Tick::User(Box::new(ev)),
                 _ = self.state.wait_shutdown() => Tick::Shutdown,
             };
@@ -527,6 +567,42 @@ impl PolyBot {
                         if let Err(e) = self.reconcile_once(&poly).await {
                             debug!(error = %e, "polymarket reconciliation failed");
                         }
+                    }
+                    continue;
+                }
+                Tick::Copy => {
+                    // Leader feed → engine → the same staged pipeline as every
+                    // strategy entry. Gated like the scan: module enabled and
+                    // the kill switch released.
+                    match copy_engine.as_mut().zip(copy_feed.as_ref()) {
+                        Some((engine, feed)) if poly.enabled && !self.state.kill_switch() => {
+                            if !self.state.is_enabled(BotModule::Polymarket).await {
+                                continue;
+                            }
+                            let report = self.copy_poll_once(engine, feed, &poly).await;
+                            if report.rows > 0 {
+                                info!(
+                                    wallets = report.wallets,
+                                    rows = report.rows,
+                                    skipped_rows = report.skipped_rows,
+                                    evaluated = report.evaluated,
+                                    signals = report.signals,
+                                    reached_venue = report.reached_venue,
+                                    rejected = report.rejected,
+                                    unresolved_markets = report.unresolved_markets,
+                                    feed_errors = report.feed_errors,
+                                    skips = ?report.skips,
+                                    "polymarket copy poll"
+                                );
+                            } else if report.feed_errors > 0 {
+                                warn!(
+                                    wallets = report.wallets,
+                                    feed_errors = report.feed_errors,
+                                    "polymarket copy poll: every leader feed failed"
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                     continue;
                 }

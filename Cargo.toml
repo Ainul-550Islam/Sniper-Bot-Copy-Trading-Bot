@@ -47,11 +47,19 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "url"] }
 url = "2"
 
+# --- geyser (yellowstone gRPC) --------------------------------------------
+# Streaming transaction ingestion. `tonic` 0.14 is what yellowstone 13 is
+# built against; the client lives in solana-kit::geyser.
+tonic = "0.14"
+yellowstone-grpc-proto = { version = "13", features = ["tonic"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
 # --- solana ----------------------------------------------------------------
 # NOTE: `default-features = false` hides signer/transaction/compute_budget
 # behind the `full` feature, so the default features are required.
 solana-sdk = "2.1"
-solana-client = "2.1"
+solana-rpc-client = "2.1"
+solana-rpc-client-api = "2.1"
 # Non-deprecated replacement for solana_sdk::{system_instruction,system_program}
 # (already in the tree transitively via solana-sdk 2.x — not a new download).
 solana-system-interface = "1.0"
@@ -72,7 +80,7 @@ hex = "0.4"
 toml = "0.8"
 
 # --- crypto ----------------------------------------------------------------
-k256 = { version = "0.13", features = ["ecdsa"] }
+k256 = { version = "0.14", features = ["ecdsa"] }
 sha2 = "0.10"
 hmac = "0.12"
 tiny-keccak = { version = "2", features = ["keccak"] }
@@ -122,3 +130,22 @@ inherits = "release"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+# ---------------------------------------------------------------------------
+# Vendored patch: solana-account-decoder 2.3.13 with zstd 0.13.3 -> 0.14.3.
+#
+# WHY: the last three open RustSec advisories (RUSTSEC-2026-0391 / 0398 / 0403)
+# are all zstd 0.13.3 / zstd-safe 7.3.0, reachable only through
+# `solana-account-decoder` (it uses zstd in exactly one place: the
+# `base64+zstd` account encoding). solana-account-decoder 3.1.14 — the newest
+# 3.x — still requires `zstd ^0.13.3`; only agave 4.4.0 moves to `zstd ^0.14.0`,
+# and agave 4.x also splits the SDK types this tree references 319 times.
+#
+# So instead of a multi-day SDK migration for a decompression dependency, the
+# crate is vendored unchanged except for that one version requirement, and the
+# `Encoder::new(...) / write_all / finish` call it makes is API-identical in
+# zstd 0.14. See vendor/solana-account-decoder/README-PATCH.md.
+# ---------------------------------------------------------------------------
+[patch.crates-io]
+solana-account-decoder = { path = "vendor/solana-account-decoder" }
+solana-account-decoder-client-types = { path = "vendor/solana-account-decoder-client-types" }

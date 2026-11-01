@@ -23,6 +23,7 @@ pub mod dca;
 pub mod dca_worker;
 pub mod executions;
 pub mod integrations;
+pub mod limit_order_ports;
 pub mod limit_order_worker;
 pub mod limit_orders;
 pub mod market_service;

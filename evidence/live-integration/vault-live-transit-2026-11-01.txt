@@ -1,0 +1,16 @@
+=== LIVE HashiCorp Vault 1.18.3 (real server, dev mode) — 2026-11-01T03:01:44Z
+vault server -dev, transit engine, ed25519 key 'sniper-ed25519'
+
+{"initialized":true,"sealed":false,"standby":false,"performance_standby":false,"replication_performance_mode":"disabled","replication_dr_mode":"disabled","server_time_utc":1793502104,"version":"1.18.3","enterprise":false,"cluster_name":"vault-cluster-72c3012e","cluster_id":"95020df1-3256-d0c1-5cd3-558ffd4dc34a","echo_duration_ms":0,"clock_skew_ms":0,"replication_primary_canary_age_ms":0}
+
+--- cargo test -p sniper-suite --test vault_live_transit -- --ignored
+     Running tests/vault_live_transit.rs (target/debug/deps/vault_live_transit-dc7eebdb93197305)
+
+running 4 tests
+test live_vault_fails_closed_on_real_service ... ok
+test live_vault_health_and_token_permission ... ok
+test live_vault_sign_and_verify ... ok
+test live_vault_transit_key_metadata ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.05s
+

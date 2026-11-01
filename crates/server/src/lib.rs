@@ -52,6 +52,7 @@ pub mod security {
 pub mod solana {
     pub mod connection_contract;
     pub mod geyser_contract;
+    pub mod geyser_ingest;
 }
 pub mod staking {
     pub mod deployment_contract;

@@ -1,3 +1,17 @@
+# CURRENT STATUS — see `docs/FINAL-RELEASE-AUDIT-2026-10-31.md`
+
+> **This document is the historical record of the 2026-09-19 handover pass.** Its numbers and
+> claims describe the tree as it was then; `scripts/verify-delivery.sh` marks it RETIRED for that
+> reason. It is preserved unchanged rather than rewritten, so the audit trail stays honest.
+>
+> For the current pass — Batch 01 completion, the defects fixed (database startup crash, dead DCA
+> worker, no-op lifecycle worker, fabricated readiness values), the verification actually executed,
+> and the open blockers — read **`docs/FINAL-RELEASE-AUDIT-2026-10-31.md`**. A section-by-section
+> compliance record against the master prompt, including everything that was *not* delivered, is in
+> `docs/PROMPT-COMPLIANCE-AUDIT.md`.
+
+---
+
 # Final release audit (buyer-handover pass, 2026-09-19)
 
 This document is the closing audit record of the FINAL BUYER-HANDOVER PASS

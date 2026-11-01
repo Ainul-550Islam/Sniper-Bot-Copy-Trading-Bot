@@ -10,6 +10,55 @@ fails the release if they ever disagree.
 
 ## [Unreleased]
 
+### Polymarket copy-follow: the engine now has a live caller (2026-10-31)
+
+`crates/module-polymarket/src/copy.rs` shipped a full copy-follow decision
+engine, but **nothing ever called it**: `CopyEngine::new` / `CopyEngine::evaluate`
+appeared only inside `copy.rs`'s own tests, so "follow these wallets" was
+configuration with no consumer. That gap is closed.
+
+#### Added
+- `crates/module-polymarket/src/copy_feed.rs` — `CopyFeedClient`, the leader
+  trade source: `GET {data_url}/trades?user=<wallet>&limit=50` on Polymarket's
+  public data API (no key). The row parser is pure and total: a malformed body
+  or a non-2xx response is an **error**, never "no trades"; a row missing a
+  required field is dropped and **counted**, never treated as a fill. The
+  endpoint reports no liquidity or tick size, so neither is invented.
+- `crates/module-polymarket/src/copy_run.rs` — `PolyBot::copy_poll_once`, the
+  engine's production call site: poll each followed wallet → resolve the market
+  (scanner cache, then Gamma by condition id) → price through the **same**
+  quote path strategies use → `CopyEngine::evaluate` → `PolyBot::process_signal`.
+  Copy entries therefore pass the identical risk / exposure / collateral /
+  idempotency / ownership / signing gates; the copy path adds none and bypasses
+  none. `CopyPollReport` counts feed errors, dropped rows, every `CopySkipReason`
+  and what reached the venue.
+- `PolyBot::run` gained a `Tick::Copy` arm on
+  `copy_poll_interval_secs` (min 5s), gated like the scan (module enabled, kill
+  switch released).
+- `PolymarketConfig`: `copy_followed_wallets` (empty default = no engine, no
+  feed, no copy order), `copy_poll_interval_secs` (15), `copy_size_multiplier`
+  (1.0), `copy_min_stake_usd` (1.0), `copy_max_stake_usd` (25.0),
+  `copy_max_price` (0.95), `copy_slippage_tolerance_bps` (300) — documented in
+  `config.toml.example`, `config.toml` and `docs/POLYMARKET-ENGINE.md` §12a, and
+  asserted by `bundled_example_config_parses`.
+- `crates/module-polymarket/tests/copy_follow.rs` — 8 integration tests against
+  the mock venue: a followed leader BUY becomes a `strategy="copy"` signal that
+  fills through the real pipeline in paper mode (position + journal + OMS);
+  re-polling the same page mirrors once; a leader sell is `LEADER_SELL`; an
+  unfollowed wallet is `NOT_FOLLOWED_WALLET`; a runaway price is
+  `SLIPPAGE_EXCEEDED`; an HTTP-500 feed is an error and produces no signal; no
+  followed wallets means no request at all; malformed rows are counted while the
+  valid row still mirrors. The mock harness gained a `/data-api/trades` route.
+
+#### Honest limits (unchanged)
+- Entries only. A followed leader's **sell** is an explicit skip, not an
+  implicit close — the module has no automated Polymarket exit.
+- Mirroring is not filtered by `leaders.rs` leader-quality statistics; the
+  operator chooses the wallet list.
+- No live CLOB / data-API round-trip was executed against Polymarket: the tests
+  run against the in-process mock, so the banner that live trading is
+  unverified still stands.
+
 ### Backup, restore and durability (P1 batches 3–6, 2026-10-02)
 
 #### BREAKING — contract version 1.0.0 → 2.0.0

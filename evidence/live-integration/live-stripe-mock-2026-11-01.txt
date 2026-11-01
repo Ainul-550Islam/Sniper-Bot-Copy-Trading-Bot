@@ -1,0 +1,26 @@
+=== LIVE Stripe via Stripe's own stripe-mock 0.206.0 — 2026-11-01T03:36:09Z
+server: stripe-mock -http-port 12111 (stripe/stripe-mock release binary)
+
+--- stripe-mock request log (real HTTP, real responses):
+Request: POST /v1/checkout/sessions
+Request data = map[cancel_url:https://sniper.example.test/billing/cancel client_reference_id:7bc9e3a9-45cf-4500-bfda-5f1221cc1003 mode:subscription success_url:https://sniper.example.test/billing/success]
+Response: elapsed=2.457595ms status=200
+Request: POST /v1/checkout/sessions
+Request data = map[cancel_url:https://sniper.example.test/billing/cancel client_reference_id:7d97532c-adcc-4d35-92ea-57212617e9d1 mode:subscription success_url:https://sniper.example.test/billing/success]
+Response: elapsed=3.947287ms status=200
+
+--- cargo test -p sniper-suite --test live_stripe_mock -- --ignored
+    Finished `test` profile [unoptimized] target(s) in 0.39s
+     Running tests/live_stripe_mock.rs (target/debug/deps/live_stripe_mock-8cda83c59ce25bcc)
+
+running 4 tests
+test live_stripe_creates_a_checkout_session_over_http ... LIVE stripe-mock checkout ok: session_id=cs_test_Rd7YDd7JQFVTSHM url=https://checkout.stripe.com/pay/c/cs_test_a1YS1URlnyQCN5fUUduORoQ7Pw41PJqDWkIVQCpJPqkfIhd6tVY8XB1OLY
+ok
+test live_stripe_propagates_idempotency_key ... LIVE stripe-mock idempotency ok: cs_test_Rd7YDcCPI0uNksd / cs_test_Rd7YDyzWXOW3vbW / cs_test_Rd7YD1fYnBSxZXE
+ok
+test live_stripe_refuses_without_live_billing_opt_in ... ok
+test live_stripe_webhook_signature_round_trip ... LIVE stripe webhook HMAC: valid verified; tampered, wrong-secret, unsigned and stale-replay all rejected
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

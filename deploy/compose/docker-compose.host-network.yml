@@ -1,0 +1,52 @@
+# ============================================================================
+# deploy/compose/docker-compose.host-network.yml — run the stack on a kernel
+# where the container bridge cannot be created.
+#
+#   docker compose -f docker-compose.yml \
+#                  -f deploy/compose/docker-compose.host-network.yml up -d
+#
+# Why this exists (2026-11-01, found by running the stack, not reading it):
+# in the delivery/validation sandbox `netavark` cannot apply its nftables
+# ruleset ("nft did not return successfully while applying ruleset"), so every
+# service failed to start with the default project network. That is an
+# environment limitation, not a defect in the stack — but a buyer validating on
+# a locked-down host (no NET_ADMIN, nf_tables module unavailable, some CI
+# sandboxes) hits exactly the same wall.
+#
+# The override keeps the SAME images, the SAME environment and the SAME
+# ordering/healthchecks; it only replaces the bridge with the host network
+# namespace and pins the overlay's service hostnames (postgres, redis) to
+# loopback so the compose files' connection strings keep working unchanged.
+#
+# Trade-off, stated plainly: with `network_mode: host` there is no network
+# isolation between these services and the host — ports 5432/6379 are bound on
+# the host interface instead of a private bridge. Use the default bridge-based
+# files in production; use this one only where the bridge cannot exist.
+
+services:
+  postgres:
+    network_mode: host
+
+  postgres-roles:
+    network_mode: host
+    extra_hosts:
+      - "postgres:127.0.0.1"
+
+  db-migrate:
+    network_mode: host
+    extra_hosts:
+      - "postgres:127.0.0.1"
+
+  redis:
+    network_mode: host
+
+  bot:
+    network_mode: host
+    extra_hosts:
+      - "postgres:127.0.0.1"
+      - "redis:127.0.0.1"
+
+  control-plane:
+    network_mode: host
+    extra_hosts:
+      - "bot:127.0.0.1"

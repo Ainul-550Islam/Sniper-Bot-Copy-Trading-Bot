@@ -721,27 +721,122 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Durable tenant lifecycle worker (P0-04)
-    {
-        let shutdown_lc = shutdown.clone();
-        let config_lc = crate::provisioning::lifecycle_worker::LifecycleWorkerConfig::default();
-        worker_handles.push(tokio::spawn(async move {
-            info!("tenant lifecycle background worker started");
+    // Durable tenant lifecycle worker (P0-04).
+    //
+    // This used to spawn a task that logged "background worker started" and
+    // then idled on an empty `select!` arm, so `tenant_lifecycle_jobs` rows
+    // were never advanced by anything and a tenant close request stalled at
+    // `requested` forever (visible only as a log line claiming the opposite).
+    // It now drains due jobs, one phase per tick, and parks them at the first
+    // phase this build cannot perform unattended.
+    match db.clone() {
+        Some(db_lc) => {
+            let shutdown_lc = shutdown.clone();
+            let config_lc = crate::provisioning::lifecycle_worker::LifecycleWorkerConfig::default();
             let poll_dur = config_lc
                 .poll_interval
                 .to_std()
                 .unwrap_or(std::time::Duration::from_secs(5));
-            let mut ticker = tokio::time::interval(poll_dur);
-            loop {
-                tokio::select! {
-                    _ = shutdown_lc.wait() => break,
-                    _ = ticker.tick() => {
-                        // Periodic heartbeat and worker poll
+            worker_handles.push(tokio::spawn(async move {
+                info!(
+                    role = "tenant_lifecycle",
+                    poll_secs = poll_dur.as_secs(),
+                    "tenant lifecycle worker started"
+                );
+                let mut ticker = tokio::time::interval(poll_dur);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        _ = shutdown_lc.wait() => break,
+                        _ = ticker.tick() => {
+                            match crate::provisioning::lifecycle_worker::drain_due_jobs(&db_lc, 20)
+                                .await
+                            {
+                                Ok(report) if report.claimed > 0 => info!(
+                                    claimed = report.claimed,
+                                    advanced = report.advanced,
+                                    parked = report.parked,
+                                    skipped = report.skipped,
+                                    "tenant lifecycle pass"
+                                ),
+                                Ok(_) => {}
+                                Err(error) => warn!(
+                                    error = %error,
+                                    "tenant lifecycle pass failed; jobs stay durably pending"
+                                ),
+                            }
+                        }
                     }
                 }
+                info!("tenant lifecycle worker stopped");
+            }));
+        }
+        None => warn!(
+            "tenant lifecycle worker not started: it needs a database (close requests stay \
+             durably queued in tenant_lifecycle_jobs until one is configured)"
+        ),
+    }
+
+    // Limit-order worker (Batch 01 §B). `limit_orders` rows were previously
+    // evaluated by nothing: the worker existed with `MarkSource`/`TriggerSink`
+    // ports, but the only implementations were test doubles, so it could not be
+    // started without inventing a price or a fill. Both ports now come from
+    // real infrastructure:
+    //   * marks — Jupiter's public price API (usdPrice(mint) / usdPrice(WSOL));
+    //     a missing or non-finite mark returns None and the order simply waits,
+    //     which is the worker's documented fail-closed rule;
+    //   * hand-off — a durable, idempotent row in the project's own write-ahead
+    //     `execution_intents` journal, keyed by order id. It journals an intent,
+    //     not a fill: no signature, balance or venue state is fabricated.
+    // It needs the RLS system pool for the same reason the DCA worker does, so
+    // it is not started (rather than started unscoped) when RLS is off.
+    if let Some(db_lo) = db.as_ref() {
+        match db_lo.system_pool().cloned() {
+            Some(system_pool_lo) => {
+                let host_lo = std::env::var("HOSTNAME")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "local".to_string());
+                let lo_cfg = crate::trading_data_plane::limit_order_worker::WorkerConfig {
+                    worker_id: format!("limit-order-{}-{}", host_lo, std::process::id()),
+                    lease_secs: 30.0,
+                    tick: std::time::Duration::from_secs(5),
+                };
+                let marks: std::sync::Arc<
+                    dyn crate::trading_data_plane::limit_order_worker::MarkSource,
+                > = std::sync::Arc::new(
+                    crate::trading_data_plane::limit_order_ports::JupiterMarkSource::new(),
+                );
+                let sink: std::sync::Arc<
+                    dyn crate::trading_data_plane::limit_order_worker::TriggerSink,
+                > = std::sync::Arc::new(
+                    crate::trading_data_plane::limit_order_ports::IntentJournalSink::new(
+                        db_lo.pool().clone(),
+                    ),
+                );
+                let app_pool_lo = db_lo.pool().clone();
+                let lo_stop = shutdown.subscribe();
+                worker_handles.push(tokio::spawn(async move {
+                    info!(worker = %lo_cfg.worker_id, "limit-order worker started");
+                    crate::trading_data_plane::limit_order_worker::run(
+                        app_pool_lo,
+                        system_pool_lo,
+                        lo_cfg,
+                        marks,
+                        sink,
+                        lo_stop,
+                    )
+                    .await;
+                    info!("limit-order worker stopped");
+                }));
             }
-            info!("tenant lifecycle background worker stopped");
-        }));
+            None => {
+                warn!(
+                    "limit-order worker not started: RLS system pool unavailable \
+                     (database.rls_enabled must be true for scoped background work)"
+                );
+            }
+        }
     }
 
     // Webhook delivery retries (GAP-MAP P1): failed tenant-webhook attempts
@@ -766,6 +861,56 @@ async fn main() -> anyhow::Result<()> {
             ),
         );
         worker_handles.push(tokio::spawn(worker.run(shutdown.clone())));
+    }
+
+    // DCA schedule worker (Batch 01 §B). `POST /api/tenant/dca-schedules`
+    // creates rows; nothing executed them before this task existed, so a
+    // tenant could schedule a recurring buy that never ran. The worker
+    // discovers tenant identifiers through an audited `with_system_scope`
+    // audit reason and then ticks each tenant inside `with_tenant_scope`,
+    // so no schedule query ever runs unbound and no row is visible across
+    // tenants (app pool + system pool, migration 0068 grants; proven by
+    // `crates/server/tests/rls_background_paths.rs`).
+    //
+    // It requires the RLS system pool: with RLS disabled there is no
+    // privileged pool to discover tenants with, so the worker is not started
+    // rather than silently scanning as the app role.
+    if let Some(db_dca) = db.as_ref() {
+        match db_dca.system_pool().cloned() {
+            Some(system_pool) => {
+                let host = std::env::var("HOSTNAME")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "local".to_string());
+                let dca_cfg = crate::trading_data_plane::dca_worker::DcaWorkerConfig {
+                    // One id per process: the lease is per worker, so two
+                    // replicas must never present the same id or one would
+                    // steal the other's claims.
+                    worker_id: format!("dca-{}-{}", host, std::process::id()),
+                    lease_secs: 30.0,
+                    tick: std::time::Duration::from_secs(5),
+                };
+                let app_pool = db_dca.pool().clone();
+                let dca_stop = shutdown.subscribe();
+                worker_handles.push(tokio::spawn(async move {
+                    info!(worker = %dca_cfg.worker_id, "DCA schedule worker started");
+                    crate::trading_data_plane::dca_worker::run(
+                        app_pool,
+                        system_pool,
+                        dca_cfg,
+                        dca_stop,
+                    )
+                    .await;
+                    info!("DCA schedule worker stopped");
+                }));
+            }
+            None => {
+                warn!(
+                    "DCA schedule worker not started: RLS system pool unavailable \
+                     (database.rls_enabled must be true for scoped background work)"
+                );
+            }
+        }
     }
 
     // ---- modules -----------------------------------------------------------
@@ -796,11 +941,88 @@ async fn main() -> anyhow::Result<()> {
     // single-tenant operator keeps using their deployment key; it maps to
     // this organization and can never reach another one.
     let saas = Arc::new(saas::SaasStore::with_database(db.clone()).await?);
-    let deployment_org = match saas::ensure_deployment_organization(&saas).await? {
-        Some(org) => org,
-        None => anyhow::bail!("failed to initialize the deployment organization"),
+    // Adopt the id the schema already uses for the deployment tenant, if any.
+    // `public.deployment_organization_id()` (migration 0024) creates that row
+    // on demand and is the column DEFAULT of every legacy tenant-keyed table,
+    // so a startup write can create it BEFORE this bootstrap runs. Minting a
+    // second id here made the identity projection violate
+    // `organizations_slug_key` and aborted startup on a fresh database.
+    let deployment_hint = match db.as_ref().and_then(|d| d.system_pool().cloned()) {
+        Some(system_pool) => {
+            match bot_core::tenant::rls_context::with_system_scope(
+                &system_pool,
+                "resolve deployment organization id for SaaS bootstrap",
+                |connection| {
+                    Box::pin(async move {
+                        sqlx::query_scalar::<_, uuid::Uuid>(
+                            "SELECT public.deployment_organization_id()",
+                        )
+                        .fetch_one(connection)
+                        .await
+                    })
+                },
+            )
+            .await
+            {
+                Ok(id) => Some(bot_core::tenant::OrganizationId::from(id)),
+                Err(error) => {
+                    // Fail closed: without the schema's answer a second id
+                    // could be minted, so surface the storage failure instead
+                    // of silently continuing.
+                    return Err(anyhow::anyhow!(
+                        "failed to resolve the deployment organization id: {error}"
+                    ));
+                }
+            }
+        }
+        None => None,
     };
+    let deployment_org =
+        match saas::ensure_deployment_organization_with_id(&saas, deployment_hint).await? {
+            Some(org) => org,
+            None => anyhow::bail!("failed to initialize the deployment organization"),
+        };
     let deployment_org_id = deployment_org.id;
+
+    // ---- tenant execution control plane (migration 0025) -------------------
+    // The runtime registry, the fence/heartbeat/reaper loops and the tenant
+    // execution gateway are assembled HERE, once, against PostgreSQL. Before
+    // this, `RuntimeRegistryService` existed only inside `#[cfg(test)]` blocks:
+    // `tenant_runtimes` never received a row for the running process and no
+    // tenant admission could ever pass the fence guard. Registration failure is
+    // a startup error (a deployment that cannot name its own runtime must not
+    // accept tenant traffic).
+    let tenant_control_plane = match db.as_ref() {
+        Some(database) => {
+            let hostname = std::env::var("HOSTNAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "local".to_string());
+            let worker_id = format!("worker-{}-{}", hostname, std::process::id());
+            match crate::tenant::control_plane::spawn(
+                database.clone(),
+                saas.clone(),
+                deployment_org_id,
+                &worker_id,
+            )
+            .await
+            {
+                Ok(plane) => Some(std::sync::Arc::new(plane)),
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to assemble the tenant execution control plane: {error}"
+                    ));
+                }
+            }
+        }
+        None => {
+            tracing::warn!(
+                "no database configured: the tenant runtime registry is not assembled, so tenant \
+                 executions cannot be admitted (operator/single-key mode is unaffected)"
+            );
+            None
+        }
+    };
 
     let module_handles = spawn_modules(
         &state,
@@ -817,6 +1039,27 @@ async fn main() -> anyhow::Result<()> {
         &shutdown,
     )
     .await;
+
+    // ---- Geyser ingest (optional Yellowstone subscription) -----------------
+    // Off unless GEYSER_ENDPOINT is set; see solana::geyser_ingest.
+    let geyser_ingest = match sniper_suite::solana::geyser_ingest::GeyserIngestConfig::from_env() {
+        Some(geyser_cfg) => {
+            let ingest = sniper_suite::solana::geyser_ingest::GeyserIngest::new(geyser_cfg.clone());
+            let stats = ingest.stats();
+            let handle = ingest.spawn(shutdown.clone());
+            info!(
+                endpoint = %geyser_cfg.endpoint,
+                programs = ?geyser_cfg.programs,
+                commitment = ?geyser_cfg.commitment,
+                "geyser ingest enabled (Yellowstone gRPC transaction stream)"
+            );
+            Some((handle, stats))
+        }
+        None => {
+            debug!("geyser ingest disabled: GEYSER_ENDPOINT is not set");
+            None
+        }
+    };
 
     // ---- control plane -----------------------------------------------------
     let api_handle = if cfg.api.enabled {
@@ -881,6 +1124,52 @@ async fn main() -> anyhow::Result<()> {
             }
         })
         .await;
+    // 3b) Tenant control plane drain: stop this process's runtime row so the
+    //     registry never has to reap a runtime that exited on purpose, and so
+    //     a standby's fence check sees the tenant as free immediately.
+    if let Some(plane) = tenant_control_plane.clone() {
+        shutdown
+            .run_phase("tenant-runtime-stop", Duration::from_secs(10), async move {
+                match plane
+                    .runtime
+                    .stop(plane.runtime_id, chrono::Utc::now())
+                    .await
+                {
+                    Ok(()) => tracing::info!(
+                        runtime = %plane.runtime_id,
+                        "tenant runtime registry: deployment runtime stopped"
+                    ),
+                    Err(error) => tracing::warn!(
+                        runtime = %plane.runtime_id,
+                        error = %error,
+                        "tenant runtime registry: could not stop the runtime row"
+                    ),
+                }
+            })
+            .await;
+    }
+    // 3c) Stop the Geyser ingest task and report what it ingested.
+    //     The task selects on the same shutdown signal, so this only joins it.
+    if let Some((handle, stats)) = geyser_ingest {
+        shutdown
+            .run_phase("geyser-ingest-stop", Duration::from_secs(5), async move {
+                if tokio::time::timeout(Duration::from_secs(5), handle)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("geyser ingest: task did not stop within 5 s");
+                }
+                tracing::info!(
+                    transactions = stats.transactions(),
+                    reconnects = stats.reconnects(),
+                    votes_dropped = stats.votes_dropped(),
+                    last_slot = stats.last_slot(),
+                    "geyser ingest: final counters"
+                );
+            })
+            .await;
+    }
+
     // 4) Close the pools (waits for in-flight statements).
     if let Some(db) = &db {
         shutdown

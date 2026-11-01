@@ -81,7 +81,13 @@ impl GeneratedToken {
 pub fn generate_token(kind: &str) -> GeneratedToken {
     let mut bytes = [0u8; TOKEN_BYTES];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let body = URL_SAFE_NO_PAD.encode(bytes);
+    // `public_prefix` separates the namespace from the body at the FIRST '_', so a
+    // body that itself contains '_' (both '_' and '-' are in the base64url
+    // alphabet) would be split in the wrong place and the displayed prefix would
+    // span a namespace that does not exist. Mapping '_' to '-' keeps the invariant
+    // "the only '_' in a generated token is the namespace separator"; the cost is
+    // one alphabet symbol in the body, not a bit of the 32 random bytes.
+    let body = URL_SAFE_NO_PAD.encode(bytes).replace('_', "-");
     let kind = kind.trim().trim_end_matches('_');
     let plaintext = if kind.is_empty() {
         body
@@ -357,9 +363,26 @@ mod tests {
         assert_eq!(public_prefix("short"), "short");
         assert_eq!(public_prefix("ses_ab"), "ses_ab");
         assert_eq!(public_prefix(""), "");
-        // A token generated without a namespace still yields a prefix.
+        // A token generated without a namespace still yields a prefix, and no
+        // namespace separator is prepended. NOTE: the URL-safe base64 body can
+        // itself start with '_' or '-' (both are in the alphabet), so asserting
+        // `!plaintext.starts_with('_')` was flaky — it failed roughly one run in
+        // 64 and was caught on 2026-11-01 by running the workspace suite
+        // repeatedly. The length proves the point instead: 32 random bytes encode
+        // to exactly 43 base64url characters, so a `kind_` prefix would show up.
         let t = generate_token("");
         assert!(!t.prefix.is_empty());
-        assert!(!t.plaintext.starts_with('_'));
+        assert_eq!(
+            t.plaintext.len(),
+            43,
+            "no namespace prefix: {}",
+            t.plaintext
+        );
+        assert!(
+            !t.plaintext.contains('_'),
+            "a token without a namespace must not contain the separator: {}",
+            t.plaintext
+        );
+        assert!(t.plaintext.starts_with(&t.prefix));
     }
 }

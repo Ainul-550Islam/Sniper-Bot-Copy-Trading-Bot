@@ -1,0 +1,11 @@
+=== FULL-WORKSPACE STATIC GATES — 2026-11-01T10:13:25Z
+
+--- cargo check --workspace --all-targets --locked -j 2
+    Finished `dev` profile [unoptimized] target(s) in 0.78s
+
+--- cargo clippy --workspace --all-targets --locked -j 2 (warnings counted)
+    Finished `dev` profile [unoptimized] target(s) in 0.71s
+warning lines: 0  error lines: 0
+
+--- cargo fmt --all --check
+fmt: clean (exit 0)
