@@ -81,12 +81,14 @@ impl GeneratedToken {
 pub fn generate_token(kind: &str) -> GeneratedToken {
     let mut bytes = [0u8; TOKEN_BYTES];
     rand::thread_rng().fill_bytes(&mut bytes);
-    // `public_prefix` separates the namespace from the body at the FIRST '_', so a
-    // body that itself contains '_' (both '_' and '-' are in the base64url
-    // alphabet) would be split in the wrong place and the displayed prefix would
-    // span a namespace that does not exist. Mapping '_' to '-' keeps the invariant
-    // "the only '_' in a generated token is the namespace separator"; the cost is
-    // one alphabet symbol in the body, not a bit of the 32 random bytes.
+    // Preserve the existing separator-free body format: public_prefix splits at
+    // the first '_', so an unnamespaced body containing '_' could be mistaken for
+    // a namespace plus body. A namespaced token already has an explicit delimiter.
+    // Mapping '_' to '-' is non-injective and slightly reduces encoded entropy;
+    // it must not be described as a reversible encoding of all 256 input bits.
+    // The source remains 32 random bytes. Supported namespaces are single-component
+    // names (ses/sk/inv); this compatibility-preserving change documents the format
+    // rather than changing existing token generation or verification behavior.
     let body = URL_SAFE_NO_PAD.encode(bytes).replace('_', "-");
     let kind = kind.trim().trim_end_matches('_');
     let plaintext = if kind.is_empty() {

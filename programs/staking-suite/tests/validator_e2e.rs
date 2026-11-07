@@ -49,9 +49,9 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use borsh::BorshDeserialize;
-use solana_client::client_error::{ClientError, ClientErrorKind};
-use solana_client::rpc_client::RpcClient;
-use solana_client::rpc_request::{RpcError, RpcResponseErrorData};
+use solana_rpc_client::rpc_client::RpcClient;
+use solana_rpc_client_api::client_error::{Error as ClientError, ErrorKind as ClientErrorKind};
+use solana_rpc_client_api::request::{RpcError, RpcResponseErrorData};
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::instruction::InstructionError;
 use solana_sdk::program_error::ProgramError;

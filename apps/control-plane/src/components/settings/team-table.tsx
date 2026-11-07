@@ -23,7 +23,7 @@ export default function TeamTable({ members, onRefresh }: TeamTableProps) {
 
     try {
       await inviteMember({ email, role });
-      setSuccess(`Invitation successfully sent to ${email}`);
+      setSuccess(`Invitation queued for delivery to ${email}`);
       setEmail("");
       onRefresh();
     } catch (err: unknown) {

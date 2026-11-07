@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use bot_core::config::DatabaseConfig;
-use bot_core::db::Database;
+use bot_core::db::{Database, MIGRATOR};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
@@ -107,10 +107,16 @@ async fn both_migrations_are_recorded_and_idempotent() {
         .collect();
     assert!(descriptions.iter().any(|d| d == "telegram_trade_consents"));
     assert!(descriptions.iter().any(|d| d == "telegram_trade_commands"));
+    // Compare the COMPLETE applied graph with the embedded graph, not a
+    // stale hard-coded high water. Missing and unexpected versions both fail.
+    let expected_versions: Vec<i64> = MIGRATOR
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .map(|migration| migration.version)
+        .collect();
     assert_eq!(
-        versions.last().copied(),
-        Some(68),
-        "0068 must be the newest migration in the graph"
+        versions, expected_versions,
+        "database migration ledger must exactly match the complete embedded graph"
     );
 }
 

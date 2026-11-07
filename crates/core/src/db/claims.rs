@@ -31,11 +31,12 @@ use crate::ownership::{
     ClaimDecision, ClaimRequest, ClaimStatus, ClaimStore, ExecutionClaim, RuntimeFlag,
     RuntimeFlagsReader, RuntimeFlagsWriter, StoreContext,
 };
-use crate::risk::GlobalRiskOracle;
+use crate::risk::{GlobalRiskOracle, RealizedPnlRead};
 use crate::tenant::OrganizationId;
 
-fn ms(d: std::time::Duration) -> i64 {
-    d.as_millis().max(1) as i64
+fn ms(d: std::time::Duration) -> BotResult<i64> {
+    i64::try_from(d.as_millis().max(1))
+        .map_err(|_| BotError::config("claim duration exceeds the signed millisecond range"))
 }
 
 fn claim_from_row(row: &PgRow) -> ExecutionClaim {
@@ -148,6 +149,8 @@ impl ClaimStore for PostgresClaimStore {
     }
 
     async fn claim(&self, req: &ClaimRequest, ctx: &StoreContext) -> BotResult<ClaimDecision> {
+        let lease_ms = ms(ctx.lease)?;
+        let grace_ms = ms(ctx.handoff_grace)?;
         // One atomic statement. The `prev` CTE captures the pre-upsert status
         // so a takeover (prev='claimed' with a lapsed lease) is distinguishable
         // from a plain re-acquisition (prev='released'/'handed_off') for
@@ -214,8 +217,8 @@ FROM ins LEFT JOIN prev ON TRUE
                         .bind(&req.strategy)
                         .bind(&req.symbol)
                         .bind(&ctx.owner_id)
-                        .bind(ms(ctx.lease))
-                        .bind(ms(ctx.handoff_grace))
+                        .bind(lease_ms)
+                        .bind(grace_ms)
                         .fetch_optional(self.db.pool()),
                 )
                 .await
@@ -283,15 +286,15 @@ FROM ins LEFT JOIN prev ON TRUE
         // CAS on (owner, epoch, claimed) AND lease still running: an expired
         // lease is never silently resurrected by a late renewal — it must go
         // through a fresh claim (takeover path) so epoch/audit stay honest.
-        // The renewer supplies its lease length via the row's own cadence:
-        // extend by the remaining configured lease is impossible here without
-        // extra state, so extend by a fixed generous window derived from the
-        // current lease span (claimed_at..lease_until).
+        // The previous grant is lease_until - last_heartbeat. Measuring
+        // from claimed_at instead adds all elapsed ownership time at every
+        // renewal and progressively inflates the recovery/takeover delay.
+        // Keep the interval itself so sub-second grants retain precision.
         const SQL: &str = r#"
 UPDATE execution_claims
 SET lease_until    = now() + GREATEST(
-        EXTRACT(EPOCH FROM (lease_until - claimed_at))::bigint, 1
-    ) * interval '1 second',
+        lease_until - last_heartbeat, interval '1 millisecond'
+    ),
     last_heartbeat = now(),
     updated_at     = now()
 WHERE organization_id = $1 AND execution_id = $2
@@ -557,12 +560,10 @@ impl RuntimeFlagsReader for PostgresFlags {
 /// Cluster-wide [`GlobalRiskOracle`] over the shared positions table:
 /// open-position capacity and today's realized PnL as seen by ALL replicas.
 ///
-/// Honest approximation (documented in docs/DISTRIBUTED.md): `realized_today`
-/// attributes the full lifecycle PnL (`realized_quote - cost_basis`) of
-/// positions CLOSED today (UTC) to today; partial exits on still-open
-/// positions are only visible through each replica's local accumulator until
-/// the position closes. The engine combines views conservatively
-/// (`min` of local/global), so this can only tighten the daily-loss gate.
+/// `realized_today` sums the persisted cumulative exit PnL for positions
+/// closed today (UTC). Legacy rows with unknown partial-exit allocation make
+/// the oracle return None, failing the daily-loss gate closed rather than
+/// deriving a value from the shrinking remaining cost basis.
 pub struct PostgresRiskOracle {
     db: Arc<Database>,
 }
@@ -570,6 +571,131 @@ pub struct PostgresRiskOracle {
 impl PostgresRiskOracle {
     pub fn new(db: Arc<Database>) -> Self {
         PostgresRiskOracle { db }
+    }
+
+    /// A cumulative lifecycle PnL cannot safely be attributed to one UTC day
+    /// when the position spans days or has an open partial exit. Reject those
+    /// cases instead of hiding a loss or double-counting prior-day exits.
+    async fn daily_pnl_projection_complete(
+        &self,
+        organization: Option<OrganizationId>,
+        source: Option<&str>,
+    ) -> Option<bool> {
+        let row = self
+            .db
+            .timed(
+                "risk_daily_pnl_projection_complete",
+                sqlx::query(
+                    "SELECT NOT EXISTS (
+                         SELECT 1 FROM positions p
+                         WHERE ($1::uuid IS NULL OR p.organization_id = $1)
+                           AND ($2::text IS NULL OR p.source = $2)
+                           AND (
+                               (p.closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                                AND p.closed_at < (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC'
+                                AND (p.realized_pnl_quote IS NULL OR
+                                     p.opened_at < date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'))
+                               OR
+                               (p.status IN ('open','closing')
+                                AND ((p.realized_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                                      AND p.realized_at < (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC')
+                                     OR (p.realized_at IS NULL AND
+                                         (p.realized_quote <> 0 OR COALESCE(p.realized_pnl_quote, 0) <> 0))))
+                           )
+                     ) AS complete",
+                )
+                .bind(organization.map(|org| org.0))
+                .bind(source)
+                .fetch_one(self.db.pool()),
+            )
+            .await
+            .ok()?;
+        row.try_get("complete").ok()
+    }
+
+    /// Polymarket fills are journaled separately from generic positions.
+    /// When a fill lacks a matching tenant position projection, daily PnL
+    /// cannot be trusted and tenant entries must fail closed.
+    async fn polymarket_pnl_projection_complete(
+        &self,
+        organization: Option<OrganizationId>,
+    ) -> Option<bool> {
+        let row = self
+            .db
+            .timed(
+                "risk_poly_pnl_projection_complete",
+                sqlx::query(
+                    "SELECT NOT EXISTS (
+                         SELECT 1 FROM poly_fills f
+                         WHERE ($1::uuid IS NULL OR f.organization_id = $1)
+                           AND f.ts >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                           AND (f.position_id IS NULL OR NOT EXISTS (
+                               SELECT 1 FROM positions p
+                               WHERE p.organization_id = f.organization_id
+                                 AND p.id = f.position_id AND p.source = 'polymarket'
+                                 AND (f.side <> 'sell' OR
+                                      (p.closed_at IS NOT NULL AND p.realized_pnl_quote IS NOT NULL))
+                           ))
+                     ) AS complete",
+                )
+                .bind(organization.map(|org| org.0))
+                .fetch_one(self.db.pool()),
+            )
+            .await
+            .ok()?;
+        row.try_get("complete").ok()
+    }
+
+    async fn realized_pnl_read(
+        &self,
+        organization: Option<OrganizationId>,
+        source: Option<&str>,
+    ) -> RealizedPnlRead {
+        match self
+            .daily_pnl_projection_complete(organization, source)
+            .await
+        {
+            Some(true) => {}
+            Some(false) => return RealizedPnlRead::Incomplete,
+            None => return RealizedPnlRead::Unavailable,
+        }
+
+        if source.is_none() || source == Some("polymarket") {
+            match self.polymarket_pnl_projection_complete(organization).await {
+                Some(true) => {}
+                Some(false) => return RealizedPnlRead::Incomplete,
+                None => return RealizedPnlRead::Unavailable,
+            }
+        }
+
+        let row = match self
+            .db
+            .timed(
+                "risk_realized_today",
+                sqlx::query(
+                    "SELECT CASE WHEN COUNT(*) FILTER (WHERE realized_pnl_quote IS NULL) > 0
+                            THEN NULL::double precision
+                            ELSE COALESCE(SUM(realized_pnl_quote), 0)::double precision END AS pnl
+                     FROM positions
+                     WHERE closed_at IS NOT NULL
+                       AND closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                       AND ($1::uuid IS NULL OR organization_id = $1)
+                       AND ($2::text IS NULL OR source = $2)",
+                )
+                .bind(organization.map(|org| org.0))
+                .bind(source)
+                .fetch_one(self.db.pool()),
+            )
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return RealizedPnlRead::Unavailable,
+        };
+        match row.try_get::<Option<f64>, _>("pnl") {
+            Ok(Some(value)) if value.is_finite() => RealizedPnlRead::Known(value),
+            Ok(Some(_)) | Ok(None) => RealizedPnlRead::Incomplete,
+            Err(_) => RealizedPnlRead::Unavailable,
+        }
     }
 }
 
@@ -598,6 +724,37 @@ impl GlobalRiskOracle for PostgresRiskOracle {
             BotModule::Polymarket => "polymarket",
             BotModule::Contract | BotModule::Telegram => return None,
         };
+        if module == BotModule::Polymarket {
+            let row = self
+                .db
+                .timed(
+                    "risk_count_open_poly",
+                    sqlx::query(
+                        "SELECT (
+                             SELECT count(*) FROM positions
+                             WHERE status IN ('open','closing') AND source = 'polymarket'
+                               AND ($1::uuid IS NULL OR organization_id = $1)
+                         ) + (
+                             SELECT count(DISTINCT (o.organization_id, COALESCE(o.position_id, o.venue_order_id)))
+                             FROM poly_orders o
+                             WHERE ($1::uuid IS NULL OR o.organization_id = $1)
+                               AND o.closed_at IS NULL AND o.side = 'buy'
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM positions p
+                                   WHERE p.organization_id = o.organization_id
+                                     AND p.id = o.position_id AND p.source = 'polymarket'
+                                     AND p.status IN ('open','closing')
+                               )
+                         ) AS n",
+                    )
+                    .bind(organization.map(|org| org.0))
+                    .fetch_one(self.db.pool()),
+                )
+                .await
+                .ok()?;
+            let n: i64 = row.try_get("n").ok()?;
+            return Some(n.max(0) as usize);
+        }
         let mut q = sqlx::query(match organization {
             Some(_) => {
                 "SELECT count(*)::bigint AS n FROM positions
@@ -626,29 +783,173 @@ impl GlobalRiskOracle for PostgresRiskOracle {
     /// tenant's losses can no longer trip another tenant's daily-loss gate
     /// (nor be inferred from it).
     async fn realized_today_for(&self, organization: Option<OrganizationId>) -> Option<f64> {
-        let mut q = sqlx::query(match organization {
-            Some(_) => {
-                "SELECT COALESCE(SUM(realized_quote - cost_basis), 0)::double precision AS pnl
-                 FROM positions
-                 WHERE closed_at IS NOT NULL
-                   AND closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-                   AND organization_id = $1"
-            }
-            None => {
-                "SELECT COALESCE(SUM(realized_quote - cost_basis), 0)::double precision AS pnl
-                 FROM positions
-                 WHERE closed_at IS NOT NULL
-                   AND closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
-            }
-        });
-        if let Some(org) = organization {
-            q = q.bind(org.0);
+        match self.realized_pnl_read(organization, None).await {
+            RealizedPnlRead::Known(value) => Some(value),
+            RealizedPnlRead::Unavailable | RealizedPnlRead::Incomplete => None,
+        }
+    }
+
+    async fn realized_today_status_for(
+        &self,
+        organization: Option<OrganizationId>,
+    ) -> RealizedPnlRead {
+        self.realized_pnl_read(organization, None).await
+    }
+
+    async fn realized_today_for_module(
+        &self,
+        organization: Option<OrganizationId>,
+        module: BotModule,
+    ) -> Option<f64> {
+        match self
+            .realized_today_status_for_module(organization, module)
+            .await
+        {
+            RealizedPnlRead::Known(value) => Some(value),
+            RealizedPnlRead::Unavailable | RealizedPnlRead::Incomplete => None,
+        }
+    }
+
+    async fn realized_today_status_for_module(
+        &self,
+        organization: Option<OrganizationId>,
+        module: BotModule,
+    ) -> RealizedPnlRead {
+        let source = match module {
+            BotModule::Sniper => "sniper",
+            BotModule::Copy => "copy",
+            BotModule::Polymarket => "polymarket",
+            BotModule::Contract | BotModule::Telegram => return RealizedPnlRead::Known(0.0),
+        };
+        self.realized_pnl_read(organization, Some(source)).await
+    }
+
+    async fn has_open_symbol_for(
+        &self,
+        organization: OrganizationId,
+        module: BotModule,
+        symbol: &str,
+    ) -> Option<bool> {
+        let source = match module {
+            BotModule::Sniper => "sniper",
+            BotModule::Copy => "copy",
+            BotModule::Polymarket => "polymarket",
+            BotModule::Contract | BotModule::Telegram => return Some(false),
+        };
+        if module == BotModule::Polymarket {
+            let row = self
+                .db
+                .timed(
+                    "risk_has_open_poly_symbol",
+                    sqlx::query(
+                        "SELECT (
+                             EXISTS (
+                                 SELECT 1 FROM positions
+                                 WHERE status IN ('open','closing') AND source = 'polymarket'
+                                   AND organization_id = $1 AND symbol = $2
+                             ) OR EXISTS (
+                                 SELECT 1 FROM poly_orders
+                                 WHERE organization_id = $1 AND closed_at IS NULL
+                                   AND side = 'buy' AND token_id = $2
+                             )
+                         ) AS is_open",
+                    )
+                    .bind(organization.0)
+                    .bind(symbol)
+                    .fetch_one(self.db.pool()),
+                )
+                .await
+                .ok()?;
+            return row.try_get("is_open").ok();
         }
         let row = self
             .db
-            .timed("risk_realized_today", q.fetch_one(self.db.pool()))
+            .timed(
+                "risk_has_open_symbol",
+                sqlx::query(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM positions
+                         WHERE status IN ('open','closing') AND source = $1
+                           AND symbol = $2 AND organization_id = $3
+                     ) AS is_open",
+                )
+                .bind(source)
+                .bind(symbol)
+                .bind(organization.0)
+                .fetch_one(self.db.pool()),
+            )
             .await
             .ok()?;
-        row.try_get("pnl").ok()
+        row.try_get("is_open").ok()
+    }
+
+    async fn open_exposure_for(
+        &self,
+        organization: OrganizationId,
+        module: BotModule,
+    ) -> Option<f64> {
+        if module == BotModule::Polymarket {
+            let row = self
+                .db
+                .timed(
+                    "risk_open_exposure_poly",
+                    sqlx::query(
+                        "SELECT CASE WHEN EXISTS (
+                             SELECT 1 FROM positions
+                             WHERE status IN ('open','closing') AND source = 'polymarket'
+                               AND organization_id = $1 AND quote_symbol IS DISTINCT FROM 'USDC'
+                         ) THEN NULL::double precision ELSE
+                             COALESCE((
+                                 SELECT SUM(cost_basis) FROM positions
+                                 WHERE status IN ('open','closing') AND source = 'polymarket'
+                                   AND quote_symbol = 'USDC' AND organization_id = $1
+                             ), 0) + COALESCE((
+                                 SELECT SUM(CASE WHEN EXISTS (
+                                     SELECT 1 FROM positions p
+                                     WHERE p.organization_id = $1 AND p.id = o.position_id
+                                       AND p.source = 'polymarket' AND p.status IN ('open','closing')
+                                 ) THEN GREATEST(o.size_tokens - o.size_matched, 0) * o.limit_price
+                                   ELSE o.size_tokens * o.limit_price END)
+                                 FROM poly_orders o
+                                 WHERE o.organization_id = $1 AND o.closed_at IS NULL
+                                   AND o.side = 'buy'
+                             ), 0)::double precision END AS exposure",
+                    )
+                    .bind(organization.0)
+                    .fetch_one(self.db.pool()),
+                )
+                .await
+                .ok()?;
+            return row.try_get("exposure").ok();
+        }
+        let (source, quote_symbol) = match module {
+            BotModule::Sniper => ("sniper", "SOL"),
+            BotModule::Copy => ("copy", "SOL"),
+            BotModule::Polymarket => ("polymarket", "USDC"),
+            BotModule::Contract | BotModule::Telegram => return Some(0.0),
+        };
+        let row = self
+            .db
+            .timed(
+                "risk_open_exposure",
+                sqlx::query(
+                    "SELECT CASE WHEN EXISTS (
+                         SELECT 1 FROM positions
+                         WHERE status IN ('open','closing') AND source = $1
+                           AND organization_id = $3 AND quote_symbol IS DISTINCT FROM $2
+                     ) THEN NULL::double precision
+                     ELSE COALESCE(SUM(cost_basis), 0)::double precision END AS exposure
+                     FROM positions
+                     WHERE status IN ('open','closing') AND source = $1
+                       AND quote_symbol = $2 AND organization_id = $3",
+                )
+                .bind(source)
+                .bind(quote_symbol)
+                .bind(organization.0)
+                .fetch_one(self.db.pool()),
+            )
+            .await
+            .ok()?;
+        row.try_get("exposure").ok()
     }
 }

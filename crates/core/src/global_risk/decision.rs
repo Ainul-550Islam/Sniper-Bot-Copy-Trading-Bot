@@ -45,11 +45,13 @@ pub enum GlobalRejectReason {
     Drawdown,
     /// The request itself is malformed (non-finite / non-positive size).
     InvalidRequest,
+    /// Runtime configuration or accounting inputs are malformed/non-finite.
+    InvalidPortfolio,
 }
 
 impl GlobalRejectReason {
     /// Every reason, stable order.
-    pub const ALL: [GlobalRejectReason; 14] = [
+    pub const ALL: [GlobalRejectReason; 15] = [
         GlobalRejectReason::GlobalKillSwitch,
         GlobalRejectReason::VenueKillSwitch,
         GlobalRejectReason::StrategyKillSwitch,
@@ -64,6 +66,7 @@ impl GlobalRejectReason {
         GlobalRejectReason::DailyLoss,
         GlobalRejectReason::Drawdown,
         GlobalRejectReason::InvalidRequest,
+        GlobalRejectReason::InvalidPortfolio,
     ];
 
     /// Stable label.
@@ -83,6 +86,7 @@ impl GlobalRejectReason {
             GlobalRejectReason::DailyLoss => "daily_loss",
             GlobalRejectReason::Drawdown => "drawdown",
             GlobalRejectReason::InvalidRequest => "invalid_request",
+            GlobalRejectReason::InvalidPortfolio => "invalid_portfolio",
         }
     }
 
@@ -274,7 +278,7 @@ mod tests {
         assert!(GlobalRejectReason::PortfolioExposure.is_exposure_limit());
         assert!(!GlobalRejectReason::DailyLoss.is_exposure_limit());
         assert!(GlobalRejectReason::VenueKillSwitch.is_kill_switch());
-        assert_eq!(GlobalRejectReason::ALL.len(), 14);
+        assert_eq!(GlobalRejectReason::ALL.len(), 15);
     }
 
     #[test]

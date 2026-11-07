@@ -40,6 +40,7 @@ manifest = json.loads(Path(manifest_path).read_text())
 EXCLUDED_DIRS = {
     "target", "node_modules", ".next", ".git", ".turbo", ".vercel", "dist",
     "build", "out", "coverage", ".arena", ".cache", ".local", "__pycache__",
+    "test-results", "playwright-report", "blob-report",
     ".venv", ".mypy_cache", ".pytest_cache", ".ruff_cache", "buyer-release",
     "uploads", ".rustup",
 }

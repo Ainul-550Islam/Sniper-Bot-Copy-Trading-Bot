@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
@@ -15,13 +15,22 @@ export default function OrderDetailPage() {
   const [order, setOrder] = useState<TenantOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
-    if (!orderId) return;
+    const requestId = ++requestVersion.current;
+    if (!orderId) {
+      setOrder(null);
+      setError("Order identifier is missing.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setOrder(null);
     try {
       const next = await tradingDetailApi.order(orderId);
+      if (requestId !== requestVersion.current) return;
       // A body without an id is not an order record; surface it honestly.
       if (next && typeof next.id === "string") {
         setOrder(next);
@@ -29,18 +38,27 @@ export default function OrderDetailPage() {
         setError(`The server returned no order record for ${orderId}.`);
       }
     } catch (err: unknown) {
+      if (requestId !== requestVersion.current) return;
+      setOrder(null);
       if (err instanceof ApiError && err.status === 404) {
         setError(`Order ${orderId} not found`);
       } else {
         setError(toDisplayError(err));
       }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [orderId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

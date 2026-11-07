@@ -114,9 +114,9 @@ pub struct VenueScript {
     pub markets: Vec<Value>,
     /// Order books served by `GET /book`.
     pub books: HashMap<String, (f64, f64)>,
-    /// Rows served by the public data API's `GET /trades` (leader feed).
+    /// Rows served in the public Data API v2 `GET /v2/trades` (leader feed).
     pub leader_trades: Vec<Value>,
-    /// When true, `GET /trades` answers HTTP 500 — a failed feed, which must
+    /// When true, `GET /v2/trades` answers HTTP 500 — a failed feed, which must
     /// surface as an error and never as "no trades".
     pub leader_trades_fail: bool,
 }
@@ -140,7 +140,7 @@ impl MockVenue {
     pub fn rpc_url(&self) -> String {
         format!("http://{}/rpc", self.addr)
     }
-    /// Base URL of the public data API (`/trades`) that feeds the copy engine.
+    /// Base URL of the public Data API v2 (`/v2/trades`) that feeds the copy engine.
     pub fn data_url(&self) -> String {
         format!("http://{}/data-api", self.addr)
     }
@@ -157,14 +157,14 @@ impl MockVenue {
         self.script.lock().unwrap().leader_trades_fail = true;
     }
 
-    /// Requests the copy feed made to `GET /trades`, with their query strings.
+    /// Requests the copy feed made to `GET /v2/trades`, with their query strings.
     pub fn leader_trade_queries(&self) -> Vec<Option<String>> {
         self.script
             .lock()
             .unwrap()
             .captures
             .iter()
-            .filter(|c| c.path == "/data-api/trades")
+            .filter(|c| c.path == "/data-api/v2/trades")
             .map(|c| c.query.clone())
             .collect()
     }
@@ -636,12 +636,15 @@ pub async fn mock_venue() -> MockVenue {
                 Json(json!({"error": "boom"})),
             );
         }
-        (StatusCode::OK, Json(Value::Array(s.leader_trades.clone())))
+        (
+            StatusCode::OK,
+            Json(json!({"data": s.leader_trades.clone(), "pagination": {}})),
+        )
     }
 
     let app = Router::new()
         .route("/gamma/markets", get(gamma_markets))
-        .route("/data-api/trades", get(data_api_trades))
+        .route("/data-api/v2/trades", get(data_api_trades))
         .route("/clob/time", get(clob_time))
         .route("/clob/book", get(clob_book))
         .route("/clob/markets/:cid", get(clob_market))

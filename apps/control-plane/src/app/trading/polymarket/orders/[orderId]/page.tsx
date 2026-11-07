@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
@@ -14,32 +14,50 @@ export default function PolymarketOrderDetailPage() {
   const [order, setOrder] = useState<PolymarketOrderDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
-    if (!venueOrderId) return;
+    const requestId = ++requestVersion.current;
+    if (!venueOrderId) {
+      setOrder(null);
+      setError("Polymarket order identifier is missing.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setOrder(null);
     try {
       const next = await tradingDetailApi.polymarketOrder(venueOrderId);
+      if (requestId !== requestVersion.current) return;
       // A body without a venue order id is not a record; surface it honestly.
-      if (next && typeof next.venue_order_id === "string") {
+      if (next && typeof next.venue_order_id === "string" && next.venue_order_id.length > 0) {
         setOrder(next);
       } else {
         setError(`The server returned no Polymarket order record for ${venueOrderId}.`);
       }
     } catch (err: unknown) {
+      if (requestId !== requestVersion.current) return;
+      setOrder(null);
       if (err instanceof ApiError && err.status === 404) {
         setError(`Polymarket order ${venueOrderId.slice(0, 14)}… not found`);
       } else {
         setError(toDisplayError(err));
       }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [venueOrderId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

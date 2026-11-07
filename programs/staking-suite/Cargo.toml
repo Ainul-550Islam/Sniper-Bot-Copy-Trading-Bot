@@ -8,6 +8,9 @@ edition = "2021"
 # toolchain instead of drifting to crates that require newer Rust editions
 # (the 2.3-generation solana split-crates and their RustCrypto 2025 deps need
 # 1.85+; Agave 4.x platform-tools breaks solana-zk-token-sdk on BPF).
+# Resolver fallback is not a toolchain-compatibility test: optional host RPC
+# dependencies can require newer Rust. Re-run cargo build-sbf after security
+# lockfile updates before claiming an Agave platform-tools build.
 rust-version = "1.79"
 description = "Module 4 — native Solana staking + token + fee program (no Anchor)"
 license = "LicenseRef-Proprietary"
@@ -38,7 +41,11 @@ bincode = "1.3"
 # (`tests/validator_e2e.rs`, gated behind STAKING_E2E=1) drives a local
 # `solana-test-validator` with a normal signing client.
 solana-sdk = "2.1"
-solana-client = "2.1"
+# The validator harness uses only JSON-RPC. Depending on the umbrella client
+# also pulls in unused TPU/QUIC networking and its separate legacy TLS graph.
+# Keep the same RPC APIs without those unused transports.
+solana-rpc-client = "2.1"
+solana-rpc-client-api = "2.1"
 # Property tests for the reward/fee/cap arithmetic
 # (`tests/property_rewards.rs`, audit/INVARIANTS.md §D/E): randomized
 # boundaries, monotonicity, and conservation properties.
@@ -74,3 +81,9 @@ panic = "abort"
 # Standalone package (excluded from the parent workspace); this table makes it
 # its own workspace root so it resolves and locks independently.
 [workspace]
+
+# The parent workspace's patches are NOT inherited by this standalone workspace.
+# Reuse its existing client-types security patch so validator RPC account
+# decoding uses zstd 0.14 instead of the vulnerable 0.13 dependency.
+[patch.crates-io]
+solana-account-decoder-client-types = { path = "../../vendor/solana-account-decoder-client-types" }

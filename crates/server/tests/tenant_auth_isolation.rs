@@ -7,9 +7,9 @@
 //! 2. **Durable (`POSTGRES_URL` required, else NOT_RUN):** wrong, expired,
 //!    superseded, replayed and cross-user tokens are refused, and a refused
 //!    token leaves no side effect (`email_verified` and membership unchanged).
-//!    Tokens are read exactly as the real delivery channels expose them: the
-//!    verification link from the durable outbox, and the invitation token from
-//!    the invite-creation response.
+//!    Tokens are read from their intended recipient delivery path: verification
+//!    and invitation links are inspected in the durable mail outbox, never in
+//!    inviter-facing API responses.
 
 use std::sync::Arc;
 
@@ -357,7 +357,7 @@ async fn owner_scoped_session(saas: Arc<SaasStore>, db: &Arc<Database>) -> Strin
         state_with(saas.clone(), Some(db.clone())),
         "POST",
         "/api/saas/organizations",
-        Some(json!({ "name": "Isolation Org" })),
+        Some(json!({ "name": "Isolation Org", "slug": format!("test-{}", uuid::Uuid::new_v4()) })),
         Some(&unscoped),
     )
     .await;
@@ -395,9 +395,31 @@ async fn create_invitation(
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "invite creation: {body}");
-    body["invitation_token"]
-        .as_str()
-        .expect("invitation token is returned once, at creation")
+    assert!(
+        body.get("invitation_token").is_none(),
+        "inviter cannot read the token: {body}"
+    );
+    let row: (String,) = sqlx::query_as(
+        "SELECT body_text FROM email_outbox
+          WHERE recipient = $1 AND template_key = 'member_invite'
+            AND dedup_key LIKE $2
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(invitee)
+    .bind(format!(
+        "member_invite:{}:%",
+        body["invitation_id"].as_str().expect("invitation id")
+    ))
+    .fetch_one(db.pool())
+    .await
+    .expect("recipient invitation mail queued");
+    row.0
+        .split("token=")
+        .nth(1)
+        .expect("token link")
+        .split_whitespace()
+        .next()
+        .expect("token")
         .to_string()
 }
 

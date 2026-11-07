@@ -39,18 +39,21 @@ export default function VerifyEmailPage() {
 function VerifyEmailBody() {
   const token = useSearchParams().get("token");
   const [email, setEmail] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(Boolean(token));
   const [verified, setVerified] = useState<ConfirmResponse | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [resent, setResent] = useState<RequestResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Auto-confirm once when the link carries a token.
+  // Defer dispatch by a microtask: Strict Mode's setup/cleanup replay cancels
+  // the first setup before it can consume this one-time token.
   useEffect(() => {
     if (!token) return;
-    let cancelled = false;
-    (async () => {
+    let active = true;
+    void Promise.resolve().then(async () => {
+      if (!active) return;
       setBusy(true);
+      setVerified(null);
       setFailed(null);
       try {
         const res = await request<ConfirmResponse>("/api/saas/email-verification/confirm", {
@@ -58,17 +61,17 @@ function VerifyEmailBody() {
           body: { token },
           anonymous: true,
         });
-        if (!cancelled) setVerified(res);
+        if (active) setVerified(res);
       } catch (err) {
-        if (!cancelled) {
+        if (active) {
           setFailed(err instanceof ApiError ? err.reason : "Could not verify this link.");
         }
       } finally {
-        if (!cancelled) setBusy(false);
+        if (active) setBusy(false);
       }
-    })();
+    });
     return () => {
-      cancelled = true;
+      active = false;
     };
   }, [token]);
 

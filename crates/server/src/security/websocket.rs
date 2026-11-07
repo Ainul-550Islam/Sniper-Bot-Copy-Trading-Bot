@@ -140,7 +140,7 @@ pub async fn events(
             }),
             Err(denied) => (
                 StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": denied.kind.as_str(), "reason": denied.reason })),
+                Json(json!({ "error": denied.kind().as_str(), "reason": denied.reason() })),
             )
                 .into_response(),
         };
@@ -184,7 +184,7 @@ async fn first_frame_auth(state: ApiState, mut socket: WebSocket, headers: Heade
         Err(denied) => {
             let _ = send_with_timeout(
                 &mut socket,
-                Message::Text(json!({ "kind": "error", "reason": denied.reason }).to_string()),
+                Message::Text(json!({ "kind": "error", "reason": denied.reason() }).to_string()),
             )
             .await;
             let _ = send_with_timeout(
@@ -413,8 +413,8 @@ mod tests {
         let denied = resolve(&state, &headers)
             .await
             .expect_err("bogus token denied");
-        assert_eq!(denied.kind.as_str(), "deny_unauthenticated");
-        assert!(!denied.reason.contains("not-a-real-token"));
+        assert_eq!(denied.kind().as_str(), "deny_unauthenticated");
+        assert!(!denied.reason().contains("not-a-real-token"));
 
         // A real session resolves to a tenant-scoped context.
         use bot_core::membership::{Membership, MembershipRole};

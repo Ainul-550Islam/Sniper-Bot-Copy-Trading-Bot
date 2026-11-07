@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
@@ -15,33 +15,51 @@ export default function PositionDetailPage() {
   const [position, setPosition] = useState<TenantPosition | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
-    if (!positionId) return;
+    const requestId = ++requestVersion.current;
+    if (!positionId) {
+      setPosition(null);
+      setError("Position identifier is missing.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setPosition(null);
     try {
       const next = await tradingDetailApi.position(positionId);
+      if (requestId !== requestVersion.current) return;
       // A body without an id is not a position record; surface it as a
       // retrieval failure rather than rendering an empty detail card.
-      if (next && typeof next.id === "string") {
+      if (next && typeof next.id === "string" && next.id.length > 0) {
         setPosition(next);
       } else {
         setError(`The server returned no position record for ${positionId}.`);
       }
     } catch (err: unknown) {
+      if (requestId !== requestVersion.current) return;
+      setPosition(null);
       if (err instanceof ApiError && err.status === 404) {
         setError(`Position ${positionId} not found`);
       } else {
         setError(toDisplayError(err));
       }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [positionId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

@@ -12,9 +12,9 @@
 //!   is replaced with a fresh PBKDF2 hash, and EVERY live session for the
 //!   user is revoked.
 //!
-//! Rate limiting rides on the router-level IP limiter; the identical
-//! response bodies remove the timing/enumeration side channel an attacker
-//! could otherwise use to probe addresses.
+//! Rate limiting rides on the router-level IP limiter; identical response
+//! bodies avoid response-content account enumeration. They do not establish
+//! timing equalization between existing and unknown accounts.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -203,14 +203,47 @@ pub async fn confirm_reset(
             .into_response();
     }
 
+    let presented_hash = hash_token(body.token.trim());
+    // Reject unavailable tokens before doing expensive password work. This
+    // autocommit probe releases its row lock before hashing; it is NOT the
+    // authority for consumption. A concurrent winner, revocation or expiry
+    // must still be checked again in the transaction below.
+    let available = match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1 FROM password_reset_tokens
+             WHERE token_hash = $1
+               AND used_at IS NULL
+               AND revoked_at IS NULL
+               AND expires_at > now()
+             FOR UPDATE SKIP LOCKED
+         )",
+    )
+    .bind(&presented_hash)
+    .fetch_one(db.pool())
+    .await
+    {
+        Ok(available) => available,
+        Err(error) => return unavailable(error),
+    };
+    if !available {
+        return invalid_token();
+    }
+    // PBKDF2 must neither block an async runtime worker nor hold database
+    // locks for its CPU-bound duration. Keep the existing hash work factor.
+    let password = body.new_password;
+    let password_hash = match tokio::task::spawn_blocking(move || hash_password(&password)).await {
+        Ok(hash) => hash,
+        Err(error) => return unavailable(error),
+    };
+
     // Keep the single-use token, canonical password, relational projection and
     // session revocations in ONE transaction. A storage failure rolls back all
-    // four; a concurrent confirm waits on the token row and then cleanly loses.
+    // four. A busy token is the same opaque denial as an unavailable one, not
+    // a potentially statement-timeout-length wait behind another confirm.
     let mut transaction = match db.pool().begin().await {
         Ok(transaction) => transaction,
         Err(error) => return unavailable(error),
     };
-    let presented_hash = hash_token(body.token.trim());
     let row = match sqlx::query(
         "SELECT id, user_id, token_hash
            FROM password_reset_tokens
@@ -218,7 +251,7 @@ pub async fn confirm_reset(
             AND used_at IS NULL
             AND revoked_at IS NULL
             AND expires_at > now()
-          FOR UPDATE",
+          FOR UPDATE SKIP LOCKED",
     )
     .bind(&presented_hash)
     .fetch_optional(&mut *transaction)
@@ -263,7 +296,7 @@ pub async fn confirm_reset(
         return invalid_token();
     }
     let now = chrono::Utc::now();
-    user.password_hash = hash_password(&body.new_password);
+    user.password_hash = password_hash;
     user.updated_at = now;
     if let Err(error) =
         PostgresSaasRepo::update_user_in_transaction(&mut transaction, &user, now).await

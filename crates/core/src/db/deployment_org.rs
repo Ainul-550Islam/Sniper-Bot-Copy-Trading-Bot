@@ -31,10 +31,14 @@ pub async fn deployment_org_uuid(db: &Database) -> Result<Uuid, TimedDbError> {
     if let Some(cached) = DEPLOYMENT_ORG.get() {
         return Ok(*cached);
     }
+    // Deployment identity is control-plane metadata, not a request-scoped
+    // tenant lookup. Use the system pool when RLS is configured so an empty
+    // or unrelated request tenant cannot hide the deployment organization.
+    let pool = db.system_pool().unwrap_or_else(|| db.pool());
     let row: (Uuid,) = db
         .timed(
             "deployment_org_uuid",
-            sqlx::query_as("SELECT public.deployment_organization_id()").fetch_one(db.pool()),
+            sqlx::query_as("SELECT public.deployment_organization_id()").fetch_one(pool),
         )
         .await?;
     let _ = DEPLOYMENT_ORG.set(row.0);

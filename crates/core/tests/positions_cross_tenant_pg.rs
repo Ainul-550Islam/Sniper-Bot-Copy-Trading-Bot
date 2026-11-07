@@ -7,6 +7,12 @@
 
 mod trading_isolation_common;
 
+use bot_core::db::claims::PostgresRiskOracle;
+use bot_core::risk::GlobalRiskOracle;
+use bot_core::trading_repository::polymarket::{
+    model::{TenantPolyFill, TenantPolyOrder},
+    write::TenantPolyWrite,
+};
 use bot_core::trading_repository::positions::{
     model::TenantPosition, TenantBalanceRepo, TenantPositionRead, TenantPositionWrite,
     TenantTradeRepo,
@@ -28,13 +34,15 @@ fn position(
         venue: "paper".into(),
         mode: "paper".into(),
         status: "open".into(),
-        symbol: "SOL/USDC".into(),
-        symbol_display: "SOL/USDC".into(),
-        quote_symbol: "USDC".into(),
+        symbol: "TOKEN/SOL".into(),
+        symbol_display: "TOKEN/SOL".into(),
+        quote_symbol: "SOL".into(),
         qty: 1.0,
         avg_entry: 100.0,
         cost_basis: 100.0,
         realized_quote: 0.0,
+        realized_pnl_quote: Some(0.0),
+        realized_at: None,
         last_mark: 100.0,
         stop_loss: None,
         take_profit: None,
@@ -69,33 +77,36 @@ async fn positions_trades_balances_isolation_and_pnl_exclusion() {
     let balances = TenantBalanceRepo::new(db.clone());
     let reporting = TenantReportingRepo::new(db.clone());
 
-    // Per tenant: one position that closes at a known PnL, one that
-    // stays open, one trade, one balance snapshot.
+    // Per tenant: one position with a known same-day PnL, one that stays
+    // open, one trade, and one balance snapshot. Keep the closed position
+    // inside today's UTC window: the oracle intentionally rejects cumulative
+    // PnL for positions opened on an earlier day.
+    let utc_day_start = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("valid UTC midnight")
+        .and_utc();
+    let closed_opened_at = utc_day_start + chrono::Duration::minutes(1);
+    let closed_at = utc_day_start + chrono::Duration::minutes(2);
     for (tenant, label, realized) in [(a, "a", 150.0_f64), (b, "b", -40.0_f64)] {
         let closing_id = format!("pos-{label}-{run}");
         let open_id = format!("pos2-{label}-{run}");
+        // Seed a fully projected closed row. The close-only repository API
+        // deliberately clears realized_pnl_quote because it cannot infer
+        // canonical net PnL from realized proceeds alone.
+        let mut closed = position(tenant, closing_id.clone(), closed_opened_at);
+        closed.status = "closed".into();
+        closed.realized_quote = 100.0 + realized;
+        closed.realized_pnl_quote = Some(realized);
+        closed.realized_at = Some(closed_at);
+        closed.closed_at = Some(closed_at);
+        closed.updated_at = closed_at;
         pos_write
-            .upsert(
-                &write_scope(tenant),
-                &position(tenant, closing_id.clone(), at(1.0)),
-            )
+            .upsert(&write_scope(tenant), &closed)
             .await
             .unwrap();
         pos_write
             .upsert(&write_scope(tenant), &position(tenant, open_id, at(0.5)))
-            .await
-            .unwrap();
-        // close at realized_quote = 100 + realized ⇒ net = realized.
-        pos_write
-            .close(
-                &write_scope(tenant),
-                &closing_id,
-                Some(&format!("exit-{label}-{run}")),
-                Some("target"),
-                100.0 + realized,
-                100.0,
-                at(0.25),
-            )
             .await
             .unwrap();
         let trade = bot_core::trading_repository::positions::model::TenantTrade {
@@ -163,6 +174,46 @@ async fn positions_trades_balances_isolation_and_pnl_exclusion() {
         .unwrap();
     assert!(closed_b.iter().all(|p| p.organization_id == b));
     assert_eq!(closed_b.len(), 1);
+
+    // The risk oracle's tenant projections use the same durable rows:
+    // counts, exposure, duplicate symbols and realized PnL stay per-org.
+    let oracle = PostgresRiskOracle::new(db.clone());
+    assert_eq!(
+        oracle
+            .count_open_for(Some(a), bot_core::models::BotModule::Sniper)
+            .await,
+        Some(1)
+    );
+    assert_eq!(
+        oracle
+            .count_open_for(Some(b), bot_core::models::BotModule::Sniper)
+            .await,
+        Some(1)
+    );
+    assert_eq!(
+        oracle
+            .open_exposure_for(a, bot_core::models::BotModule::Sniper)
+            .await,
+        Some(100.0)
+    );
+    assert_eq!(
+        oracle
+            .has_open_symbol_for(a, bot_core::models::BotModule::Sniper, "TOKEN/SOL")
+            .await,
+        Some(true)
+    );
+    assert_eq!(
+        oracle
+            .realized_today_for_module(Some(a), bot_core::models::BotModule::Sniper)
+            .await,
+        Some(150.0)
+    );
+    assert_eq!(
+        oracle
+            .realized_today_for_module(Some(b), bot_core::models::BotModule::Sniper)
+            .await,
+        Some(-40.0)
+    );
 
     // B cannot close or risk-mark A's position (both NotFound).
     match pos_write
@@ -294,17 +345,15 @@ async fn cross_tenant_position_id_collision_cannot_mutate() {
     ));
 
     // B upserts the SAME global id. `positions.id` is the GLOBAL PK;
-    // the ON CONFLICT leg is tenant-guarded (`WHERE
-    // positions.organization_id = $1`), so the conflict fires but the
-    // guarded update matches zero of B's rows: a silent no-op that
-    // must NOT mutate A's row and must NOT create a B row.
+    // the tenant-guarded conflict update affects zero rows. That must be
+    // surfaced as a tenant mismatch, not reported as a successful write.
     let mut b_pos = position(b, id.clone(), at(0.1));
     b_pos.qty = 2.0;
     b_pos.cost_basis = 20.0;
-    pos_write
-        .upsert(&write_scope(b), &b_pos)
-        .await
-        .expect("tenant-guarded upsert no-ops instead of failing");
+    assert!(matches!(
+        pos_write.upsert(&write_scope(b), &b_pos).await,
+        Err(RepositoryError::TenantMismatch)
+    ));
 
     let a_row = pos_read
         .get(&read_scope(a), &id)
@@ -321,4 +370,245 @@ async fn cross_tenant_position_id_collision_cannot_mutate() {
         pos_read.get(&read_scope(b), &id).await,
         Err(RepositoryError::NotFound(_))
     ));
+}
+
+#[tokio::test]
+async fn risk_exposure_fails_closed_when_positions_use_an_unexpected_quote_unit() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: risk_quote_unit_projection_pg — POSTGRES_URL missing");
+        return;
+    };
+    let tenant = org(&db, &format!("risk-quote-{}", run_id())).await;
+    let write = write_scope(tenant);
+    let mut sniper_position = position(tenant, format!("wrong-quote-{}", run_id()), at(0.0));
+    sniper_position.quote_symbol = "USDC".into();
+    sniper_position.cost_basis = 10.0;
+    TenantPositionWrite::new(db.clone())
+        .upsert(&write, &sniper_position)
+        .await
+        .expect("persist open position with unexpected quote unit");
+    let mut poly_position = position(tenant, format!("wrong-poly-quote-{}", run_id()), at(0.0));
+    poly_position.source = "polymarket".into();
+    poly_position.quote_symbol = "SOL".into();
+    TenantPositionWrite::new(db.clone())
+        .upsert(&write, &poly_position)
+        .await
+        .expect("persist Polymarket position with unexpected quote unit");
+
+    let oracle = PostgresRiskOracle::new(db);
+    assert_eq!(
+        oracle
+            .open_exposure_for(tenant, bot_core::models::BotModule::Sniper)
+            .await,
+        None,
+        "silently omitting a quote unit would understate tenant exposure"
+    );
+    assert_eq!(
+        oracle
+            .open_exposure_for(tenant, bot_core::models::BotModule::Polymarket)
+            .await,
+        None,
+        "Polymarket exposure must also fail closed outside USDC"
+    );
+}
+
+#[tokio::test]
+async fn polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fills() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: polymarket_risk_projection_pg — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let tenant = org(&db, &format!("poly-risk-{run}")).await;
+    let write = write_scope(tenant);
+    let writes = TenantPolyWrite::new(db.clone());
+    let order_id = format!("poly-order-{run}");
+    let token_id = format!("poly-token-{run}");
+    let now = at(0.0);
+    writes
+        .upsert_order(
+            &write,
+            &TenantPolyOrder {
+                organization_id: tenant,
+                venue_order_id: order_id.clone(),
+                order_id: format!("oms-{run}"),
+                signal_id: format!("signal-{run}"),
+                condition_id: format!("condition-{run}"),
+                token_id: token_id.clone(),
+                outcome: "YES".into(),
+                side: "buy".into(),
+                order_type: "GTC".into(),
+                limit_price: 0.5,
+                size_tokens: 10.0,
+                size_matched: 0.0,
+                mode: "paper".into(),
+                state: "resting".into(),
+                venue_status: "live".into(),
+                expiration: 0,
+                position_id: None,
+                replica_id: "risk-projection-test".into(),
+                submitted_at: now,
+                updated_at: now,
+                closed_at: None,
+            },
+        )
+        .await
+        .expect("upsert tenant order");
+
+    let oracle = PostgresRiskOracle::new(db.clone());
+    assert_eq!(
+        oracle
+            .count_open_for(Some(tenant), bot_core::models::BotModule::Polymarket)
+            .await,
+        Some(1)
+    );
+    assert_eq!(
+        oracle
+            .open_exposure_for(tenant, bot_core::models::BotModule::Polymarket)
+            .await,
+        Some(5.0)
+    );
+    assert_eq!(
+        oracle
+            .has_open_symbol_for(tenant, bot_core::models::BotModule::Polymarket, &token_id)
+            .await,
+        Some(true)
+    );
+
+    // A fill without its generic tenant-position projection makes PnL
+    // incomplete; the oracle returns unknown so the tenant gate fails closed.
+    writes
+        .record_fill(
+            &write,
+            &TenantPolyFill {
+                organization_id: tenant,
+                fill_id: format!("fill-{run}"),
+                venue_order_id: order_id.clone(),
+                order_id: format!("oms-{run}"),
+                token_id,
+                side: "buy".into(),
+                price: 0.5,
+                size_tokens: 2.0,
+                quote_usd: 1.0,
+                source: "test".into(),
+                position_id: None,
+                ts: now,
+            },
+        )
+        .await
+        .expect("record fill");
+    assert_eq!(
+        oracle
+            .realized_today_for_module(Some(tenant), bot_core::models::BotModule::Polymarket)
+            .await,
+        None
+    );
+    assert_eq!(
+        oracle
+            .realized_today_status_for_module(
+                Some(tenant),
+                bot_core::models::BotModule::Polymarket,
+            )
+            .await,
+        bot_core::risk::RealizedPnlRead::Incomplete
+    );
+
+    // Legacy closed rows with no trustworthy cumulative PnL must not be
+    // interpreted as zero or reconstructed from the remaining basis.
+    let mut closed = position(tenant, format!("legacy-pnl-{run}"), now);
+    closed.status = "closed".into();
+    closed.closed_at = Some(now);
+    closed.realized_quote = 11.0;
+    closed.realized_pnl_quote = None;
+    let position_writes = TenantPositionWrite::new(db.clone());
+    position_writes
+        .upsert(&write, &closed)
+        .await
+        .expect("persist unknown legacy pnl projection");
+    assert_eq!(
+        oracle
+            .realized_today_for_module(Some(tenant), bot_core::models::BotModule::Sniper)
+            .await,
+        None
+    );
+    assert_eq!(
+        oracle
+            .realized_today_status_for_module(Some(tenant), bot_core::models::BotModule::Sniper,)
+            .await,
+        bot_core::risk::RealizedPnlRead::Incomplete
+    );
+
+    // A same-day lifecycle with a known cumulative result is reportable.
+    closed.realized_pnl_quote = Some(2.0);
+    position_writes
+        .upsert(&write, &closed)
+        .await
+        .expect("persist known cumulative pnl projection");
+    assert_eq!(
+        oracle
+            .realized_today_for_module(Some(tenant), bot_core::models::BotModule::Sniper)
+            .await,
+        Some(2.0)
+    );
+
+    // Mark-only updates must not make yesterday's open partial exit look like
+    // a realization today; the dedicated fill timestamp carries that day.
+    let mut partial = position(tenant, format!("open-partial-{run}"), now);
+    partial.updated_at = now;
+    partial.realized_quote = 4.0;
+    partial.realized_pnl_quote = Some(0.0);
+    partial.realized_at = Some(now - chrono::Duration::days(1));
+    position_writes
+        .upsert(&write, &partial)
+        .await
+        .expect("persist prior-day partial exit");
+    assert_eq!(
+        oracle
+            .realized_today_for_module(Some(tenant), bot_core::models::BotModule::Sniper)
+            .await,
+        Some(2.0)
+    );
+    partial.realized_at = Some(now);
+    position_writes
+        .upsert(&write, &partial)
+        .await
+        .expect("persist same-day partial exit");
+    assert_eq!(
+        oracle
+            .realized_today_status_for_module(Some(tenant), bot_core::models::BotModule::Sniper)
+            .await,
+        bot_core::risk::RealizedPnlRead::Incomplete
+    );
+
+    // A lifecycle spanning UTC days has cumulative rather than daily PnL,
+    // so its close-day contribution is unknown.
+    closed.opened_at = now - chrono::Duration::days(1);
+    position_writes
+        .upsert(&write, &closed)
+        .await
+        .expect("persist cross-day closed lifecycle");
+    assert_eq!(
+        oracle
+            .realized_today_for_module(Some(tenant), bot_core::models::BotModule::Sniper)
+            .await,
+        None
+    );
+
+    // Partial exits on a still-open position are not silently omitted from
+    // the durable daily-loss view.
+    closed.status = "open".into();
+    closed.opened_at = now;
+    closed.closed_at = None;
+    closed.realized_quote = 11.0;
+    closed.realized_pnl_quote = Some(1.0);
+    position_writes
+        .upsert(&write, &closed)
+        .await
+        .expect("persist open partial-exit lifecycle");
+    assert_eq!(
+        oracle
+            .realized_today_for_module(Some(tenant), bot_core::models::BotModule::Sniper)
+            .await,
+        None
+    );
 }

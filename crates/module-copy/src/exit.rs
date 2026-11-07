@@ -375,6 +375,15 @@ pub async fn sell_position(
             )
         })
     };
+    let intent_id = if !ctx.curve.complete {
+        exit_intent_id(position, sell_raw, ExitRoute::Curve)
+    } else if cfg.sniper.use_jupiter_fallback {
+        exit_intent_id(position, sell_raw, ExitRoute::Jupiter)
+    } else {
+        return Err(BotError::solana(
+            "token graduated and jupiter fallback is off — cannot exit copy position",
+        ));
+    };
     // Fencing (§E): re-validate ownership immediately before the
     // money-moving branch.
     permit.fence().await?;
@@ -389,7 +398,7 @@ pub async fn sell_position(
             sell_raw,
             slippage_pct,
             mk_journal(),
-            &exit_intent_id(position, sell_raw, ExitRoute::Curve),
+            &intent_id,
         )
         .await?
     } else if cfg.sniper.use_jupiter_fallback {
@@ -403,7 +412,7 @@ pub async fn sell_position(
             sell_raw,
             &cfg,
             mk_journal(),
-            &exit_intent_id(position, sell_raw, ExitRoute::Jupiter),
+            &intent_id,
         )
         .await?
     } else {
@@ -469,7 +478,7 @@ pub async fn sell_position(
         wallet.pubkey.to_string(),
         bot_core::global_risk::strategy_label(BotModule::Copy, position.copied_wallet.as_deref()),
         None,
-        None,
+        Some(intent_id),
     );
     state.record_trade(trade.clone()).await;
     state.events.publish(AppEvent::Fill {

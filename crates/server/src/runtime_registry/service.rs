@@ -22,7 +22,7 @@ use tracing::{info, warn};
 use bot_core::error::BotResult;
 use bot_core::tenant::{OrganizationId, RuntimeId};
 
-use super::fencing::{verify as verify_fence, FenceVerdict};
+use super::fencing::{verify_with_policy as verify_fence, FenceVerdict};
 use super::lease::{evaluate, LeasePolicy};
 use super::model::{FenceToken, RuntimeStatus, TenantRuntimeRecord};
 use super::store::RuntimeStore;
@@ -145,7 +145,7 @@ impl RuntimeRegistryService {
     /// Verify a claimed fence token (the shared check for guards and
     /// background jobs).
     pub async fn verify(&self, claimed: &FenceToken) -> BotResult<FenceVerdict> {
-        verify_fence(&self.store, claimed).await
+        verify_fence(&self.store, claimed, &self.policy).await
     }
 
     /// Mark a runtime draining (graceful handover: refuses new work).
@@ -225,6 +225,43 @@ mod tests {
 
     fn service() -> RuntimeRegistryService {
         RuntimeRegistryService::new(Arc::new(MemoryRuntimeStore::new()))
+    }
+
+    #[tokio::test]
+    async fn fence_verification_uses_the_services_configured_lease_policy() {
+        let mut actual = Vec::new();
+        for (heartbeat_age, stale_after, expected_live) in [(5, 1, false), (100, 120, true)] {
+            let store: Arc<dyn RuntimeStore> = Arc::new(MemoryRuntimeStore::new());
+            let org = OrganizationId::new();
+            let record = TenantRuntimeRecord::new_active(
+                org,
+                RuntimeId::new(),
+                RuntimeGeneration::first(),
+                "configured-policy",
+                Utc::now() - chrono::Duration::seconds(heartbeat_age),
+            );
+            store.insert(&record).await.unwrap();
+            let svc = RuntimeRegistryService::with_policy(
+                store,
+                LeasePolicy {
+                    stale_after: chrono::Duration::seconds(stale_after),
+                    ..LeasePolicy::default()
+                },
+            );
+            let resolved_live = svc.current(org).await.unwrap().is_some();
+            assert_eq!(resolved_live, expected_live, "resolution policy control");
+            let verified_live = svc
+                .verify(&record.fence_token())
+                .await
+                .unwrap()
+                .is_current();
+            actual.push((resolved_live, verified_live));
+        }
+        assert_eq!(
+            actual,
+            vec![(false, false), (true, true)],
+            "fence checks and current-runtime resolution must honor the SAME configured policy"
+        );
     }
 
     #[tokio::test]

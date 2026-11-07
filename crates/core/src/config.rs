@@ -1900,10 +1900,13 @@ fn mask(v: Option<&str>) -> String {
     match v {
         None | Some("") => "—".into(),
         Some(s) => {
-            if s.len() <= 8 {
+            let count = s.chars().count();
+            if count <= 8 {
                 "****".into()
             } else {
-                format!("{}…{} ({} chars)", &s[..4], &s[s.len() - 4..], s.len())
+                let prefix: String = s.chars().take(4).collect();
+                let suffix: String = s.chars().skip(count - 4).collect();
+                format!("{prefix}…{suffix} ({count} chars)")
             }
         }
     }
@@ -2033,8 +2036,16 @@ fn env_str(key: &str, warnings: &mut Vec<String>) -> Option<String> {
 }
 
 fn env_bool(key: &str, warnings: &mut Vec<String>) -> Option<bool> {
-    env_str(key, warnings)
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    env_str(key, warnings).and_then(|v| match v.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => {
+            warnings.push(format!(
+                "env {key} is not a boolean (expected 1/0, true/false, yes/no or on/off); ignored"
+            ));
+            None
+        }
+    })
 }
 
 fn env_f64(key: &str, warnings: &mut Vec<String>) -> Option<f64> {
@@ -2220,7 +2231,7 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
         c.database.auto_migrate = v;
     }
     if let Some(v) = env_u64("DATABASE_MAX_CONNECTIONS", w) {
-        c.database.max_connections = v.max(1) as u32;
+        c.database.max_connections = v.clamp(1, u32::MAX as u64) as u32;
     }
     if let Some(v) = env_bool("REDIS_ENABLED", w) {
         c.redis.enabled = v;
@@ -2765,10 +2776,47 @@ pub fn resolve_api_key(c: &Config) -> Option<String> {
         .filter(|v| !v.trim().is_empty())
 }
 
+/// Reject non-finite settings without changing existing finite-value policy.
+fn require_finite_config(label: &str, value: f64) -> BotResult<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(BotError::config(format!("{label} must be finite")))
+    }
+}
+
 /// Sniper-engine specific validation (slippage engine, safety gates, exit
 /// hardening, exposure controls). Split out so the rules stay readable.
 fn validate_sniper_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     let sn = &c.sniper;
+    for (label, value) in [
+        ("sniper.take_profit_pct", sn.take_profit_pct),
+        ("sniper.stop_loss_pct", sn.stop_loss_pct),
+        ("sniper.trailing_stop_pct", sn.trailing_stop_pct),
+    ] {
+        if let Some(value) = value {
+            require_finite_config(label, value)?;
+        }
+    }
+    if let Some(advanced) = &sn.advanced_exit {
+        for level in &advanced.ladder {
+            require_finite_config(
+                "sniper.advanced_exit.ladder.trigger_multiple",
+                level.trigger_multiple,
+            )?;
+            require_finite_config(
+                "sniper.advanced_exit.ladder.sell_fraction",
+                level.sell_fraction,
+            )?;
+        }
+        if let Some(rule) = advanced.break_even {
+            require_finite_config(
+                "sniper.advanced_exit.break_even.activation_multiple",
+                rule.activation_multiple,
+            )?;
+            require_finite_config("sniper.advanced_exit.break_even.buffer", rule.buffer)?;
+        }
+    }
     let mode = sn.slippage_mode_normalized();
     if !matches!(mode.as_str(), "fixed" | "liquidity_aware" | "price_impact") {
         return Err(BotError::config(format!(
@@ -2984,6 +3032,7 @@ fn validate_sniper_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
 /// the Module-2 exposure controls in `[risk]`.
 fn validate_copy_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     let cp = &c.copy;
+    require_finite_config("copy.slippage_pct", cp.slippage_pct)?;
     if cp.max_event_age_secs < 0 {
         return Err(BotError::config(
             "copy.max_event_age_secs must be >= 0 (0 = off)",
@@ -3008,6 +3057,20 @@ fn validate_copy_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
         ));
     }
     for wallet in &cp.wallets {
+        for (label, value) in [
+            ("copy.wallets.fixed_sol", wallet.fixed_sol),
+            (
+                "copy.wallets.fraction_of_their_size",
+                Some(wallet.fraction_of_their_size),
+            ),
+            ("copy.wallets.max_sol", Some(wallet.max_sol)),
+            ("copy.wallets.min_sol", Some(wallet.min_sol)),
+            ("copy.wallets.slippage_pct", wallet.slippage_pct),
+        ] {
+            if let Some(value) = value {
+                require_finite_config(label, value)?;
+            }
+        }
         if !wallet.max_exposure_sol.is_finite() || wallet.max_exposure_sol < 0.0 {
             return Err(BotError::config(format!(
                 "copy wallet {} max_exposure_sol must be >= 0 (0 = off)",
@@ -3076,6 +3139,14 @@ fn validate_copy_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
 /// TASK 4: Polymarket order-pipeline and exposure-control invariants.
 fn validate_polymarket_engine(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     let p = &c.polymarket;
+    for (label, value) in [
+        ("polymarket.copy_size_multiplier", p.copy_size_multiplier),
+        ("polymarket.copy_min_stake_usd", p.copy_min_stake_usd),
+        ("polymarket.copy_max_stake_usd", p.copy_max_stake_usd),
+        ("polymarket.copy_max_price", p.copy_max_price),
+    ] {
+        require_finite_config(label, value)?;
+    }
     for (label, v) in [
         ("polymarket.stake_usd", p.stake_usd),
         ("polymarket.min_order_size", p.min_order_size),
@@ -3200,7 +3271,9 @@ fn validate_ha(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
     if ha.heartbeat_secs == 0 {
         return Err(BotError::config("ha.heartbeat_secs must be >= 1"));
     }
-    if ha.heartbeat_timeout_secs > 0 && ha.heartbeat_timeout_secs < ha.heartbeat_secs * 2 {
+    if ha.heartbeat_timeout_secs > 0
+        && ha.heartbeat_timeout_secs < ha.heartbeat_secs.saturating_mul(2)
+    {
         w.push(format!(
             "ha.heartbeat_timeout_secs ({}) is less than twice ha.heartbeat_secs ({}); a single missed beat would mark this worker stale — the effective timeout is raised to {}s",
             ha.heartbeat_timeout_secs,
@@ -3495,6 +3568,35 @@ fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
             c.network.ws_stale_after_ms
         ));
     }
+    // TOML and environment overrides can contain NaN/infinity. Reject them
+    // before comparisons, which do not enforce bounds on NaN.
+    for (name, value) in [
+        ("max_position_fraction", c.risk.max_position_fraction),
+        ("max_position_quote", c.risk.max_position_quote),
+        ("daily_loss_limit_quote", c.risk.daily_loss_limit_quote),
+        ("default_stop_loss_pct", c.risk.default_stop_loss_pct),
+        ("default_take_profit_pct", c.risk.default_take_profit_pct),
+        ("min_sol_reserve", c.risk.min_sol_reserve),
+        ("min_creator_buy_sol", c.risk.min_creator_buy_sol),
+        (
+            "max_launch_market_cap_sol",
+            c.risk.max_launch_market_cap_sol,
+        ),
+        ("poly_min_liquidity_usd", c.risk.poly_min_liquidity_usd),
+        ("poly_min_edge", c.risk.poly_min_edge),
+        ("poly_price_floor", c.risk.poly_price_floor),
+        ("poly_price_ceiling", c.risk.poly_price_ceiling),
+    ] {
+        if !value.is_finite() {
+            return Err(BotError::config(format!("risk.{name} must be finite")));
+        }
+    }
+    if c.risk
+        .trailing_stop_pct
+        .is_some_and(|value| !value.is_finite())
+    {
+        return Err(BotError::config("risk.trailing_stop_pct must be finite"));
+    }
     if c.risk.max_position_fraction <= 0.0 || c.risk.max_position_fraction > 1.0 {
         return Err(BotError::config(
             "risk.max_position_fraction must be in (0, 1]",
@@ -3505,10 +3607,13 @@ fn validate(c: &Config, w: &mut Vec<String>) -> BotResult<()> {
             "risk.default_stop_loss_pct must be in [0, 1]",
         ));
     }
-    if c.sniper.slippage_pct < 0.0 || c.sniper.slippage_pct > 100.0 {
+    if !c.sniper.slippage_pct.is_finite()
+        || c.sniper.slippage_pct < 0.0
+        || c.sniper.slippage_pct > 100.0
+    {
         return Err(BotError::config("sniper.slippage_pct must be in [0, 100]"));
     }
-    if c.sniper.buy_sol <= 0.0 {
+    if !c.sniper.buy_sol.is_finite() || c.sniper.buy_sol <= 0.0 {
         return Err(BotError::config("sniper.buy_sol must be > 0"));
     }
     if c.risk.max_slippage_bps > 10_000 {
@@ -4783,5 +4888,290 @@ max_open_positions = 4
         assert_eq!(old.sniper.buy_sol, 0.02);
         assert_eq!(old.sniper.slippage_mode, "fixed");
         assert_eq!(old.risk.sniper_position_limit(), 4);
+    }
+
+    #[test]
+    fn non_finite_generic_risk_settings_are_rejected() {
+        // TOML explicitly supports nan/inf. Merely comparing numeric bounds
+        // does not reject NaN, because both comparisons evaluate to false.
+        for field in [
+            "max_position_fraction",
+            "max_position_quote",
+            "daily_loss_limit_quote",
+            "default_stop_loss_pct",
+            "default_take_profit_pct",
+            "min_sol_reserve",
+            "min_creator_buy_sol",
+            "max_launch_market_cap_sol",
+            "poly_min_liquidity_usd",
+            "poly_min_edge",
+            "poly_price_floor",
+            "poly_price_ceiling",
+        ] {
+            for value in ["nan", "inf", "-inf"] {
+                let c: Config = toml::from_str(&format!("[risk]\n{field} = {value}\n")).unwrap();
+                assert!(
+                    validate(&c, &mut Vec::new()).is_err(),
+                    "risk.{field}={value} was accepted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_finite_sniper_order_settings_are_rejected() {
+        for field in ["buy_sol", "slippage_pct"] {
+            for value in ["nan", "inf", "-inf"] {
+                let c: Config = toml::from_str(&format!("[sniper]\n{field} = {value}\n")).unwrap();
+                assert!(
+                    validate(&c, &mut Vec::new()).is_err(),
+                    "sniper.{field}={value} was accepted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_finite_optional_trailing_stop_is_rejected() {
+        for value in ["nan", "inf", "-inf"] {
+            let c: Config =
+                toml::from_str(&format!("[risk]\ntrailing_stop_pct = {value}\n")).unwrap();
+            assert!(
+                validate(&c, &mut Vec::new()).is_err(),
+                "trailing_stop_pct={value} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn finite_risk_settings_keep_their_existing_boundaries() {
+        let c: Config = toml::from_str("[risk]\nmax_position_fraction = 1.0\ndefault_stop_loss_pct = 0.0\ndaily_loss_limit_quote = 0.0\n").unwrap();
+        validate(&c, &mut Vec::new()).expect("finite boundary values remain supported");
+    }
+
+    #[test]
+    fn mask_handles_unicode_without_panicking_and_counts_characters() {
+        assert_eq!(mask(Some("কখগঘঙচছজঝ")), "কখগঘ…চছজঝ (9 chars)");
+        assert_eq!(mask(Some("ééééééééé")), "éééé…éééé (9 chars)");
+    }
+
+    #[test]
+    fn mask_does_not_expose_short_unicode_values() {
+        for value in ["ééééé", "🔑🔑🔑", "চাবি"] {
+            assert_eq!(mask(Some(value)), "****", "value must stay fully masked");
+        }
+    }
+
+    #[test]
+    fn remaining_non_finite_sniper_exit_settings_are_rejected() {
+        for field in ["take_profit_pct", "stop_loss_pct", "trailing_stop_pct"] {
+            for value in ["nan", "inf", "-inf"] {
+                let c: Config = toml::from_str(&format!("[sniper]\n{field} = {value}\n")).unwrap();
+                assert!(
+                    validate(&c, &mut Vec::new()).is_err(),
+                    "sniper.{field}={value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remaining_non_finite_advanced_exit_settings_are_rejected() {
+        for fragment in [
+            "[sniper.advanced_exit]\nladder = [{trigger_multiple = VALUE, sell_fraction = 0.5}]\n",
+            "[sniper.advanced_exit]\nladder = [{trigger_multiple = 2.0, sell_fraction = VALUE}]\n",
+            "[sniper.advanced_exit.break_even]\nactivation_multiple = VALUE\nbuffer = 0.02\n",
+            "[sniper.advanced_exit.break_even]\nactivation_multiple = 1.5\nbuffer = VALUE\n",
+        ] {
+            for value in ["nan", "inf", "-inf"] {
+                let c: Config = toml::from_str(&fragment.replace("VALUE", value)).unwrap();
+                assert!(
+                    validate(&c, &mut Vec::new()).is_err(),
+                    "{fragment} with {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remaining_non_finite_copy_slippage_is_rejected() {
+        for value in ["nan", "inf", "-inf"] {
+            let c: Config = toml::from_str(&format!("[copy]\nslippage_pct = {value}\n")).unwrap();
+            assert!(
+                validate(&c, &mut Vec::new()).is_err(),
+                "copy.slippage_pct={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn remaining_non_finite_copy_wallet_settings_are_rejected() {
+        for field in [
+            "fixed_sol",
+            "fraction_of_their_size",
+            "max_sol",
+            "min_sol",
+            "slippage_pct",
+        ] {
+            for value in ["nan", "inf", "-inf"] {
+                let c: Config = toml::from_str(&format!(
+                    "[[copy.wallets]]\naddress = \"whale\"\n{field} = {value}\n"
+                ))
+                .unwrap();
+                assert!(
+                    validate(&c, &mut Vec::new()).is_err(),
+                    "copy wallet {field}={value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remaining_non_finite_polymarket_copy_settings_are_rejected() {
+        for field in [
+            "copy_size_multiplier",
+            "copy_min_stake_usd",
+            "copy_max_stake_usd",
+            "copy_max_price",
+        ] {
+            for value in ["nan", "inf", "-inf"] {
+                let c: Config =
+                    toml::from_str(&format!("[polymarket]\n{field} = {value}\n")).unwrap();
+                assert!(
+                    validate(&c, &mut Vec::new()).is_err(),
+                    "polymarket.{field}={value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remaining_ha_validation_handles_large_heartbeat_without_overflow() {
+        let mut c = Config::default();
+        c.ha.heartbeat_secs = u64::MAX / 2 + 1;
+        let mut warnings = Vec::new();
+        validate(&c, &mut warnings)
+            .expect("the validator must match the saturating timeout getter");
+        assert_eq!(c.ha.heartbeat_timeout().as_secs(), u64::MAX);
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("heartbeat_timeout_secs")));
+    }
+
+    #[test]
+    fn remaining_env_connection_capacity_is_bounded_without_wrapping() {
+        const MARKER: &str = "CONFIG_AUDIT_CONNECTION_CHILD";
+        if let Ok(expected) = std::env::var(MARKER) {
+            let mut c = Config::default();
+            apply_env_overrides(&mut c, &mut Vec::new());
+            assert_eq!(c.database.max_connections, expected.parse::<u32>().unwrap());
+            return;
+        }
+        for (value, expected) in [
+            (0, 1),
+            (1, 1),
+            (u32::MAX as u64, u32::MAX),
+            (u32::MAX as u64 + 1, u32::MAX),
+            (u32::MAX as u64 + 2, u32::MAX),
+            (u64::MAX, u32::MAX),
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::remaining_env_connection_capacity_is_bounded_without_wrapping",
+                    "--test-threads=1",
+                ])
+                .env(MARKER, expected.to_string())
+                .env("DATABASE_MAX_CONNECTIONS", value.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "DATABASE_MAX_CONNECTIONS={value}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn remaining_env_booleans_reject_malformed_values_without_clearing_safety_flags() {
+        const MARKER: &str = "CONFIG_AUDIT_BOOLEAN_CHILD";
+        const KEY: &str = "CONFIG_AUDIT_BOOLEAN_VALUE";
+        if let Ok(expected) = std::env::var(MARKER) {
+            let mut warnings = Vec::new();
+            let parsed = env_bool(KEY, &mut warnings);
+            match expected.as_str() {
+                "true" => assert_eq!(parsed, Some(true)),
+                "false" => assert_eq!(parsed, Some(false)),
+                "invalid" => {
+                    assert_eq!(parsed, None);
+                    assert!(warnings.iter().any(|w| w.contains(KEY)));
+                    let mut c = Config::default();
+                    c.risk.kill_switch = true;
+                    c.sniper.strict_gates = true;
+                    c.recovery.block_modules_on_unresolved = true;
+                    apply_env_overrides(&mut c, &mut warnings);
+                    assert!(c.risk.kill_switch);
+                    assert!(c.sniper.strict_gates);
+                    assert!(c.recovery.block_modules_on_unresolved);
+                }
+                _ => panic!("unknown private subprocess expectation"),
+            }
+            return;
+        }
+        for (value, expected) in [
+            ("1", "true"),
+            ("TRUE", "true"),
+            ("yes", "true"),
+            ("On", "true"),
+            ("0", "false"),
+            ("FALSE", "false"),
+            ("no", "false"),
+            ("Off", "false"),
+            ("typo", "invalid"),
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "config::tests::remaining_env_booleans_reject_malformed_values_without_clearing_safety_flags", "--test-threads=1"])
+                .env(MARKER, expected).env(KEY, value)
+                .env("KILL_SWITCH", "typo").env("SNIPER_STRICT_GATES", "typo")
+                .env("RECOVERY_BLOCK_MODULES_ON_UNRESOLVED", "typo")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "boolean {value}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn remaining_finite_legacy_values_are_preserved() {
+        let c: Config = toml::from_str(
+            r#"
+[sniper]
+take_profit_pct = 2.0
+stop_loss_pct = 0.0
+trailing_stop_pct = 0.0
+[sniper.advanced_exit]
+ladder = [{ trigger_multiple = 3.0, sell_fraction = 0.5 }]
+break_even = { activation_multiple = 1.5, buffer = 0.02 }
+[copy]
+slippage_pct = 20.0
+[[copy.wallets]]
+address = "whale"
+fraction_of_their_size = 2.0
+fixed_sol = 0.01
+max_sol = 0.25
+min_sol = 0.0
+slippage_pct = 10.0
+[polymarket]
+copy_size_multiplier = 2.0
+copy_min_stake_usd = 0.0
+copy_max_stake_usd = 25.0
+copy_max_price = 0.95
+"#,
+        )
+        .unwrap();
+        validate(&c, &mut Vec::new()).expect("no new finite-value range policies");
     }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
 import { OrgLifecyclePanel } from "@/components/settings/OrgLifecyclePanel";
@@ -9,11 +9,11 @@ import { sessionStore } from "@/lib/auth";
 import { getCapabilities, type MembershipRole } from "@/lib/permissions";
 import { toDisplayError } from "@/lib/api";
 
-function currentRole(): MembershipRole {
+function currentRole(organizationId: string | null): MembershipRole {
   const state = sessionStore.getSnapshot();
-  const organization =
-    state.organizations.find((item) => item.organization_id === state.selectedOrganizationId) ??
-    state.organizations[0];
+  const organization = organizationId
+    ? state.organizations.find((item) => item.organization_id === organizationId)
+    : state.organizations.length === 1 ? state.organizations[0] : undefined;
   const role = organization?.role.toLowerCase() ?? "";
   if (role.includes("owner")) return "owner";
   if (role.includes("admin")) return "admin";
@@ -36,35 +36,60 @@ export default function OrganizationSettingsPage() {
   const [organizationId, setOrganizationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState(
+    () => sessionStore.getSnapshot().selectedOrganizationId,
+  );
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const requestVersion = useRef(0);
 
-  const canManage = getCapabilities({ role: currentRole() }).canManageTeam;
+  const canManage = getCapabilities({ role: currentRole(selectedOrganizationId) }).canManageTeam;
+
+  useEffect(() => sessionStore.subscribe(() => {
+    setSelectedOrganizationId(sessionStore.getSnapshot().selectedOrganizationId);
+    setSessionVersion((version) => version + 1);
+    setLifecycle(null);
+    setOrganizationId(null);
+    setOrganizationSlug("");
+    setLoading(true);
+  }), []);
 
   const load = useCallback(async () => {
+    const version = ++requestVersion.current;
     setLoading(true);
     setError(null);
+    setLifecycle(null);
+    setOrganizationId(null);
+    setOrganizationSlug("");
     try {
       const state = sessionStore.getSnapshot();
-      const organization =
-        state.organizations.find(
-          (o) => o.organization_id === state.selectedOrganizationId,
-        ) ?? state.organizations[0];
-      if (!organization) throw new Error("No organization selected");
-      setOrganizationId(organization.organization_id);
-      setOrganizationSlug(organization.slug);
+      const organization = selectedOrganizationId
+        ? state.organizations.find((item) => item.organization_id === selectedOrganizationId) ?? null
+        : state.organizations.length === 1 ? state.organizations[0] ?? null : null;
+      if (!organization) throw new Error("No selected organization is available");
       const reported = await orgLifecycleApi.get(organization.organization_id);
+      if (version !== requestVersion.current) return;
       // Only a body with a real state is lifecycle truth; anything else
       // renders the panel's not-reported state instead of "undefined".
+      setOrganizationId(organization.organization_id);
+      setOrganizationSlug(organization.slug);
       setLifecycle(reported && typeof reported.state === "string" ? reported : null);
     } catch (err: unknown) {
-      setError(toDisplayError(err));
+      if (version === requestVersion.current) setError(toDisplayError(err));
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
-  }, []);
+  }, [selectedOrganizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
-  }, [load]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [load, sessionVersion]);
 
   return (
     <AppShell title="Organization Settings">

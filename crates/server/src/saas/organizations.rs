@@ -174,6 +174,30 @@ async fn run_provisioning(
     let user_id = job
         .user_id
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "provisioning has no user").into_response())?;
+    // A resumable job is not proof that its organization belongs to this
+    // caller. Validate before ANY later step can attach an owner membership.
+    if let Some(org_id) = job.organization_id {
+        match state.saas.organization(org_id).await {
+            Ok(Some(org)) if org.created_by == Some(user_id) && org.slug == slug => {}
+            Ok(_) => {
+                job.record_failure("organization ownership mismatch", now);
+                let _ = state.saas.update_job(job).await;
+                return Err(
+                    (StatusCode::CONFLICT, "organization slug is unavailable").into_response()
+                );
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "resumed organization lookup failed");
+                job.record_failure("organization lookup unavailable", now);
+                let _ = state.saas.update_job(job).await;
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "organization lookup unavailable",
+                )
+                    .into_response());
+            }
+        }
+    }
     job.begin(now);
 
     while let ProvisioningAction::Execute(step) = plan_next(job) {
@@ -183,9 +207,16 @@ async fn run_provisioning(
                 job.complete_step(step, now);
             }
             ProvisioningStep::OrganizationCreated => {
-                // Idempotent: reuse the row if a previous attempt created it.
+                // Reuse only THIS creator's row. An unrelated user naming an
+                // existing slug must never gain an owner membership in that tenant.
                 let org = match state.saas.organization_by_slug(slug).await {
-                    Ok(Some(o)) => o,
+                    Ok(Some(o)) if o.created_by == Some(user_id) => o,
+                    Ok(Some(_)) => {
+                        job.record_failure("organization slug belongs to another creator", now);
+                        let _ = state.saas.update_job(job).await;
+                        return Err((StatusCode::CONFLICT, "organization slug is unavailable")
+                            .into_response());
+                    }
                     Ok(None) => {
                         let o = Organization::new(
                             OrganizationId::new(),

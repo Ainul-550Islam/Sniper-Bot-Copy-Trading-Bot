@@ -28,7 +28,7 @@ export function MemberManager({
   const [signerId, setSignerId] = useState("");
   const [weight, setWeight] = useState("1");
   const [error, setError] = useState<string | null>(null);
-  const [removeTarget, setRemoveTarget] = useState<WalletPoolMember | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<{ poolId: string; member: WalletPoolMember } | null>(null);
   const activeSigners = signers.filter((signer) => signer.status === "active");
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -124,7 +124,7 @@ export function MemberManager({
                     type="button"
                     className="link"
                     disabled={!canManage || busy}
-                    onClick={() => setRemoveTarget(member)}
+                    onClick={() => setRemoveTarget({ poolId: pool.id, member })}
                   >
                     Remove
                   </button>
@@ -135,11 +135,11 @@ export function MemberManager({
         </table>
       )}
 
-      {removeTarget && (
+      {removeTarget?.poolId === pool.id && (
         <div role="alertdialog" aria-label="Confirm wallet pool member removal" style={{ marginTop: "1rem", borderLeft: "4px solid var(--bad)", paddingLeft: "1rem" }}>
           <h3>Remove this pool member?</h3>
           <p className="muted">
-            {removeTarget.logical_identity} (<code>{removeTarget.public_address}</code>) will no
+            {removeTarget.member.logical_identity} (<code>{removeTarget.member.public_address}</code>) will no
             longer be selected from this pool for new orders.
           </p>
           <div className="row">
@@ -149,7 +149,7 @@ export function MemberManager({
               className="danger"
               disabled={busy}
               onClick={() => {
-                const target = removeTarget;
+                const target = removeTarget.member;
                 setRemoveTarget(null);
                 void onRemove(target);
               }}

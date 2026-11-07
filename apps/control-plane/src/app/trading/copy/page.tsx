@@ -6,11 +6,12 @@
  * Real-time leader tracking, swap decoding, mirror status, and risk gates.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import ModuleActionButton from "@/components/trading/ModuleActionButton";
 import SavedStrategiesPanel from "@/components/trading/SavedStrategiesPanel";
+import { sessionStore } from "@/lib/auth";
 import {
   classifyTradingError,
   customerTrading,
@@ -27,8 +28,23 @@ export default function CopyPage() {
   const [config, setConfig] = useState<CopyConfig | null>(null);
   const [leaders, setLeaders] = useState<TenantCopyLeader[]>([]);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setStatus(null);
+    setConfig(null);
+    setLeaders([]);
+    setState({ kind: "loading" });
+  }), []);
 
   const loadData = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    setStatus(null);
+    setConfig(null);
+    setLeaders([]);
     setState({ kind: "loading" });
     try {
       const [st, cfg, ldr] = await Promise.all([
@@ -36,6 +52,7 @@ export default function CopyPage() {
         customerTrading.copyConfig(),
         customerTrading.copyLeaders(),
       ]);
+      if (requestId !== requestVersion.current) return;
       setStatus(st);
       setConfig(cfg);
       setLeaders(ldr.items ?? []);
@@ -53,13 +70,25 @@ export default function CopyPage() {
         setState({ kind: "ready" });
       }
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) {
+        setStatus(null);
+        setConfig(null);
+        setLeaders([]);
+        setState(classifyTradingError(e));
+      }
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadData());
-  }, [loadData]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void loadData();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [loadData, sessionVersion]);
 
   return (
     <AppShell>

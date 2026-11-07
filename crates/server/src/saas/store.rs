@@ -225,31 +225,24 @@ impl SaasStore {
         Ok(inner.users.get(id).cloned())
     }
 
-    /// Persist a changed user.
-    pub async fn update_user(&self, user: &User) -> BotResult<()> {
-        let email = User::normalize_email(&user.email);
+    /// Persist only a profile display-name update, preserving the latest
+    /// password, status, email-verification and other identity fields.
+    pub async fn update_user(&self, user: &User) -> BotResult<User> {
         if let Some(repo) = &self.repo {
-            if !repo
-                .update(
-                    USER,
-                    &user.id.to_string(),
-                    None,
-                    Some(user.id),
-                    Some(&email),
-                    user,
-                )
-                .await?
-            {
-                return Err(BotError::NotFound(format!("user {}", user.id)));
-            }
-        } else if !self.inner.read().await.users.contains_key(&user.id) {
-            return Err(BotError::NotFound(format!("user {}", user.id)));
+            let current = repo
+                .update_user_display_name(user.id, &user.display_name, user.updated_at)
+                .await?;
+            let mut inner = self.inner.write().await;
+            inner.users.insert(current.id, current.clone());
+            return Ok(current);
         }
         let mut inner = self.inner.write().await;
-        inner.users_by_email.retain(|_, id| *id != user.id);
-        inner.users_by_email.insert(email, user.id);
-        inner.users.insert(user.id, user.clone());
-        Ok(())
+        let Some(current) = inner.users.get_mut(&user.id) else {
+            return Err(BotError::NotFound(format!("user {}", user.id)));
+        };
+        current.display_name = user.display_name.clone();
+        current.updated_at = user.updated_at;
+        Ok(current.clone())
     }
 
     /// Change a password and revoke all of that user's sessions atomically
@@ -258,38 +251,55 @@ impl SaasStore {
     pub async fn update_user_and_revoke_sessions(
         &self,
         user: &User,
+        expected_password_hash: &str,
+        display_name: Option<&str>,
         reason: &str,
         now: DateTime<Utc>,
-    ) -> BotResult<usize> {
-        let email = User::normalize_email(&user.email);
-        let revoked = if let Some(repo) = &self.repo {
-            repo.update_user_and_revoke_sessions(user, reason, now)
-                .await?
-        } else {
-            let mut inner = self.inner.write().await;
-            if !inner.users.contains_key(&user.id) {
-                return Err(BotError::NotFound(format!("user {}", user.id)));
+    ) -> BotResult<Option<(User, usize)>> {
+        if let Some(repo) = &self.repo {
+            let result = repo
+                .update_user_and_revoke_sessions(
+                    user,
+                    expected_password_hash,
+                    display_name,
+                    reason,
+                    now,
+                )
+                .await?;
+            if let Some((current, _)) = &result {
+                self.inner
+                    .write()
+                    .await
+                    .users
+                    .insert(current.id, current.clone());
             }
-            let mut revoked = 0usize;
-            for session in inner
-                .sessions
-                .values_mut()
-                .filter(|session| session.user_id == user.id)
-            {
-                if session.revoke(reason, now) {
-                    revoked += 1;
-                }
-            }
-            inner.users_by_email.retain(|_, id| *id != user.id);
-            inner.users_by_email.insert(email.clone(), user.id);
-            inner.users.insert(user.id, user.clone());
-            return Ok(revoked);
-        };
+            return Ok(result);
+        }
+
         let mut inner = self.inner.write().await;
-        inner.users_by_email.retain(|_, id| *id != user.id);
-        inner.users_by_email.insert(email, user.id);
-        inner.users.insert(user.id, user.clone());
-        Ok(revoked)
+        let Some(current) = inner.users.get_mut(&user.id) else {
+            return Err(BotError::NotFound(format!("user {}", user.id)));
+        };
+        if current.password_hash != expected_password_hash || !current.can_authenticate() {
+            return Ok(None);
+        }
+        current.password_hash = user.password_hash.clone();
+        if let Some(display_name) = display_name {
+            current.display_name = display_name.to_string();
+        }
+        current.updated_at = now;
+        let current = current.clone();
+        let mut revoked = 0usize;
+        for session in inner
+            .sessions
+            .values_mut()
+            .filter(|session| session.user_id == user.id)
+        {
+            if session.revoke(reason, now) {
+                revoked += 1;
+            }
+        }
+        Ok(Some((current, revoked)))
     }
 
     // ----------------------------------------------------- organizations --
@@ -500,6 +510,55 @@ impl SaasStore {
 
     // ---------------------------------------------------------- sessions --
 
+    /// Revalidate the password and persist an authenticated session and
+    /// `last_login_at` atomically. PostgreSQL serializes this with password
+    /// reset/change on the canonical user row; the in-memory adapter holds
+    /// the same write lock for the whole state transition.
+    pub async fn create_authenticated_session(
+        &self,
+        expected_password_hash: &str,
+        session: &SessionRecord,
+        now: DateTime<Utc>,
+    ) -> BotResult<Option<User>> {
+        if let Some(repo) = &self.repo {
+            let Some(user) = repo
+                .create_authenticated_session(expected_password_hash, session, now)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let mut inner = self.inner.write().await;
+            inner.users_by_email.insert(user.email.clone(), user.id);
+            inner.users.insert(user.id, user.clone());
+            inner
+                .sessions_by_hash
+                .insert(session.token_hash.clone(), session.id);
+            inner.sessions.insert(session.id, session.clone());
+            return Ok(Some(user));
+        }
+
+        let mut inner = self.inner.write().await;
+        if inner.sessions.contains_key(&session.id)
+            || inner.sessions_by_hash.contains_key(&session.token_hash)
+        {
+            return Err(BotError::invalid("that session already exists"));
+        }
+        let Some(user) = inner.users.get_mut(&session.user_id) else {
+            return Ok(None);
+        };
+        if user.password_hash != expected_password_hash || !user.can_authenticate() {
+            return Ok(None);
+        }
+        user.last_login_at = Some(now);
+        user.updated_at = now;
+        let user = user.clone();
+        inner
+            .sessions_by_hash
+            .insert(session.token_hash.clone(), session.id);
+        inner.sessions.insert(session.id, session.clone());
+        Ok(Some(user))
+    }
+
     /// Persist a new session.
     pub async fn create_session(&self, s: &SessionRecord) -> BotResult<()> {
         if let Some(repo) = &self.repo {
@@ -546,25 +605,117 @@ impl SaasStore {
         Ok(inner.sessions.get(id).cloned())
     }
 
-    /// Persist a changed session.
-    pub async fn update_session(&self, s: &SessionRecord) -> BotResult<()> {
+    /// Record a session use without replacing its authorization state. Returns
+    /// false when the session was concurrently revoked, expired, or mismatched.
+    pub async fn touch_session_last_seen(
+        &self,
+        session_id: SessionId,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> BotResult<bool> {
         if let Some(repo) = &self.repo {
             if !repo
-                .update(
-                    SESSION,
-                    &s.id.to_string(),
-                    s.organization_id,
-                    Some(s.user_id),
-                    Some(&s.token_hash),
-                    s,
+                .touch_session_last_seen(&session_id.to_string(), token_hash, now)
+                .await?
+            {
+                return Ok(false);
+            }
+            let mut inner = self.inner.write().await;
+            if let Some(session) = inner.sessions.get_mut(&session_id) {
+                if session.token_hash == token_hash {
+                    session.last_seen_at = session.last_seen_at.max(now);
+                }
+            }
+            return Ok(true);
+        }
+
+        let mut inner = self.inner.write().await;
+        let Some(session) = inner.sessions.get_mut(&session_id) else {
+            return Ok(false);
+        };
+        if session.token_hash != token_hash || !session.is_usable(now) {
+            return Ok(false);
+        }
+        session.last_seen_at = session.last_seen_at.max(now);
+        Ok(true)
+    }
+
+    /// Update only MFA proof/promotion fields on a live session.
+    pub async fn set_session_mfa_state(
+        &self,
+        session_id: SessionId,
+        token_hash: &str,
+        policy_updated_at: Option<DateTime<Utc>>,
+        enrollment_only: bool,
+        now: DateTime<Utc>,
+    ) -> BotResult<bool> {
+        if let Some(repo) = &self.repo {
+            if !repo
+                .set_session_mfa_state(
+                    &session_id.to_string(),
+                    token_hash,
+                    policy_updated_at,
+                    enrollment_only,
+                    now,
                 )
                 .await?
             {
-                return Err(BotError::NotFound(format!("session {}", s.id)));
+                return Ok(false);
             }
+            let mut inner = self.inner.write().await;
+            if let Some(session) = inner.sessions.get_mut(&session_id) {
+                if session.token_hash == token_hash {
+                    session.mfa_policy_updated_at = policy_updated_at;
+                    session.mfa_enrollment_only = enrollment_only;
+                }
+            }
+            return Ok(true);
         }
-        self.inner.write().await.sessions.insert(s.id, s.clone());
-        Ok(())
+
+        let mut inner = self.inner.write().await;
+        let Some(session) = inner.sessions.get_mut(&session_id) else {
+            return Ok(false);
+        };
+        if session.token_hash != token_hash || !session.is_usable(now) {
+            return Ok(false);
+        }
+        session.mfa_policy_updated_at = policy_updated_at;
+        session.mfa_enrollment_only = enrollment_only;
+        Ok(true)
+    }
+
+    /// Revoke a session without writing back a stale full-record snapshot.
+    pub async fn revoke_session(
+        &self,
+        session_id: SessionId,
+        token_hash: &str,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> BotResult<bool> {
+        if let Some(repo) = &self.repo {
+            if !repo
+                .revoke_session(&session_id.to_string(), token_hash, reason, now)
+                .await?
+            {
+                return Ok(false);
+            }
+            let mut inner = self.inner.write().await;
+            if let Some(session) = inner.sessions.get_mut(&session_id) {
+                if session.token_hash == token_hash {
+                    session.revoke(reason, now);
+                }
+            }
+            return Ok(true);
+        }
+
+        let mut inner = self.inner.write().await;
+        let Some(session) = inner.sessions.get_mut(&session_id) else {
+            return Ok(false);
+        };
+        if session.token_hash != token_hash {
+            return Ok(false);
+        }
+        Ok(session.revoke(reason, now))
     }
 
     /// Every session of one user, newest first (the "active devices" list
@@ -596,11 +747,13 @@ impl SaasStore {
         reason: &str,
         now: DateTime<Utc>,
     ) -> BotResult<usize> {
-        let mut sessions = self.sessions_of_user(user_id).await?;
+        let sessions = self.sessions_of_user(user_id).await?;
         let mut n = 0;
-        for session in &mut sessions {
-            if session.revoke(reason, now) {
-                self.update_session(session).await?;
+        for session in sessions {
+            if self
+                .revoke_session(session.id, &session.token_hash, reason, now)
+                .await?
+            {
                 n += 1;
             }
         }
@@ -670,37 +823,76 @@ impl SaasStore {
         Ok(v)
     }
 
-    /// Persist a changed key (revocation, last-used).
-    pub async fn update_api_key(&self, key: &SaasApiKey) -> BotResult<()> {
+    /// Revoke an API key once, preserving concurrent last-use telemetry and
+    /// the first reason. Returns false for a missing, mismatched, or already
+    /// revoked key.
+    pub async fn revoke_api_key(
+        &self,
+        key_id: uuid::Uuid,
+        secret_hash: &str,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> BotResult<bool> {
         if let Some(repo) = &self.repo {
             if !repo
-                .update(
-                    API_KEY,
-                    &key.id.to_string(),
-                    Some(key.organization_id),
-                    key.created_by,
-                    Some(&key.secret_hash),
-                    key,
-                )
+                .revoke_api_key(&key_id.to_string(), secret_hash, reason, now)
                 .await?
             {
-                return Err(BotError::NotFound(format!("api key {}", key.key_prefix)));
+                return Ok(false);
             }
-        } else if !self
-            .inner
-            .read()
-            .await
-            .api_keys
-            .contains_key(&key.secret_hash)
-        {
-            return Err(BotError::NotFound(format!("api key {}", key.key_prefix)));
+            let mut inner = self.inner.write().await;
+            if let Some(key) = inner.api_keys.get_mut(secret_hash) {
+                if key.id == key_id {
+                    key.revoke(reason, now);
+                }
+            }
+            return Ok(true);
         }
-        self.inner
-            .write()
-            .await
-            .api_keys
-            .insert(key.secret_hash.clone(), key.clone());
-        Ok(())
+
+        let mut inner = self.inner.write().await;
+        let Some(key) = inner.api_keys.get_mut(secret_hash) else {
+            return Ok(false);
+        };
+        if key.id != key_id {
+            return Ok(false);
+        }
+        Ok(key.revoke(reason, now))
+    }
+
+    /// Record successful authentication without replacing any authorization
+    /// fields from the snapshot used to authenticate. Returns false if the key
+    /// was revoked, expired, or no longer matches the resolved identity.
+    pub async fn touch_api_key_last_used(
+        &self,
+        key_id: uuid::Uuid,
+        secret_hash: &str,
+        now: DateTime<Utc>,
+    ) -> BotResult<bool> {
+        if let Some(repo) = &self.repo {
+            if !repo
+                .touch_api_key_last_used(&key_id.to_string(), secret_hash, now)
+                .await?
+            {
+                return Ok(false);
+            }
+            let mut inner = self.inner.write().await;
+            if let Some(key) = inner.api_keys.get_mut(secret_hash) {
+                if key.id == key_id {
+                    key.last_used_at = Some(key.last_used_at.map_or(now, |old| old.max(now)));
+                }
+            }
+            return Ok(true);
+        }
+
+        let mut inner = self.inner.write().await;
+        let Some(key) = inner.api_keys.get_mut(secret_hash) else {
+            return Ok(false);
+        };
+        if key.id != key_id || !key.is_usable(now) {
+            return Ok(false);
+        }
+        key.last_used_at = Some(key.last_used_at.map_or(now, |old| old.max(now)));
+        Ok(true)
     }
 
     /// Reload API keys from durable records at startup.
@@ -1234,7 +1426,10 @@ mod postgres_tests {
             .await
             .expect("business plan lookup")
             .expect("business plan");
-        let now = Utc::now();
+        // PostgreSQL timestamptz stores microseconds, so normalize the
+        // fixture clock before asserting exact round-trips from the DB.
+        let now = DateTime::<Utc>::from_timestamp_micros(Utc::now().timestamp_micros())
+            .expect("current time is representable");
         let subscription = first
             .assign_plan(organization_id, PlanCode::Business, now)
             .await
@@ -1284,13 +1479,16 @@ mod postgres_tests {
         assert_eq!(key.organization_id, organization_id);
         assert!(key.is_usable(now), "valid key is usable after restart");
         assert_eq!(key.rejection(now), None);
-
-        let mut revoked = key.clone();
-        assert!(revoked.revoke("operator request", now));
-        first
-            .update_api_key(&revoked)
+        let used_at = now + chrono::Duration::seconds(1);
+        assert!(second
+            .touch_api_key_last_used(key.id, &key.secret_hash, used_at)
             .await
-            .expect("persist revoke");
+            .expect("record successful use on second replica"));
+        let revoked_at = now + chrono::Duration::seconds(2);
+        assert!(first
+            .revoke_api_key(key.id, &key.secret_hash, "operator request", revoked_at,)
+            .await
+            .expect("persist revoke"));
         let seen_by_second = second
             .api_key_by_hash(&created.key.secret_hash)
             .await
@@ -1298,6 +1496,24 @@ mod postgres_tests {
             .expect("revoked record is still there");
         assert!(!seen_by_second.is_usable(now), "revoked key stops working");
         assert_eq!(seen_by_second.rejection(now), Some("api_key_revoked"));
+        assert!(
+            !second
+                .touch_api_key_last_used(
+                    key.id,
+                    &key.secret_hash,
+                    now + chrono::Duration::seconds(3)
+                )
+                .await
+                .expect("stale authentication touch is a no-op"),
+            "a replica's last-used write cannot restore a revoked key"
+        );
+        let after_stale_touch = second
+            .api_key_by_hash(&created.key.secret_hash)
+            .await
+            .expect("reload after stale touch")
+            .expect("revoked record remains stored");
+        assert_eq!(after_stale_touch.revoked_at, Some(revoked_at));
+        assert_eq!(after_stale_touch.last_used_at, Some(used_at));
 
         let expired = super::super::api_keys::build_api_key(
             organization_id,
@@ -1322,6 +1538,198 @@ mod postgres_tests {
         assert!(!seen_expired.is_usable(now), "expired key stops working");
         assert_eq!(seen_expired.rejection(now), Some("api_key_expired"));
 
+        // Session field updates use the same durable replica guarantee: a
+        // last-seen/MFA update cannot overwrite a revoke committed elsewhere.
+        let user_id = UserId::new();
+        let user = User {
+            id: user_id,
+            email: format!("session-race-{user_id}@example.invalid"),
+            email_verified: true,
+            display_name: "Session race test".to_string(),
+            password_hash: "test-only-hash".to_string(),
+            status: bot_core::tenant::UserStatus::Active,
+            platform_admin: false,
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+        };
+        first
+            .create_user(&user)
+            .await
+            .expect("insert session owner");
+        let token_hash = format!("session-token-hash-{user_id}");
+        let session = SessionRecord::new(
+            user_id,
+            None,
+            token_hash,
+            "ss_race",
+            chrono::Duration::hours(1),
+            now,
+        );
+        first
+            .create_session(&session)
+            .await
+            .expect("insert durable session");
+        let touched_at = now + chrono::Duration::seconds(2);
+        assert!(second
+            .touch_session_last_seen(session.id, &session.token_hash, touched_at)
+            .await
+            .expect("touch from second replica"));
+        assert!(second
+            .set_session_mfa_state(
+                session.id,
+                &session.token_hash,
+                Some(touched_at),
+                false,
+                touched_at,
+            )
+            .await
+            .expect("set MFA state from second replica"));
+        let revoked_at = now + chrono::Duration::seconds(3);
+        assert!(first
+            .revoke_session(
+                session.id,
+                &session.token_hash,
+                "durable race test",
+                revoked_at,
+            )
+            .await
+            .expect("revoke from first replica"));
+        assert!(!second
+            .touch_session_last_seen(
+                session.id,
+                &session.token_hash,
+                now + chrono::Duration::seconds(4),
+            )
+            .await
+            .expect("stale last-seen touch is a no-op"));
+        assert!(!second
+            .set_session_mfa_state(
+                session.id,
+                &session.token_hash,
+                None,
+                true,
+                now + chrono::Duration::seconds(4),
+            )
+            .await
+            .expect("stale MFA update is a no-op"));
+        let after_session_race = second
+            .session(session.id)
+            .await
+            .expect("reload session after race")
+            .expect("revoked session remains stored");
+        assert_eq!(after_session_race.revoked_at, Some(revoked_at));
+        assert_eq!(after_session_race.revoke_reason, "durable race test");
+        assert_eq!(after_session_race.last_seen_at, touched_at);
+        assert_eq!(after_session_race.mfa_policy_updated_at, Some(touched_at));
+        assert!(!after_session_race.mfa_enrollment_only);
+
         db.close().await;
+    }
+}
+
+#[cfg(test)]
+mod session_touch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_touch_is_monotonic_and_cannot_restore_revocation() {
+        let store = SaasStore::new_in_memory_identity();
+        let now = Utc::now();
+        let live = SessionRecord::new(
+            UserId::new(),
+            None,
+            "live-session-hash",
+            "ss_live",
+            chrono::Duration::hours(1),
+            now,
+        );
+        store
+            .create_session(&live)
+            .await
+            .expect("create live session");
+        assert!(store
+            .touch_session_last_seen(
+                live.id,
+                &live.token_hash,
+                now + chrono::Duration::seconds(3)
+            )
+            .await
+            .expect("touch live session"));
+        assert!(store
+            .touch_session_last_seen(
+                live.id,
+                &live.token_hash,
+                now + chrono::Duration::seconds(2)
+            )
+            .await
+            .expect("older timestamp is an idempotent touch"));
+        assert!(store
+            .set_session_mfa_state(
+                live.id,
+                &live.token_hash,
+                Some(now + chrono::Duration::seconds(3)),
+                false,
+                now + chrono::Duration::seconds(3),
+            )
+            .await
+            .expect("update active session MFA state"));
+        let live_after_updates = store.session(live.id).await.unwrap().unwrap();
+        assert_eq!(
+            live_after_updates.last_seen_at,
+            now + chrono::Duration::seconds(3)
+        );
+        assert_eq!(
+            live_after_updates.mfa_policy_updated_at,
+            Some(now + chrono::Duration::seconds(3))
+        );
+
+        let candidate = SessionRecord::new(
+            UserId::new(),
+            None,
+            "revoked-session-hash",
+            "ss_revoked",
+            chrono::Duration::hours(1),
+            now,
+        );
+        store
+            .create_session(&candidate)
+            .await
+            .expect("create revocable session");
+        assert!(store
+            .revoke_session(candidate.id, &candidate.token_hash, "operator revoke", now,)
+            .await
+            .expect("persist revocation"));
+        assert!(!store
+            .revoke_session(
+                candidate.id,
+                &candidate.token_hash,
+                "later reason must not replace the first",
+                now + chrono::Duration::seconds(1),
+            )
+            .await
+            .expect("duplicate revocation is a no-op"));
+        assert!(!store
+            .set_session_mfa_state(
+                candidate.id,
+                &candidate.token_hash,
+                Some(now),
+                false,
+                now + chrono::Duration::seconds(1),
+            )
+            .await
+            .expect("revoked session MFA update is a no-op"));
+        assert!(!store
+            .touch_session_last_seen(
+                candidate.id,
+                &candidate.token_hash,
+                now + chrono::Duration::seconds(1)
+            )
+            .await
+            .expect("revoked session touch is a no-op"));
+        let after = store.session(candidate.id).await.unwrap().unwrap();
+        assert_eq!(after.revoked_at, Some(now));
+        assert_eq!(after.revoke_reason, "operator revoke");
+        assert_eq!(after.last_seen_at, now);
     }
 }

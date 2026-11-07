@@ -51,7 +51,9 @@ test("customer trading client is tenant-only and fail-closed", () => {
   const client = read("apps/control-plane/src/lib/customer-trading-api.ts");
 
   assert.match(client, /const TENANT_PREFIX = "\/api\/tenant\/"/);
-  assert.match(client, /if \(!path\.startsWith\(TENANT_PREFIX\)\)/);
+  assert.match(client, /path\.startsWith\(TENANT_PREFIX\)/);
+  assert.match(client, /new URL\(path, "https:\/\/tenant-request\.invalid"\)\.pathname/);
+  assert.match(client, /normalizedPath\?\.startsWith\(TENANT_PREFIX\)/);
   assert.match(client, /throw new Error\(/);
 
   const endpointLines = client

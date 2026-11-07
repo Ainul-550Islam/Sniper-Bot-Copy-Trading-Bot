@@ -65,7 +65,11 @@ export interface MarketsResponse {
  * refusal, never a fabricated list.
  */
 export async function listMarkets(): Promise<MarketsResponse> {
-  return tenantRequest<MarketsResponse>("/api/tenant/markets");
+  const response = await tenantRequest<MarketsResponse>("/api/tenant/markets");
+  if (!response || !Array.isArray(response.items) || !Array.isArray(response.feeds)) {
+    throw new Error("Invalid markets response");
+  }
+  return response;
 }
 
 /** Fetch a single market by id; unknown ids are a 404 `market_not_found`. */

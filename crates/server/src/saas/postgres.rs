@@ -222,6 +222,59 @@ impl PostgresSaasRepo {
         Ok(())
     }
 
+    /// Revalidate the password and create the session plus `last_login_at`
+    /// under one canonical-user row lock and one database transaction. This
+    /// serializes login against password reset/change: either login commits
+    /// first and the password mutation revokes its session, or the mutation
+    /// commits first and the stale login is rejected.
+    pub async fn create_authenticated_session(
+        &self,
+        expected_password_hash: &str,
+        session: &SessionRecord,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BotResult<Option<User>> {
+        let mut transaction = self
+            .control_plane_pool()
+            .begin()
+            .await
+            .map_err(|error| BotError::db(format!("begin authenticated session: {error}")))?;
+        let Some(mut user) = Self::user_for_update(&mut transaction, session.user_id).await? else {
+            return Ok(None);
+        };
+        if user.password_hash != expected_password_hash || !user.can_authenticate() {
+            return Ok(None);
+        }
+        user.last_login_at = Some(now);
+        user.updated_at = now;
+        Self::update_user_in_transaction(&mut transaction, &user, now).await?;
+
+        let document = Self::encode(session)?;
+        let inserted = sqlx::query(
+            r#"INSERT INTO saas_runtime_records
+                 (kind,id,organization_id,user_id,lookup_key,record)
+               VALUES ($1,$2,$3,$4,$5,$6)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(SESSION)
+        .bind(session.id.to_string())
+        .bind(session.organization_id.map(|id| id.as_uuid()))
+        .bind(session.user_id.as_uuid())
+        .bind(&session.token_hash)
+        .bind(&document)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("insert authenticated session: {error}")))?;
+        if inserted.rows_affected() != 1 {
+            return Err(BotError::invalid("that session already exists"));
+        }
+        Self::sync_identity_projection(&mut transaction, SESSION, &document).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| BotError::db(format!("commit authenticated session: {error}")))?;
+        Ok(Some(user))
+    }
+
     /// Insert once. `false` means the id or unique lookup key already exists.
     pub async fn insert<T: Serialize>(
         &self,
@@ -303,6 +356,218 @@ impl PostgresSaasRepo {
             .await
             .map_err(|error| BotError::db(format!("commit SaaS {kind} update: {error}")))?;
         Ok(updated)
+    }
+
+    /// Atomically update only the last-use timestamp for a still-usable API
+    /// key. A concurrent revocation or scope change in the JSON record is
+    /// preserved; authentication telemetry must never replace the credential.
+    pub async fn touch_api_key_last_used(
+        &self,
+        id: &str,
+        secret_hash: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BotResult<bool> {
+        let result = sqlx::query(
+            r#"UPDATE saas_runtime_records
+               SET record = jsonb_set(
+                       record,
+                       '{last_used_at}',
+                       to_jsonb(GREATEST(COALESCE((record->>'last_used_at')::timestamptz, $3), $3)),
+                       true
+                   ),
+                   updated_at = GREATEST(updated_at, $3)
+             WHERE kind = $1 AND id = $2 AND record->>'secret_hash' = $4
+               AND record->>'revoked_at' IS NULL
+               AND (record->>'expires_at' IS NULL
+                    OR (record->>'expires_at')::timestamptz > $3)"#,
+        )
+        .bind(API_KEY)
+        .bind(id)
+        .bind(now)
+        .bind(secret_hash)
+        .execute(self.control_plane_pool())
+        .await
+        .map_err(|error| BotError::db(format!("touch SaaS API key last-used time: {error}")))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Revoke an API key once without replacing its current usage timestamp
+    /// or other credential metadata.
+    pub async fn revoke_api_key(
+        &self,
+        id: &str,
+        secret_hash: &str,
+        reason: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BotResult<bool> {
+        let result = sqlx::query(
+            r#"UPDATE saas_runtime_records
+               SET record = record || jsonb_build_object(
+                       'revoked_at', $3::timestamptz,
+                       'revoke_reason', $4::text
+                   ),
+                   updated_at = GREATEST(updated_at, $3)
+             WHERE kind = $1 AND id = $2 AND record->>'secret_hash' = $5
+               AND record->>'revoked_at' IS NULL"#,
+        )
+        .bind(API_KEY)
+        .bind(id)
+        .bind(now)
+        .bind(reason)
+        .bind(secret_hash)
+        .execute(self.control_plane_pool())
+        .await
+        .map_err(|error| BotError::db(format!("revoke SaaS API key: {error}")))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Update only a live session's last-seen timestamp, preserving any
+    /// concurrent revocation and other session security fields.
+    pub async fn touch_session_last_seen(
+        &self,
+        id: &str,
+        token_hash: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BotResult<bool> {
+        let mut transaction = self
+            .control_plane_pool()
+            .begin()
+            .await
+            .map_err(|error| BotError::db(format!("begin SaaS session touch: {error}")))?;
+        let row = sqlx::query(
+            r#"UPDATE saas_runtime_records
+               SET record = jsonb_set(
+                       record,
+                       '{last_seen_at}',
+                       to_jsonb(GREATEST(COALESCE((record->>'last_seen_at')::timestamptz, $3), $3)),
+                       true
+                   ),
+                   updated_at = GREATEST(updated_at, $3)
+             WHERE kind = $1 AND id = $2 AND record->>'token_hash' = $4
+               AND record->>'revoked_at' IS NULL
+               AND (record->>'expires_at')::timestamptz > $3
+             RETURNING record"#,
+        )
+        .bind(SESSION)
+        .bind(id)
+        .bind(now)
+        .bind(token_hash)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("touch SaaS session last-seen time: {error}")))?;
+        let Some(row) = row else {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| BotError::db(format!("commit SaaS session touch: {error}")))?;
+            return Ok(false);
+        };
+        let document: serde_json::Value = row.get("record");
+        Self::sync_identity_projection(&mut transaction, SESSION, &document).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| BotError::db(format!("commit SaaS session touch: {error}")))?;
+        Ok(true)
+    }
+
+    /// Atomically promote an active session's MFA state without replacing
+    /// unrelated fields from a potentially stale session snapshot.
+    pub async fn set_session_mfa_state(
+        &self,
+        id: &str,
+        token_hash: &str,
+        policy_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+        enrollment_only: bool,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BotResult<bool> {
+        let mut transaction = self
+            .control_plane_pool()
+            .begin()
+            .await
+            .map_err(|error| BotError::db(format!("begin SaaS session MFA update: {error}")))?;
+        let row = sqlx::query(
+            r#"UPDATE saas_runtime_records
+               SET record = record || jsonb_build_object(
+                       'mfa_policy_updated_at', $3::timestamptz,
+                       'mfa_enrollment_only', $4::boolean
+                   ),
+                   updated_at = GREATEST(updated_at, $5)
+             WHERE kind = $1 AND id = $2 AND record->>'token_hash' = $6
+               AND record->>'revoked_at' IS NULL
+               AND (record->>'expires_at')::timestamptz > $5
+             RETURNING record"#,
+        )
+        .bind(SESSION)
+        .bind(id)
+        .bind(policy_updated_at)
+        .bind(enrollment_only)
+        .bind(now)
+        .bind(token_hash)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("update SaaS session MFA state: {error}")))?;
+        let Some(row) = row else {
+            transaction.commit().await.map_err(|error| {
+                BotError::db(format!("commit SaaS session MFA update: {error}"))
+            })?;
+            return Ok(false);
+        };
+        let document: serde_json::Value = row.get("record");
+        Self::sync_identity_projection(&mut transaction, SESSION, &document).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| BotError::db(format!("commit SaaS session MFA update: {error}")))?;
+        Ok(true)
+    }
+
+    /// Revoke the identified session once, preserving all other fields and
+    /// the first revocation reason.
+    pub async fn revoke_session(
+        &self,
+        id: &str,
+        token_hash: &str,
+        reason: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BotResult<bool> {
+        let mut transaction = self
+            .control_plane_pool()
+            .begin()
+            .await
+            .map_err(|error| BotError::db(format!("begin SaaS session revocation: {error}")))?;
+        let row = sqlx::query(
+            r#"UPDATE saas_runtime_records
+               SET record = record || jsonb_build_object(
+                       'revoked_at', $3::timestamptz,
+                       'revoke_reason', $4::text
+                   ),
+                   updated_at = GREATEST(updated_at, $3)
+             WHERE kind = $1 AND id = $2 AND record->>'token_hash' = $5
+               AND record->>'revoked_at' IS NULL
+             RETURNING record"#,
+        )
+        .bind(SESSION)
+        .bind(id)
+        .bind(now)
+        .bind(reason)
+        .bind(token_hash)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| BotError::db(format!("revoke SaaS session: {error}")))?;
+        let Some(row) = row else {
+            transaction.commit().await.map_err(|error| {
+                BotError::db(format!("commit SaaS session revocation: {error}"))
+            })?;
+            return Ok(false);
+        };
+        let document: serde_json::Value = row.get("record");
+        Self::sync_identity_projection(&mut transaction, SESSION, &document).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| BotError::db(format!("commit SaaS session revocation: {error}")))?;
+        Ok(true)
     }
 
     pub(super) async fn revoke_user_sessions_in_transaction(
@@ -445,28 +710,69 @@ impl PostgresSaasRepo {
         Ok(())
     }
 
-    /// Atomically change a user's password and revoke every existing session.
+    /// Atomically apply only the requested profile fields and password change
+    /// after revalidating the caller's current hash, then revoke every session.
+    /// A stale authenticated snapshot cannot overwrite a newer reset/change.
     pub async fn update_user_and_revoke_sessions(
         &self,
         user: &User,
+        expected_password_hash: &str,
+        display_name: Option<&str>,
         reason: &str,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> BotResult<usize> {
+    ) -> BotResult<Option<(User, usize)>> {
         let mut transaction = self
             .control_plane_pool()
             .begin()
             .await
             .map_err(|error| BotError::db(format!("begin password change: {error}")))?;
-        Self::update_user_in_transaction(&mut transaction, user, now).await?;
+        let Some(mut current) = Self::user_for_update(&mut transaction, user.id).await? else {
+            return Err(BotError::NotFound(format!("user {}", user.id)));
+        };
+        if current.password_hash != expected_password_hash || !current.can_authenticate() {
+            return Ok(None);
+        }
+        current.password_hash = user.password_hash.clone();
+        if let Some(display_name) = display_name {
+            current.display_name = display_name.to_string();
+        }
+        current.updated_at = now;
+        Self::update_user_in_transaction(&mut transaction, &current, now).await?;
         let count =
-            Self::revoke_user_sessions_in_transaction(&mut transaction, user.id, reason, now)
+            Self::revoke_user_sessions_in_transaction(&mut transaction, current.id, reason, now)
                 .await?;
         transaction.commit().await.map_err(|error| {
             BotError::db(format!(
                 "commit password change and session revocation: {error}"
             ))
         })?;
-        Ok(count)
+        Ok(Some((current, count)))
+    }
+
+    /// Atomically update only the display name and timestamp, preserving all
+    /// current security-sensitive fields from the locked canonical record.
+    pub async fn update_user_display_name(
+        &self,
+        user_id: UserId,
+        display_name: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BotResult<User> {
+        let mut transaction = self
+            .control_plane_pool()
+            .begin()
+            .await
+            .map_err(|error| BotError::db(format!("begin display-name update: {error}")))?;
+        let Some(mut user) = Self::user_for_update(&mut transaction, user_id).await? else {
+            return Err(BotError::NotFound(format!("user {user_id}")));
+        };
+        user.display_name = display_name.to_string();
+        user.updated_at = now;
+        Self::update_user_in_transaction(&mut transaction, &user, now).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| BotError::db(format!("commit display-name update: {error}")))?;
+        Ok(user)
     }
 
     /// Insert or replace by `(kind,id)`. Unique lookup-key conflicts with a

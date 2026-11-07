@@ -42,6 +42,9 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 import BillingPage from "../app/billing/page";
+import { BillingStatusPanel } from "../components/billing/BillingStatusPanel";
+import { UsageLimitsPanel } from "../components/billing/UsageLimitsPanel";
+import { ReconcilePanel } from "../components/billing/ReconcilePanel";
 
 const billingStatus = {
   organization_id: "org-1",
@@ -71,6 +74,57 @@ describe("billing status", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("clears and ignores stale billing status when the organization changes", async () => {
+    let resolveOld!: (value: typeof billingStatus) => void;
+    status
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({ ...billingStatus, organization_id: "org-2", plan_code: "enterprise" });
+    const view = render(<BillingStatusPanel organizationId="org-1" />);
+    await waitFor(() => expect(status).toHaveBeenCalledWith("org-1"));
+    view.rerender(<BillingStatusPanel organizationId="org-2" />);
+    expect(await screen.findByText("ENTERPRISE")).toBeTruthy();
+    resolveOld(billingStatus);
+    await waitFor(() => expect(screen.getByText("ENTERPRISE")).toBeTruthy());
+    expect(screen.queryByText("PRO")).toBeNull();
+  });
+
+  it("clears and ignores stale usage limits when the organization changes", async () => {
+    let resolveOld!: (value: { organization_id: string; period: string; plan_code: string; limits: never[]; as_of: string }) => void;
+    usageLimits
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({ organization_id: "org-2", period: "2026-10", plan_code: "enterprise", limits: [], as_of: "2026-10-20T08:00:00Z" });
+    const view = render(<UsageLimitsPanel organizationId="org-1" />);
+    await waitFor(() => expect(usageLimits).toHaveBeenCalledWith("org-1"));
+    view.rerender(<UsageLimitsPanel organizationId="org-2" />);
+    expect(await screen.findByText("enterprise")).toBeTruthy();
+    resolveOld({ organization_id: "org-1", period: "2026-10", plan_code: "pro", limits: [], as_of: "2026-10-20T08:00:00Z" });
+    await waitFor(() => expect(screen.getByText("enterprise")).toBeTruthy());
+    expect(screen.queryByText("pro")).toBeNull();
+  });
+
+  it("clears and ignores stale reconciliation results after an organization change", async () => {
+    const resultFor = (organizationId: string) => ({
+      organization_id: organizationId,
+      action: `${organizationId}-action`,
+      reason: "Server reported reconciliation",
+      decided_at: "2026-10-20T09:00:00Z",
+      idempotent: true,
+      internal_subscription_status: "active",
+      provider_event_kind: "subscription_updated",
+    });
+    let resolveOld!: (value: ReturnType<typeof resultFor>) => void;
+    reconcileResult
+      .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce(resultFor("org-2"));
+    const view = render(<ReconcilePanel organizationId="org-1" canManage={false} />);
+    await waitFor(() => expect(reconcileResult).toHaveBeenCalledWith("org-1"));
+    view.rerender(<ReconcilePanel organizationId="org-2" canManage={false} />);
+    expect(await screen.findByText("org-2-action")).toBeTruthy();
+    resolveOld(resultFor("org-1"));
+    await waitFor(() => expect(screen.getByText("org-2-action")).toBeTruthy());
+    expect(screen.queryByText("org-1-action")).toBeNull();
   });
 
   it("renders server billing status", async () => {

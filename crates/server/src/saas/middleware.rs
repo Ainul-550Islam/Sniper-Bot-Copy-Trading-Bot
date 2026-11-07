@@ -262,10 +262,13 @@ async fn authorize_request_mode(
         if !decision.is_allowed() {
             return Err(decision);
         }
-        // Record last use (best effort; never blocks the request).
-        let mut used = key.clone();
-        used.last_used_at = Some(now);
-        let _ = state.saas.update_api_key(&used).await;
+        // Record last use (best effort; never blocks the request). This is a
+        // field-specific touch: a stale authentication snapshot must not
+        // overwrite a concurrent revocation or key-scope update.
+        let _ = state
+            .saas
+            .touch_api_key_last_used(key.id, &key.secret_hash, now)
+            .await;
         let user = match key.created_by {
             Some(u) => match state.saas.user(u).await {
                 Ok(value) => value,
@@ -408,6 +411,20 @@ async fn authorize_request_mode(
                 }
             }
         };
+        if !user.platform_admin && !record.was_sso_authenticated_for(org.id) {
+            if let Some(db) = state.db.as_deref() {
+                let enforced = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM tenant_sso_configs WHERE organization_id = $1 AND status = 'active' AND enforce_sso = true)",
+                )
+                .bind(org.id.as_uuid())
+                .fetch_one(db.pool())
+                .await
+                .map_err(|_| Decision::unavailable("tenant SSO policy is temporarily unavailable"))?;
+                if enforced {
+                    return Err(Decision::unauthenticated("sso_required"));
+                }
+            }
+        }
         if enrollment_only
             && !user.platform_admin
             && !membership
@@ -440,9 +457,10 @@ async fn authorize_request_mode(
                 return Err(decision);
             }
         }
-        let mut touched = record.clone();
-        touched.touch(now);
-        let _ = state.saas.update_session(&touched).await;
+        let _ = state
+            .saas
+            .touch_session_last_seen(record.id, &record.token_hash, now)
+            .await;
         bot_core::tenant::rls_context::bind_request_tenant(org.id.as_uuid())
             .map_err(|_| Decision::resource("a request cannot change tenant context"))?;
         return Ok(SaasContext {
@@ -539,16 +557,16 @@ fn build_context(
 /// Turn a refusal into an HTTP response, auditing the security-relevant
 /// ones. The body never says whether a resource exists in another tenant.
 pub async fn deny_response(state: &ApiState, decision: &Decision) -> Response {
-    if decision.kind.is_security_relevant() {
+    if decision.kind().is_security_relevant() {
         warn!(decision = %decision.summary(), "saas authorization denied");
         state
             .audit
             .record(
                 "saas",
                 "saas.authorization.denied",
-                Some(decision.kind.as_str()),
+                Some(decision.kind().as_str()),
                 bot_core::audit::AuditOutcome::Denied,
-                json!({ "reason": decision.reason }),
+                json!({ "reason": decision.reason() }),
             )
             .await;
     }
@@ -557,8 +575,8 @@ pub async fn deny_response(state: &ApiState, decision: &Decision) -> Response {
     (
         status,
         Json(json!({
-            "error": decision.kind.as_str(),
-            "reason": decision.reason,
+            "error": decision.kind().as_str(),
+            "reason": decision.reason(),
         })),
     )
         .into_response()

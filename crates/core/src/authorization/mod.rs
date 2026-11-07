@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn unauthenticated_requests_are_denied_first() {
         let d = authorize(None, &AccessRequest::read(Permission::BotRead), None);
-        assert_eq!(d.kind, DecisionKind::DenyUnauthenticated);
+        assert_eq!(d.kind(), DecisionKind::DenyUnauthenticated);
         assert_eq!(d.http_status(), 401);
     }
 
@@ -310,7 +310,7 @@ mod tests {
             &AccessRequest::read(Permission::OrderRead).on_resource(theirs),
             None,
         );
-        assert_eq!(d.kind, DecisionKind::DenyResource);
+        assert_eq!(d.kind(), DecisionKind::DenyResource);
         assert_eq!(
             d.http_status(),
             403,
@@ -325,7 +325,7 @@ mod tests {
             &AccessRequest::manage(Permission::RiskManage).on_resource(theirs),
             None,
         );
-        assert_eq!(d.kind, DecisionKind::DenyResource);
+        assert_eq!(d.kind(), DecisionKind::DenyResource);
 
         // Own resource is fine.
         assert!(authorize(
@@ -341,7 +341,7 @@ mod tests {
         let o = org(OrganizationStatus::Suspended);
         let c = ctx(&o, MembershipRole::OrgOwner);
         assert_eq!(
-            authorize(Some(&c), &AccessRequest::trade(Permission::BotStart), None).kind,
+            authorize(Some(&c), &AccessRequest::trade(Permission::BotStart), None).kind(),
             DecisionKind::DenySuspended
         );
         assert_eq!(
@@ -350,7 +350,7 @@ mod tests {
                 &AccessRequest::manage(Permission::TenantUpdate),
                 None
             )
-            .kind,
+            .kind(),
             DecisionKind::DenySuspended
         );
         assert!(authorize(Some(&c), &AccessRequest::read(Permission::BotRead), None).is_allowed());
@@ -379,9 +379,9 @@ mod tests {
         let o = org(OrganizationStatus::Active);
         let v = ctx(&o, MembershipRole::Viewer);
         let d = authorize(Some(&v), &AccessRequest::trade(Permission::BotStart), None);
-        assert_eq!(d.kind, DecisionKind::DenyPermission);
-        assert!(d.reason.contains("viewer"));
-        assert!(d.reason.contains("bot.start"));
+        assert_eq!(d.kind(), DecisionKind::DenyPermission);
+        assert!(d.reason().contains("viewer"));
+        assert!(d.reason().contains("bot.start"));
 
         // The same caller may read.
         assert!(authorize(Some(&v), &AccessRequest::read(Permission::BotRead), None).is_allowed());
@@ -394,7 +394,7 @@ mod tests {
                 &AccessRequest::manage(Permission::ApiKeyCreate),
                 None
             )
-            .kind,
+            .kind(),
             DecisionKind::DenyPermission
         );
     }
@@ -411,7 +411,7 @@ mod tests {
             &AccessRequest::trade(Permission::BotStart).requiring(features::LIVE_TRADING),
             Some(&ents),
         );
-        assert_eq!(d.kind, DecisionKind::DenyEntitlement);
+        assert_eq!(d.kind(), DecisionKind::DenyEntitlement);
         assert_eq!(d.http_status(), 402);
 
         // Plan includes it.
@@ -433,7 +433,7 @@ mod tests {
             ),
             Some(&ents),
         );
-        assert_eq!(d.kind, DecisionKind::DenyEntitlement);
+        assert_eq!(d.kind(), DecisionKind::DenyEntitlement);
         assert!(authorize(
             Some(&c),
             &AccessRequest::manage(Permission::ApiKeyCreate).consuming(
@@ -461,7 +461,7 @@ mod tests {
             Some(&ents),
         );
         assert_eq!(
-            d.kind,
+            d.kind(),
             DecisionKind::DenyResource,
             "ownership is the first gate after authentication"
         );
@@ -474,7 +474,7 @@ mod tests {
                 .requiring(features::LIVE_TRADING),
             Some(&ents),
         );
-        assert_eq!(d.kind, DecisionKind::DenySuspended);
+        assert_eq!(d.kind(), DecisionKind::DenySuspended);
 
         // Healthy tenant, weak role: permission.
         let active = org(OrganizationStatus::Active);
@@ -485,7 +485,7 @@ mod tests {
             &AccessRequest::trade(Permission::BotStart).requiring(features::LIVE_TRADING),
             Some(&ents),
         );
-        assert_eq!(d.kind, DecisionKind::DenyPermission);
+        assert_eq!(d.kind(), DecisionKind::DenyPermission);
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
                 &AccessRequest::read(Permission::OrderRead).on_resource(theirs),
                 None
             )
-            .kind,
+            .kind(),
             DecisionKind::DenyResource
         );
     }

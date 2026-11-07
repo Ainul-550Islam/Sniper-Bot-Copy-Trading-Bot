@@ -1,7 +1,8 @@
 //! SOLE decider of `authoritative` (BATCH 02).
 //!
-//! `verify()` NEVER trusts the manifest's self-declared `status`, `source` or
-//! `authoritative` flags. It recomputes:
+//! `verify()` never trusts the manifest's cached `status` or `authoritative`
+//! flags. The source label is checked after integrity; it is NOT external
+//! proof of real-market provenance. It recomputes:
 //! * the hash chain — every chunk's SHA-256, each `prev_sha256` link, the
 //!   `sha256_root`, strict chunk ordering and byte/record counts;
 //! * the coverage — slot gaps, overlaps and out-of-order records against a
@@ -21,7 +22,7 @@ use super::format::DatasetManifest;
 use super::format::{decode_line, DatasetSource};
 use super::hashing::{constant_time_eq, hash_chunk, sha256_root, GENESIS_PREV_SHA256};
 use super::policy::VerifierPolicy;
-use super::store::{DatasetStore, FsDatasetStore};
+use super::store::{ChunkData, DatasetStore, FsDatasetStore};
 use super::VERIFIER_VERSION;
 
 /// The verifier's pass/fail verdict for one run.
@@ -72,10 +73,35 @@ pub fn verify(
     dataset_id: &str,
     policy: &VerifierPolicy,
 ) -> BotResult<VerificationReport> {
+    let (_, _, report) = load_and_verify(store, dataset_id, policy)?;
+    Ok(report)
+}
+
+// The manifest, chunk bytes and report form one owned snapshot. Replay must
+// consume these same bytes, not reopen mutable files after verification.
+fn load_and_verify(
+    store: &dyn DatasetStore,
+    dataset_id: &str,
+    policy: &VerifierPolicy,
+) -> BotResult<(DatasetManifest, Vec<ChunkData>, VerificationReport)> {
     policy.validate()?;
     let manifest = store.load_manifest(dataset_id)?;
+    if manifest.dataset_id != dataset_id {
+        return Err(BotError::Encoding(
+            "dataset manifest identity mismatch".into(),
+        ));
+    }
     let chunks = store.open_chunks(dataset_id)?;
+    let report = verify_loaded(&manifest, &chunks, dataset_id, policy)?;
+    Ok((manifest, chunks, report))
+}
 
+fn verify_loaded(
+    manifest: &DatasetManifest,
+    chunks: &[ChunkData],
+    dataset_id: &str,
+    policy: &VerifierPolicy,
+) -> BotResult<VerificationReport> {
     let mut hash_chain_ok = true;
     let mut problems: Vec<String> = Vec::new();
     let mut root_hashes: Vec<String> = Vec::with_capacity(chunks.len());
@@ -210,7 +236,7 @@ pub fn verify(
     // previous chunk's last known slot.
     let mut overlap = false;
     let mut prev_chunk_last: Option<u64> = None;
-    for chunk in &chunks {
+    for chunk in chunks {
         let first = if chunk.meta.first_slot > 0 {
             Some(chunk.meta.first_slot)
         } else {
@@ -290,13 +316,19 @@ pub fn verify_dir(
     dataset_dir: &Path,
     policy: &VerifierPolicy,
 ) -> BotResult<(DatasetManifest, VerificationReport)> {
+    let (manifest, _, report) = load_verified_dir(dataset_dir, policy)?;
+    Ok((manifest, report))
+}
+
+pub(super) fn load_verified_dir(
+    dataset_dir: &Path,
+    policy: &VerifierPolicy,
+) -> BotResult<(DatasetManifest, Vec<ChunkData>, VerificationReport)> {
     let root = dataset_dir.parent().unwrap_or_else(|| Path::new("."));
     let id = dataset_dir
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| BotError::InvalidArgument("dataset dir has no id".into()))?;
     let store = FsDatasetStore::new(root);
-    let manifest = store.load_manifest(id)?;
-    let report = verify(&store, id, policy)?;
-    Ok((manifest, report))
+    load_and_verify(&store, id, policy)
 }

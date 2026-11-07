@@ -137,6 +137,12 @@ function toServerUpdate(input: UpdateStrategyInput): Record<string, unknown> {
 export async function listStrategies(module?: string): Promise<StrategyRecord[]> {
   const query = module ? `?module=${encodeURIComponent(module)}` : "";
   const response = await tenantRequest<ServerStrategiesResponse>(`/api/tenant/strategies${query}`);
+  if (!response || !Array.isArray(response.items)) {
+    throw new Error("Invalid strategies response");
+  }
+  if (response.items.some((item) => item.organization_id !== response.organization_id)) {
+    throw new Error("Strategy records do not match the response organization");
+  }
   return response.items.map(fromServer);
 }
 

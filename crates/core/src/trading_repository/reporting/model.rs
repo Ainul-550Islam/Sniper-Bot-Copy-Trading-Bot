@@ -58,9 +58,9 @@ pub struct TenantSymbolPnl {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenantRealizedPnl {
     pub organization_id: OrganizationId,
-    /// `SUM(realized_quote - cost_basis)` over positions closed in
-    /// the window (matches the risk oracle's realized_today shape,
-    /// tenant-scoped).
+    /// `SUM(realized_pnl_quote)` over positions closed wholly within the
+    /// window; unknown allocations or lifecycles opened before the window are
+    /// reported as an error by the repository.
     pub realized_net: f64,
     pub positions_closed: i64,
     pub fees_paid: f64,

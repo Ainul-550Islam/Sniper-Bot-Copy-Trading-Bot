@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { CancelConfirm } from "@/components/limit-orders/CancelConfirm";
 import { OrderForm } from "@/components/limit-orders/OrderForm";
@@ -21,9 +21,9 @@ import { getCapabilities, type MembershipRole } from "@/lib/permissions";
 
 function currentRole(): MembershipRole {
   const state = sessionStore.getSnapshot();
-  const organization =
-    state.organizations.find((item) => item.organization_id === state.selectedOrganizationId) ??
-    state.organizations[0];
+  const organization = state.selectedOrganizationId
+    ? state.organizations.find((item) => item.organization_id === state.selectedOrganizationId)
+    : state.organizations.length === 1 ? state.organizations[0] : undefined;
   const role = organization?.role.toLowerCase() ?? "";
   if (role.includes("owner")) return "owner";
   if (role.includes("admin")) return "admin";
@@ -33,7 +33,9 @@ function currentRole(): MembershipRole {
 }
 
 export default function LimitOrdersPage() {
-  const [, setSessionTick] = useState(0);
+  const [sessionTick, setSessionTick] = useState(0);
+  const tenantVersion = useRef(0);
+  const loadRequestVersion = useRef(0);
   const [orders, setOrders] = useState<LimitOrder[] | null>(null);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
@@ -42,51 +44,85 @@ export default function LimitOrdersPage() {
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
   const [cancelTarget, setCancelTarget] = useState<LimitOrder | null>(null);
 
-  useEffect(() => sessionStore.subscribe(() => setSessionTick((value) => value + 1)), []);
+  useEffect(() => sessionStore.subscribe(() => {
+    tenantVersion.current += 1;
+    loadRequestVersion.current += 1;
+    setSessionTick((value) => value + 1);
+    setOrders(null);
+    setNextBefore(null);
+    setState({ kind: "loading" });
+    setActionError(null);
+    setCreating(false);
+    setBusyOrderId(null);
+    setCancelTarget(null);
+  }), []);
   const canManage = getCapabilities({ role: currentRole() }).canCreateStrategies;
 
   const load = useCallback(async (before?: string) => {
+    const requestTenantVersion = tenantVersion.current;
+    const requestVersion = ++loadRequestVersion.current;
+    setOrders(null);
+    setNextBefore(null);
     setState({ kind: "loading" });
     try {
       const response = await limitOrdersApi.list(before ? { before } : {});
+      if (requestTenantVersion !== tenantVersion.current || requestVersion !== loadRequestVersion.current) return;
       setOrders(response.orders);
       setNextBefore(response.next_before);
       setState({ kind: response.orders.length === 0 ? "empty" : "ready" });
     } catch (error) {
-      setState(classifyTradingError(error));
+      if (requestTenantVersion === tenantVersion.current && requestVersion === loadRequestVersion.current) {
+        setOrders(null);
+        setNextBefore(null);
+        setState(classifyTradingError(error));
+      }
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
-  }, [load]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      loadRequestVersion.current += 1;
+    };
+  }, [load, sessionTick]);
 
   async function create(input: CreateLimitOrderInput) {
+    const requestTenantVersion = tenantVersion.current;
     setCreating(true);
     setActionError(null);
     try {
       await limitOrdersApi.create(input);
-      await load();
+      if (requestTenantVersion === tenantVersion.current) await load();
     } catch (error) {
-      setActionError(tradingStateMessage(classifyTradingError(error)));
+      if (requestTenantVersion === tenantVersion.current) {
+        setActionError(tradingStateMessage(classifyTradingError(error)));
+      }
     } finally {
-      setCreating(false);
+      if (requestTenantVersion === tenantVersion.current) setCreating(false);
     }
   }
 
   async function cancel(order: LimitOrder) {
+    const requestTenantVersion = tenantVersion.current;
     setBusyOrderId(order.id);
     setActionError(null);
     try {
       await limitOrdersApi.cancel(order.id);
+      if (requestTenantVersion !== tenantVersion.current) return;
       setCancelTarget(null);
       // Server truth only: the cancelled status appears when the refetch
       // returns it, never as an optimistic local rewrite.
       await load();
     } catch (error) {
-      setActionError(tradingStateMessage(classifyTradingError(error)));
+      if (requestTenantVersion === tenantVersion.current) {
+        setActionError(tradingStateMessage(classifyTradingError(error)));
+      }
     } finally {
-      setBusyOrderId(null);
+      if (requestTenantVersion === tenantVersion.current) setBusyOrderId(null);
     }
   }
 

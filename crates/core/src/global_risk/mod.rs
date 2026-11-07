@@ -9,7 +9,7 @@
 //!
 //! | file | concern |
 //! |---|---|
-//! | `decision.rs` | [`GlobalRiskRequest`], [`GlobalRejectReason`] (14 reasons), [`GlobalRiskDecision`] + snapshot |
+//! | `decision.rs` | [`GlobalRiskRequest`], [`GlobalRejectReason`] (15 reasons), [`GlobalRiskDecision`] + snapshot |
 //! | `engine.rs` | [`GlobalRiskEngine`]: the ordered checks over the ledger's book |
 //! | `kill_switch.rs` | [`KillSwitches`] per venue / strategy, config-pinned or operator-engaged |
 //! | `store.rs` | [`RiskStore`] (decision journal, switch state / events) + [`MemoryRiskStore`] |
@@ -28,6 +28,8 @@ pub use audit::AUDIT_ACTOR;
 pub use decision::{
     DecisionSnapshot, GlobalRejectReason, GlobalRiskDecision, GlobalRiskRequest, GlobalVerdict,
 };
-pub use engine::{quote_asset_for, strategy_label, DecisionContext, GlobalRiskEngine};
+pub use engine::{
+    quote_asset_for, strategy_label, DecisionContext, GlobalRiskEngine, GlobalRiskReservation,
+};
 pub use kill_switch::{KillScope, KillSwitchEvent, KillSwitchState, KillSwitches, SwitchOutcome};
-pub use store::{MemoryRiskStore, RiskStore};
+pub use store::{MemoryRiskStore, RiskEntryReservation, RiskStore};

@@ -217,7 +217,13 @@ impl TenantModuleInstance {
         if context.scope().module() != self.module {
             return Err(InstanceIdentityError::ContextMismatch);
         }
+        if context.scope().mode() != self.mode {
+            return Err(InstanceIdentityError::ContextMismatch);
+        }
         if context.wallet().address() != self.wallet_address {
+            return Err(InstanceIdentityError::ContextMismatch);
+        }
+        if context.signer().provider() != self.signer_provider {
             return Err(InstanceIdentityError::ContextMismatch);
         }
         if context.signer().key_ref() != self.signer_key_ref {
@@ -319,6 +325,54 @@ mod tests {
         assert_eq!(instance.signer_key_ref(), "mod-key");
         assert!(instance.enabled());
         assert!(instance.verify_context(&context).is_ok());
+    }
+
+    #[test]
+    fn context_mode_must_match_the_instance() {
+        let context = issued(
+            OrganizationId::new(),
+            RuntimeId::new(),
+            RuntimeGeneration::first(),
+            BotModule::Sniper,
+            &keypair_address(),
+        );
+        let bound = TenantModuleInstance::from_context(&context, true);
+        assert!(bound.verify_context(&context).is_ok());
+        // Change ONLY the expected mode: all other public identity fields
+        // still match the genuinely issued paper context.
+        for mode in [ExecutionMode::Simulate, ExecutionMode::Live] {
+            let mut different = bound.clone();
+            different.mode = mode;
+            assert_eq!(
+                different.verify_context(&context),
+                Err(InstanceIdentityError::ContextMismatch),
+                "a {mode:?} instance must refuse a paper context"
+            );
+        }
+    }
+
+    #[test]
+    fn context_signer_provider_must_match_the_instance() {
+        let context = issued(
+            OrganizationId::new(),
+            RuntimeId::new(),
+            RuntimeGeneration::first(),
+            BotModule::Sniper,
+            &keypair_address(),
+        );
+        let bound = TenantModuleInstance::from_context(&context, true);
+        assert!(bound.verify_context(&context).is_ok());
+        // A key reference is not a provider namespace: equal key strings
+        // must not authorize substitution of a different signer provider.
+        for provider in [SignerProvider::Custody, SignerProvider::External] {
+            let mut different = bound.clone();
+            different.signer_provider = provider;
+            assert_eq!(
+                different.verify_context(&context),
+                Err(InstanceIdentityError::ContextMismatch),
+                "a {provider:?} instance must refuse a local-signer context"
+            );
+        }
     }
 
     #[test]

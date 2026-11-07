@@ -24,8 +24,9 @@ pub const DEFAULT_PAGE_LIMIT: u32 = 50;
 /// An opaque, tenant-bound keyset cursor.
 ///
 /// Encoded form: the canonical JSON of `(organization_id, sort_key, at)`.
-/// It is opaque to clients (they treat it as a string) but verifiable
-/// server-side: the tenant is part of the signed-by-construction payload.
+/// Clients treat it as a string, but it is plain JSON, not a signed token.
+/// The organization field is an untrusted claim, checked against the acting
+/// tenant; repository SQL independently constrains rows to that tenant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantPageCursor {
     /// The tenant whose listing this cursor walks. A cursor replayed

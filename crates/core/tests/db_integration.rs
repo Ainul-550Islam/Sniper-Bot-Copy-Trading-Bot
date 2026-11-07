@@ -65,13 +65,13 @@ fn run_id() -> String {
 // verify_chain(), which then reports a break that no production writer caused.
 // Found on 2026-11-01 by actually running `cargo test --workspace --all-targets`
 // (the crate-by-crate runs used a single binary at a time and never collided).
-// A process-wide mutex keeps the three of them serial without adding a dependency.
-static AUDIT_CHAIN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// A process-wide async mutex keeps the three of them serial using existing Tokio.
+// Waiting must yield rather than block an executor thread: each guarded test
+// performs database awaits while it owns the guard. Tokio mutexes do not poison.
+static AUDIT_CHAIN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn chain_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    AUDIT_CHAIN_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+async fn chain_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    AUDIT_CHAIN_TEST_LOCK.lock().await
 }
 
 #[tokio::test]
@@ -178,7 +178,7 @@ async fn dedup_first_arrival_is_exactly_once_across_processes() {
 
 #[tokio::test]
 async fn audit_chain_verifies_and_detects_tampering() {
-    let _chain = chain_test_guard();
+    let _chain = chain_test_guard().await;
     let Some(db) = setup().await else { return };
     let run = run_id();
     let repo = AuditRepo::new(db.clone());
@@ -227,7 +227,7 @@ async fn audit_chain_verifies_and_detects_tampering() {
 
 #[tokio::test]
 async fn audit_chain_detects_reorder_missing_and_duplicate() {
-    let _chain = chain_test_guard();
+    let _chain = chain_test_guard().await;
     // Regression coverage demanded by the release audit (item: audit /
     // provenance): the hash chain must detect REORDERED, MISSING and
     // DUPLICATED rows — not just modified content (covered by
@@ -352,7 +352,7 @@ async fn audit_chain_detects_reorder_missing_and_duplicate() {
 
 #[tokio::test]
 async fn audit_chain_survives_concurrent_appends() {
-    let _chain = chain_test_guard();
+    let _chain = chain_test_guard().await;
     // Regression test for the chain-fork race: `AuditRepo::append` used to
     // take the head hash with `SELECT … ORDER BY id DESC LIMIT 1 FOR UPDATE`.
     // Under READ COMMITTED a blocked writer's snapshot never sees the row
@@ -1366,54 +1366,108 @@ async fn pg_claim_event_history_records_full_lineage() {
     assert_eq!(events[3].event, "released");
 }
 
-/// §Q gap closure: the cluster-wide risk oracle counts open positions and
-/// sums today's realized PnL from the shared positions table.
+/// §Q gap closure: tenant-scoped risk-oracle reads count open positions and
+/// sum today's realized PnL without depending on data left by other integration
+/// tests or observing another tenant's portfolio.
 #[tokio::test]
-async fn pg_risk_oracle_counts_and_pnl() {
+async fn pg_tenant_risk_oracle_counts_and_pnl_are_scoped() {
     use bot_core::db::claims::PostgresRiskOracle;
     use bot_core::risk::GlobalRiskOracle;
+    use bot_core::tenant::OrganizationId;
+    use bot_core::trading_repository::positions::{model::TenantPosition, TenantPositionWrite};
+    use bot_core::trading_repository::write_scope::{TenantWriteScope, WriteOrigin};
 
     let Some(db) = setup().await else { return };
     let oracle = PostgresRiskOracle::new(db.clone());
-    let repo = PositionRepo::new(db.clone());
+    let run = run_id();
+    let org_uuid = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
+        .bind(org_uuid)
+        .bind(format!("risk-oracle-{run}"))
+        .bind("Risk Oracle Test")
+        .execute(db.pool())
+        .await
+        .expect("create isolated tenant");
+    let organization = OrganizationId::from(org_uuid);
+    let write_scope = TenantWriteScope::new(organization, "risk-oracle-test", WriteOrigin::Job)
+        .expect("valid write scope");
+    let repo = TenantPositionWrite::new(db.clone());
 
     // Non-trading modules have no position source → unknown (None).
     assert!(oracle.count_open(BotModule::Telegram).await.is_none());
 
-    let baseline = oracle.count_open(BotModule::Sniper).await.expect("count");
-    let pnl_before = oracle.realized_today().await.expect("pnl");
+    let baseline = oracle
+        .count_open_for(Some(organization), BotModule::Sniper)
+        .await
+        .expect("tenant position count");
+    let pnl_before = oracle
+        .realized_today_for_module(Some(organization), BotModule::Sniper)
+        .await
+        .expect("tenant realized PnL");
 
-    let mut p = Position::new(
-        format!("p-{}", run_id()),
-        TradeSource::Sniper,
-        Venue::PumpFun,
-        ExecutionMode::Paper,
-        "MINT".into(),
-        "MINT".into(),
-        "SOL".into(),
-    );
-    p.qty = 1.0;
-    p.avg_entry = 1.0;
-    repo.upsert(&p).await.expect("upsert open");
+    let now = chrono::Utc::now();
+    let mut p = TenantPosition {
+        organization_id: organization,
+        id: format!("p-{run}"),
+        source: "sniper".into(),
+        venue: "pump.fun".into(),
+        mode: "paper".into(),
+        status: "open".into(),
+        symbol: "MINT".into(),
+        symbol_display: "MINT".into(),
+        quote_symbol: "SOL".into(),
+        qty: 1.0,
+        avg_entry: 1.0,
+        cost_basis: 1.0,
+        realized_quote: 0.0,
+        realized_pnl_quote: Some(0.0),
+        realized_at: None,
+        last_mark: 1.0,
+        stop_loss: None,
+        take_profit: None,
+        trailing_stop: None,
+        trailing_high_water: None,
+        max_hold_secs: None,
+        entry_signature: None,
+        exit_signature: None,
+        entry_latency_ms: None,
+        copied_wallet: None,
+        market_id: None,
+        outcome: None,
+        reason_closed: None,
+        opened_at: now,
+        updated_at: now,
+        closed_at: None,
+    };
+    repo.upsert(&write_scope, &p).await.expect("upsert open");
     assert_eq!(
-        oracle.count_open(BotModule::Sniper).await.unwrap(),
-        baseline + 1,
-        "a position written by ANY replica counts against global capacity"
+        oracle
+            .count_open_for(Some(organization), BotModule::Sniper)
+            .await,
+        Some(baseline + 1),
+        "the tenant's durable open position counts against its capacity"
     );
 
-    // Close it at a loss: capacity drops back, today's realized PnL includes
-    // the -0.5 (single-threaded run ⇒ deterministic delta).
-    p.status = PositionStatus::Closed;
+    // Close it at a loss; the canonical cumulative PnL and timestamp are
+    // persisted explicitly rather than reconstructed from exit proceeds.
+    p.status = "closed".into();
     p.qty = 0.0;
-    p.closed_at = Some(chrono::Utc::now());
-    p.cost_basis = 1.0;
+    p.closed_at = Some(now);
+    p.updated_at = now;
+    p.realized_at = Some(now);
     p.realized_quote = 0.5;
-    repo.upsert(&p).await.expect("upsert closed");
+    p.realized_pnl_quote = Some(-0.5);
+    repo.upsert(&write_scope, &p).await.expect("upsert closed");
     assert_eq!(
-        oracle.count_open(BotModule::Sniper).await.unwrap(),
-        baseline
+        oracle
+            .count_open_for(Some(organization), BotModule::Sniper)
+            .await,
+        Some(baseline)
     );
-    let pnl_after = oracle.realized_today().await.unwrap();
+    let pnl_after = oracle
+        .realized_today_for_module(Some(organization), BotModule::Sniper)
+        .await
+        .expect("tenant realized PnL after close");
     assert!(
         (pnl_after - (pnl_before - 0.5)).abs() < 1e-9,
         "pnl {pnl_before} -> {pnl_after} must include the -0.5"

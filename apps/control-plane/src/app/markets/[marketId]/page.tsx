@@ -4,7 +4,7 @@
  * Market Detail Page (THIRD.md §106).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import MarketDetailPanel from "@/components/market/MarketDetailPanel";
@@ -17,23 +17,41 @@ export default function MarketDetailPage() {
   const [market, setMarket] = useState<MarketTicker | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
-    if (!marketId) return;
+    const version = ++requestVersion.current;
+    if (!marketId) {
+      setMarket(null);
+      setError("A market ID is required.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setMarket(null);
     try {
       const data = await getMarket(marketId);
-      setMarket(data);
+      if (requestVersion.current === version) setMarket(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load market pair data");
+      if (requestVersion.current === version) {
+        setMarket(null);
+        setError(err instanceof Error ? err.message : "Failed to load market pair data");
+      }
     } finally {
-      setLoading(false);
+      if (requestVersion.current === version) setLoading(false);
     }
   }, [marketId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

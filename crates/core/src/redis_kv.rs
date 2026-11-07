@@ -35,6 +35,24 @@ static RELEASE_LOCK: once_cell::sync::Lazy<Script> = once_cell::sync::Lazy::new(
     )
 });
 
+// MULTI/EXEC does not roll back INCR if EXPIRE raises a runtime error.
+// Validate the absolute expiry using Redis TIME before mutating the counter.
+static INCR_EXPIRE: once_cell::sync::Lazy<Script> = once_cell::sync::Lazy::new(|| {
+    Script::new(
+        r#"local ttl = tonumber(ARGV[1])
+local t = redis.call('TIME')
+local now_ms = t[1] * 1000 + math.floor(t[2] / 1000)
+if not ttl or ttl < 1 or ttl > math.floor((9007199254740991 - now_ms) / 1000) then
+    return redis.error_reply('counter expiration exceeds exact millisecond range')
+end
+redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+-- GET returns the exact integer string; a Lua numeric reply could round
+-- counters above 2^53 even though Redis INCR itself remains exact.
+return redis.call('GET', KEYS[1])"#,
+    )
+});
+
 #[derive(Clone)]
 pub struct RedisKv {
     manager: ConnectionManager,
@@ -73,7 +91,8 @@ impl RedisKv {
     /// `SET key val NX PX ttl` — true when THIS call created the key
     /// (first arrival). The dedup L2 primitive.
     pub async fn set_nx_ttl(&self, key: &str, val: &str, ttl: Duration) -> BotResult<bool> {
-        let ttl_ms = ttl.as_millis().max(1) as u64;
+        let ttl_ms = i64::try_from(ttl.as_millis().max(1))
+            .map_err(|_| BotError::config("Redis TTL exceeds signed milliseconds"))?;
         let key = key.to_string();
         let val = val.to_string();
         self.op("set_nx", move |mut c| async move {
@@ -108,22 +127,14 @@ impl RedisKv {
         .await
     }
 
-    /// INCR + EXPIRE atomically-ish (pipeline). Returns the new counter
+    /// INCR + EXPIRE atomically (validated Lua script). Returns the new counter
     /// value. Used by the rate limiter and alert throttles.
     pub async fn incr_expire(&self, key: &str, ttl: Duration) -> BotResult<u64> {
         let key = key.to_string();
-        let secs = ttl.as_secs().max(1) as i64;
+        let secs = i64::try_from(ttl.as_secs().max(1))
+            .map_err(|_| BotError::config("Redis counter TTL exceeds signed seconds"))?;
         self.op("incr", move |mut c| async move {
-            // The pipeline returns one reply PER command: (INCR result,
-            // EXPIRE result). Destructuring only the first was a latent
-            // type error ("Array response of wrong dimension") that no
-            // environment had ever executed until now.
-            let (n, _expired): (u64, i64) = redis::pipe()
-                .atomic()
-                .incr(&key, 1u64)
-                .expire(&key, secs)
-                .query_async(&mut c)
-                .await?;
+            let n: u64 = INCR_EXPIRE.key(&key).arg(secs).invoke_async(&mut c).await?;
             Ok(n)
         })
         .await

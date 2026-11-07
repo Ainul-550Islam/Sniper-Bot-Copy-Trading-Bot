@@ -57,7 +57,7 @@ describe("Limit orders", () => {
   afterEach(() => cleanup());
 
   it("uses the exact tenant endpoints and payloads", async () => {
-    tenantRequest.mockResolvedValue({});
+    tenantRequest.mockResolvedValueOnce({ organization_id: "org-1", orders: [], next_before: null }).mockResolvedValue({});
     await limitOrdersApi.list({ status: "active", limit: 50 });
     await limitOrdersApi.create({
       mint: order.mint,
@@ -87,6 +87,11 @@ describe("Limit orders", () => {
       ],
       ["/api/tenant/limit-orders/lo_123/cancel", { method: "POST" }],
     ]);
+  });
+
+  it("rejects malformed list responses instead of exposing a non-array orders value", async () => {
+    tenantRequest.mockResolvedValue({ organization_id: "org-1", orders: null });
+    await expect(limitOrdersApi.list()).rejects.toThrow("Invalid limit orders response");
   });
 
   it("page shows cancelled status only after the server refetch returns it", async () => {

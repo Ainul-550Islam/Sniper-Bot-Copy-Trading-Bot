@@ -174,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
     // ---- persistence backends (optional, degrade loudly) -------------------
     let db = bot_core::db::open(&cfg.database).await?.map(Arc::new);
     let redis = bot_core::redis_kv::open(&cfg.redis).await?;
+    let email_config = crate::email::EmailConfig::from_env()?;
 
     // Dedup facade: L1 memory always; L2 per config.
     let dedup_backend = DedupBackend::parse(&cfg.storage.dedup_backend);
@@ -405,6 +406,25 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- recovery / reconciliation workers ---------------------------------
     let mut worker_handles = Vec::new();
+    if email_config.enabled {
+        if let Some(db_email) = db.as_ref() {
+            let provider = email_config.build_provider()?;
+            let dispatcher = std::sync::Arc::new(
+                crate::email::outbox::OutboxDispatcher::new(
+                    db_email.pool().clone(),
+                    provider,
+                    email_config.from_address.clone(),
+                )
+                .with_rate_limit(email_config.per_minute_limit),
+            );
+            info!("email outbox dispatcher enabled");
+            worker_handles.push(tokio::spawn(
+                dispatcher.run(Duration::from_secs(5), Some(shutdown.clone())),
+            ));
+        } else {
+            warn!("email delivery enabled but PostgreSQL is unavailable; outbox dispatcher not started");
+        }
+    }
     if let Some(db) = &db {
         use bot_core::recovery::{run_maintenance, startup_reconcile, RecoveryWorker};
         use recon::{IntentTruth, PolymarketOrderTruth, SolanaPositionTruth, SolanaTxTruth};

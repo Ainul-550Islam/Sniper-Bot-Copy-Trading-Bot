@@ -7,12 +7,13 @@
  * historical tick feeds with Sharpe ratio and drawdown analytics.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import BacktestRunner from "@/components/backtest/backtest-runner";
 import BacktestTable from "@/components/backtest/backtest-table";
 import { BacktestRecord, listBacktests } from "@/lib/api/backtest-api";
 import { StrategyRecord, listStrategies } from "@/lib/api/strategy-api";
+import { sessionStore } from "@/lib/auth";
 
 export default function BacktestsPage() {
   const [backtests, setBacktests] = useState<BacktestRecord[]>([]);
@@ -20,24 +21,52 @@ export default function BacktestsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showRunner, setShowRunner] = useState(false);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setBacktests([]);
+    setStrategies([]);
+    setShowRunner(false);
+    setLoading(true);
+    setError(null);
+  }), []);
 
   const loadData = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    setBacktests([]);
+    setStrategies([]);
     setLoading(true);
     setError(null);
     try {
       const [bts, strats] = await Promise.all([listBacktests(), listStrategies()]);
-      setBacktests(bts);
-      setStrategies(strats);
+      if (requestId === requestVersion.current) {
+        setBacktests(bts);
+        setStrategies(strats);
+      }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load backtest data");
+      if (requestId === requestVersion.current) {
+        setBacktests([]);
+        setStrategies([]);
+        setError(err instanceof Error ? err.message : "Failed to load backtest data");
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadData());
-  }, [loadData]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void loadData();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [loadData, sessionVersion]);
 
   return (
     <AppShell title="Strategy Backtesting">

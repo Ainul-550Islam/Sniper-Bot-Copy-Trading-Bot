@@ -74,7 +74,7 @@ frozen. The POST now uses the frozen signal's normalised type
 | `src/venue.rs` | `ensure_api_key` (L1 → L2), `authed_client`, heartbeat, `order_status` (server reconciliation truth), kill-switch `cancel_all` / `flatten`. |
 | `src/strategy.rs` | `market_gate`, `quote_gate`, `evaluate_market` → `Vec<Verdict>` (`Enter(OrderDecision)` / `Skip{reason}`), `round_size`. Pure functions. |
 | `src/copy.rs` | `CopyEngine` (followed set, dedup ring, `evaluate` → `Follow(OrderSignal)` / `Skip(CopySkipReason)`), `CopyFollowConfig`, `LeaderTrade`. Pure with respect to money (§12a). |
-| `src/copy_feed.rs` | `CopyFeedClient::recent_trades` over the public data API's `/trades`, and the pure, total row parser. Failures are errors, never "no trades". |
+| `src/copy_feed.rs` | `CopyFeedClient::recent_trades` over the public Data API v2 `/v2/trades` endpoint, and the pure, total row parser for its `{ data, pagination }` response. Failures are errors, never "no trades". |
 | `src/copy_run.rs` | `PolyBot::copy_poll_once` — the copy engine's production caller, driven by the `Tick::Copy` arm of the run loop: poll → resolve market → quote → `evaluate` → `process_signal`. |
 | `src/orders.rs` | `OrderSignal` (frozen intent), `intent_key`, `PolyStage`, `RejectReason`, `LocalOrderState` machine, `VenueOrderState` parsing, `TrackedOrder::apply_venue` (cumulative fill accounting), order building and EIP-712 signing (`sign_order_bundle`). |
 | `src/clob.rs` | L1/L2-authenticated CLOB client: `post_order`, `cancel_order(s)`, `order`, `open_orders`, `trades`, `heartbeat`, tick size, books. |
@@ -538,7 +538,7 @@ disconnected pieces:
 | File | Role |
 |---|---|
 | `src/copy.rs` | `CopyEngine`: followed set, dedup ring, and the `evaluate` verdict (`Follow(OrderSignal)` or `Skip(CopySkipReason)`). Pure with respect to money — it commits nothing. |
-| `src/copy_feed.rs` | `CopyFeedClient`: the leader-trade source, `GET {data_url}/trades?user=<wallet>&limit=50` on Polymarket's public data API (no key). Pure, total row parser; a malformed body is an **error**, never "no trades". |
+| `src/copy_feed.rs` | `CopyFeedClient`: the leader-trade source, `GET {data_url}/v2/trades?user=<wallet>&limit=50` on Polymarket's public Data API v2 (no key). Parses the `{ data, pagination }` envelope and snake_case fields; a malformed body is an **error**, never "no trades". |
 | `src/copy_run.rs` | `PolyBot::copy_poll_once` — **the production call site**: poll → resolve market → quote → `evaluate` → `process_signal`. Owned by `PolyBot::run` on its own tick (`Tick::Copy`). |
 
 Construction is gated on configuration: `copy_followed_wallets = []` (the

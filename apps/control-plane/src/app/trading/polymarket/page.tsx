@@ -8,10 +8,11 @@
  */
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import ModuleActionButton from "@/components/trading/ModuleActionButton";
 import SavedStrategiesPanel from "@/components/trading/SavedStrategiesPanel";
+import { sessionStore } from "@/lib/auth";
 import {
   classifyTradingError,
   customerTrading,
@@ -38,8 +39,27 @@ export default function PolymarketPage() {
   const [fills, setFills] = useState<unknown[]>([]);
   const [drift, setDrift] = useState<unknown[]>([]);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setStatus(null);
+    setConfig(null);
+    setOrders([]);
+    setFills([]);
+    setDrift([]);
+    setState({ kind: "loading" });
+  }), []);
 
   const loadData = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    setStatus(null);
+    setConfig(null);
+    setOrders([]);
+    setFills([]);
+    setDrift([]);
     setState({ kind: "loading" });
     try {
       const [st, cfg, ord, fl, rc] = await Promise.all([
@@ -49,11 +69,12 @@ export default function PolymarketPage() {
         customerTrading.polymarketFills(),
         customerTrading.polymarketReconciliation(),
       ]);
+      if (requestId !== requestVersion.current) return;
       setStatus(st);
       setConfig(cfg);
-      setOrders((ord.items as PolyOrderRow[]) ?? []);
-      setFills(fl.items ?? []);
-      setDrift(rc.drift ?? []);
+      setOrders(Array.isArray(ord.items) ? ord.items as PolyOrderRow[] : []);
+      setFills(Array.isArray(fl.items) ? fl.items : []);
+      setDrift(Array.isArray(rc.drift) ? rc.drift : []);
 
       if (st.effective_state === "disabled") {
         setState({
@@ -69,13 +90,27 @@ export default function PolymarketPage() {
         setState({ kind: "ready" });
       }
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) {
+        setStatus(null);
+        setConfig(null);
+        setOrders([]);
+        setFills([]);
+        setDrift([]);
+        setState(classifyTradingError(e));
+      }
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadData());
-  }, [loadData]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void loadData();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [loadData, sessionVersion]);
 
   return (
     <AppShell>

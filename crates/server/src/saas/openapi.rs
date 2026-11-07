@@ -341,7 +341,7 @@ pub fn base_document() -> Value {
             "/api/saas/users/me": {
                 "get": operation(
                     "saas.currentUser",
-                    "The authenticated user plus the organizations they belong to.",
+                    "The authenticated user's profile and organizations. User sessions only; tenant API keys cannot impersonate their creator.",
                     &["users"], true, json!(null),
                     guarded_responses("The user profile and tenant memberships.", json!({
                         "type": "object",
@@ -359,7 +359,7 @@ pub fn base_document() -> Value {
                 ),
                 "patch": operation(
                     "saas.updateProfile",
-                    "Update safe profile fields of the current user.",
+                    "Update safe profile fields of the current user. User sessions only; tenant API keys cannot impersonate their creator.",
                     &["users"], true,
                     json!({ "type": "object", "properties": { "display_name": { "type": "string" } } }),
                     guarded_responses("The updated profile.", json!({ "$ref": "#/components/schemas/UserProfile" })),

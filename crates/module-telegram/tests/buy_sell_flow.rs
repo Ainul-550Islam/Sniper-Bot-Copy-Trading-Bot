@@ -309,6 +309,80 @@ async fn cancel_and_pending_are_honest() {
 }
 
 #[tokio::test]
+async fn replacing_consent_does_not_authorize_an_old_pending_command() {
+    use uuid::Uuid;
+
+    let bot = Bot::start(true).await;
+    bot.grant_consent().await;
+    let nonce = bot.request_buy("0.01").await;
+    let original = memory(&bot).consents.all().pop().expect("granted consent");
+    let now = chrono::Utc::now();
+    bot.stores
+        .consents
+        .revoke(ORG, CHAT, now)
+        .await
+        .expect("revoke original consent");
+    let mut replacement = original;
+    replacement.consent_id = Uuid::new_v4();
+    replacement.granted_at = now;
+    replacement.expires_at = now + chrono::Duration::hours(24);
+    replacement.revoked_at = None;
+    bot.stores
+        .consents
+        .insert(&replacement)
+        .await
+        .expect("insert replacement consent");
+
+    let reply = bot
+        .say(CHAT, LINKED_USER, &format!("/confirm {nonce}"))
+        .await;
+    assert!(reply.contains("consent_changed"), "{reply}");
+    assert_eq!(
+        bot.port.call_count(),
+        0,
+        "no trade with replacement consent"
+    );
+    let command = memory(&bot).commands.all().pop().expect("pending command");
+    assert_eq!(command.status, CommandStatus::Cancelled);
+    bot.stop().await;
+}
+
+#[tokio::test]
+async fn expiration_between_request_and_confirmation_fails_closed() {
+    use uuid::Uuid;
+
+    let bot = Bot::start(true).await;
+    bot.grant_consent().await;
+    let nonce = bot.request_buy("0.01").await;
+    let original = memory(&bot).consents.all().pop().expect("granted consent");
+    let now = chrono::Utc::now();
+    bot.stores
+        .consents
+        .revoke(ORG, CHAT, now)
+        .await
+        .expect("retire original consent");
+    let mut expired = original;
+    expired.consent_id = Uuid::new_v4();
+    expired.granted_at = now - chrono::Duration::hours(2);
+    expired.expires_at = now - chrono::Duration::hours(1);
+    expired.revoked_at = None;
+    bot.stores
+        .consents
+        .insert(&expired)
+        .await
+        .expect("insert expired consent fixture");
+
+    let reply = bot
+        .say(CHAT, LINKED_USER, &format!("/confirm {nonce}"))
+        .await;
+    assert!(reply.contains("consent_expired"), "{reply}");
+    assert_eq!(bot.port.call_count(), 0, "expired consent cannot execute");
+    let command = memory(&bot).commands.all().pop().expect("pending command");
+    assert_eq!(command.status, CommandStatus::Cancelled);
+    bot.stop().await;
+}
+
+#[tokio::test]
 async fn revoking_the_consent_cancels_pending_and_blocks_new_orders() {
     let bot = Bot::start(true).await;
     bot.grant_consent().await;

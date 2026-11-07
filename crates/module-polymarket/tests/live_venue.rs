@@ -8,7 +8,7 @@
 //! * `gamma-api.polymarket.com` — the catalogue we scan (`GammaClient`);
 //! * `clob.polymarket.com` — `/book` prices and `/markets/{condition}` tick
 //!   sizes (`ClobClient`), i.e. the same calls live entries depend on;
-//! * `data-api.polymarket.com/trades` — the leader feed behind copy-follow
+//! * `data-api.polymarket.com/v2/trades` — the leader feed behind copy-follow
 //!   (`CopyFeedClient`), parsed by the production parser;
 //! * the whole local pipeline, fed with that live data, in **paper** mode.
 //!
@@ -43,6 +43,24 @@ const CHAIN_ID: u64 = 137;
 
 fn live_enabled() -> bool {
     std::env::var("LIVE_POLYMARKET").ok().as_deref() == Some("1")
+}
+
+fn trade_rows(payload: &serde_json::Value) -> Option<&[serde_json::Value]> {
+    payload
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| payload.as_array())
+        .map(Vec::as_slice)
+}
+
+fn trade_string<'a>(
+    row: &'a serde_json::Value,
+    v2_name: &str,
+    legacy_name: &str,
+) -> Option<&'a str> {
+    row.get(v2_name)
+        .or_else(|| row.get(legacy_name))
+        .and_then(serde_json::Value::as_str)
 }
 
 /// A real market from the live Gamma catalogue, with a real token id.
@@ -160,18 +178,16 @@ async fn live_data_api_leader_trades_parse_into_leader_trades() {
     }
     // Step 1: find a wallet that is actually trading right now, using the
     // public feed itself (no assumption about who the leaders are).
-    let raw: serde_json::Value = reqwest::get(format!("{DATA}/trades?limit=1"))
+    let raw: serde_json::Value = reqwest::get(format!("{DATA}/v2/trades?limit=1"))
         .await
         .expect("live /trades must answer")
         .json()
         .await
         .expect("live /trades must be JSON");
-    let wallet = raw
-        .as_array()
+    let wallet = trade_rows(&raw)
         .and_then(|rows| rows.first())
-        .and_then(|row| row.get("proxyWallet"))
-        .and_then(|w| w.as_str())
-        .expect("live /trades row without proxyWallet")
+        .and_then(|row| trade_string(row, "proxy_wallet", "proxyWallet"))
+        .expect("live /v2/trades row without proxy_wallet")
         .to_string();
 
     // Step 2: read that wallet through the PRODUCTION client + parser.
@@ -219,17 +235,17 @@ async fn live_leader_trade_reaches_a_paper_fill_through_the_engine() {
         return;
     }
     let feed = CopyFeedClient::with_base_url(DATA);
-    let raw: serde_json::Value = reqwest::get(format!("{DATA}/trades?limit=25"))
+    let raw: serde_json::Value = reqwest::get(format!("{DATA}/v2/trades?limit=25"))
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let rows = raw.as_array().expect("live /trades array");
+    let rows = trade_rows(&raw).expect("live /v2/trades data array");
     let mut wallet = None;
     for row in rows {
         if row.get("side").and_then(|s| s.as_str()) == Some("BUY") {
-            if let Some(w) = row.get("proxyWallet").and_then(|w| w.as_str()) {
+            if let Some(w) = trade_string(row, "proxy_wallet", "proxyWallet") {
                 wallet = Some(w.to_string());
                 break;
             }

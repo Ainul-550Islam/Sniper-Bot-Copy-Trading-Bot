@@ -39,6 +39,145 @@ async fn columns(pool: &PgPool, table: &str) -> BTreeSet<String> {
     .collect()
 }
 
+// A trigger SELECT under tenant RLS cannot distinguish a missing parent from
+// an invisible foreign parent. Exercise actual inserts/updates as bot_app, not
+// just an admin query or an assertion that the constraint's name exists.
+fn assert_custody_profile_fk(error: sqlx::Error) {
+    let database_error = error
+        .as_database_error()
+        .expect("custody tenant mismatch must produce a database constraint error");
+    assert_eq!(database_error.code().as_deref(), Some("23503"));
+    assert_eq!(
+        database_error.constraint(),
+        Some("custody_signers_profile_org_fk"),
+        "a uniqueness error, generic trigger failure or RLS rejection is not the FK regression"
+    );
+}
+
+async fn custody_profile_tenant_fk_under_rls(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_a: uuid::Uuid,
+    organization_b: uuid::Uuid,
+) {
+    let profile_a = uuid::Uuid::new_v4();
+    let profile_b = uuid::Uuid::new_v4();
+    let signer_a = uuid::Uuid::new_v4();
+    for (profile, organization, name) in [
+        (profile_a, organization_a, "own-profile"),
+        (profile_b, organization_b, "foreign-profile"),
+    ] {
+        sqlx::query(
+            "INSERT INTO custody_profiles (id, organization_id, name, provider_type) VALUES ($1, $2, $3, 'local')",
+        )
+        .bind(profile)
+        .bind(organization)
+        .bind(name)
+        .execute(&mut **transaction)
+        .await
+        .expect("privileged custody profile fixtures must insert");
+    }
+    sqlx::query("SET LOCAL ROLE bot_app")
+        .execute(&mut **transaction)
+        .await
+        .expect("disposable migration test admin must be allowed to SET ROLE bot_app");
+    sqlx::query("SELECT set_config('app.org_id', $1, true)")
+        .bind(organization_a.to_string())
+        .execute(&mut **transaction)
+        .await
+        .expect("tenant A RLS context must be set");
+    let tested_role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&mut **transaction)
+        .await
+        .expect("tested database role must be readable");
+    assert_eq!(tested_role, "bot_app");
+    let foreign_visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM custody_profiles WHERE id = $1")
+            .bind(profile_b)
+            .fetch_one(&mut **transaction)
+            .await
+            .expect("RLS visibility must be checked");
+    assert_eq!(foreign_visible, 0, "foreign profile must be hidden by RLS");
+
+    sqlx::query(
+        "INSERT INTO custody_signers (id, organization_id, custody_profile_id, logical_identity, provider_type, public_address) VALUES ($1, $2, $3, 'same-org-control', 'local', 'same-org-fixture')",
+    )
+    .bind(signer_a)
+    .bind(organization_a)
+    .bind(profile_a)
+    .execute(&mut **transaction)
+    .await
+    .expect("a same-organization signer must still insert under bot_app");
+
+    sqlx::query("SAVEPOINT foreign_custody_insert")
+        .execute(&mut **transaction)
+        .await
+        .expect("foreign-profile insert savepoint must start");
+    let rejected_insert = sqlx::query(
+        "INSERT INTO custody_signers (id, organization_id, custody_profile_id, logical_identity, provider_type, public_address) VALUES ($1, $2, $3, 'foreign-org-insert', 'local', 'foreign-org-fixture')",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(organization_a)
+    .bind(profile_b)
+    .execute(&mut **transaction)
+    .await
+    .expect_err("a signer must not attach to an RLS-hidden foreign profile");
+    assert_custody_profile_fk(rejected_insert);
+    sqlx::query("ROLLBACK TO SAVEPOINT foreign_custody_insert")
+        .execute(&mut **transaction)
+        .await
+        .expect("failed foreign-profile insert must roll back to its savepoint");
+    sqlx::query("RELEASE SAVEPOINT foreign_custody_insert")
+        .execute(&mut **transaction)
+        .await
+        .expect("foreign-profile insert savepoint must release");
+
+    sqlx::query("SAVEPOINT foreign_custody_update")
+        .execute(&mut **transaction)
+        .await
+        .expect("foreign-profile update savepoint must start");
+    let rejected_update =
+        sqlx::query("UPDATE custody_signers SET custody_profile_id = $1 WHERE id = $2")
+            .bind(profile_b)
+            .bind(signer_a)
+            .execute(&mut **transaction)
+            .await
+            .expect_err("an existing signer must not move to an RLS-hidden foreign profile");
+    assert_custody_profile_fk(rejected_update);
+    sqlx::query("ROLLBACK TO SAVEPOINT foreign_custody_update")
+        .execute(&mut **transaction)
+        .await
+        .expect("failed signer update must roll back to its savepoint");
+    sqlx::query("RELEASE SAVEPOINT foreign_custody_update")
+        .execute(&mut **transaction)
+        .await
+        .expect("foreign-profile update savepoint must release");
+
+    sqlx::query("RESET ROLE")
+        .execute(&mut **transaction)
+        .await
+        .expect("restore migration admin for the parent-row mutation check");
+    sqlx::query("SAVEPOINT foreign_custody_parent_update")
+        .execute(&mut **transaction)
+        .await
+        .expect("parent organization update savepoint must start");
+    let rejected_parent_update =
+        sqlx::query("UPDATE custody_profiles SET organization_id = $1 WHERE id = $2")
+            .bind(organization_b)
+            .bind(profile_a)
+            .execute(&mut **transaction)
+            .await
+            .expect_err("an admin parent edit must not orphan the signer's tenant binding");
+    assert_custody_profile_fk(rejected_parent_update);
+    sqlx::query("ROLLBACK TO SAVEPOINT foreign_custody_parent_update")
+        .execute(&mut **transaction)
+        .await
+        .expect("failed parent organization update must roll back to its savepoint");
+    sqlx::query("RELEASE SAVEPOINT foreign_custody_parent_update")
+        .execute(&mut **transaction)
+        .await
+        .expect("parent organization update savepoint must release");
+}
+
 #[tokio::test]
 async fn fresh_migrations_apply_and_keep_operator_and_tenant_tables_separate() {
     let Some(url) = migration_url() else {
@@ -87,6 +226,33 @@ async fn fresh_migrations_apply_and_keep_operator_and_tenant_tables_separate() {
         .run(&pool)
         .await
         .expect("every embedded migration must apply to an empty database");
+
+    let realized_pnl_nullable: Option<String> = sqlx::query_scalar(
+        "SELECT is_nullable::text FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'positions'
+           AND column_name = 'realized_pnl_quote'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("realized PnL column metadata must be queryable");
+    assert_eq!(
+        realized_pnl_nullable.as_deref(),
+        Some("YES"),
+        "legacy realized PnL must stay explicitly unknown rather than being backfilled as a guessed zero"
+    );
+    let realized_at_nullable: Option<String> = sqlx::query_scalar(
+        "SELECT is_nullable::text FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'positions'
+           AND column_name = 'realized_at'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("realized exit timestamp metadata must be queryable");
+    assert_eq!(
+        realized_at_nullable.as_deref(),
+        Some("YES"),
+        "legacy exit timestamps must remain unknown rather than borrowing updated_at"
+    );
 
     let operator_strategies = columns(&pool, "strategies").await;
     assert!(operator_strategies.contains("module"));
@@ -180,6 +346,167 @@ async fn fresh_migrations_apply_and_keep_operator_and_tenant_tables_separate() {
             .await
             .expect("test organization must insert");
     }
+
+    // Regression for the 0033/0070 ledger identity swap: event ids are not
+    // organization-prefixed, so two tenants may have the same event id and
+    // sequence number. Both tenant-local events must retain their posting;
+    // a leftover UNIQUE (event_id, seq) silently drops the second line in
+    // the writer's ON CONFLICT path.
+    sqlx::query("SET LOCAL ROLE bot_system")
+        .execute(&mut *transaction)
+        .await
+        .expect("migration test role must be able to exercise tenant tables");
+    let shared_reference = "shared-reference";
+    let shared_event_id = bot_core::accounting::event_id_for(
+        bot_core::accounting::EventKind::Deposit,
+        bot_core::models::BotModule::Sniper,
+        bot_core::models::Venue::PumpFun,
+        "shared-wallet",
+        shared_reference,
+    );
+    for organization_id in [organization_a, organization_b] {
+        sqlx::query(
+            "INSERT INTO ledger_events (organization_id, event_id, kind, module, venue, wallet, asset, quote_asset, mode, reference_id, ts) VALUES ($1, $2, 'deposit', 'sniper', 'pump.fun', 'shared-wallet', 'USD', 'USD', 'paper', $3, $4)",
+        )
+        .bind(organization_id)
+        .bind(&shared_event_id)
+        .bind(shared_reference)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .expect("same event id must be independent across organizations");
+        sqlx::query(
+            "INSERT INTO ledger_postings (organization_id, event_id, seq, account, wallet, asset, side, amount) VALUES ($1, $2, 0, 'cash', 'shared-wallet', 'USD', 'debit', 1.0) ON CONFLICT (organization_id, event_id, seq) DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(&shared_event_id)
+        .execute(&mut *transaction)
+        .await
+        .expect("same event id and sequence must allow one posting per organization");
+    }
+    let shared_postings: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ledger_postings WHERE event_id = $1 AND seq = 0")
+            .bind(&shared_event_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("tenant-local postings must be countable");
+    assert_eq!(
+        shared_postings, 2,
+        "both tenants' posting lines must persist"
+    );
+
+    // Runtime child rows must not be able to name another tenant's parent,
+    // even when the child row itself passes its organization RLS policy.
+    let schedule_a = format!("migration-dca-{}", uuid::Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO dca_schedules (id, organization_id, mint, amount_per_run_sol, interval_secs, budget_sol, next_run_at) VALUES ($1, $2, 'test-mint', 0.1, 60, 1.0, $3)",
+    )
+    .bind(&schedule_a)
+    .bind(organization_a)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .expect("tenant A DCA schedule must insert");
+    sqlx::query(
+        "INSERT INTO dca_runs (organization_id, schedule_id, slot_at, amount_sol) VALUES ($1, $2, $3, 0.1)",
+    )
+    .bind(organization_a)
+    .bind(&schedule_a)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .expect("same-tenant DCA run must insert");
+    sqlx::query("SAVEPOINT cross_tenant_dca_run")
+        .execute(&mut *transaction)
+        .await
+        .expect("cross-tenant DCA savepoint must start");
+    let dca_cross_tenant = sqlx::query(
+        "INSERT INTO dca_runs (organization_id, schedule_id, slot_at, amount_sol) VALUES ($1, $2, $3, 0.1)",
+    )
+    .bind(organization_b)
+    .bind(&schedule_a)
+    .bind(now + chrono::Duration::seconds(1))
+    .execute(&mut *transaction)
+    .await
+    .expect_err("tenant B must not attach a DCA run to tenant A's schedule");
+    let dca_error = dca_cross_tenant
+        .as_database_error()
+        .expect("cross-tenant DCA reference must fail at a database constraint");
+    assert_eq!(dca_error.code().as_deref(), Some("23503"));
+    assert_eq!(
+        dca_error.constraint(),
+        Some("dca_runs_schedule_tenant_fkey")
+    );
+    sqlx::query("ROLLBACK TO SAVEPOINT cross_tenant_dca_run")
+        .execute(&mut *transaction)
+        .await
+        .expect("cross-tenant DCA insert must roll back to savepoint");
+    sqlx::query("RELEASE SAVEPOINT cross_tenant_dca_run")
+        .execute(&mut *transaction)
+        .await
+        .expect("cross-tenant DCA savepoint must release");
+
+    let config_a = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tenant_sso_configs (id, organization_id, provider_type, issuer_url, client_id) VALUES ($1, $2, 'oidc', 'https://idp.example', 'migration-test')",
+    )
+    .bind(config_a)
+    .bind(organization_a)
+    .execute(&mut *transaction)
+    .await
+    .expect("tenant A SSO config must insert");
+    let pending_state_a = format!("migration-state-a-{}", uuid::Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO sso_pending_auth (state, organization_id, config_id, code_verifier, redirect_uri, created_at, expires_at) VALUES ($1, $2, $3, $4, 'https://app.example/callback', $5, $6)",
+    )
+    .bind(&pending_state_a)
+    .bind(organization_a)
+    .bind(config_a)
+    .bind("v".repeat(43))
+    .bind(now)
+    .bind(now + chrono::Duration::minutes(10))
+    .execute(&mut *transaction)
+    .await
+    .expect("same-tenant SSO pending state must insert");
+    sqlx::query("SAVEPOINT cross_tenant_sso_state")
+        .execute(&mut *transaction)
+        .await
+        .expect("cross-tenant SSO savepoint must start");
+    let pending_state_b = format!("migration-state-b-{}", uuid::Uuid::new_v4());
+    let sso_cross_tenant = sqlx::query(
+        "INSERT INTO sso_pending_auth (state, organization_id, config_id, code_verifier, redirect_uri, created_at, expires_at) VALUES ($1, $2, $3, $4, 'https://app.example/callback', $5, $6)",
+    )
+    .bind(&pending_state_b)
+    .bind(organization_b)
+    .bind(config_a)
+    .bind("w".repeat(43))
+    .bind(now)
+    .bind(now + chrono::Duration::minutes(10))
+    .execute(&mut *transaction)
+    .await
+    .expect_err("tenant B must not bind a pending SSO flow to tenant A's config");
+    let sso_error = sso_cross_tenant
+        .as_database_error()
+        .expect("cross-tenant SSO reference must fail at a database constraint");
+    assert_eq!(sso_error.code().as_deref(), Some("23503"));
+    assert_eq!(
+        sso_error.constraint(),
+        Some("sso_pending_auth_config_tenant_fkey")
+    );
+    sqlx::query("ROLLBACK TO SAVEPOINT cross_tenant_sso_state")
+        .execute(&mut *transaction)
+        .await
+        .expect("cross-tenant SSO insert must roll back to savepoint");
+    sqlx::query("RELEASE SAVEPOINT cross_tenant_sso_state")
+        .execute(&mut *transaction)
+        .await
+        .expect("cross-tenant SSO savepoint must release");
+
+    sqlx::query("RESET ROLE")
+        .execute(&mut *transaction)
+        .await
+        .expect("restore the migration role for subsequent contract checks");
+
     let user_id = uuid::Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'migration-test-hash')",
@@ -450,6 +777,8 @@ async fn fresh_migrations_apply_and_keep_operator_and_tenant_tables_separate() {
         projected_session.as_deref(),
         Some(backfill_token_hash.as_str())
     );
+
+    custody_profile_tenant_fk_under_rls(&mut transaction, organization_a, organization_b).await;
 
     transaction
         .rollback()

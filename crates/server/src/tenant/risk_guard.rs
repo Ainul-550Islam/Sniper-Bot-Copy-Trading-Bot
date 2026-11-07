@@ -18,6 +18,18 @@ pub fn check(
     size_usd: Option<f64>,
     slippage_bps: Option<u32>,
 ) -> GuardOutcome {
+    if [
+        effective.risk.max_position_usd,
+        effective.risk.daily_loss_usd_cap,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|limit| !limit.is_finite() || limit <= 0.0)
+        || effective.risk.max_slippage_bps == Some(0)
+    {
+        return GuardOutcome::Deny(DenyReason::RiskValuesInvalid);
+    }
+
     if let Some(size) = size_usd {
         if !size.is_finite() || size <= 0.0 {
             return GuardOutcome::Deny(DenyReason::RiskValuesInvalid);
@@ -124,6 +136,39 @@ mod tests {
         );
         assert_eq!(
             check(&effective(None), Some(-5.0), None)
+                .deny_reason()
+                .unwrap()
+                .as_str(),
+            "risk_values_invalid"
+        );
+    }
+
+    #[test]
+    fn invalid_effective_limits_fail_closed_without_order_values() {
+        let bad_position_cap = effective(Some(f64::NAN));
+        assert_eq!(bad_position_cap.risk.max_position_usd, Some(0.0));
+        assert_eq!(
+            check(&bad_position_cap, None, None)
+                .deny_reason()
+                .unwrap()
+                .as_str(),
+            "risk_values_invalid"
+        );
+
+        let mut bad_other_caps = effective(None);
+        bad_other_caps.risk.daily_loss_usd_cap = Some(f64::INFINITY);
+        assert_eq!(
+            check(&bad_other_caps, None, None)
+                .deny_reason()
+                .unwrap()
+                .as_str(),
+            "risk_values_invalid"
+        );
+
+        bad_other_caps.risk.daily_loss_usd_cap = None;
+        bad_other_caps.risk.max_slippage_bps = Some(0);
+        assert_eq!(
+            check(&bad_other_caps, None, None)
                 .deny_reason()
                 .unwrap()
                 .as_str(),

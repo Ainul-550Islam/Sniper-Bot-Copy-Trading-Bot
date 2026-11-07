@@ -544,8 +544,8 @@ impl ClaimGuard {
     /// Run `work` under active lease renewal (every lease/3 with light
     /// jitter, bounded by [`MAX_RENEWALS`]). If a renewal is rejected the
     /// work future is NOT cancelled mid-flight (a broadcast in progress
-    /// cannot be un-sent) — but the returned guard is marked fenced-lost so
-    /// the caller's next `fence()`/`complete()` reports the loss. Money
+    /// cannot be un-sent) — the caller must still consult the store with
+    /// `fence()` before each continuation; no local lost flag is marked. Money
     /// paths therefore call `fence()` immediately BEFORE the broadcast
     /// (inside `work`), which is where the cancellation is safe.
     pub async fn run_guarded<F>(&mut self, work: F) -> F::Output
@@ -793,7 +793,7 @@ struct MemRow {
     claim: ExecutionClaim,
     updated_at: DateTime<Utc>,
     /// Lease length recorded at claim time (mirrors Redis `lease_span` and
-    /// the PG `lease_until - claimed_at` derivation): renewals extend by
+    /// the PG `lease_until - last_heartbeat` derivation): renewals extend by
     /// exactly this, never by a drifting recomputation.
     lease_span: Duration,
 }

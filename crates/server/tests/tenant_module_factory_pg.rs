@@ -18,7 +18,7 @@ use bot_core::db::Database;
 use bot_core::execution::{
     AuthorityChecklist, ExecutionTrace, TenantExecutionContext, AUTHORITY_CHECK_ORDER,
 };
-use bot_core::models::{BotModule, ExecutionMode};
+use bot_core::models::{BotModule, ExecutionMode, Position, TradeSource, Venue};
 use bot_core::state::AppState;
 use bot_core::tenant::{OrganizationId, RuntimeGeneration, RuntimeId, SignerProvider};
 use bot_core::trading_repository::copy::{
@@ -27,6 +27,7 @@ use bot_core::trading_repository::copy::{
 };
 use bot_core::trading_repository::executions::read::TenantExecutionRead;
 use bot_core::trading_repository::executions::write::TenantExecutionWrite;
+use bot_core::trading_repository::positions::{TenantPositionRead, TenantPositionWrite};
 use bot_core::trading_repository::query_scope::TradingQueryScope;
 use bot_core::trading_repository::write_scope::{TenantWriteScope, WriteOrigin};
 use chrono::Utc;
@@ -274,9 +275,71 @@ async fn sniper_sink_writes_only_the_bound_tenants_rows() {
 
     // A sink built for tenant B refuses tenant A's outcome outright.
     let write_b = TenantWriteScope::new(tenant_b, "pg:test", WriteOrigin::Http).unwrap();
-    let sink_b = RepoExecutionSink::new(TenantExecutionWrite::new(Arc::clone(&db)), write_b);
+    let sink_b = RepoExecutionSink::new(
+        TenantExecutionWrite::new(Arc::clone(&db)),
+        TenantPositionWrite::new(Arc::clone(&db)),
+        write_b,
+    );
     let err = sink_b.record(&tx).await.unwrap_err();
     assert!(err.to_string().contains("organization mismatch"), "{err}");
+}
+
+#[tokio::test]
+async fn tenant_position_sink_persists_and_scopes_the_risk_projection() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: tenant_position_sink_pg — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let tenant_a = org(&db, &format!("position-a-{run}")).await;
+    let tenant_b = org(&db, &format!("position-b-{run}")).await;
+    let write_a = TenantWriteScope::new(tenant_a, "pg:test", WriteOrigin::Job).unwrap();
+    let write_b = TenantWriteScope::new(tenant_b, "pg:test", WriteOrigin::Job).unwrap();
+    let sink_a = RepoExecutionSink::new(
+        TenantExecutionWrite::new(Arc::clone(&db)),
+        TenantPositionWrite::new(Arc::clone(&db)),
+        write_a,
+    );
+    let sink_b = RepoExecutionSink::new(
+        TenantExecutionWrite::new(Arc::clone(&db)),
+        TenantPositionWrite::new(Arc::clone(&db)),
+        write_b,
+    );
+    let id = format!("tenant-position-{run}");
+    let mut position = Position::new(
+        id.clone(),
+        TradeSource::Sniper,
+        Venue::PumpFun,
+        ExecutionMode::Live,
+        "mint-risk-projection".into(),
+        "RISK".into(),
+        "SOL".into(),
+    );
+    position.apply_buy(100.0, 0.01, 1.0);
+    sink_a
+        .record_position(tenant_a, &position)
+        .await
+        .expect("persist A");
+
+    let read = TenantPositionRead::new(Arc::clone(&db));
+    let row = read
+        .get(&TradingQueryScope::new(tenant_a), &id)
+        .await
+        .expect("tenant A reads its position");
+    assert_eq!(row.organization_id, tenant_a);
+    assert_eq!(row.source, "sniper");
+    assert_eq!(row.status, "open");
+    assert!((row.cost_basis - 1.0).abs() < 1e-9);
+    assert!(read
+        .get(&TradingQueryScope::new(tenant_b), &id)
+        .await
+        .is_err());
+
+    let error = sink_b
+        .record_position(tenant_a, &position)
+        .await
+        .expect_err("foreign position must be refused before repository access");
+    assert!(error.to_string().contains("organization mismatch"));
 }
 
 /// Record through the EXECUTOR's own attached sink (the exact object
@@ -371,7 +434,11 @@ async fn copy_sink_writes_only_the_bound_tenants_rows_and_is_idempotent() {
 
     // A sink built for tenant B refuses tenant A's context outright.
     let write_b = TenantWriteScope::new(tenant_b, "pg:test", WriteOrigin::Http).unwrap();
-    let sink_b = RepoCopySink::new(TenantCopyEventRepo::new(Arc::clone(&db)), write_b);
+    let sink_b = RepoCopySink::new(
+        TenantCopyEventRepo::new(Arc::clone(&db)),
+        TenantPositionWrite::new(Arc::clone(&db)),
+        write_b,
+    );
     let foreign_ctx =
         CopyTenantContext::adapt(issued(tenant_a, BotModule::Copy, &address)).expect("adapt");
     let err = sink_b

@@ -29,7 +29,7 @@ export interface AlertsResponse {
 }
 
 /** Lists tenant alerts with optional severity and acknowledgement filters. */
-export async function listAlerts(options?: { severity?: string; unreadOnly?: boolean }): Promise<AlertsResponse> {
+export async function listAlerts(options?: { severity?: AlertSeverity; unreadOnly?: boolean }): Promise<AlertsResponse> {
   const params = new URLSearchParams();
   if (options?.severity) params.set("severity", options.severity);
   if (options?.unreadOnly) params.set("unread", "true");

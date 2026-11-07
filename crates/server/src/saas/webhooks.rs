@@ -351,26 +351,37 @@ fn validate_event_types(events: &[String]) -> Result<Vec<String>, String> {
 fn forbidden_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(value) => {
+            let [a, b, c, _] = value.octets();
             value.is_private()
                 || value.is_loopback()
                 || value.is_link_local()
                 || value.is_unspecified()
+                || value.is_broadcast()
                 || value.is_multicast()
-                || value.octets()[0] == 0
-                || value.octets()[0] == 100 && (value.octets()[1] & 0b1100_0000) == 0b0100_0000
-                || value.octets()[0] == 198 && matches!(value.octets()[1], 18 | 19)
-                || value.octets()[0] == 198 && value.octets()[1] == 51 && value.octets()[2] == 100
-                || value.octets()[0] == 203 && value.octets()[1] == 0 && value.octets()[2] == 113
+                || a == 0
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 224
         }
         IpAddr::V6(value) => {
+            if let Some(mapped) = value.to_ipv4_mapped() {
+                return forbidden_ip(IpAddr::V4(mapped));
+            }
+            let segments = value.segments();
             value.is_loopback()
                 || value.is_unspecified()
                 || value.is_multicast()
-                || (value.segments()[0] & 0xfe00) == 0xfc00
-                || (value.segments()[0] & 0xffc0) == 0xfe80
-                || value
-                    .to_ipv4()
-                    .is_some_and(|mapped| forbidden_ip(IpAddr::V4(mapped)))
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xe000) != 0x2000
+                || (segments[0] == 0x2001 && (segments[1] <= 0x01ff || segments[1] == 0x0db8))
+                || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0)
+                || segments[0] == 0x2002
         }
     }
 }
@@ -1016,6 +1027,7 @@ async fn test_webhook(
     let client = match reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(DELIVERY_TIMEOUT)
+        .no_proxy()
         .resolve(&host, public_socket)
         .build()
     {
@@ -1166,6 +1178,30 @@ async fn test_webhook(
 #[cfg(test)]
 mod encryption_key_config_tests {
     use super::*;
+
+    #[test]
+    fn webhook_destination_filter_rejects_private_and_reserved_addresses() {
+        for blocked in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "100.64.0.1",
+            "169.254.169.254",
+            "192.0.2.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "2001:db8::1",
+            "3fff::1",
+        ] {
+            assert!(forbidden_ip(blocked.parse().unwrap()), "allowed {blocked}");
+        }
+        for allowed in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            assert!(!forbidden_ip(allowed.parse().unwrap()), "blocked {allowed}");
+        }
+    }
 
     #[test]
     fn encryption_key_must_be_valid_base64_and_exactly_32_bytes() {

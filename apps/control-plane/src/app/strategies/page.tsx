@@ -8,7 +8,7 @@
  * and Polymarket CLOB modules.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import StrategyCard from "@/components/strategy/strategy-card";
 import StrategyForm from "@/components/strategy/strategy-form";
@@ -20,23 +20,36 @@ export default function StrategiesPage() {
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [filterModule, setFilterModule] = useState<string>("all");
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++requestVersion.current;
     setLoading(true);
     setError(null);
+    setStrategies([]);
     try {
       const mod = filterModule === "all" ? undefined : filterModule;
       const data = await listStrategies(mod);
-      setStrategies(data);
+      if (requestId === requestVersion.current) setStrategies(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load strategies");
+      if (requestId === requestVersion.current) {
+        setStrategies([]);
+        setError(err instanceof Error ? err.message : "Failed to load strategies");
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [filterModule]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

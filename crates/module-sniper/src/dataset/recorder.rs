@@ -32,7 +32,9 @@ use super::format::{
 };
 use super::hashing::{hash_chunk, prev_link_for, sha256_root, GENESIS_PREV_SHA256};
 use super::policy::RecorderConfig;
-use super::store::{read_chunk_text, truncate_partial_line, DatasetStore, FsDatasetStore};
+use super::store::{
+    read_chunk_text, truncate_partial_line, validate_dataset_id, DatasetStore, FsDatasetStore,
+};
 
 /// Measured counters shared between all sinks and the worker.
 #[derive(Default)]
@@ -118,6 +120,7 @@ impl Recorder {
         manifest: DatasetManifest,
         cfg: &RecorderConfig,
     ) -> BotResult<(RecorderSink, Recorder)> {
+        cfg.validate()?;
         let (tx, rx) = mpsc::channel(cfg.channel_capacity);
         let counters = Arc::new(RecorderCounters::default());
         let sink = RecorderSink {
@@ -141,6 +144,7 @@ impl Recorder {
         dataset_id: &str,
         cfg: &RecorderConfig,
     ) -> BotResult<(RecorderSink, Recorder)> {
+        cfg.validate()?;
         let (tx, rx) = mpsc::channel(cfg.channel_capacity);
         let counters = Arc::new(RecorderCounters::default());
         let sink = RecorderSink {
@@ -242,6 +246,8 @@ impl ChunkWriter {
         mut manifest: DatasetManifest,
         cfg: &RecorderConfig,
     ) -> BotResult<Self> {
+        cfg.validate()?;
+        validate_dataset_id(&manifest.dataset_id)?;
         let dir = store.dataset_dir(&manifest.dataset_id);
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
@@ -271,6 +277,7 @@ impl ChunkWriter {
         dataset_id: &str,
         cfg: &RecorderConfig,
     ) -> BotResult<Self> {
+        cfg.validate()?;
         let manifest = store.load_manifest(dataset_id)?;
         if manifest.status != DatasetStatus::Recording {
             return Err(BotError::InvalidArgument(format!(

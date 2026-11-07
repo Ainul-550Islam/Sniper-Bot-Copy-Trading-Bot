@@ -1,0 +1,19 @@
+# This directory is the Compose frontend build context. The repository-root
+# .dockerignore is NOT applied here. Never overwrite npm-ci dependencies with
+# host modules, reuse host build output, or send local credentials to a builder.
+node_modules
+.next
+coverage
+test-results
+playwright-report
+.git
+.env
+.env.*
+!.env.template
+*.pem
+*.key
+*.keypair.json
+*-keypair.json
+*.log
+*.tsbuildinfo
+.DS_Store

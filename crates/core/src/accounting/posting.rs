@@ -310,11 +310,19 @@ pub fn expand(event: &AccountingEvent, cost_of_slice: f64) -> Result<Entry, Post
         },
     }
     let entry = Entry { postings: lines };
-    debug_assert!(
-        entry.is_balanced(),
-        "unbalanced entry for {}",
-        event.summary()
-    );
+    if entry.postings.iter().any(|posting| {
+        !posting.amount.is_finite() || posting.amount < 0.0 || !posting.quantity.is_finite()
+    }) {
+        return Err(PostingError::Invalid(
+            "posting amounts and quantities must be finite".into(),
+        ));
+    }
+    let (debits, credits) = entry.totals();
+    if !debits.is_finite() || !credits.is_finite() || !entry.is_balanced() {
+        return Err(PostingError::Invalid(
+            "expanded entry is non-finite or unbalanced".into(),
+        ));
+    }
     Ok(entry)
 }
 
@@ -415,6 +423,19 @@ mod tests {
         let e = expand(&fund, 0.0).unwrap();
         assert!(e.is_balanced());
         assert!((e.net(Account::Cash) + 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn arithmetic_overflow_rejects_the_entry_instead_of_panicking_or_booking() {
+        let mut sell = fill(EventSide::Sell, 1.0, 1.0, f64::MAX, f64::MAX);
+        assert!(sell.validate().is_ok());
+        assert!(matches!(expand(&sell, 0.0), Err(PostingError::Invalid(_))));
+
+        sell.kind = EventKind::Withdrawal;
+        sell.side = None;
+        sell.quantity = 0.0;
+        assert!(sell.validate().is_ok());
+        assert!(matches!(expand(&sell, 0.0), Err(PostingError::Invalid(_))));
     }
 
     #[test]

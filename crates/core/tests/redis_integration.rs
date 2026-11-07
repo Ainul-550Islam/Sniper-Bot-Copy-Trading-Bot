@@ -347,3 +347,273 @@ async fn redis_runtime_flags_roundtrip() {
     kv.del("own:flag:kill_switch").await.unwrap();
     kv.del("own:flag:module:copy").await.unwrap();
 }
+
+// Audit regressions: every key is run-unique and all protocol fixtures are
+// applied only to these disposable keys. No global FLUSHDB/FLUSHALL.
+async fn audit_redis_connection() -> redis::aio::ConnectionManager {
+    redis::aio::ConnectionManager::new(redis::Client::open(url().expect("REDIS_URL")).unwrap())
+        .await
+        .expect("configured Redis must connect")
+}
+
+#[tokio::test]
+async fn audit_redis_renewal_keeps_hash_alive_for_entire_renewed_lease() {
+    let Some(kv) = setup().await else { return };
+    let id = format!("audit:retention:{}", run_id());
+    let key = format!("own:claim:{id}");
+    let reg = OwnershipRegistry::new(
+        std::sync::Arc::new(RedisClaimStore::new(kv.clone())),
+        "audit-owner",
+        Duration::from_secs(30),
+        Duration::from_secs(1),
+    );
+    let mut guard = match reg.claim(&id, "entry", "audit", "", "").await.unwrap() {
+        ClaimOutcome::Owned(g) => g,
+        _ => panic!("fresh key must be acquired"),
+    };
+    let mut conn = audit_redis_connection().await;
+    // Model the remaining hash TTL late in a sequence of successful renewals.
+    // The lease is still valid, but the original finite key TTL is near expiry.
+    let _: i64 = redis::cmd("PEXPIRE")
+        .arg(&key)
+        .arg(5_000)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(guard.renew().await.unwrap());
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    kv.del(&key).await.unwrap();
+    assert!(
+        ttl >= 30_000,
+        "hash can disappear before the renewed 30s lease: remaining TTL {ttl}ms"
+    );
+}
+
+#[tokio::test]
+async fn audit_redis_rejected_renewal_does_not_extend_retention() {
+    use bot_core::ownership::ClaimStore;
+    let Some(kv) = setup().await else { return };
+    let id = format!("audit:ttl-fencing:{}", run_id());
+    let key = format!("own:claim:{id}");
+    let reg = redis_registry(&kv, "audit-owner", Duration::from_secs(30));
+    let guard = match reg.claim(&id, "entry", "audit", "", "").await.unwrap() {
+        ClaimOutcome::Owned(g) => g,
+        _ => panic!("fresh key must be acquired"),
+    };
+    let mut conn = audit_redis_connection().await;
+    let _: i64 = redis::cmd("PEXPIRE")
+        .arg(&key)
+        .arg(5_000)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let store = RedisClaimStore::new(kv.clone());
+    assert!(!store
+        .renew(&id, "wrong-owner", guard.epoch())
+        .await
+        .unwrap());
+    assert!(!store
+        .renew(&id, "audit-owner", guard.epoch() + 1)
+        .await
+        .unwrap());
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    kv.del(&key).await.unwrap();
+    assert!(
+        (1..=5_000).contains(&ttl),
+        "rejected renewal extended the TTL: {ttl}"
+    );
+}
+
+#[tokio::test]
+async fn audit_redis_handoff_retention_covers_long_grace() {
+    let Some(kv) = setup().await else { return };
+    let id = format!("audit:long-grace:{}", run_id());
+    let key = format!("own:claim:{id}");
+    let grace = Duration::from_secs(8 * 24 * 3600);
+    let reg = OwnershipRegistry::new(
+        std::sync::Arc::new(RedisClaimStore::new(kv.clone())),
+        "audit-owner",
+        Duration::from_secs(30),
+        grace,
+    );
+    let mut guard = match reg.claim(&id, "entry", "audit", "", "").await.unwrap() {
+        ClaimOutcome::Owned(g) => g,
+        _ => panic!("fresh key must be acquired"),
+    };
+    assert!(guard.hand_off().await);
+    let mut conn = audit_redis_connection().await;
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    kv.del(&key).await.unwrap();
+    assert!(
+        ttl >= grace.as_millis() as i64,
+        "handoff hash expires before its configured grace: {ttl}ms"
+    );
+}
+
+#[tokio::test]
+async fn audit_redis_legacy_handoff_without_recorded_grace_is_not_prematurely_expired() {
+    let Some(kv) = setup().await else { return };
+    let id = format!("audit:legacy-grace:{}", run_id());
+    let key = format!("own:claim:{id}");
+    let reg = redis_registry(&kv, "audit-owner", Duration::from_secs(30));
+    let mut guard = match reg.claim(&id, "entry", "audit", "", "").await.unwrap() {
+        ClaimOutcome::Owned(g) => g,
+        _ => panic!("fresh key must be acquired"),
+    };
+    let mut conn = audit_redis_connection().await;
+    // Exact legacy layout: these hashes did not persist their grace interval.
+    let _: i64 = redis::cmd("HDEL")
+        .arg(&key)
+        .arg("grace_span")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(guard.hand_off().await);
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    kv.del(&key).await.unwrap();
+    assert_eq!(
+        ttl, -1,
+        "legacy handoff must retain its fence when its grace cannot be reconstructed"
+    );
+}
+
+async fn audit_redis_unrepresentable_claim_duration(lease_overflow: bool) {
+    use bot_core::ownership::{ClaimRequest, ClaimStore, StoreContext};
+    let Some(kv) = setup().await else { return };
+    let id = format!("audit:duration:{}", run_id());
+    let key = format!("own:claim:{id}");
+    let req = ClaimRequest {
+        execution_id: id,
+        kind: "entry".into(),
+        module: "audit".into(),
+        strategy: String::new(),
+        symbol: String::new(),
+    };
+    let huge = Duration::from_secs(u64::MAX);
+    let ctx = StoreContext {
+        owner_id: "audit-owner".into(),
+        lease: if lease_overflow {
+            huge
+        } else {
+            Duration::from_secs(30)
+        },
+        handoff_grace: if lease_overflow {
+            Duration::from_secs(900)
+        } else {
+            huge
+        },
+    };
+    let result = RedisClaimStore::new(kv.clone()).claim(&req, &ctx).await;
+    let mut conn = audit_redis_connection().await;
+    let exists: i64 = redis::cmd("EXISTS")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    kv.del(&key).await.unwrap();
+    assert!(
+        result.is_err(),
+        "unrepresentable duration was accepted: {result:?}"
+    );
+    assert_eq!(exists, 0, "rejected duration mutated the claim store");
+}
+
+#[tokio::test]
+async fn audit_redis_claim_rejects_unrepresentable_lease_before_mutation() {
+    audit_redis_unrepresentable_claim_duration(true).await;
+}
+
+#[tokio::test]
+async fn audit_redis_claim_rejects_unrepresentable_grace_before_mutation() {
+    audit_redis_unrepresentable_claim_duration(false).await;
+}
+
+#[tokio::test]
+async fn audit_redis_set_nx_rejects_duration_that_wraps_to_two_seconds() {
+    let Some(kv) = setup().await else { return };
+    let key = format!("audit:nx-overflow:{}", run_id());
+    // Exactly 2^64 + 2000 milliseconds: an unchecked u128 -> u64 cast
+    // silently makes this requested duration a two-second lease.
+    let huge = Duration::new(18_446_744_073_709_553, 616_000_000);
+    let result = kv.set_nx_ttl(&key, "audit", huge).await;
+    let value = kv.get(&key).await.unwrap();
+    kv.del(&key).await.unwrap();
+    assert!(
+        result.is_err(),
+        "huge NX TTL narrowed to a short accepted TTL: {result:?}"
+    );
+    assert!(value.is_none(), "invalid NX TTL created a key");
+}
+
+#[tokio::test]
+async fn audit_redis_counter_rejects_duration_overflow_before_increment_or_delete() {
+    let Some(kv) = setup().await else { return };
+    let key = format!("audit:counter-overflow:{}", run_id());
+    assert!(kv
+        .set_nx_ttl(&key, "41", Duration::from_secs(30))
+        .await
+        .unwrap());
+    let result = kv.incr_expire(&key, Duration::from_secs(u64::MAX)).await;
+    let value = kv.get(&key).await.unwrap();
+    kv.del(&key).await.unwrap();
+    assert!(result.is_err(), "huge counter TTL was accepted: {result:?}");
+    assert_eq!(
+        value.as_deref(),
+        Some("41"),
+        "invalid TTL must not increment/delete an existing counter"
+    );
+}
+
+#[tokio::test]
+async fn audit_redis_counter_expiry_error_does_not_leave_partial_increment() {
+    let Some(kv) = setup().await else { return };
+    let key = format!("audit:counter-atomicity:{}", run_id());
+    assert!(kv
+        .set_nx_ttl(&key, "41", Duration::from_secs(30))
+        .await
+        .unwrap());
+    // This fits signed seconds, but Redis cannot represent the resulting
+    // absolute expiration. MULTI/EXEC does not roll back a prior INCR.
+    let result = kv
+        .incr_expire(&key, Duration::from_secs(i64::MAX as u64))
+        .await;
+    let value = kv.get(&key).await.unwrap();
+    kv.del(&key).await.unwrap();
+    assert!(result.is_err());
+    assert_eq!(
+        value.as_deref(),
+        Some("41"),
+        "an expiry error partially incremented the rate-limit counter"
+    );
+}
+
+#[tokio::test]
+async fn audit_redis_counter_preserves_integer_precision_above_lua_exact_range() {
+    let Some(kv) = setup().await else { return };
+    let key = format!("audit:counter-precision:{}", run_id());
+    assert!(kv
+        .set_nx_ttl(&key, "9007199254740992", Duration::from_secs(30))
+        .await
+        .unwrap());
+    let result = kv.incr_expire(&key, Duration::from_secs(30)).await.unwrap();
+    let value = kv.get(&key).await.unwrap();
+    kv.del(&key).await.unwrap();
+    assert_eq!(result, 9_007_199_254_740_993);
+    assert_eq!(value.as_deref(), Some("9007199254740993"));
+}

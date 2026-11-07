@@ -42,7 +42,7 @@ pub trait LedgerStore: Send + Sync {
     /// Guarded insert of one event with its balanced postings.
     /// `Some(true)` new, `Some(false)` already booked, `None` unavailable.
     async fn record_event(&self, stored: &StoredEvent, entry: &Entry) -> Option<bool>;
-    /// Every journaled event, oldest first (`None` = unavailable).
+    /// Every journaled event in append order (`None` = unavailable).
     async fn load_events(&self) -> Option<Vec<StoredEvent>>;
     /// Upsert one aggregated-position snapshot (derived, informational).
     async fn upsert_position(&self, position: &BookPosition) -> bool;
@@ -147,10 +147,8 @@ impl LedgerStore for MemoryLedgerStore {
         }
         let mut out = self.events.read().await.clone();
         out.sort_by(|a, b| {
-            a.event
-                .ts
-                .cmp(&b.event.ts)
-                .then_with(|| a.recorded_at.cmp(&b.recorded_at))
+            a.recorded_at
+                .cmp(&b.recorded_at)
                 .then_with(|| a.event_id.cmp(&b.event_id))
         });
         Some(out)

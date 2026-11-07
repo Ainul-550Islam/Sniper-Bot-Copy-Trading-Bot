@@ -28,8 +28,8 @@ export interface InviteMemberInput {
  */
 export async function inviteMember(
   input: InviteMemberInput,
-): Promise<{ success: boolean; invitation_id: string; organization_id: string; email: string; role: string }> {
-  return request<{ success: boolean; invitation_id: string; organization_id: string; email: string; role: string }>(
+): Promise<{ success: boolean; invitation_id: string; organization_id: string; email: string; role: string; token_delivery: "queued_for_delivery" }> {
+  return request<{ success: boolean; invitation_id: string; organization_id: string; email: string; role: string; token_delivery: "queued_for_delivery" }>(
     "/api/saas/team/invites",
     {
       method: "POST",

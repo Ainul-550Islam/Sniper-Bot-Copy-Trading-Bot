@@ -53,6 +53,14 @@ use bot_core::tenant::{OrganizationId, UserId};
 use super::middleware::{authorize_request, deny_response, SaasContext};
 use crate::api::ApiState;
 
+/// Maximum lifetime accepted by `POST /api/saas/api-keys` and documented in
+/// the public OpenAPI contract.
+pub const MAX_API_KEY_EXPIRY_DAYS: i64 = 3_650;
+
+fn valid_expiry_days(days: Option<i64>) -> bool {
+    days.is_none_or(|value| (1..=MAX_API_KEY_EXPIRY_DAYS).contains(&value))
+}
+
 fn key_storage_error() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -187,7 +195,15 @@ pub fn build_api_key(
         created_by,
         created_at: now,
         last_used_at: None,
-        expires_at: expires_in_days.map(|d| now + Duration::days(d.max(1))),
+        // The route rejects out-of-contract values. Internal callers also
+        // fail closed: invalid lifetimes or unrepresentable timestamps produce
+        // an immediately expired key, never a panic or a longer-lived grant.
+        expires_at: expires_in_days.map(|days| {
+            if !(1..=MAX_API_KEY_EXPIRY_DAYS).contains(&days) {
+                return now;
+            }
+            now.checked_add_signed(Duration::days(days)).unwrap_or(now)
+        }),
         revoked_at: None,
         revoke_reason: String::new(),
     };
@@ -247,6 +263,13 @@ pub async fn create_key(
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if !valid_expiry_days(body.expires_in_days) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("expires_in_days must be between 1 and {MAX_API_KEY_EXPIRY_DAYS}"),
+        )
+            .into_response();
+    }
 
     // Plan limit: how many keys may exist at once. A durable read failure
     // must not be interpreted as zero existing keys or default entitlements.
@@ -416,12 +439,23 @@ pub async fn revoke_key(
     let Some(mut key) = keys.into_iter().find(|k| k.key_prefix == prefix) else {
         return (StatusCode::NOT_FOUND, "no such key in this organization").into_response();
     };
-    if !key.revoke("revoked via api", Utc::now()) {
+    let now = Utc::now();
+    let reason = "revoked via api";
+    let revoked = match state
+        .saas
+        .revoke_api_key(key.id, &key.secret_hash, reason, now)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, key = %key.key_prefix, "API key revocation failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    if !revoked {
         return Json(json!({ "ok": true, "already_revoked": true })).into_response();
     }
-    if let Err(e) = state.saas.update_api_key(&key).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
+    key.revoke(reason, now);
     state
         .audit
         .success(
@@ -517,6 +551,86 @@ mod tests {
         assert!(!created.key.is_usable(now));
         assert_eq!(created.key.rejection(now), Some("api_key_revoked"));
         assert_eq!(created.key.revoke_reason, "compromised");
+    }
+
+    #[test]
+    fn expiry_bounds_match_the_api_contract_and_extreme_values_do_not_panic() {
+        assert!(valid_expiry_days(None));
+        assert!(valid_expiry_days(Some(1)));
+        assert!(valid_expiry_days(Some(MAX_API_KEY_EXPIRY_DAYS)));
+        assert!(!valid_expiry_days(Some(0)));
+        assert!(!valid_expiry_days(Some(-1)));
+        assert!(!valid_expiry_days(Some(MAX_API_KEY_EXPIRY_DAYS + 1)));
+        assert!(!valid_expiry_days(Some(i64::MAX)));
+
+        // The route rejects this input, but the public builder must also stay
+        // panic-free when called directly by internal code.
+        let now = Utc::now();
+        let maximum = build_api_key(
+            OrganizationId::new(),
+            "maximum expiry",
+            MembershipRole::Viewer,
+            vec![],
+            None,
+            Some(MAX_API_KEY_EXPIRY_DAYS),
+            now,
+        );
+        assert_eq!(
+            maximum.key.expires_at,
+            Some(now + Duration::days(MAX_API_KEY_EXPIRY_DAYS))
+        );
+        let extreme = build_api_key(
+            OrganizationId::new(),
+            "extreme expiry",
+            MembershipRole::Viewer,
+            vec![],
+            None,
+            Some(i64::MAX),
+            now,
+        );
+        assert_eq!(extreme.key.expires_at, Some(now));
+        assert!(!extreme.key.is_usable(now));
+    }
+
+    #[tokio::test]
+    async fn last_used_touch_cannot_restore_a_concurrently_revoked_key() {
+        let now = Utc::now();
+        let saas = crate::saas::SaasStore::new_in_memory_identity();
+        let created = key(now);
+        saas.create_api_key(&created.key).await.expect("insert key");
+        // This is the authentication middleware's snapshot, taken before the
+        // revocation completes.
+        let stale = saas
+            .api_key_by_hash(&created.key.secret_hash)
+            .await
+            .expect("lookup key")
+            .expect("key exists");
+        assert!(saas
+            .revoke_api_key(stale.id, &stale.secret_hash, "operator revoke", now)
+            .await
+            .expect("persist revocation"));
+        assert!(!saas
+            .revoke_api_key(
+                stale.id,
+                &stale.secret_hash,
+                "later reason must not replace the first",
+                now + Duration::seconds(1),
+            )
+            .await
+            .expect("duplicate revocation is a no-op"));
+
+        assert!(!saas
+            .touch_api_key_last_used(stale.id, &stale.secret_hash, now + Duration::seconds(1))
+            .await
+            .expect("best-effort last-used touch"));
+        let after = saas
+            .api_key_by_hash(&created.key.secret_hash)
+            .await
+            .expect("reload key")
+            .expect("revoked key remains stored");
+        assert_eq!(after.revoked_at, Some(now));
+        assert_eq!(after.revoke_reason, "operator revoke");
+        assert_eq!(after.last_used_at, None);
     }
 
     #[test]

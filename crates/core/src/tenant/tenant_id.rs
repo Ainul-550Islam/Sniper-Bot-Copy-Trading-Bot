@@ -13,7 +13,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use uuid::Uuid;
 
 use super::model::{Organization, OrganizationId, TenantIdError};
@@ -46,7 +46,7 @@ pub fn require_valid_tenant_id(id: OrganizationId) -> BotResult<OrganizationId> 
 /// operator tooling identify tenants by handle; keeping the pair together
 /// removes the "id without a name" ambiguity at call sites. The slug is
 /// public data (it appears in URLs and the SaaS console) — never a secret.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct TenantIdentity {
     id: OrganizationId,
     slug: String,

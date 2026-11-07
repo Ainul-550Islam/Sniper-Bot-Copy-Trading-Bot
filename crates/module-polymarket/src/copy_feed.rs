@@ -8,11 +8,12 @@
 //!
 //! ## What it reads
 //!
-//! Polymarket's public data API (`data-api.polymarket.com/trades`), the same
-//! source the leaderboard uses. One request per followed wallet returns the
-//! most recent fills with `proxyWallet`, `side`, `asset` (CTF token id),
-//! `conditionId`, `size`, `price` and `timestamp` — exactly the fields
-//! [`LeaderTrade`] needs.
+//! Polymarket's public Data API v2 (`data-api.polymarket.com/v2/trades`),
+//! the same source the leaderboard uses. One request per followed wallet
+//! returns the most recent fills with `proxy_wallet`, `side`, `token_id`,
+//! `condition_id`, `size`, `price` and `timestamp` — exactly the fields
+//! [`LeaderTrade`] needs. The parser also accepts the retired v1 camelCase
+//! field aliases so recorded legacy payloads remain readable.
 //!
 //! ## Honesty rules
 //!
@@ -92,7 +93,7 @@ impl CopyFeedClient {
         if wallet.is_empty() {
             return Err("copy feed: empty wallet".to_string());
         }
-        let url = format!("{}/trades", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/v2/trades", self.base_url.trim_end_matches('/'));
         let response = self
             .http
             .get(&url)
@@ -110,10 +111,14 @@ impl CopyFeedClient {
             .json()
             .await
             .map_err(|e| format!("copy feed: invalid json: {e}"))?;
-        // A non-array body is a contract change, not "no trades".
+        // Data API v2 wraps rows in `{ data, pagination }`. Accept a bare
+        // array as well for archived v1 payloads, but never turn an unknown
+        // shape into an empty success.
         let rows = body
-            .as_array()
-            .ok_or_else(|| "copy feed: response is not an array".to_string())?;
+            .get("data")
+            .and_then(Value::as_array)
+            .or_else(|| body.as_array())
+            .ok_or_else(|| "copy feed: response has no data array".to_string())?;
         Ok(parse_trade_rows(rows))
     }
 }
@@ -130,10 +135,18 @@ pub fn parse_trade_rows(rows: &[Value]) -> TradePage {
     page
 }
 
+fn aliased<'a>(row: &'a Value, primary: &str, legacy: &str) -> Option<&'a Value> {
+    row.get(primary).or_else(|| row.get(legacy))
+}
+
 fn parse_trade_row(row: &Value) -> Option<LeaderTrade> {
-    let wallet = row.get("proxyWallet")?.as_str()?.to_ascii_lowercase();
-    let token_id = row.get("asset")?.as_str()?.to_string();
-    let condition_id = row.get("conditionId")?.as_str()?.to_string();
+    let wallet = aliased(row, "proxy_wallet", "proxyWallet")?
+        .as_str()?
+        .to_ascii_lowercase();
+    let token_id = aliased(row, "token_id", "asset")?.as_str()?.to_string();
+    let condition_id = aliased(row, "condition_id", "conditionId")?
+        .as_str()?
+        .to_string();
     let side = row.get("side")?.as_str()?.to_ascii_uppercase();
     if wallet.is_empty() || token_id.is_empty() || condition_id.is_empty() {
         return None;
@@ -166,9 +179,8 @@ fn parse_trade_row(row: &Value) -> Option<LeaderTrade> {
         price,
         size_tokens: size,
         stake_usd: price * size,
-        neg_risk: row
-            .get("negRisk")
-            .and_then(|v| v.as_bool())
+        neg_risk: aliased(row, "neg_risk", "negRisk")
+            .and_then(Value::as_bool)
             .unwrap_or(false),
         question: row
             .get("title")
@@ -177,9 +189,8 @@ fn parse_trade_row(row: &Value) -> Option<LeaderTrade> {
             .to_string(),
         // Not reported by this endpoint — deliberately 0.0, never guessed.
         liquidity_usd: 0.0,
-        tick_size: row
-            .get("tickSize")
-            .and_then(|v| v.as_str())
+        tick_size: aliased(row, "tick_size", "tickSize")
+            .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
         at: filled_at,
@@ -219,6 +230,33 @@ mod tests {
         assert!(trade.neg_risk);
         // Never invented: this endpoint does not report liquidity.
         assert_eq!(trade.liquidity_usd, 0.0);
+    }
+
+    #[test]
+    fn parses_v2_snake_case_trade_rows() {
+        let rows = vec![json!({
+            "proxy_wallet": "0xAbC0000000000000000000000000000000000001",
+            "side": "BUY",
+            "token_id": "12345",
+            "condition_id": "0xdeadbeef",
+            "size": 10.0,
+            "price": 0.42,
+            "timestamp": 1_700_000_000i64,
+            "outcome": "Yes",
+            "neg_risk": true
+        })];
+        let page = parse_trade_rows(&rows);
+        assert_eq!(page.skipped, 0);
+        assert_eq!(page.trades.len(), 1);
+        let trade = &page.trades[0];
+        assert_eq!(trade.wallet, "0xabc0000000000000000000000000000000000001");
+        assert_eq!(trade.token_id, "12345");
+        assert_eq!(trade.condition_id, "0xdeadbeef");
+        assert!(trade.is_buy);
+        assert!(trade.neg_risk);
+        assert_eq!(trade.price, 0.42);
+        assert_eq!(trade.size_tokens, 10.0);
+        assert!((trade.stake_usd - 4.2).abs() < 1e-9);
     }
 
     #[test]

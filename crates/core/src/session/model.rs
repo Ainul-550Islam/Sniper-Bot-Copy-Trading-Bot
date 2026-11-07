@@ -128,6 +128,11 @@ pub struct SessionRecord {
     pub revoked_at: Option<DateTime<Utc>>,
     /// Why it was revoked.
     pub revoke_reason: String,
+    /// Organization whose verified SSO flow issued this session. SSO proof
+    /// for one tenant must not satisfy another tenant's enforced IdP policy.
+    /// Missing on legacy sessions is treated as no SSO proof.
+    #[serde(default)]
+    pub sso_organization_id: Option<OrganizationId>,
     /// The exact tenant MFA policy version proven by a TOTP challenge at
     /// login. This is a database-issued version (`updated_at`), not a local
     /// wall-clock timestamp, so clock skew cannot turn an unverified session
@@ -165,6 +170,7 @@ impl SessionRecord {
             expires_at: now + ttl,
             revoked_at: None,
             revoke_reason: String::new(),
+            sso_organization_id: None,
             mfa_policy_updated_at: None,
             mfa_enrollment_only: false,
         }
@@ -185,6 +191,11 @@ impl SessionRecord {
     /// May this session authenticate a request at `now`?
     pub fn is_usable(&self, now: DateTime<Utc>) -> bool {
         self.state(now).is_usable()
+    }
+
+    /// Does this session carry SSO proof for this exact tenant?
+    pub fn was_sso_authenticated_for(&self, organization_id: OrganizationId) -> bool {
+        self.sso_organization_id == Some(organization_id)
     }
 
     /// Seconds until expiry (negative once expired).
@@ -271,6 +282,32 @@ mod tests {
             "a revoked session never becomes merely expired"
         );
         assert!(!s.is_usable(t0));
+    }
+
+    #[test]
+    fn legacy_records_default_to_no_sso_tenant_proof() {
+        let now = Utc::now();
+        let record = session(3600, now);
+        assert_eq!(record.sso_organization_id, None);
+
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("sso_organization_id");
+        let decoded: SessionRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.sso_organization_id, None);
+
+        let organization_id = OrganizationId::new();
+        let other_organization_id = OrganizationId::new();
+        let mut sso = record;
+        assert!(!sso.was_sso_authenticated_for(organization_id));
+        sso.sso_organization_id = Some(organization_id);
+        assert!(sso.was_sso_authenticated_for(organization_id));
+        assert!(!sso.was_sso_authenticated_for(other_organization_id));
+        let decoded: SessionRecord =
+            serde_json::from_value(serde_json::to_value(sso).unwrap()).unwrap();
+        assert_eq!(decoded.sso_organization_id, Some(organization_id));
     }
 
     #[test]

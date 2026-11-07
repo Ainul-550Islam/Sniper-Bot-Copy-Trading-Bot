@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::Utc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use super::audit;
@@ -40,7 +40,7 @@ use super::decision::{
 };
 use super::kill_switch::{KillScope, KillSwitchEvent, KillSwitches, SwitchOutcome};
 use super::metrics;
-use super::store::{MemoryRiskStore, RiskStore};
+use super::store::{MemoryRiskStore, RiskEntryReservation, RiskStore};
 use crate::accounting::{GlobalLedger, PortfolioInputs, PortfolioView, PositionKey};
 use crate::config::GlobalRiskConfig;
 use crate::events::EventBus;
@@ -58,6 +58,148 @@ pub struct DecisionContext {
 /// How many decisions the engine keeps in memory for the API.
 const RECENT_DECISIONS: usize = 256;
 
+/// Config can also be installed programmatically, bypassing file validation.
+/// Keep the trading gate fail-closed for malformed limits and rates.
+fn global_risk_config_is_valid(config: &GlobalRiskConfig) -> bool {
+    let limits = [
+        config.capital_base_ref,
+        config.max_portfolio_exposure_ref,
+        config.max_wallet_exposure_ref,
+        config.max_venue_exposure_ref,
+        config.max_strategy_exposure_ref,
+        config.max_asset_exposure_ref,
+        config.max_order_notional_ref,
+        config.max_daily_loss_ref,
+        config.max_drawdown_ref,
+    ];
+    !config.reference_asset.trim().is_empty()
+        && limits
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+        && config.max_drawdown_pct.is_finite()
+        && (0.0..=1.0).contains(&config.max_drawdown_pct)
+        && config
+            .reference_rates
+            .iter()
+            .all(|(asset, rate)| !asset.trim().is_empty() && rate.is_finite() && *rate > 0.0)
+}
+
+#[derive(Debug, Clone)]
+struct ReservedEntry {
+    module: crate::models::BotModule,
+    organization: Option<crate::tenant::OrganizationId>,
+    wallet: String,
+    venue: String,
+    strategy: String,
+    asset: String,
+    quote_asset: String,
+    requested_quote: f64,
+    requested_ref: f64,
+    expires_at: chrono::DateTime<Utc>,
+    distributed: bool,
+}
+
+#[derive(Default)]
+struct ReservationBook {
+    /// Serialize aggregate-cap checks through creation of their reservation.
+    gate: Mutex<()>,
+    entries: std::sync::Mutex<HashMap<String, ReservedEntry>>,
+}
+
+struct ReservationLease {
+    id: String,
+    book: std::sync::Weak<ReservationBook>,
+    store: Option<Arc<dyn RiskStore>>,
+    released: std::sync::atomic::AtomicBool,
+}
+
+impl std::fmt::Debug for ReservationLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReservationLease")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl ReservationLease {
+    async fn release_now(&self) {
+        if self
+            .released
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        if let Some(book) = self.book.upgrade() {
+            book.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.id);
+        }
+        if let Some(store) = &self.store {
+            store.release_entry_reservation(&self.id).await;
+        }
+    }
+}
+
+impl Drop for ReservationLease {
+    fn drop(&mut self) {
+        if self
+            .released
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        if let Some(book) = self.book.upgrade() {
+            book.entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.id);
+        }
+        if let (Some(store), Ok(runtime)) =
+            (self.store.clone(), tokio::runtime::Handle::try_current())
+        {
+            let id = self.id.clone();
+            runtime.spawn(async move {
+                store.release_entry_reservation(&id).await;
+            });
+        }
+    }
+}
+
+/// Holds an accepted aggregate-capacity reservation for the lifetime of the
+/// corresponding module entry decision. Clones share one lease.
+#[derive(Debug, Clone, Default)]
+pub struct GlobalRiskReservation {
+    _lease: Option<Arc<ReservationLease>>,
+}
+
+impl GlobalRiskReservation {
+    /// Reservation identity, excluded when the caller adds other pending
+    /// entries to its own module-level limits.
+    pub fn id(&self) -> Option<&str> {
+        self._lease.as_ref().map(|lease| lease.id.as_str())
+    }
+
+    /// Release immediately when the caller has an explicit completion point.
+    /// Ordinary drops release asynchronously and rely on lease expiry on crash.
+    pub async fn release(self) {
+        if let Some(lease) = self._lease {
+            lease.release_now().await;
+        }
+    }
+
+    fn new(id: String, book: &Arc<ReservationBook>, store: Option<Arc<dyn RiskStore>>) -> Self {
+        Self {
+            _lease: Some(Arc::new(ReservationLease {
+                id,
+                book: Arc::downgrade(book),
+                store,
+                released: std::sync::atomic::AtomicBool::new(false),
+            })),
+        }
+    }
+}
+
 /// The engine. Constructed once by `AppState`; reached through
 /// `state.global_risk()`.
 pub struct GlobalRiskEngine {
@@ -65,10 +207,14 @@ pub struct GlobalRiskEngine {
     ledger: Arc<GlobalLedger>,
     switches: KillSwitches,
     store: RwLock<Arc<dyn RiskStore>>,
+    /// False until durable accounting recovery has proved the deployment
+    /// portfolio complete. In-memory/no-database operation starts ready.
+    portfolio_ready: RwLock<bool>,
     bus: EventBus,
     replica_id: String,
     seq: AtomicU64,
     recent: RwLock<VecDeque<GlobalRiskDecision>>,
+    reservations: Arc<ReservationBook>,
 }
 
 impl GlobalRiskEngine {
@@ -86,16 +232,31 @@ impl GlobalRiskEngine {
             ledger,
             switches,
             store: RwLock::new(Arc::new(MemoryRiskStore::default())),
+            portfolio_ready: RwLock::new(true),
             bus,
             replica_id: replica_id.into(),
             seq: AtomicU64::new(1),
             recent: RwLock::new(VecDeque::with_capacity(RECENT_DECISIONS)),
+            reservations: Arc::new(ReservationBook::default()),
         }
     }
 
     /// Attach the durable journal (startup, before recovery).
     pub async fn attach_store(&self, store: Arc<dyn RiskStore>) {
         *self.store.write().await = store;
+    }
+
+    /// Mark whether the deployment-wide accounting view is trustworthy.
+    /// Durable server startup clears this before recovery and restores it only
+    /// when the journal replay and module-position reconciliation are clean.
+    pub async fn set_portfolio_ready(&self, ready: bool) {
+        *self.portfolio_ready.write().await = ready;
+    }
+
+    /// True when the deployment-wide accounting view may safely enforce
+    /// aggregate portfolio limits.
+    pub async fn portfolio_ready(&self) -> bool {
+        *self.portfolio_ready.read().await
     }
 
     /// The journal in use.
@@ -241,18 +402,312 @@ impl GlobalRiskEngine {
             .collect()
     }
 
-    /// The one global decision for `req` (see module docs).
+    /// The one deployment-wide decision for `req` (see module docs).
     pub async fn decide(
         &self,
         req: &GlobalRiskRequest,
         ctx: &DecisionContext,
+    ) -> GlobalRiskDecision {
+        let decision = self.decide_inner(req, ctx, true).await;
+        self.record(&decision).await;
+        decision
+    }
+
+    /// Entry-path variant of [`Self::decide`] that atomically reserves the
+    /// accepted request against concurrent aggregate-capacity checks. The
+    /// caller must retain the returned lease until that entry has either
+    /// completed or failed; dropping it releases the reservation.
+    pub async fn decide_with_reservation(
+        &self,
+        req: &GlobalRiskRequest,
+        ctx: &DecisionContext,
+    ) -> (GlobalRiskDecision, Option<GlobalRiskReservation>) {
+        let _gate = self.reservations.gate.lock().await;
+        let store = self.store().await;
+        let _distributed_guard = if store.has_distributed_entry_reservations() {
+            match store.acquire_entry_admission().await {
+                Some(guard) => Some(guard),
+                None => {
+                    let decision = self
+                        .reservation_failure(
+                            req,
+                            ctx,
+                            true,
+                            "cluster entry-admission lock unavailable",
+                        )
+                        .await;
+                    return (decision, None);
+                }
+            }
+        } else {
+            None
+        };
+        if store.has_distributed_entry_reservations() {
+            let Some(active) = store.active_entry_reservations().await else {
+                let decision = self
+                    .reservation_failure(req, ctx, true, "cluster entry reservations unavailable")
+                    .await;
+                return (decision, None);
+            };
+            self.install_distributed_reservations(active);
+        }
+        let mut decision = self.decide_inner(req, ctx, true).await;
+        let expires_at = Utc::now() + chrono::Duration::seconds(300);
+        let reservation = if decision.accepted() {
+            let record = Self::reservation_record(&decision, req, None, expires_at);
+            if store.has_distributed_entry_reservations()
+                && !store.create_entry_reservation(&record).await
+            {
+                decision.verdict = GlobalVerdict::Reject;
+                decision.reason = Some(GlobalRejectReason::InvalidPortfolio);
+                decision.detail = "cluster entry reservation could not be persisted".into();
+                None
+            } else {
+                self.reserve_decision(&decision, req, None, expires_at, store.clone())
+            }
+        } else {
+            None
+        };
+        self.record(&decision).await;
+        (decision, reservation)
+    }
+
+    /// Tenant-runtime gate: apply process, venue and strategy kill switches
+    /// without reading or returning the deployment-wide portfolio. Per-order
+    /// notional remains enforceable; configured aggregate portfolio caps fail
+    /// closed until a tenant-scoped aggregate source is attached.
+    pub async fn decide_tenant(
+        &self,
+        req: &GlobalRiskRequest,
+        ctx: &DecisionContext,
+    ) -> GlobalRiskDecision {
+        let decision = self.decide_inner(req, ctx, false).await;
+        self.record(&decision).await;
+        decision
+    }
+
+    /// Tenant entry-path decision with a tenant-isolated in-flight reservation.
+    pub async fn decide_tenant_with_reservation(
+        &self,
+        req: &GlobalRiskRequest,
+        ctx: &DecisionContext,
+        organization: crate::tenant::OrganizationId,
+    ) -> (GlobalRiskDecision, Option<GlobalRiskReservation>) {
+        let _gate = self.reservations.gate.lock().await;
+        let store = self.store().await;
+        let _distributed_guard = if store.has_distributed_entry_reservations() {
+            match store.acquire_entry_admission().await {
+                Some(guard) => Some(guard),
+                None => {
+                    let decision = self
+                        .reservation_failure(
+                            req,
+                            ctx,
+                            false,
+                            "cluster entry-admission lock unavailable",
+                        )
+                        .await;
+                    return (decision, None);
+                }
+            }
+        } else {
+            None
+        };
+        if store.has_distributed_entry_reservations() {
+            let Some(active) = store.active_entry_reservations().await else {
+                let decision = self
+                    .reservation_failure(req, ctx, false, "cluster entry reservations unavailable")
+                    .await;
+                return (decision, None);
+            };
+            self.install_distributed_reservations(active);
+        }
+        let mut decision = self.decide_inner(req, ctx, false).await;
+        let expires_at = Utc::now() + chrono::Duration::seconds(300);
+        let reservation = if decision.accepted() {
+            let record = Self::reservation_record(&decision, req, Some(organization), expires_at);
+            if store.has_distributed_entry_reservations()
+                && !store.create_entry_reservation(&record).await
+            {
+                decision.verdict = GlobalVerdict::Reject;
+                decision.reason = Some(GlobalRejectReason::InvalidPortfolio);
+                decision.detail = "cluster entry reservation could not be persisted".into();
+                None
+            } else {
+                self.reserve_decision(
+                    &decision,
+                    req,
+                    Some(organization),
+                    expires_at,
+                    store.clone(),
+                )
+            }
+        } else {
+            None
+        };
+        self.record(&decision).await;
+        (decision, reservation)
+    }
+
+    fn reservation_record(
+        decision: &GlobalRiskDecision,
+        req: &GlobalRiskRequest,
+        organization: Option<crate::tenant::OrganizationId>,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> RiskEntryReservation {
+        RiskEntryReservation {
+            reservation_id: decision.decision_id.clone(),
+            module: req.module,
+            organization,
+            venue: req.venue,
+            wallet: req.wallet.clone(),
+            strategy: req.strategy.clone(),
+            asset: req.asset.clone(),
+            quote_asset: req.quote_asset.clone(),
+            requested_quote: req.requested_quote,
+            requested_ref: decision.snapshot.requested_ref,
+            expires_at,
+        }
+    }
+
+    fn reserve_decision(
+        &self,
+        decision: &GlobalRiskDecision,
+        req: &GlobalRiskRequest,
+        organization: Option<crate::tenant::OrganizationId>,
+        expires_at: chrono::DateTime<Utc>,
+        store: Arc<dyn RiskStore>,
+    ) -> Option<GlobalRiskReservation> {
+        if !decision.accepted() {
+            return None;
+        }
+        let id = decision.decision_id.clone();
+        let row = ReservedEntry {
+            module: req.module,
+            organization,
+            wallet: req.wallet.clone(),
+            venue: req.venue.as_str().to_string(),
+            strategy: req.strategy.clone(),
+            asset: req.asset.clone(),
+            quote_asset: req.quote_asset.clone(),
+            requested_quote: req.requested_quote,
+            requested_ref: decision.snapshot.requested_ref,
+            expires_at,
+            distributed: store.has_distributed_entry_reservations(),
+        };
+        let mut entries = self
+            .reservations
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.insert(id.clone(), row);
+        Some(GlobalRiskReservation::new(
+            id,
+            &self.reservations,
+            store.has_distributed_entry_reservations().then_some(store),
+        ))
+    }
+
+    fn install_distributed_reservations(&self, active: Vec<RiskEntryReservation>) {
+        let mut entries = self
+            .reservations
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.retain(|_, entry| !entry.distributed);
+        for reservation in active {
+            if reservation.expires_at <= Utc::now() {
+                continue;
+            }
+            entries.insert(
+                reservation.reservation_id,
+                ReservedEntry {
+                    module: reservation.module,
+                    organization: reservation.organization,
+                    wallet: reservation.wallet,
+                    venue: reservation.venue.as_str().to_string(),
+                    strategy: reservation.strategy,
+                    asset: reservation.asset,
+                    quote_asset: reservation.quote_asset,
+                    requested_quote: reservation.requested_quote,
+                    requested_ref: reservation.requested_ref,
+                    expires_at: reservation.expires_at,
+                    distributed: true,
+                },
+            );
+        }
+    }
+
+    async fn reservation_failure(
+        &self,
+        req: &GlobalRiskRequest,
+        ctx: &DecisionContext,
+        include_deployment_portfolio: bool,
+        detail: &str,
+    ) -> GlobalRiskDecision {
+        let mut decision = self
+            .decide_inner(req, ctx, include_deployment_portfolio)
+            .await;
+        decision.verdict = GlobalVerdict::Reject;
+        decision.reason = Some(GlobalRejectReason::InvalidPortfolio);
+        decision.detail = detail.to_string();
+        self.record(&decision).await;
+        decision
+    }
+
+    /// Other in-flight entries in this module/tenant scope. The current
+    /// decision's own reservation is omitted by id.
+    pub fn reserved_entry_usage(
+        &self,
+        module: crate::models::BotModule,
+        organization: Option<crate::tenant::OrganizationId>,
+        quote_asset: &str,
+        asset: &str,
+        exclude_id: Option<&str>,
+    ) -> (usize, f64, bool) {
+        let entries = self
+            .reservations
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut count = 0_usize;
+        let mut exposure = 0.0_f64;
+        let mut duplicate_asset = false;
+        for (id, entry) in entries.iter() {
+            if exclude_id == Some(id.as_str())
+                || entry.expires_at <= Utc::now()
+                || entry.module != module
+                || entry.organization != organization
+            {
+                continue;
+            }
+            count = count.saturating_add(1);
+            if entry.quote_asset == quote_asset {
+                exposure += entry.requested_quote;
+            }
+            if entry.asset == asset {
+                duplicate_asset = true;
+            }
+        }
+        (count, exposure, duplicate_asset)
+    }
+
+    async fn decide_inner(
+        &self,
+        req: &GlobalRiskRequest,
+        ctx: &DecisionContext,
+        include_deployment_portfolio: bool,
     ) -> GlobalRiskDecision {
         let cfg = self.config.read().await.clone();
         let ts = Utc::now();
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let id = decision_id(req, ts, seq);
         let mut snapshot = DecisionSnapshot {
-            capital_base_ref: cfg.capital_base_ref,
+            capital_base_ref: if include_deployment_portfolio {
+                cfg.capital_base_ref
+            } else {
+                0.0
+            },
             ..Default::default()
         };
 
@@ -265,6 +720,20 @@ impl GlobalRiskEngine {
                         "requested size {} is not a positive number",
                         req.requested_quote
                     ),
+                ));
+            }
+            if [
+                req.wallet.as_str(),
+                req.strategy.as_str(),
+                req.asset.as_str(),
+                req.quote_asset.as_str(),
+            ]
+            .iter()
+            .any(|value| value.trim().is_empty() || value.trim() != *value)
+            {
+                break 'check Err((
+                    GlobalRejectReason::InvalidRequest,
+                    "wallet, strategy, asset, and quote asset must be non-empty and trimmed".into(),
                 ));
             }
             // 1–3. Switches.
@@ -300,6 +769,99 @@ impl GlobalRiskEngine {
                         s.reason
                     ),
                 ));
+            }
+            if !global_risk_config_is_valid(&cfg) {
+                break 'check Err((
+                    GlobalRejectReason::InvalidPortfolio,
+                    "global risk configuration contains an invalid limit or reference rate".into(),
+                ));
+            }
+            if !include_deployment_portfolio {
+                // A tenant must never inherit the deployment-wide portfolio
+                // snapshot. Until tenant-aggregated wallet/venue/asset,
+                // total exposure, position-count, loss and drawdown inputs
+                // are available here, fail closed if any such limit is on.
+                // The per-order notional cap is independent of portfolio
+                // state, so it can still be enforced using its quote rate.
+                if cfg.max_order_notional_ref > 0.0 {
+                    let Some(rate) = cfg.reference_rates.get(&req.quote_asset).copied() else {
+                        break 'check Err((
+                            GlobalRejectReason::ReferenceRateMissing,
+                            format!(
+                                "no [global_risk.reference_rates] entry for {} — order notional cannot be evaluated",
+                                req.quote_asset
+                            ),
+                        ));
+                    };
+                    let requested_ref = req.requested_quote * rate;
+                    snapshot.rate = rate;
+                    snapshot.requested_ref = requested_ref;
+                    if !requested_ref.is_finite() {
+                        break 'check Err((
+                            GlobalRejectReason::InvalidRequest,
+                            "requested size overflows when converted to the reference asset".into(),
+                        ));
+                    }
+                    if requested_ref > cfg.max_order_notional_ref {
+                        break 'check Err((
+                            GlobalRejectReason::OrderNotional,
+                            format!(
+                                "order notional {:.4} {} exceeds max {:.4}",
+                                requested_ref, cfg.reference_asset, cfg.max_order_notional_ref
+                            ),
+                        ));
+                    }
+                }
+                let tenant_portfolio_caps_enabled = [
+                    cfg.max_portfolio_exposure_ref,
+                    cfg.max_wallet_exposure_ref,
+                    cfg.max_venue_exposure_ref,
+                    cfg.max_strategy_exposure_ref,
+                    cfg.max_asset_exposure_ref,
+                    cfg.max_daily_loss_ref,
+                    cfg.max_drawdown_ref,
+                    cfg.max_drawdown_pct,
+                ]
+                .iter()
+                .any(|limit| *limit > 0.0)
+                    || cfg.max_open_positions > 0;
+                if tenant_portfolio_caps_enabled {
+                    break 'check Err((
+                        GlobalRejectReason::InvalidPortfolio,
+                        "tenant-scoped aggregate portfolio data is unavailable; refusing to bypass configured global limits".into(),
+                    ));
+                }
+                break 'check Ok(());
+            }
+
+            let aggregate_limits_enabled = [
+                cfg.max_portfolio_exposure_ref,
+                cfg.max_wallet_exposure_ref,
+                cfg.max_venue_exposure_ref,
+                cfg.max_strategy_exposure_ref,
+                cfg.max_asset_exposure_ref,
+                cfg.max_daily_loss_ref,
+                cfg.max_drawdown_ref,
+                cfg.max_drawdown_pct,
+            ]
+            .iter()
+            .any(|limit| *limit > 0.0)
+                || cfg.max_open_positions > 0;
+            if aggregate_limits_enabled {
+                let refreshed = self.ledger.refresh_from_store().await;
+                if !refreshed {
+                    *self.portfolio_ready.write().await = false;
+                }
+                let ready = *self.portfolio_ready.read().await;
+                let pending = self.ledger.pending_count().await;
+                if !ready || !refreshed || pending > 0 {
+                    break 'check Err((
+                        GlobalRejectReason::InvalidPortfolio,
+                        format!(
+                            "deployment accounting is incomplete (ready={ready}, pending_events={pending}); refusing to evaluate aggregate limits"
+                        ),
+                    ));
+                }
             }
 
             // 4. Reference rates — only when a reference-denominated limit is on.
@@ -338,6 +900,63 @@ impl GlobalRiskEngine {
             snapshot.realized_today_ref = view.realized_today_ref;
             snapshot.drawdown_ref = view.drawdown_ref();
 
+            // Include accepted entries whose module-level operation is still
+            // in flight. Their RAII leases are released on success, failure,
+            // or cancellation; holding the admission gate through this
+            // snapshot and the next reservation closes the local TOCTOU gap.
+            {
+                let pending = self
+                    .reservations
+                    .entries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for entry in pending.values() {
+                    if entry.expires_at <= ts || entry.organization.is_some() {
+                        continue;
+                    }
+                    snapshot.portfolio_ref += entry.requested_ref;
+                    if entry.wallet == req.wallet {
+                        snapshot.wallet_ref += entry.requested_ref;
+                    }
+                    if entry.venue == req.venue.as_str() {
+                        snapshot.venue_ref += entry.requested_ref;
+                    }
+                    if entry.strategy == req.strategy {
+                        snapshot.strategy_ref += entry.requested_ref;
+                    }
+                    if entry.asset == req.asset {
+                        snapshot.asset_ref += entry.requested_ref;
+                    }
+                    snapshot.open_positions = snapshot.open_positions.saturating_add(1);
+                }
+            }
+
+            if rate.is_some() && !snapshot.requested_ref.is_finite() {
+                break 'check Err((
+                    GlobalRejectReason::InvalidRequest,
+                    "requested size overflows when converted to the reference asset".into(),
+                ));
+            }
+            if [
+                snapshot.rate,
+                snapshot.portfolio_ref,
+                snapshot.wallet_ref,
+                snapshot.venue_ref,
+                snapshot.strategy_ref,
+                snapshot.asset_ref,
+                snapshot.realized_today_ref,
+                snapshot.drawdown_ref,
+                snapshot.capital_base_ref,
+            ]
+            .iter()
+            .any(|value| !value.is_finite())
+            {
+                break 'check Err((
+                    GlobalRejectReason::InvalidPortfolio,
+                    "accounting snapshot contains a non-finite value; refusing entry".into(),
+                ));
+            }
+
             if cfg.needs_reference_rates() {
                 if rate.is_none() {
                     break 'check Err((
@@ -357,6 +976,24 @@ impl GlobalRiskEngine {
                         ),
                     ));
                 }
+            }
+            if cfg.max_daily_loss_ref > 0.0 && !view.missing_daily_loss_rates.is_empty() {
+                break 'check Err((
+                    GlobalRejectReason::ReferenceRateMissing,
+                    format!(
+                        "today's realized PnL on {} has no reference rate — daily-loss figures would be understated",
+                        view.missing_daily_loss_rates.join(", ")
+                    ),
+                ));
+            }
+            if cfg.effective_drawdown_limit().is_some() && !view.missing_drawdown_rates.is_empty() {
+                break 'check Err((
+                    GlobalRejectReason::ReferenceRateMissing,
+                    format!(
+                        "cumulative realized PnL on {} has no reference rate — drawdown figures would be understated",
+                        view.missing_drawdown_rates.join(", ")
+                    ),
+                ));
             }
 
             // 5. Open positions across every module.
@@ -494,7 +1131,6 @@ impl GlobalRiskEngine {
                 replica_id: self.replica_id.clone(),
             },
         };
-        self.record(&decision).await;
         decision
     }
 

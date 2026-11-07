@@ -37,24 +37,27 @@ impl TenantPositionWrite {
         if position.id.trim().is_empty() {
             return Err(RepositoryError::Validation("position_id"));
         }
-        self.db
+        let result = self
+            .db
             .timed(
                 "tenant_position_upsert",
                 sqlx::query(
                     r#"INSERT INTO positions
                         (organization_id, id, source, venue, mode, status, symbol,
                          symbol_display, quote_symbol, qty, avg_entry, cost_basis,
-                         realized_quote, last_mark, stop_loss, take_profit,
+                         realized_quote, realized_pnl_quote, realized_at, last_mark, stop_loss, take_profit,
                          trailing_stop, trailing_high_water, max_hold_secs,
                          entry_signature, exit_signature, entry_latency_ms,
                          copied_wallet, market_id, outcome, reason_closed,
                          opened_at, updated_at, closed_at)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                               $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+                               $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
                        ON CONFLICT (id) DO UPDATE SET
                          status = EXCLUDED.status, qty = EXCLUDED.qty,
                          avg_entry = EXCLUDED.avg_entry, cost_basis = EXCLUDED.cost_basis,
                          realized_quote = EXCLUDED.realized_quote,
+                         realized_pnl_quote = EXCLUDED.realized_pnl_quote,
+                         realized_at = EXCLUDED.realized_at,
                          last_mark = EXCLUDED.last_mark, stop_loss = EXCLUDED.stop_loss,
                          take_profit = EXCLUDED.take_profit,
                          trailing_stop = EXCLUDED.trailing_stop,
@@ -79,6 +82,8 @@ impl TenantPositionWrite {
                 .bind(position.avg_entry)
                 .bind(position.cost_basis)
                 .bind(position.realized_quote)
+                .bind(position.realized_pnl_quote)
+                .bind(position.realized_at)
                 .bind(position.last_mark)
                 .bind(position.stop_loss)
                 .bind(position.take_profit)
@@ -98,6 +103,9 @@ impl TenantPositionWrite {
                 .execute(self.db.pool()),
             )
             .await?;
+        if result.rows_affected() != 1 {
+            return Err(RepositoryError::TenantMismatch);
+        }
         Ok(())
     }
 
@@ -127,6 +135,8 @@ impl TenantPositionWrite {
                     r#"UPDATE positions
                           SET status = 'closed',
                               realized_quote = $3,
+                              realized_pnl_quote = NULL,
+                              realized_at = $7,
                               last_mark = $4,
                               exit_signature = COALESCE($5, exit_signature),
                               reason_closed = $6,

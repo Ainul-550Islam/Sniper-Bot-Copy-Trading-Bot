@@ -8,8 +8,9 @@
  * safe status confirmation.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
+import { sessionStore } from "@/lib/auth";
 import {
   classifyTradingError,
   customerTrading,
@@ -37,11 +38,38 @@ export default function TelegramPage() {
   const [busy, setBusy] = useState(false);
   const [consentBusy, setConsentBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const tenantVersion = useRef(0);
+  const loadRequestVersion = useRef(0);
+  const consentRequestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    tenantVersion.current += 1;
+    loadRequestVersion.current += 1;
+    consentRequestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setStatus(null);
+    setConsent(null);
+    setConsentError(null);
+    setChatId("");
+    setUserId("");
+    setTradingEnabled(false);
+    setBusy(false);
+    setConsentBusy(false);
+    setNotice(null);
+    setState({ kind: "loading" });
+  }), []);
 
   const load = useCallback(async () => {
+    const requestTenantVersion = tenantVersion.current;
+    const requestVersion = ++loadRequestVersion.current;
+    setStatus(null);
+    setConsent(null);
+    setConsentError(null);
     setState({ kind: "loading" });
     try {
       const response = await customerTrading.telegramStatus();
+      if (requestTenantVersion !== tenantVersion.current || requestVersion !== loadRequestVersion.current) return;
       setStatus(response);
       // Deliberately NOT clearing `notice` here: bind/unbind/revoke set the
       // notice and then reload, and wiping it in load() made every success
@@ -56,30 +84,50 @@ export default function TelegramPage() {
         setTradingEnabled(response.binding.trading_enabled);
         // Consent is per-chat: only meaningful once a chat is bound. A
         // failure here degrades the consent card, never the whole page.
+        const consentRequest = ++consentRequestVersion.current;
         try {
-          setConsent(await customerTrading.telegramConsent());
-          setConsentError(null);
+          const consentResponse = await customerTrading.telegramConsent();
+          if (requestTenantVersion === tenantVersion.current && requestVersion === loadRequestVersion.current && consentRequest === consentRequestVersion.current) {
+            setConsent(consentResponse);
+            setConsentError(null);
+          }
         } catch (e) {
-          setConsent(null);
-          setConsentError(tradingStateMessage(classifyTradingError(e)));
+          if (requestTenantVersion === tenantVersion.current && requestVersion === loadRequestVersion.current && consentRequest === consentRequestVersion.current) {
+            setConsent(null);
+            setConsentError(tradingStateMessage(classifyTradingError(e)));
+          }
         }
       } else {
         setConsent(null);
         setConsentError(null);
       }
+      if (requestTenantVersion !== tenantVersion.current || requestVersion !== loadRequestVersion.current) return;
       if (response.runtime === null) {
         setState({ kind: "stale_runtime", reason: response.runtime_detail ?? "no runtime registered" });
       } else {
         setState({ kind: "ready" });
       }
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestTenantVersion === tenantVersion.current && requestVersion === loadRequestVersion.current) {
+        setStatus(null);
+        setConsent(null);
+        setConsentError(null);
+        setState(classifyTradingError(e));
+      }
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
-  }, [load]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      loadRequestVersion.current += 1;
+      consentRequestVersion.current += 1;
+    };
+  }, [load, sessionVersion]);
 
   async function bind() {
     const parsed = Number(chatId.trim());
@@ -102,51 +150,72 @@ export default function TelegramPage() {
       );
       return;
     }
+    const requestTenantVersion = tenantVersion.current;
     setBusy(true);
     try {
       const response = await customerTrading.bindTelegram(parsed, {
         telegramUserId: parsedUser,
         tradingEnabled,
       });
-      setNotice(response.detail || "Telegram chat binding updated.");
+      if (requestTenantVersion === tenantVersion.current) {
+        setNotice(response.detail || "Telegram chat binding updated.");
+      }
     } catch (e) {
-      setNotice(tradingStateMessage(classifyTradingError(e)));
+      if (requestTenantVersion === tenantVersion.current) {
+        setNotice(tradingStateMessage(classifyTradingError(e)));
+      }
     } finally {
-      setBusy(false);
-      await load();
+      if (requestTenantVersion === tenantVersion.current) {
+        setBusy(false);
+        await load();
+      }
     }
   }
 
   async function revokeConsent() {
+    const requestTenantVersion = tenantVersion.current;
     setConsentBusy(true);
     try {
       const response = await customerTrading.revokeTelegramConsent();
-      setNotice(
-        response.revoked
-          ? `Telegram trade consent revoked; ${response.cancelled_pending.length} pending command(s) cancelled.`
-          : "No live Telegram trade consent to revoke.",
-      );
+      if (requestTenantVersion === tenantVersion.current) {
+        setNotice(
+          response.revoked
+            ? `Telegram trade consent revoked; ${response.cancelled_pending.length} pending command(s) cancelled.`
+            : "No live Telegram trade consent to revoke.",
+        );
+      }
     } catch (e) {
-      setNotice(tradingStateMessage(classifyTradingError(e)));
+      if (requestTenantVersion === tenantVersion.current) {
+        setNotice(tradingStateMessage(classifyTradingError(e)));
+      }
     } finally {
-      setConsentBusy(false);
-      await load();
+      if (requestTenantVersion === tenantVersion.current) {
+        setConsentBusy(false);
+        await load();
+      }
     }
   }
 
   async function unbind() {
+    const requestTenantVersion = tenantVersion.current;
     setBusy(true);
     try {
       const response = await customerTrading.unbindTelegram();
-      setNotice(response.detail || "Telegram binding removed.");
-      setChatId("");
-      setUserId("");
-      setTradingEnabled(false);
+      if (requestTenantVersion === tenantVersion.current) {
+        setNotice(response.detail || "Telegram binding removed.");
+        setChatId("");
+        setUserId("");
+        setTradingEnabled(false);
+      }
     } catch (e) {
-      setNotice(tradingStateMessage(classifyTradingError(e)));
+      if (requestTenantVersion === tenantVersion.current) {
+        setNotice(tradingStateMessage(classifyTradingError(e)));
+      }
     } finally {
-      setBusy(false);
-      await load();
+      if (requestTenantVersion === tenantVersion.current) {
+        setBusy(false);
+        await load();
+      }
     }
   }
 

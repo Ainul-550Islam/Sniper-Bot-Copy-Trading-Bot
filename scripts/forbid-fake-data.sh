@@ -18,6 +18,14 @@ PATTERN='act-01|alt-01|tkt-2026-9481|acme-quant|4,850,290|4_850_290|4,850,000|4_
 if grep -RInE --exclude='*.map' --exclude-dir='__tests__' --exclude-dir='tests' "$PATTERN" "${TARGETS[@]}"; then
   echo "forbid-fake-data: forbidden canned data or unsupported claim found" >&2
   exit 1
+else
+  scan_status=$?
+  # grep status 1 means a complete scan with no match; status 2 (or a
+  # missing/unreadable target) is a scan error, not evidence of clean source.
+  if [[ "$scan_status" -ne 1 ]]; then
+    echo "forbid-fake-data: production scan failed (grep status $scan_status)" >&2
+    exit "$scan_status"
+  fi
 fi
 
 echo "forbid-fake-data: no forbidden production literals found"

@@ -1,11 +1,14 @@
 //! Execution authority (STEP 3 file 12).
 //!
-//! An [`ExecutionAuthority`] is the PROOF that one execution request
-//! passed the full guard chain — it cannot be fabricated, only ISSUED by
-//! completing every mandated check, in the mandated order, inside
-//! [`AuthorityChecklist`]. The execution engine accepts a tenant context
-//! only when it carries an authority whose fingerprint matches the
-//! execution scope (organization + runtime + generation + module + mode).
+//! An [`ExecutionAuthority`] records that trusted orchestration code passed
+//! one execution request through the full guard chain. The
+//! [`AuthorityChecklist`] enforces completeness and order, but its records
+//! are assertions by the caller, not cryptographic attestations; only the
+//! trusted gateway should issue one. Authorities are serializable for audit
+//! but deliberately not deserializable, so untrusted data cannot recreate
+//! the capability. The execution engine accepts a tenant context only when
+//! its authority fingerprint matches the execution scope (organization +
+//! runtime + generation + module + mode).
 //!
 //! The mandated order (PROMPT 2/10 PHASE 2) is fixed in
 //! [`AUTHORITY_CHECK_ORDER`]; the checklist enforces it mechanically: a
@@ -97,7 +100,9 @@ impl fmt::Display for AuthorityError {
 
 impl std::error::Error for AuthorityError {}
 
-/// The ordered record of passed checks. Build one per request.
+/// The ordered record of checks the trusted caller asserts have passed.
+/// This type verifies order and completeness; it does not execute or verify
+/// the underlying guards. Build it only in the trusted orchestration path.
 #[derive(Debug, Clone, Default)]
 pub struct AuthorityChecklist {
     checks: Vec<AuthorityCheck>,
@@ -175,7 +180,7 @@ impl AuthorityChecklist {
 }
 
 /// The proof object. Constructed only via [`AuthorityChecklist::finish`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionAuthority {
     fingerprint: String,
     granted_at: DateTime<Utc>,
@@ -305,9 +310,14 @@ mod tests {
     fn authority_is_serializable_for_audit() {
         let s = scope();
         let authority = complete_checklist().finish(&s, Utc::now()).unwrap();
-        let json = serde_json::to_string(&authority).unwrap();
-        assert!(json.contains("risk_permission"));
-        let back: ExecutionAuthority = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, authority);
+        let json = serde_json::to_value(&authority).unwrap();
+        let check_names: Vec<&str> = json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|check| check["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(check_names, AUTHORITY_CHECK_ORDER);
+        assert_eq!(json["fingerprint"].as_str(), Some(authority.fingerprint()));
     }
 }

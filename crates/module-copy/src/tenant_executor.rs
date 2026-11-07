@@ -112,6 +112,16 @@ pub trait TenantCopySink: Send + Sync {
         event: &LeaderTradeEvent,
         outcome: &CopyOutcome,
     ) -> BotResult<()>;
+
+    /// Persist the current position projection after an entry/exit event.
+    async fn record_position(
+        &self,
+        context: &CopyTenantContext,
+        position: &bot_core::models::Position,
+    ) -> BotResult<()> {
+        let _ = (context, position);
+        Ok(())
+    }
 }
 
 /// A no-op sink (used when tenant persistence is not attached — e.g.
@@ -131,6 +141,73 @@ impl TenantCopySink for NullCopySink {
     }
 }
 
+fn spawn_position_projection(
+    state: Shared,
+    context: CopyTenantContext,
+    sink: Arc<dyn TenantCopySink>,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = state.events.subscribe();
+    tokio::spawn(async move {
+        persist_copy_positions(&state, &context, &sink).await;
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    let position = match event.as_ref() {
+                        bot_core::events::AppEvent::PositionUpdate { position, .. }
+                        | bot_core::events::AppEvent::PositionClosed { position, .. }
+                            if position.source == bot_core::models::TradeSource::Copy =>
+                        {
+                            Some(position)
+                        }
+                        _ => None,
+                    };
+                    if let Some(position) = position {
+                        if let Err(error) = sink.record_position(&context, position).await {
+                            tracing::error!(position = %position.id, %error, "tenant copy position projection failed");
+                            state
+                                .record_error(
+                                    bot_core::models::BotModule::Copy,
+                                    &format!("tenant position projection: {error}"),
+                                )
+                                .await;
+                            state
+                                .set_running(bot_core::models::BotModule::Copy, false, true)
+                                .await;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    persist_copy_positions(&state, &context, &sink).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+async fn persist_copy_positions(
+    state: &Shared,
+    context: &CopyTenantContext,
+    sink: &Arc<dyn TenantCopySink>,
+) {
+    for position in state.all_positions().await {
+        if position.source == bot_core::models::TradeSource::Copy {
+            if let Err(error) = sink.record_position(context, &position).await {
+                tracing::error!(position = %position.id, %error, "tenant copy position projection failed during reconciliation");
+                state
+                    .record_error(
+                        bot_core::models::BotModule::Copy,
+                        &format!("tenant position projection: {error}"),
+                    )
+                    .await;
+                state
+                    .set_running(bot_core::models::BotModule::Copy, false, true)
+                    .await;
+            }
+        }
+    }
+}
+
 /// The tenant-scoped copy executor: the existing engine, bound to one
 /// tenant, with tenant-local state and tenant-scoped persistence.
 pub struct TenantCopyExecutor {
@@ -139,6 +216,7 @@ pub struct TenantCopyExecutor {
     signing: TenantSigningContext,
     state: TenantCopyState,
     sink: Arc<dyn TenantCopySink>,
+    position_pump: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TenantCopyExecutor {
@@ -169,12 +247,21 @@ impl TenantCopyExecutor {
             signing,
             state: TenantCopyState::new(),
             sink: Arc::new(NullCopySink),
+            position_pump: None,
         })
     }
 
     /// Attach the tenant-scoped persistence sink.
     #[must_use]
     pub fn with_copy_sink(mut self, sink: Arc<dyn TenantCopySink>) -> Self {
+        if let Some(task) = self.position_pump.take() {
+            task.abort();
+        }
+        self.position_pump = Some(spawn_position_projection(
+            self.bot.state.clone(),
+            self.context.clone(),
+            Arc::clone(&sink),
+        ));
         self.sink = sink;
         self
     }
@@ -301,16 +388,50 @@ impl TenantCopyExecutor {
             }
             outcome
         };
-        // Tenant-scoped persistence: a sink failure SURFACES (it is
-        // never swallowed) but does not un-broadcast a transaction that
-        // already left the process — the outcome records the error.
+        if let Some(position_id) = outcome.position_id.as_deref() {
+            let persisted = match self.bot.state().position(position_id).await {
+                Some(position) => self.sink.record_position(&self.context, &position).await,
+                None => Err(BotError::invalid(
+                    "tenant copy produced a position id but no local position row",
+                )),
+            };
+            if let Err(error) = persisted {
+                let detail = format!("tenant position persistence failed: {error}");
+                self.bot
+                    .state()
+                    .record_error(
+                        bot_core::models::BotModule::Copy,
+                        &format!("tenant position persistence: {error}"),
+                    )
+                    .await;
+                self.bot
+                    .state()
+                    .set_running(bot_core::models::BotModule::Copy, false, true)
+                    .await;
+                if let Some(rejection) = outcome.rejection.as_mut() {
+                    rejection.detail = format!("{}; {detail}", rejection.detail);
+                } else {
+                    outcome.rejection = Some(Rejection::new(
+                        RejectReason::ExecutionFailed,
+                        outcome.stage,
+                        detail,
+                    ));
+                }
+            }
+        }
+        // Persist the outcome after the risk projection so a failed position
+        // write is reflected in the event's terminal detail. A broadcast that
+        // already left the process is never undone; its local state and audit
+        // record remain available for reconciliation.
         if let Err(e) = self
             .sink
             .record_outcome(&self.context, &event, &outcome)
             .await
         {
             let detail = format!("tenant copy sink: {e}");
-            if outcome.rejection.is_none() {
+            if let Some(rejection) = outcome.rejection.as_mut() {
+                rejection.detail = format!("{}; {detail}", rejection.detail);
+            } else {
                 outcome.rejection = Some(Rejection::new(
                     RejectReason::ExecutionFailed,
                     outcome.stage,
@@ -319,6 +440,14 @@ impl TenantCopyExecutor {
             }
         }
         outcome
+    }
+}
+
+impl Drop for TenantCopyExecutor {
+    fn drop(&mut self) {
+        if let Some(task) = self.position_pump.take() {
+            task.abort();
+        }
     }
 }
 
@@ -412,5 +541,65 @@ mod tests {
             CopyTenantContext::adapt(issued_for(OrganizationId::new(), runtime, BotModule::Copy))
                 .unwrap();
         assert_ne!(foreign.organization_id(), bound.organization_id());
+    }
+
+    struct PositionSink {
+        count: std::sync::atomic::AtomicUsize,
+        changed: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl TenantCopySink for PositionSink {
+        async fn record_outcome(
+            &self,
+            _: &CopyTenantContext,
+            _: &LeaderTradeEvent,
+            _: &CopyOutcome,
+        ) -> BotResult<()> {
+            Ok(())
+        }
+
+        async fn record_position(
+            &self,
+            _: &CopyTenantContext,
+            position: &bot_core::models::Position,
+        ) -> BotResult<()> {
+            if position.source == bot_core::models::TradeSource::Copy {
+                self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.changed.notify_one();
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn position_update_events_are_projected_for_background_copy_exits() {
+        let state = bot_core::state::AppState::new(bot_core::config::AppConfig::from_defaults());
+        let (organization, runtime, _) = parts();
+        let context = CopyTenantContext::adapt(issued_for(organization, runtime, BotModule::Copy))
+            .expect("copy tenant context");
+        let sink = Arc::new(PositionSink {
+            count: std::sync::atomic::AtomicUsize::new(0),
+            changed: tokio::sync::Notify::new(),
+        });
+        let task = spawn_position_projection(state.clone(), context, sink.clone());
+        let position = bot_core::models::Position::new(
+            "copy-projection-test".into(),
+            bot_core::models::TradeSource::Copy,
+            bot_core::models::Venue::Paper,
+            ExecutionMode::Paper,
+            "mint".into(),
+            "TOKEN".into(),
+            "SOL".into(),
+        );
+        state.upsert_position(position).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while sink.count.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                sink.changed.notified().await;
+            }
+        })
+        .await
+        .expect("position update must reach the tenant sink");
+        task.abort();
     }
 }

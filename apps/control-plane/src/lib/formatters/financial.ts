@@ -9,7 +9,18 @@
 
 /** Formats integer USD cents (e.g. 10050 -> "$100.50"). */
 export function formatUsdCents(cents: number | bigint | string, options?: { showSign?: boolean }): string {
-  const numeric = typeof cents === "bigint" ? Number(cents) : Number(cents || 0);
+  const integerString = typeof cents === "string" && /^[+-]?\d+$/.test(cents.trim());
+  if (typeof cents === "bigint" || integerString) {
+    const exact = typeof cents === "bigint" ? cents : BigInt(cents.trim());
+    const isNegative = exact < 0n;
+    const abs = isNegative ? -exact : exact;
+    const dollars = abs / 100n;
+    const rem = (abs % 100n).toString().padStart(2, "0");
+    const sign = isNegative ? "-" : options?.showSign && exact > 0n ? "+" : "";
+    return `${sign}$${dollars.toLocaleString("en-US")}.${rem}`;
+  }
+
+  const numeric = Number(cents || 0);
   const isNegative = numeric < 0;
   const abs = Math.abs(numeric);
   const dollars = Math.floor(abs / 100);
@@ -26,7 +37,34 @@ export function formatLamports(
 ): string {
   const decimals = options?.decimals ?? 4;
   const showUnit = options?.showUnit ?? true;
-  const raw = typeof lamports === "bigint" ? Number(lamports) : Number(lamports || 0);
+  const integerString = typeof lamports === "string" && /^[+-]?\d+$/.test(lamports.trim());
+  if (typeof lamports === "bigint" || integerString) {
+    const exact = typeof lamports === "bigint" ? lamports : BigInt(lamports.trim());
+    // Keep Intl's option validation and its minimum/maximum fraction rules.
+    new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: decimals });
+
+    const negative = exact < 0n;
+    const absolute = negative ? -exact : exact;
+    const nanoSol = 1_000_000_000n;
+    let whole: bigint;
+    let fraction: string;
+    if (decimals <= 9) {
+      const scale = 10n ** BigInt(decimals);
+      const divisor = nanoSol / scale;
+      let rounded = absolute / divisor;
+      if ((absolute % divisor) * 2n >= divisor) rounded += 1n;
+      whole = rounded / scale;
+      fraction = (rounded % scale).toString().padStart(decimals, "0");
+    } else {
+      whole = absolute / nanoSol;
+      fraction = (absolute % nanoSol).toString().padStart(9, "0") + "0".repeat(decimals - 9);
+    }
+    while (fraction.length > 2 && fraction.endsWith("0")) fraction = fraction.slice(0, -1);
+    const formatted = `${negative ? "-" : ""}${whole.toLocaleString("en-US")}.${fraction}`;
+    return showUnit ? `${formatted} SOL` : formatted;
+  }
+
+  const raw = Number(lamports || 0);
   const sol = raw / 1_000_000_000;
   const formatted = sol.toLocaleString("en-US", {
     minimumFractionDigits: 2,
@@ -52,7 +90,11 @@ export function formatPercentage(pct: number | string, options?: { showSign?: bo
 
 /** Formats integer units with readable thousand separators. */
 export function formatInteger(val: number | bigint | string): string {
-  const raw = typeof val === "bigint" ? Number(val) : Number(val || 0);
+  const integerString = typeof val === "string" && /^[+-]?\d+$/.test(val.trim());
+  if (typeof val === "bigint" || integerString) {
+    return (typeof val === "bigint" ? val : BigInt(val.trim())).toLocaleString("en-US");
+  }
+  const raw = Number(val || 0);
   return raw.toLocaleString("en-US");
 }
 

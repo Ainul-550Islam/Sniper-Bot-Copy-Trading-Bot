@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::models::ExecutionMode;
 use crate::tenant::{ModuleKind, OrganizationId, RuntimeGeneration, RuntimeId};
@@ -17,10 +17,10 @@ use crate::tenant::{ModuleKind, OrganizationId, RuntimeGeneration, RuntimeId};
 /// The coherent identity of one tenant execution path.
 ///
 /// All fields are public data (ids and enums); nothing here is a secret.
-/// Coherence is enforced at construction: [`ExecutionScope::new`] requires
-/// a non-nil runtime id, because a scope without a runtime cannot be
-/// fenced and therefore must not exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Coherence is enforced at construction: [`ExecutionScope::new`] rejects
+/// nil organization and runtime ids, because neither tenant identity nor
+/// fencing can be established without them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct ExecutionScope {
     organization_id: OrganizationId,
     runtime_id: RuntimeId,
@@ -30,8 +30,8 @@ pub struct ExecutionScope {
 }
 
 impl ExecutionScope {
-    /// Build a scope. Fails closed on a nil runtime id (an unfenceable
-    /// scope would be an authorization hole, not a convenience).
+    /// Build a scope. Fails closed on nil organization or runtime ids (a
+    /// tenantless or unfenceable scope would be an authorization hole).
     pub fn new(
         organization_id: OrganizationId,
         runtime_id: RuntimeId,
@@ -39,6 +39,9 @@ impl ExecutionScope {
         module: ModuleKind,
         mode: ExecutionMode,
     ) -> Result<Self, ScopeError> {
+        if organization_id.as_uuid().is_nil() {
+            return Err(ScopeError::NilOrganization);
+        }
         if runtime_id.is_nil() {
             return Err(ScopeError::NilRuntime);
         }
@@ -104,6 +107,8 @@ impl fmt::Display for ExecutionScope {
 /// Why a scope could not be built. Closed vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeError {
+    /// The nil organization id was supplied.
+    NilOrganization,
     /// The nil runtime id was supplied.
     NilRuntime,
 }
@@ -112,6 +117,7 @@ impl ScopeError {
     /// Stable machine-readable label.
     pub fn as_str(self) -> &'static str {
         match self {
+            ScopeError::NilOrganization => "nil_organization",
             ScopeError::NilRuntime => "nil_runtime",
         }
     }
@@ -120,6 +126,12 @@ impl ScopeError {
 impl fmt::Display for ScopeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ScopeError::NilOrganization => {
+                write!(
+                    f,
+                    "execution scope rejected: nil organization id is not a tenant"
+                )
+            }
             ScopeError::NilRuntime => {
                 write!(
                     f,
@@ -172,6 +184,20 @@ mod tests {
     }
 
     #[test]
+    fn nil_organization_is_rejected_fail_closed() {
+        let err = ExecutionScope::new(
+            OrganizationId::from(uuid::Uuid::nil()),
+            RuntimeId::new(),
+            RuntimeGeneration::first(),
+            BotModule::Copy,
+            ExecutionMode::Paper,
+        )
+        .unwrap_err();
+        assert_eq!(err, ScopeError::NilOrganization);
+        assert_eq!(err.as_str(), "nil_organization");
+    }
+
+    #[test]
     fn live_scopes_report_live() {
         let s = ExecutionScope::new(
             OrganizationId::new(),
@@ -188,7 +214,8 @@ mod tests {
     fn scopes_are_hashable_and_serializable() {
         let s = scope().unwrap();
         let json = serde_json::to_string(&s).unwrap();
-        let back: ExecutionScope = serde_json::from_str(&json).unwrap();
-        assert_eq!(s, back);
+        assert!(json.contains("organization_id"));
+        assert!(json.contains("runtime_id"));
+        assert!(json.contains("generation"));
     }
 }

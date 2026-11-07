@@ -325,15 +325,12 @@ fn all_25_batch6_docs_exist() {
     // new document set.
     // Include the generated STATS.md in this total, as docs_files in the
     // release manifest does.
-    // 2026-11-01: 160 -> 167 — the delivery passes added the FINAL-DELIVERY,
-    // KNOWN-LIMITATIONS and buyer-handover documents and this pin was not
-    // bumped with them, so the assertion had been failing on any tree newer
-    // than 2026-10-28. Found by running the whole workspace's tests in one
-    // pass instead of crate by crate. It must stay equal to `docs_files` in
-    // release-manifest.json, which `tests/release/manifest_current.sh` checks.
+    // 2026-11-03: 167 -> 168 — EMAIL-DELIVERY.md documents the explicit
+    // opt-in outbox dispatcher/provider setup; keep the test pin aligned
+    // with the generated release-manifest docs_files count.
     assert_eq!(
-        count, 167,
-        "docs/*.md should equal the current document count (167)"
+        count, 168,
+        "docs/*.md should equal the current document count (168)"
     );
 }
 

@@ -420,7 +420,8 @@ pub struct PgCommandStore {
     pool: PgPool,
 }
 
-const COMMAND_COLUMNS: &str = "command_id, organization_id, user_id, chat_id, action, mint, \
+const COMMAND_COLUMNS: &str =
+    "command_id, organization_id, user_id, chat_id, consent_id, action, mint, \
      amount_lamports, percent_bps, slippage_bps, nonce_sha256, idempotency_key, status, \
      failure_reason, created_at, expires_at, confirmed_at, settled_at";
 
@@ -442,6 +443,7 @@ impl PgCommandStore {
             organization_id: row.get::<Uuid, _>("organization_id").to_string(),
             user_id: row.get::<i64, _>("user_id"),
             chat_id: row.get::<i64, _>("chat_id"),
+            consent_id: row.get::<Option<Uuid>, _>("consent_id"),
             action: action_from_row(row.get::<&str, _>("action"))?,
             mint: row.get::<String, _>("mint"),
             amount_lamports: amount
@@ -531,12 +533,13 @@ impl CommandStore for PgCommandStore {
              (command_id, organization_id, user_id, chat_id, consent_id, action, mint, \
               amount_lamports, percent_bps, slippage_bps, nonce_sha256, idempotency_key, \
               status, created_at, expires_at) \
-             VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(command.command_id)
         .bind(org)
         .bind(command.user_id)
         .bind(command.chat_id)
+        .bind(command.consent_id)
         .bind(command.action.as_str())
         .bind(&command.mint)
         .bind(
@@ -613,13 +616,23 @@ impl CommandStore for PgCommandStore {
         failure_code: Option<&str>,
     ) -> Result<bool, StoreError> {
         let result = sqlx::query(
-            "UPDATE telegram_trade_commands SET \
+            "UPDATE telegram_trade_commands AS cmd SET \
                  status = $3, \
                  failure_reason = COALESCE($4, failure_reason), \
                  confirmed_at = CASE WHEN $3 = 'confirmed' THEN $5 ELSE confirmed_at END, \
                  settled_at = CASE WHEN $3 IN ('executed','failed','expired','cancelled') \
                                    THEN $5 ELSE settled_at END \
-             WHERE command_id = $1 AND status = $2",
+             WHERE cmd.command_id = $1 AND cmd.status = $2 \
+               AND ($3 <> 'confirmed' OR EXISTS ( \
+                   SELECT 1 FROM telegram_trade_consents AS consent \
+                   WHERE consent.consent_id = cmd.consent_id \
+                     AND consent.organization_id = cmd.organization_id \
+                     AND consent.user_id = cmd.user_id \
+                     AND consent.chat_id = cmd.chat_id \
+                     AND consent.revoked_at IS NULL \
+                     AND consent.expires_at > $5 \
+                     AND consent.scope @> ARRAY[cmd.action]::text[] \
+               ))",
         )
         .bind(command_id)
         .bind(from.as_str())

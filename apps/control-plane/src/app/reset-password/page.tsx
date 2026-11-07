@@ -17,6 +17,7 @@ import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ApiError, request } from "@/lib/api";
+import { clearSession } from "@/lib/auth";
 
 interface ConfirmResponse {
   status: string;
@@ -55,6 +56,10 @@ function ResetPasswordBody() {
         body: { token, new_password: password },
         anonymous: true,
       });
+      // The server revokes every session after a password reset. Drop this
+      // browser's in-memory credential too, so the UI cannot retain a session
+      // that the server has already invalidated.
+      clearSession("expired");
       setDone(res);
     } catch (err) {
       setError(err instanceof ApiError ? err.reason : "Could not reset the password.");

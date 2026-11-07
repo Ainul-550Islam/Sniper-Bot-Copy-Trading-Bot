@@ -15,7 +15,9 @@
 //!   mirror outcome through the `bot-core` `TenantCopyEventRepo`
 //!   (`copy_events` rows, organization-attributed, idempotent on
 //!   `(organization_id, event_id)`);
-//! * both sinks verify the outcome's organization against their OWN
+//! * both sinks also upsert the current position projection into tenant-scoped
+//!   `positions`, so risk-oracle counts/exposure survive process restarts;
+//! * all sinks verify the presented organization against their OWN
 //!   write scope before touching the database — a handed-in outcome of
 //!   another tenant fails closed (`TenantMismatch`), it is never
 //!   silently re-attributed.
@@ -40,6 +42,7 @@ use async_trait::async_trait;
 
 use bot_core::error::{BotError, BotResult};
 use bot_core::execution::TenantExecutionContext;
+use bot_core::models::Position;
 use bot_core::state::Shared;
 use bot_core::tenant::OrganizationId;
 use bot_core::trading_repository::copy::events::TenantCopyEventRepo;
@@ -50,6 +53,7 @@ use bot_core::trading_repository::polymarket::model::{
 };
 use bot_core::trading_repository::polymarket::read::TenantPolyRead;
 use bot_core::trading_repository::polymarket::write::TenantPolyWrite;
+use bot_core::trading_repository::positions::{TenantPosition, TenantPositionWrite};
 use bot_core::trading_repository::write_scope::TenantWriteScope;
 use chrono::{DateTime, Utc};
 use solana_kit::rpc::Rpc;
@@ -185,6 +189,7 @@ impl TenantModuleFactory {
         Ok(
             executor.with_execution_sink(Arc::new(RepoExecutionSink::new(
                 TenantExecutionWrite::new(Arc::clone(&self.db)),
+                TenantPositionWrite::new(Arc::clone(&self.db)),
                 write,
             ))),
         )
@@ -208,6 +213,7 @@ impl TenantModuleFactory {
         .await?;
         Ok(executor.with_copy_sink(Arc::new(RepoCopySink::new(
             TenantCopyEventRepo::new(Arc::clone(&self.db)),
+            TenantPositionWrite::new(Arc::clone(&self.db)),
             write,
         ))))
     }
@@ -228,6 +234,7 @@ impl TenantModuleFactory {
             .map_err(|e| BotError::invalid(e.to_string()))?;
         Ok(executor.with_poly_sink(Arc::new(RepoPolySink::new(
             TenantPolyWrite::new(Arc::clone(&self.db)),
+            TenantPositionWrite::new(Arc::clone(&self.db)),
             read,
             write,
         ))))
@@ -252,13 +259,22 @@ fn not_wired(e: crate::module_runtime::tenant_module_instance::InstanceIdentityE
 /// `transactions` row for the tenant that executed it.
 pub struct RepoExecutionSink {
     executions: TenantExecutionWrite,
+    positions: TenantPositionWrite,
     write: TenantWriteScope,
 }
 
 impl RepoExecutionSink {
     /// Build the sink for ONE tenant's write scope.
-    pub fn new(executions: TenantExecutionWrite, write: TenantWriteScope) -> Self {
-        RepoExecutionSink { executions, write }
+    pub fn new(
+        executions: TenantExecutionWrite,
+        positions: TenantPositionWrite,
+        write: TenantWriteScope,
+    ) -> Self {
+        RepoExecutionSink {
+            executions,
+            positions,
+            write,
+        }
     }
 }
 
@@ -277,6 +293,72 @@ fn assert_tenant_scope(
         )));
     }
     Ok(())
+}
+
+fn tenant_position_from_core(
+    organization: OrganizationId,
+    position: &Position,
+) -> BotResult<TenantPosition> {
+    if [
+        position.qty,
+        position.avg_entry,
+        position.cost_basis,
+        position.realized_quote,
+        position.last_mark,
+    ]
+    .iter()
+    .any(|value| !value.is_finite())
+        || position
+            .realized_pnl_quote
+            .is_some_and(|value| !value.is_finite())
+    {
+        return Err(BotError::invalid(
+            "tenant position contains a non-finite accounting value",
+        ));
+    }
+    let entry_latency_ms = position
+        .entry_latency_ms
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| BotError::invalid("tenant position latency exceeds i64 range"))?;
+    let mode = match position.mode {
+        bot_core::models::ExecutionMode::Paper => "paper",
+        bot_core::models::ExecutionMode::Simulate => "simulate",
+        bot_core::models::ExecutionMode::Live => "live",
+    };
+    Ok(TenantPosition {
+        organization_id: organization,
+        id: position.id.clone(),
+        source: position.source.as_str().into(),
+        venue: position.venue.as_str().into(),
+        mode: mode.into(),
+        status: position.status.as_str().into(),
+        symbol: position.symbol.clone(),
+        symbol_display: position.symbol_display.clone(),
+        quote_symbol: position.quote_symbol.clone(),
+        qty: position.qty,
+        avg_entry: position.avg_entry,
+        cost_basis: position.cost_basis,
+        realized_quote: position.realized_quote,
+        realized_pnl_quote: position.realized_pnl_quote,
+        realized_at: position.realized_at,
+        last_mark: position.last_mark,
+        stop_loss: position.stop_loss,
+        take_profit: position.take_profit,
+        trailing_stop: position.trailing_stop,
+        trailing_high_water: position.trailing_high_water,
+        max_hold_secs: position.max_hold_secs,
+        entry_signature: position.entry_signature.clone(),
+        exit_signature: position.exit_signature.clone(),
+        entry_latency_ms,
+        copied_wallet: position.copied_wallet.clone(),
+        market_id: position.market_id.clone(),
+        outcome: position.outcome.clone(),
+        reason_closed: position.reason_closed.clone(),
+        opened_at: position.opened_at,
+        updated_at: position.updated_at,
+        closed_at: position.closed_at,
+    })
 }
 
 #[async_trait]
@@ -331,6 +413,19 @@ impl module_sniper::tenant_executor::TenantExecutionSink for RepoExecutionSink {
             .map_err(|e| BotError::db(e.to_string()))?;
         Ok(())
     }
+
+    async fn record_position(
+        &self,
+        organization: OrganizationId,
+        position: &Position,
+    ) -> BotResult<()> {
+        assert_tenant_scope("tenant position sink", &self.write, organization)?;
+        let position = tenant_position_from_core(organization, position)?;
+        self.positions
+            .upsert(&self.write, &position)
+            .await
+            .map_err(|e| BotError::db(e.to_string()))
+    }
 }
 
 /// Copy-side persistence: every mirror outcome becomes a `copy_events`
@@ -338,13 +433,22 @@ impl module_sniper::tenant_executor::TenantExecutionSink for RepoExecutionSink {
 /// so a replayed feed can never double-count).
 pub struct RepoCopySink {
     events: TenantCopyEventRepo,
+    positions: TenantPositionWrite,
     write: TenantWriteScope,
 }
 
 impl RepoCopySink {
     /// Build the sink for ONE tenant's write scope.
-    pub fn new(events: TenantCopyEventRepo, write: TenantWriteScope) -> Self {
-        RepoCopySink { events, write }
+    pub fn new(
+        events: TenantCopyEventRepo,
+        positions: TenantPositionWrite,
+        write: TenantWriteScope,
+    ) -> Self {
+        RepoCopySink {
+            events,
+            positions,
+            write,
+        }
     }
 }
 
@@ -399,6 +503,23 @@ impl module_copy::tenant_executor::TenantCopySink for RepoCopySink {
             .map_err(|e| BotError::db(e.to_string()))?;
         Ok(())
     }
+
+    async fn record_position(
+        &self,
+        context: &module_copy::tenant_context::CopyTenantContext,
+        position: &Position,
+    ) -> BotResult<()> {
+        assert_tenant_scope(
+            "tenant copy position sink",
+            &self.write,
+            context.organization_id(),
+        )?;
+        let position = tenant_position_from_core(context.organization_id(), position)?;
+        self.positions
+            .upsert(&self.write, &position)
+            .await
+            .map_err(|e| BotError::db(e.to_string()))
+    }
 }
 
 /// Polymarket-side persistence (§D): signal outcomes become
@@ -408,15 +529,22 @@ impl module_copy::tenant_executor::TenantCopySink for RepoCopySink {
 /// the repositories' own composite arbiters.
 pub struct RepoPolySink {
     writes: TenantPolyWrite,
+    positions: TenantPositionWrite,
     read: TenantPolyRead,
     write: TenantWriteScope,
 }
 
 impl RepoPolySink {
     /// Build the sink for ONE tenant's write scope.
-    pub fn new(writes: TenantPolyWrite, read: TenantPolyRead, write: TenantWriteScope) -> Self {
+    pub fn new(
+        writes: TenantPolyWrite,
+        positions: TenantPositionWrite,
+        read: TenantPolyRead,
+        write: TenantWriteScope,
+    ) -> Self {
         RepoPolySink {
             writes,
+            positions,
             read,
             write,
         }
@@ -554,6 +682,19 @@ impl module_polymarket::tenant_executor::TenantPolySink for RepoPolySink {
             .map_err(|e| BotError::db(e.to_string()))?;
         Ok(())
     }
+
+    async fn record_position(
+        &self,
+        position: &Position,
+        organization: OrganizationId,
+    ) -> BotResult<()> {
+        assert_tenant_scope("tenant Polymarket position sink", &self.write, organization)?;
+        let projection = tenant_position_from_core(organization, position)?;
+        self.positions
+            .upsert(&self.write, &projection)
+            .await
+            .map_err(|error| BotError::db(error.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -575,6 +716,33 @@ mod tests {
         let err =
             assert_tenant_scope("tenant copy sink", &write, OrganizationId::new()).unwrap_err();
         assert!(err.to_string().contains("organization mismatch"), "{err}");
+    }
+
+    #[test]
+    fn tenant_position_projection_preserves_risk_fields_and_rejects_non_finite_values() {
+        let org = OrganizationId::new();
+        let mut position = Position::new(
+            "position-1".into(),
+            bot_core::models::TradeSource::Sniper,
+            bot_core::models::Venue::PumpFun,
+            bot_core::models::ExecutionMode::Live,
+            "mint-1".into(),
+            "TOKEN".into(),
+            "SOL".into(),
+        );
+        position.apply_buy(100.0, 0.01, 1.0);
+        position.entry_latency_ms = Some(42);
+        let projection = tenant_position_from_core(org, &position).expect("valid projection");
+        assert_eq!(projection.organization_id, org);
+        assert_eq!(projection.id, "position-1");
+        assert_eq!(projection.source, "sniper");
+        assert_eq!(projection.mode, "live");
+        assert_eq!(projection.status, "open");
+        assert_eq!(projection.cost_basis, 1.0);
+        assert_eq!(projection.entry_latency_ms, Some(42));
+
+        position.cost_basis = f64::NAN;
+        assert!(tenant_position_from_core(org, &position).is_err());
     }
 
     /// Unwired modules are refused explicitly — never a silent

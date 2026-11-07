@@ -26,6 +26,7 @@ export default function PortfolioPage() {
       const data = await getPortfolioSummary();
       setPortfolio(data);
     } catch (err: unknown) {
+      setPortfolio(null);
       setError(err instanceof Error ? err.message : "Failed to load portfolio summary");
     } finally {
       setLoading(false);

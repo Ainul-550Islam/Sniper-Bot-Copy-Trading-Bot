@@ -1,34 +1,51 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
 import { BalancesTable } from "@/components/trading/BalancesTable";
 import { toDisplayError } from "@/lib/api";
+import { sessionStore } from "@/lib/auth";
 import { tradingDetailApi, type BalancesResponse } from "@/lib/api/trading-detail-api";
 
 export default function BalancesPage() {
   const [balances, setBalances] = useState<BalancesResponse["items"]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const requestVersion = useRef(0);
 
-  const load = useCallback(async () => {
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setBalances([]);
     setLoading(true);
     setError(null);
+  }), []);
+
+  const load = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    setLoading(true);
+    setError(null);
+    setBalances([]);
     try {
       const response = await tradingDetailApi.balances();
-      setBalances(Array.isArray(response.items) ? response.items : []);
+      if (requestId === requestVersion.current) {
+        setBalances(Array.isArray(response.items) ? response.items : []);
+      }
     } catch (err: unknown) {
-      setBalances([]);
-      setError(toDisplayError(err));
+      if (requestId === requestVersion.current) {
+        setBalances([]);
+        setError(toDisplayError(err));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void Promise.resolve().then(() => load());
-  }, [load]);
+  }, [load, sessionVersion]);
 
   return (
     <AppShell title="Balances">

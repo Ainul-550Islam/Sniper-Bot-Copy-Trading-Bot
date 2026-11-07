@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReconcileResponse } from "@/lib/api/billing-status-api";
 import { billingStatusApi } from "@/lib/api/billing-status-api";
 import { toDisplayError } from "@/lib/api";
@@ -22,16 +22,22 @@ export function ReconcilePanel({ organizationId, canManage }: ReconcilePanelProp
   const [resultLoading, setResultLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const resultRequestVersion = useRef(0);
+  const tenantVersion = useRef(0);
 
   const loadResult = useCallback(async () => {
+    const requestId = ++resultRequestVersion.current;
     setResultLoading(true);
+    setResult(null);
     setError(null);
     try {
       const reported = await billingStatusApi.reconcileResult(organizationId);
-      // Only show a decision the server actually reported; an empty body
-      // is treated as "no reconciliation on record", never as a fake result.
-      setResult(reported && typeof reported.action === "string" && typeof reported.decided_at === "string" ? reported : null);
+      if (requestId !== resultRequestVersion.current) return;
+      // Only show a decision the server actually reported for this tenant; an
+      // empty or mismatched body is never treated as a real reconciliation.
+      setResult(reported && reported.organization_id === organizationId && typeof reported.action === "string" && typeof reported.decided_at === "string" ? reported : null);
     } catch (err: unknown) {
+      if (requestId !== resultRequestVersion.current) return;
       // A 404 means no reconciliation has run yet — that is an honest empty
       // state, not a failure.
       if (err instanceof Error && /404/.test(err.message)) {
@@ -40,29 +46,48 @@ export function ReconcilePanel({ organizationId, canManage }: ReconcilePanelProp
         setError(toDisplayError(err));
       }
     } finally {
-      setResultLoading(false);
+      if (requestId === resultRequestVersion.current) setResultLoading(false);
     }
   }, [organizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadResult());
+    const generation = ++tenantVersion.current;
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (!active) return;
+      setResult(null);
+      setResultLoading(true);
+      setError(null);
+      setMessage(null);
+      setLoading(false);
+      void loadResult();
+    });
+    return () => {
+      active = false;
+      if (tenantVersion.current === generation) tenantVersion.current += 1;
+      resultRequestVersion.current += 1;
+    };
   }, [loadResult]);
 
   const handleReconcile = async () => {
     if (!window.confirm("Reconcile subscription and entitlement state with the billing provider? This re-reads provider records for this organization.")) return;
+    const generation = tenantVersion.current;
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
       await billingStatusApi.reconcile();
+      if (generation !== tenantVersion.current) return;
       setMessage("Reconciliation accepted — result below is refreshed from the server.");
       await loadResult();
     } catch (err: unknown) {
-      setError(toDisplayError(err));
+      if (generation === tenantVersion.current) setError(toDisplayError(err));
     } finally {
-      setLoading(false);
+      if (generation === tenantVersion.current) setLoading(false);
     }
   };
+
+  const visibleResult = result?.organization_id === organizationId ? result : null;
 
   return (
     <section className="card" aria-label="Billing reconciliation">
@@ -99,38 +124,38 @@ export function ReconcilePanel({ organizationId, canManage }: ReconcilePanelProp
       <div style={{ marginTop: "1rem" }}>
         <h3 style={{ marginTop: 0 }}>Last Reconciliation Result</h3>
         {resultLoading && <p>Loading reconciliation result…</p>}
-        {result === null && resultLoading === false && (
+        {visibleResult === null && resultLoading === false && (
           <p className="muted">No reconciliation has been recorded for this organization yet.</p>
         )}
-        {result && resultLoading === false && (
+        {visibleResult && resultLoading === false && (
           <table className="table" style={{ width: "100%", borderCollapse: "collapse", marginTop: "0.5rem" }}>
             <tbody>
               <tr style={{ borderTop: "1px solid var(--line)" }}>
                 <td style={{ padding: "0.75rem 1rem" }}><strong>Action</strong></td>
-                <td style={{ padding: "0.75rem 1rem" }}>{result.action}</td>
+                <td style={{ padding: "0.75rem 1rem" }}>{visibleResult.action}</td>
               </tr>
               <tr style={{ borderTop: "1px solid var(--line)" }}>
                 <td style={{ padding: "0.75rem 1rem" }}><strong>Reason</strong></td>
-                <td style={{ padding: "0.75rem 1rem" }}>{result.reason}</td>
+                <td style={{ padding: "0.75rem 1rem" }}>{visibleResult.reason}</td>
               </tr>
               <tr style={{ borderTop: "1px solid var(--line)" }}>
                 <td style={{ padding: "0.75rem 1rem" }}><strong>Decided At</strong></td>
-                <td style={{ padding: "0.75rem 1rem" }}>{new Date(result.decided_at).toLocaleString()}</td>
+                <td style={{ padding: "0.75rem 1rem" }}>{new Date(visibleResult.decided_at).toLocaleString()}</td>
               </tr>
               <tr style={{ borderTop: "1px solid var(--line)" }}>
                 <td style={{ padding: "0.75rem 1rem" }}><strong>Idempotent</strong></td>
-                <td style={{ padding: "0.75rem 1rem" }}>{String(result.idempotent)}</td>
+                <td style={{ padding: "0.75rem 1rem" }}>{String(visibleResult.idempotent)}</td>
               </tr>
-              {result.provider_event_kind && (
+              {visibleResult.provider_event_kind && (
                 <tr style={{ borderTop: "1px solid var(--line)" }}>
                   <td style={{ padding: "0.75rem 1rem" }}><strong>Provider Event</strong></td>
-                  <td style={{ padding: "0.75rem 1rem" }}>{result.provider_event_kind}</td>
+                  <td style={{ padding: "0.75rem 1rem" }}>{visibleResult.provider_event_kind}</td>
                 </tr>
               )}
-              {result.internal_subscription_status && (
+              {visibleResult.internal_subscription_status && (
                 <tr style={{ borderTop: "1px solid var(--line)" }}>
                   <td style={{ padding: "0.75rem 1rem" }}><strong>Internal Subscription Status</strong></td>
-                  <td style={{ padding: "0.75rem 1rem" }}>{result.internal_subscription_status}</td>
+                  <td style={{ padding: "0.75rem 1rem" }}>{visibleResult.internal_subscription_status}</td>
                 </tr>
               )}
             </tbody>

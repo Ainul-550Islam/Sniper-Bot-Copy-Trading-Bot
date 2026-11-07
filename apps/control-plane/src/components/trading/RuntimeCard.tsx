@@ -10,7 +10,8 @@
  * from the runtime handle; nothing here is derived client-side.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { sessionStore } from "@/lib/auth";
 import {
   BotsResponse,
   classifyTradingError,
@@ -22,27 +23,59 @@ import {
 export default function RuntimeCard() {
   const [bots, setBots] = useState<BotsResponse | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const selectedOrganizationId = sessionStore.getSnapshot().selectedOrganizationId;
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setBots(null);
+    setState({ kind: "loading" });
+  }), []);
 
   const load = useCallback(async () => {
+    if (selectedOrganizationId !== sessionStore.getSnapshot().selectedOrganizationId) return;
+    const requestId = ++requestVersion.current;
+    setBots(null);
+    if (!selectedOrganizationId) {
+      setState({ kind: "empty" });
+      return;
+    }
     setState({ kind: "loading" });
     try {
       const response = await customerTrading.bots();
+      if (requestId !== requestVersion.current) return;
+      if (response.organization_id !== selectedOrganizationId) {
+        throw new Error("Runtime response does not match the selected organization");
+      }
       setBots(response);
       setState({ kind: response.items.length === 0 ? "empty" : "ready" });
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) {
+        setBots(null);
+        setState(classifyTradingError(e));
+      }
     }
-  }, []);
+  }, [selectedOrganizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
-  }, [load]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [load, sessionVersion]);
 
   return (
     <section className="card" aria-label="Runtime status">
       <h2>Runtimes &amp; fencing</h2>
-      {state.kind === "loading" && <p>Loading runtimes…</p>}
-      {state.kind !== "loading" && state.kind !== "ready" && state.kind !== "empty" && (
+      {!selectedOrganizationId && <p>Select an organization to view runtimes.</p>}
+      {selectedOrganizationId && state.kind === "loading" && <p>Loading runtimes…</p>}
+      {selectedOrganizationId && state.kind !== "loading" && state.kind !== "ready" && state.kind !== "empty" && (
         <p role="alert" className="error">
           {tradingStateMessage(state)}
           <br />
@@ -51,13 +84,13 @@ export default function RuntimeCard() {
           </button>
         </p>
       )}
-      {state.kind === "empty" && (
+      {selectedOrganizationId && state.kind === "empty" && (
         <p>
           No bot runtimes are registered for your organization yet. This is the live registry —
           nothing is simulated here.
         </p>
       )}
-      {state.kind === "ready" && bots && (
+      {selectedOrganizationId && state.kind === "ready" && bots?.organization_id === selectedOrganizationId && bots && (
         <table>
           <thead>
             <tr>
@@ -85,7 +118,7 @@ export default function RuntimeCard() {
           </tbody>
         </table>
       )}
-      {state.kind === "ready" && (
+      {selectedOrganizationId && state.kind === "ready" && bots?.organization_id === selectedOrganizationId && (
         <p className="muted">
           Lifecycle transitions are runtime-owned and fenced by generation: this surface reports
           state, it does not reach around the fence.

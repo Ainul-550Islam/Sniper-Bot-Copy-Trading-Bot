@@ -234,25 +234,28 @@ row names the subject it is about (`order_id` / `trade_id` / `event_id` /
 
 `GlobalLedger::recover(module_positions)` runs at startup after the
 persistence layer restored the modules' positions and BEFORE any module
-trades (`main.rs`: `accounting::recover` right after `persist::restore`):
+trades (`main.rs`: `accounting::recover` right after `persist::restore`). The
+server restores runtime kill switches before this recovery sequence.
 
 1. `load_events()` from the journal → `hydrate` re-applies every event
-   through the same validate / dedup / postings / book path (`rebuilt`,
-   `duplicate_skipped`); an unreadable journal is reported
-   (`journal_unavailable`) and the ledger starts empty — reconciliation then
-   flags every position.
+   through the same validation / dedup / postings / book path (`rebuilt`,
+   `duplicate_skipped`). Undecodable or invalid rows are reported as
+   `invalid_journal_event`; missing journal reads or realized module-position
+   coverage are treated as unavailable. Aggregate portfolio limits stay
+   unready in each case rather than evaluating an empty/partial book.
 2. `flush_pending` (`pending_flushed`).
 3. The realized series (daily net realized, cumulative, peak) is rebuilt as
-   a by-product, so daily-loss and drawdown gating is back before the first
-   decision.
+   a by-product. It is used for daily-loss and drawdown gating only after
+   recovery and position reconciliation establish a complete view; otherwise
+   configured aggregate limits fail closed.
 4. Every open module position without ledger history is reported as
    `gap_reported` — audited, metered, listed in the report and in the
    startup log. Nothing is synthesised: if the position is real, an operator
    books an opening `correction` (`side = buy`, the module position id in
    `position_id`, the ticket in `correlation_id`) which the reconciliation
    then matches; otherwise the `position_mismatch` finding stands.
-5. Runtime kill switches are restored from `kill_switches`
-   (`GlobalRiskEngine::restore`) before the ledger.
+5. Operator decisions refresh the shared journal before aggregate-limit
+   evaluation so events committed by another replica are incorporated.
 
 A fill replayed after the restart (a re-emitted confirmation, a recovery
 re-submission) is `Duplicate`. Recovery is idempotent: a second run rebuilds

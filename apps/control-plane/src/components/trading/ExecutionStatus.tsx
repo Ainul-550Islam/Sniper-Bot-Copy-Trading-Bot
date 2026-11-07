@@ -20,7 +20,7 @@
  * the server returned, it never infers a signature client-side.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   classifyTradingError,
   customerTrading,
@@ -51,20 +51,31 @@ const CLASS_LABEL: Record<LifecycleClass, string> = {
 export default function ExecutionStatus({ orderId }: { orderId: string }) {
   const [page, setPage] = useState<ExecutionsPage | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    setPage(null);
     setState({ kind: "loading" });
     try {
       const response = await customerTrading.executionsForOrder(orderId);
+      if (requestId !== requestVersion.current) return;
       setPage(response);
       setState({ kind: response.items.length === 0 ? "empty" : "ready" });
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) setState(classifyTradingError(e));
     }
   }, [orderId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   const counts: Record<LifecycleClass, number> = {

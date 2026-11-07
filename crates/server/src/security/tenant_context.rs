@@ -161,7 +161,7 @@ mod tests {
         );
         let err = validate_organization_header(&headers, &ctx).unwrap_err();
         assert_eq!(
-            err.kind,
+            err.kind(),
             bot_core::authorization::DecisionKind::DenyResource
         );
     }
@@ -199,7 +199,7 @@ mod tests {
         // Object belongs to B, context is A → deny
         let err = ensure_same_tenant(&ctx, org_b).unwrap_err();
         assert_eq!(
-            err.kind,
+            err.kind(),
             bot_core::authorization::DecisionKind::DenyResource
         );
         // Same tenant → allow

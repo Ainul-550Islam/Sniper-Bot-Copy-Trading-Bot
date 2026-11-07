@@ -78,7 +78,9 @@ done
 
 # --- 4. obtain the real certificate ----------------------------------------
 echo "==> requesting a certificate from Let's Encrypt"
-"${COMPOSE[@]}" run --rm certbot certonly \
+# The service entrypoint is the long-running renewal loop. A command alone
+# does not replace it; this one-shot invocation must select the certbot CLI.
+"${COMPOSE[@]}" run --rm --entrypoint certbot certbot certonly \
     --webroot --webroot-path=/var/www/certbot \
     --email "$SNIPER_ACME_EMAIL" \
     --agree-tos --no-eff-email \

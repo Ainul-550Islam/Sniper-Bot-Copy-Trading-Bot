@@ -87,9 +87,23 @@ impl ModuleEnablement {
 }
 
 /// The per-tenant module state table.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TenantModuleSet {
     states: Vec<TenantModuleState>,
+}
+
+impl<'de> Deserialize<'de> for TenantModuleSet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            states: Vec<TenantModuleState>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(TenantModuleSet::new(wire.states))
+    }
 }
 
 /// One row of the per-tenant module table.
@@ -217,6 +231,22 @@ mod tests {
             set.check(ModuleKind::Sniper),
             ModuleVerdict::Deny(ModuleDisableReason::Operator)
         );
+    }
+
+    #[test]
+    fn deserialization_normalizes_duplicate_modules_using_last_entry() {
+        let states = vec![
+            TenantModuleState::enabled(ModuleKind::Sniper),
+            TenantModuleState::disabled(ModuleKind::Sniper, ModuleDisableReason::Operator),
+        ];
+        let value = serde_json::json!({ "states": states });
+        let set: TenantModuleSet = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            set.check(ModuleKind::Sniper),
+            ModuleVerdict::Deny(ModuleDisableReason::Operator)
+        );
+        let serialized = serde_json::to_value(&set).unwrap();
+        assert_eq!(serialized["states"].as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { setupTotp, verifyTotp } from "@/lib/api/security-api";
@@ -23,9 +23,14 @@ export default function MfaEnrollmentPage() {
   // derive the expired state once from the in-memory session instead of
   // setting state from an effect.
   const [expired] = useState(() => !needsMfaEnrollment());
+  const initialSetupStarted = useRef(false);
 
   useEffect(() => {
-    if (!needsMfaEnrollment()) return;
+    if (!needsMfaEnrollment() || initialSetupStarted.current) return;
+    // Next runs React Strict Mode in development, which replays mount effects.
+    // TOTP setup is a POST that creates a server-side device, so suppress the
+    // replay rather than orphaning a second unverified device.
+    initialSetupStarted.current = true;
     void createSetup();
     // The initial session is established by the login flow before navigation.
   }, []);

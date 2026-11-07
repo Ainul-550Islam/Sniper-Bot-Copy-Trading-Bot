@@ -190,6 +190,10 @@ pub struct Sniper {
     /// fail-closed gate — exits move money too and must never run
     /// unguarded in tenant mode.
     tenant_guard: Option<Arc<TenantBroadcastGuard>>,
+    /// Tenant position projection sink used by the independent exit
+    /// sweeper after every partial/full exit. Entry-only persistence is
+    /// insufficient because the risk oracle consumes the durable row.
+    tenant_position_sink: Option<Arc<dyn crate::tenant_executor::TenantExecutionSink>>,
     /// Sweeper-local exit bookkeeping (mark failures, retry backoff).
     exits: exit::ExitTracker,
     /// Advanced exit policy (GAP-MAP v2 P2): laddered take-profit,
@@ -265,6 +269,7 @@ impl Sniper {
             ownership: None,
             tenant: None,
             tenant_guard: None,
+            tenant_position_sink: None,
             exits: exit::ExitTracker::default(),
             exit_policy: crate::exit_policy::engine_from_config(cfg.sniper.advanced_exit.as_ref()),
             dev_sell_rx: None,
@@ -353,6 +358,17 @@ impl Sniper {
         self.tenant = Some(guard.context().clone());
         self.tenant_guard = Some(guard);
         Ok(self)
+    }
+
+    /// Attach the tenant-scoped position projection writer. The exit
+    /// sweeper is constructed later and clones this hook into its own
+    /// guarded engine instance.
+    pub fn with_tenant_position_sink(
+        mut self,
+        sink: Arc<dyn crate::tenant_executor::TenantExecutionSink>,
+    ) -> Self {
+        self.tenant_position_sink = Some(sink);
+        self
     }
 
     /// The bound tenant context, when this sniper is tenant-scoped.
@@ -558,6 +574,7 @@ impl Sniper {
                 ownership: self.ownership.clone(),
                 tenant: self.tenant.clone(),
                 tenant_guard: self.tenant_guard.clone(),
+                tenant_position_sink: self.tenant_position_sink.clone(),
                 exits: exit::ExitTracker::default(),
                 exit_policy: sweeper_exit_policy,
                 dev_sell_rx: sweeper_dev_sell_rx,

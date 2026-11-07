@@ -371,6 +371,17 @@ pub trait TenantExecutionSink: Send + Sync {
     /// metadata. Implementations MUST fail closed on an organization
     /// mismatch with their own write scope.
     async fn record(&self, outcome: &TenantTransaction) -> BotResult<()>;
+
+    /// Persist the current position projection after an entry. The server's
+    /// repository sink overrides this; test-only null sinks may leave it local.
+    async fn record_position(
+        &self,
+        organization: OrganizationId,
+        position: &bot_core::models::Position,
+    ) -> BotResult<()> {
+        let _ = (organization, position);
+        Ok(())
+    }
 }
 
 /// A no-op sink (used when tenant persistence is not attached — e.g. the
@@ -442,6 +453,7 @@ impl TenantSniperExecutor {
     /// Attach the tenant-scoped persistence sink.
     #[must_use]
     pub fn with_execution_sink(mut self, sink: Arc<dyn TenantExecutionSink>) -> Self {
+        self.sniper = self.sniper.with_tenant_position_sink(Arc::clone(&sink));
         self.sink = sink;
         self
     }
@@ -572,7 +584,37 @@ impl TenantSniperExecutor {
                 gates: String::new(),
             };
         }
-        let outcome = self.sniper.consider_event(event).await;
+        let mut outcome = self.sniper.consider_event(event).await;
+        if let Some(position_id) = outcome.position_id.as_deref() {
+            let persisted = match self.sniper.state().position(position_id).await {
+                Some(position) => {
+                    self.sink
+                        .record_position(self.context.organization_id(), &position)
+                        .await
+                }
+                None => Err(BotError::invalid(
+                    "tenant sniper produced a position id but no local position row",
+                )),
+            };
+            if let Err(error) = persisted {
+                outcome.rejection = Some(crate::pipeline::Rejection::new(
+                    crate::pipeline::RejectReason::ExecutionUnavailable,
+                    outcome.stage.clone(),
+                    format!("tenant position persistence failed: {error}"),
+                ));
+                self.sniper
+                    .state()
+                    .record_error(
+                        bot_core::models::BotModule::Sniper,
+                        &format!("tenant position persistence: {error}"),
+                    )
+                    .await;
+                self.sniper
+                    .state()
+                    .set_running(bot_core::models::BotModule::Sniper, false, true)
+                    .await;
+            }
+        }
         if outcome.accepted() {
             self.state.note_submitted();
             if outcome.rejection.is_none() {

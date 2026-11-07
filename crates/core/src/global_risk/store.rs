@@ -3,9 +3,29 @@
 //! implementation used by tests and no-database runs.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 use super::decision::GlobalRiskDecision;
+use crate::models::{BotModule, Venue};
+use crate::tenant::OrganizationId;
+
+/// A live accepted entry that has reserved risk capacity but is not yet
+/// represented by a durable position/fill projection.
+#[derive(Debug, Clone)]
+pub struct RiskEntryReservation {
+    pub reservation_id: String,
+    pub module: BotModule,
+    pub organization: Option<OrganizationId>,
+    pub venue: Venue,
+    pub wallet: String,
+    pub strategy: String,
+    pub asset: String,
+    pub quote_asset: String,
+    pub requested_quote: f64,
+    pub requested_ref: f64,
+    pub expires_at: DateTime<Utc>,
+}
 use super::kill_switch::{KillScope, KillSwitchEvent, KillSwitchState};
 
 /// Journal contract. Writes answer `bool` (success); reads answer `Option`
@@ -22,6 +42,31 @@ pub trait RiskStore: Send + Sync {
     async fn append_kill_switch_event(&self, event: &KillSwitchEvent) -> bool;
     /// Every stored switch state (restart restore).
     async fn load_kill_switches(&self) -> Option<Vec<KillSwitchState>>;
+
+    /// Whether this store shares entry reservations across replicas.
+    fn has_distributed_entry_reservations(&self) -> bool {
+        false
+    }
+
+    /// Acquire a cluster-wide admission lock. `None` means the lock service
+    /// is unavailable and an entry must fail closed. The returned guard must
+    /// remain alive through reservation insertion.
+    async fn acquire_entry_admission(&self) -> Option<Box<dyn Send>> {
+        Some(Box::new(()))
+    }
+
+    /// Active reservations visible to all replicas. `None` means unavailable.
+    async fn active_entry_reservations(&self) -> Option<Vec<RiskEntryReservation>> {
+        Some(Vec::new())
+    }
+
+    /// Persist one reservation before admission is released.
+    async fn create_entry_reservation(&self, _reservation: &RiskEntryReservation) -> bool {
+        true
+    }
+
+    /// Remove a completed reservation. Expiry remains the crash-recovery path.
+    async fn release_entry_reservation(&self, _reservation_id: &str) {}
 }
 
 /// In-memory journal. Bounded decision ring (newest kept).

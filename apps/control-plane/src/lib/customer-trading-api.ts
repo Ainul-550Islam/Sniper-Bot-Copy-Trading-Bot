@@ -33,7 +33,18 @@ export async function tenantRequest<T>(
   path: string,
   options: Parameters<typeof request>[1] = {},
 ): Promise<T> {
-  if (!path.startsWith(TENANT_PREFIX)) {
+  let normalizedPath: string | null = null;
+  if (path.startsWith(TENANT_PREFIX)) {
+    try {
+      // Fetch normalizes dot segments before sending the URL. Check the same
+      // normalized pathname here so `/api/tenant/../ops/...` cannot pass the
+      // textual prefix guard and escape the tenant route namespace.
+      normalizedPath = new URL(path, "https://tenant-request.invalid").pathname;
+    } catch {
+      // Invalid URL text is not a tenant endpoint.
+    }
+  }
+  if (!normalizedPath?.startsWith(TENANT_PREFIX)) {
     throw new Error(
       `customer-trading-api: refusing non-tenant path '${path}' — customer pages may only call ${TENANT_PREFIX}… endpoints`,
     );

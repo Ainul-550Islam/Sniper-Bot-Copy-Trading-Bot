@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
 import { RecoveryPanel } from "@/components/trading/RecoveryPanel";
 import { toDisplayError } from "@/lib/api";
+import { sessionStore } from "@/lib/auth";
 import {
   tradingDetailApi,
   type RecoveryIntentsResponse,
@@ -16,8 +17,22 @@ export default function RecoveryPage() {
   const [sweeps, setSweeps] = useState<RecoverySweepResponse["items"]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setIntents([]);
+    setSweeps([]);
+    setLoading(true);
+    setError(null);
+  }), []);
 
   const load = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    setIntents([]);
+    setSweeps([]);
     setLoading(true);
     setError(null);
     try {
@@ -25,20 +40,30 @@ export default function RecoveryPage() {
         tradingDetailApi.recoveryIntents(),
         tradingDetailApi.recoverySweep(),
       ]);
+      if (requestId !== requestVersion.current) return;
       setIntents(Array.isArray(intentsResponse.items) ? intentsResponse.items : []);
       setSweeps(Array.isArray(sweepsResponse.items) ? sweepsResponse.items : []);
     } catch (err: unknown) {
-      setIntents([]);
-      setSweeps([]);
-      setError(toDisplayError(err));
+      if (requestId === requestVersion.current) {
+        setIntents([]);
+        setSweeps([]);
+        setError(toDisplayError(err));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
-  }, [load]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [load, sessionVersion]);
 
   return (
     <AppShell title="Recovery">

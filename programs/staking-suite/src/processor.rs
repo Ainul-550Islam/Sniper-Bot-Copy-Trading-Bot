@@ -646,7 +646,10 @@ fn process_stake(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> 
 
     // Fold any live accrual into pending before the principal changes.
     sa.settle(config.reward_rate_bps, now);
-    if sa.amount == 0 {
+    // The cooldown is measured from the LAST principal change, not the
+    // position's first deposit. A matured position must not make a new top-up
+    // immediately withdrawable. A zero-net call does not change principal.
+    if net > 0 {
         sa.staked_at = now;
     }
     sa.amount = sa.amount.checked_add(net).ok_or(StakingError::Overflow)?;

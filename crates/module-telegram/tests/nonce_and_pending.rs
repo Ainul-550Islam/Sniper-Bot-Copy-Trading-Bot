@@ -23,6 +23,7 @@ fn spec(action: TradeAction) -> PendingSpec {
         organization_id: "org-1".into(),
         user_id: 111,
         chat_id: 100,
+        consent_id: None,
         action,
         mint: "So11111111111111111111111111111111111111112".into(),
         amount_lamports: match action {

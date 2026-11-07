@@ -17,9 +17,11 @@
 //! Nothing here decides or books anything on its own; every mutation goes
 //! through the core ledger / engine.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sqlx::Row;
 use tracing::{debug, info, warn};
 
 use bot_core::accounting::{
@@ -27,7 +29,9 @@ use bot_core::accounting::{
 };
 use bot_core::db::accounting::AccountingRepo;
 use bot_core::db::Database;
-use bot_core::global_risk::{GlobalRiskDecision, KillSwitchEvent, KillSwitchState, RiskStore};
+use bot_core::global_risk::{
+    GlobalRiskDecision, KillSwitchEvent, KillSwitchState, RiskEntryReservation, RiskStore,
+};
 use bot_core::reconciliation::QuantityTolerance;
 use bot_core::state::Shared;
 
@@ -60,10 +64,21 @@ impl LedgerStore for DbLedgerStore {
     }
 
     async fn load_events(&self) -> Option<Vec<StoredEvent>> {
-        match self.repo().load_events().await {
-            Ok(v) => Some(v),
-            Err(e) => {
-                warn!(error = %e, "ledger event journal read failed");
+        let repo = self.repo();
+        match repo.load_events().await {
+            Ok(events) => match repo.position_ledger_coverage_complete().await {
+                Ok(true) => Some(events),
+                Ok(false) => {
+                    warn!("module positions include realized activity without matching ledger history");
+                    None
+                }
+                Err(error) => {
+                    warn!(error = %error, "module-position ledger coverage check failed");
+                    None
+                }
+            },
+            Err(error) => {
+                warn!(error = %error, "ledger event journal read failed");
                 None
             }
         }
@@ -94,6 +109,40 @@ impl LedgerStore for DbLedgerStore {
     }
 }
 
+/// Durable admission lease held from the risk snapshot read through
+/// reservation insertion. It does not pin a pool connection; process crashes
+/// release it by expiry.
+struct PgEntryAdmissionGuard {
+    db: Arc<Database>,
+    organization_id: uuid::Uuid,
+    holder_id: uuid::Uuid,
+}
+
+impl Drop for PgEntryAdmissionGuard {
+    fn drop(&mut self) {
+        let db = self.db.clone();
+        let organization_id = self.organization_id;
+        let holder_id = self.holder_id;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let pool = db.system_pool().unwrap_or_else(|| db.pool());
+                if let Err(error) = sqlx::query(
+                    "UPDATE global_risk_entry_admission_locks
+                     SET holder_id = NULL, lease_until = now(), updated_at = now()
+                     WHERE organization_id = $1 AND holder_id = $2",
+                )
+                .bind(organization_id)
+                .bind(holder_id)
+                .execute(pool)
+                .await
+                {
+                    warn!(%error, %holder_id, "global risk admission lease release failed; it will expire");
+                }
+            });
+        }
+    }
+}
+
 /// PostgreSQL journal of the global risk engine.
 pub struct DbRiskStore {
     db: Arc<Database>,
@@ -107,6 +156,12 @@ impl DbRiskStore {
 
     fn repo(&self) -> AccountingRepo {
         AccountingRepo::new(self.db.clone())
+    }
+
+    /// Background risk reservations span replicas and therefore use the
+    /// system identity, always with an explicit deployment-org predicate.
+    fn risk_pool(&self) -> &sqlx::PgPool {
+        self.db.system_pool().unwrap_or_else(|| self.db.pool())
     }
 }
 
@@ -155,12 +210,149 @@ impl RiskStore for DbRiskStore {
             }
         }
     }
+
+    fn has_distributed_entry_reservations(&self) -> bool {
+        true
+    }
+
+    async fn acquire_entry_admission(&self) -> Option<Box<dyn Send>> {
+        let organization_id = bot_core::db::deployment_org::deployment_org_uuid(&self.db)
+            .await
+            .ok()?;
+        let holder_id = uuid::Uuid::new_v4();
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let row = sqlx::query(
+                "INSERT INTO global_risk_entry_admission_locks
+                    (organization_id, holder_id, lease_until, updated_at)
+                 VALUES ($1, $2, now() + INTERVAL '120 seconds', now())
+                 ON CONFLICT (organization_id) DO UPDATE
+                    SET holder_id = EXCLUDED.holder_id,
+                        lease_until = EXCLUDED.lease_until,
+                        updated_at = now()
+                  WHERE global_risk_entry_admission_locks.lease_until <= now()
+                 RETURNING holder_id",
+            )
+            .bind(organization_id)
+            .bind(holder_id)
+            .fetch_optional(self.risk_pool())
+            .await
+            .ok()?;
+            if row.is_some() {
+                return Some(Box::new(PgEntryAdmissionGuard {
+                    db: self.db.clone(),
+                    organization_id,
+                    holder_id,
+                }));
+            }
+            if tokio::time::Instant::now() >= until {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn active_entry_reservations(&self) -> Option<Vec<RiskEntryReservation>> {
+        let organization_id = bot_core::db::deployment_org::deployment_org_uuid(&self.db)
+            .await
+            .ok()?;
+        sqlx::query(
+            "DELETE FROM global_risk_entry_reservations
+             WHERE organization_id = $1 AND expires_at <= now()",
+        )
+        .bind(organization_id)
+        .execute(self.risk_pool())
+        .await
+        .ok()?;
+        let rows = sqlx::query(
+            "SELECT reservation_id, tenant_id, module, venue, wallet, strategy,
+                    asset, quote_asset, requested_quote, requested_ref, expires_at
+             FROM global_risk_entry_reservations
+             WHERE organization_id = $1 AND expires_at > now()
+             ORDER BY created_at, reservation_id",
+        )
+        .bind(organization_id)
+        .fetch_all(self.risk_pool())
+        .await
+        .ok()?;
+        rows.iter()
+            .map(|row| {
+                let module = bot_core::models::BotModule::from_str(
+                    &row.try_get::<String, _>("module").ok()?,
+                )
+                .ok()?;
+                let venue =
+                    bot_core::models::Venue::parse(&row.try_get::<String, _>("venue").ok()?)?;
+                let tenant_id: Option<uuid::Uuid> = row.try_get("tenant_id").ok()?;
+                Some(RiskEntryReservation {
+                    reservation_id: row.try_get("reservation_id").ok()?,
+                    module,
+                    organization: tenant_id.map(bot_core::tenant::OrganizationId::from),
+                    venue,
+                    wallet: row.try_get("wallet").ok()?,
+                    strategy: row.try_get("strategy").ok()?,
+                    asset: row.try_get("asset").ok()?,
+                    quote_asset: row.try_get("quote_asset").ok()?,
+                    requested_quote: row.try_get("requested_quote").ok()?,
+                    requested_ref: row.try_get("requested_ref").ok()?,
+                    expires_at: row.try_get("expires_at").ok()?,
+                })
+            })
+            .collect()
+    }
+
+    async fn create_entry_reservation(&self, reservation: &RiskEntryReservation) -> bool {
+        let Ok(organization_id) = bot_core::db::deployment_org::deployment_org_uuid(&self.db).await
+        else {
+            return false;
+        };
+        sqlx::query(
+            "INSERT INTO global_risk_entry_reservations
+                (organization_id, reservation_id, tenant_id, module, venue, wallet,
+                 strategy, asset, quote_asset, requested_quote, requested_ref, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(organization_id)
+        .bind(&reservation.reservation_id)
+        .bind(reservation.organization.map(|org| org.as_uuid()))
+        .bind(reservation.module.as_str())
+        .bind(reservation.venue.as_str())
+        .bind(&reservation.wallet)
+        .bind(&reservation.strategy)
+        .bind(&reservation.asset)
+        .bind(&reservation.quote_asset)
+        .bind(reservation.requested_quote)
+        .bind(reservation.requested_ref)
+        .bind(reservation.expires_at)
+        .execute(self.risk_pool())
+        .await
+        .is_ok()
+    }
+
+    async fn release_entry_reservation(&self, reservation_id: &str) {
+        let Ok(organization_id) = bot_core::db::deployment_org::deployment_org_uuid(&self.db).await
+        else {
+            return;
+        };
+        if let Err(error) = sqlx::query(
+            "DELETE FROM global_risk_entry_reservations
+             WHERE organization_id = $1 AND reservation_id = $2",
+        )
+        .bind(organization_id)
+        .bind(reservation_id)
+        .execute(self.risk_pool())
+        .await
+        {
+            warn!(reservation_id, %error, "global risk reservation release failed; lease will expire");
+        }
+    }
 }
 
 /// Install the durable stores when a database is attached. Must run before
 /// [`recover`] and before any module starts.
 pub async fn attach(state: &Shared, db: Option<&Arc<Database>>) {
     if let Some(db) = db {
+        state.global_risk().set_portfolio_ready(false).await;
         state
             .ledger()
             .attach_store(Arc::new(DbLedgerStore::new(db.clone())))
@@ -182,7 +374,18 @@ pub async fn recover(state: &Shared) -> AccountingRecoveryReport {
     let restored = state.global_risk().restore().await;
     let positions = state.all_positions().await;
     let report = state.ledger().recover(&positions).await;
+    let pending = state.ledger().pending_count().await;
+    let portfolio_ready = report.journal_available
+        && report.invalid_events == 0
+        && report.gaps.is_empty()
+        && pending == 0;
+    state
+        .global_risk()
+        .set_portfolio_ready(portfolio_ready)
+        .await;
     info!(
+        portfolio_ready,
+        pending_events = pending,
         kill_switches_restored = restored,
         summary = %report.summary(),
         "global ledger recovered"

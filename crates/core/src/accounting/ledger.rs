@@ -1,16 +1,14 @@
 //! The global ledger (TASK 5 §2, §4): append-only, double-entry, idempotent.
 //!
-//! [`GlobalLedger::submit`] is the single mutation door. Under ONE lock it
-//! (1) refuses a malformed event, (2) refuses an event id it already holds,
-//! (3) expands the balanced postings, (4) applies the event to the
-//! aggregated book and (5) records the event in the in-memory index — so two
-//! concurrent submissions of the same fact can never both pass step 2. The
-//! durable write happens after the lock is released; when the journal
-//! already holds the id (a previous process life booked it) the submission
-//! answers `Duplicate`, and when the journal is unavailable the event stays
-//! applied in memory and is parked as *pending* (retried by
-//! [`GlobalLedger::flush_pending`], reported by reconciliation as
-//! `unresolved_financial_event`). Nothing is ever applied twice.
+//! [`GlobalLedger::submit`] is the single mutation door. Under the ledger
+//! write lock it (1) refuses malformed or locally duplicated events,
+//! (2) expands balanced postings, (3) performs the guarded durable insert
+//! before mutating memory, and (4) applies the event to the book and in-memory
+//! index. Thus a durable duplicate changes nothing in this process. If the
+//! journal is unavailable, the event is applied in memory and parked as
+//! *pending*; later submissions cannot overtake pending writes in the journal.
+//! Pending writes are retried by [`GlobalLedger::flush_pending`] and reported
+//! by reconciliation as `unresolved_financial_event`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -66,6 +64,9 @@ struct Inner {
     book: PositionBook,
     events: Vec<StoredEvent>,
     ids: HashSet<String>,
+    /// Canonical payload for each id, so a replayed/corrupted row with the
+    /// same id but different economics cannot be silently treated as a dup.
+    canonical_events: HashMap<String, AccountingEvent>,
     entries: HashMap<String, Entry>,
     /// Event ids applied in memory whose durable write has not succeeded.
     pending: Vec<String>,
@@ -73,6 +74,8 @@ struct Inner {
     /// Finding ids already journaled by this process life (a persisting
     /// discrepancy is journaled once, not on every run).
     seen_findings: HashSet<String>,
+    /// Last journal timestamp used to preserve a strict local append order.
+    last_recorded_at: Option<DateTime<Utc>>,
 }
 
 /// Result of one reconciliation run.
@@ -102,10 +105,12 @@ impl GlobalLedger {
                 book: PositionBook::new(),
                 events: Vec::new(),
                 ids: HashSet::new(),
+                canonical_events: HashMap::new(),
                 entries: HashMap::new(),
                 pending: Vec::new(),
                 series: RealizedSeries::default(),
                 seen_findings: HashSet::new(),
+                last_recorded_at: None,
             }),
             store: RwLock::new(Arc::new(MemoryLedgerStore::new())),
             bus,
@@ -137,54 +142,82 @@ impl GlobalLedger {
             return Applied::Rejected(reason);
         }
         let event_id = event.event_id();
-        let (stored, entry, effect) = {
-            let mut inner = self.inner.write().await;
-            if inner.ids.contains(&event_id) {
-                metrics::count_ledger_event(event.kind.as_str(), "duplicate");
-                metrics::count_duplicate_prevented("global_ledger");
-                debug!(event = %event_id, "ledger duplicate — not booked twice");
-                return Applied::Duplicate;
+        let store = self.store().await;
+        let mut inner = self.inner.write().await;
+        if inner.ids.contains(&event_id) {
+            metrics::count_ledger_event(event.kind.as_str(), "duplicate");
+            metrics::count_duplicate_prevented("global_ledger");
+            debug!(event = %event_id, "ledger duplicate — not booked twice");
+            return Applied::Duplicate;
+        }
+        let cost_of_slice = inner.book.cost_of_slice(&event);
+        let entry = match expand(&event, cost_of_slice) {
+            Ok(e) => e,
+            Err(e) => {
+                metrics::count_ledger_event(event.kind.as_str(), "rejected");
+                return Applied::Rejected(e.to_string());
             }
-            let cost_of_slice = inner.book.cost_of_slice(&event);
-            let entry = match expand(&event, cost_of_slice) {
-                Ok(e) => e,
-                Err(e) => {
-                    metrics::count_ledger_event(event.kind.as_str(), "rejected");
-                    return Applied::Rejected(e.to_string());
-                }
-            };
-            let effect = inner.book.apply(&event, &event_id);
-            Self::fold_series(&mut inner.series, &event, &effect);
-            let stored = StoredEvent {
-                event_id: event_id.clone(),
-                event: event.clone(),
-                recorded_at: Utc::now(),
-                replica_id: self.replica_id.clone(),
-            };
-            inner.ids.insert(event_id.clone());
-            inner.events.push(stored.clone());
-            inner.entries.insert(event_id.clone(), entry.clone());
-            (stored, entry, effect)
+        };
+        if let Err(reason) = inner.book.validate_apply(&event, &event_id) {
+            metrics::count_ledger_event(event.kind.as_str(), "rejected");
+            return Applied::Rejected(reason);
+        }
+        if let Err(reason) = Self::validate_series_update(&inner.series, &event, cost_of_slice) {
+            metrics::count_ledger_event(event.kind.as_str(), "rejected");
+            return Applied::Rejected(reason);
+        }
+        let now = Utc::now();
+        let recorded_at = inner
+            .last_recorded_at
+            .as_ref()
+            .and_then(|last| last.checked_add_signed(chrono::Duration::microseconds(1)))
+            .map(|floor| now.max(floor))
+            .unwrap_or(now);
+        let stored = StoredEvent {
+            event_id: event_id.clone(),
+            event: event.clone(),
+            recorded_at,
+            replica_id: self.replica_id.clone(),
         };
 
-        let store = self.store().await;
-        match store.record_event(&stored, &entry).await {
-            Some(true) => {}
-            Some(false) => {
-                // A previous life / another replica journaled this fact. The
-                // in-memory apply above happened because recovery did not
-                // load it; reconciliation surfaces any resulting drift.
-                metrics::count_ledger_event(event.kind.as_str(), "duplicate");
-                metrics::count_duplicate_prevented("global_ledger_journal");
-                warn!(event = %event_id, "event already in the durable journal — treated as a duplicate");
-                return Applied::Duplicate;
-            }
-            None => {
-                metrics::count_journal_error("record_event");
-                self.inner.write().await.pending.push(event_id.clone());
-                warn!(event = %event_id, "ledger journal unavailable — event parked as pending");
-            }
+        // Preserve journal order. If an earlier event is still pending, flush
+        // it first; while the journal remains unavailable, later events also
+        // stay pending rather than being durably written ahead of it.
+        if !inner.pending.is_empty() {
+            Self::flush_pending_locked(&mut inner, &store).await;
         }
+        let pending_blocked = !inner.pending.is_empty();
+        let journaled = if pending_blocked {
+            None
+        } else {
+            store.record_event(&stored, &entry).await
+        };
+        if journaled == Some(false) {
+            // A previous process life / replica already journaled this fact.
+            // Do not mutate the in-memory book or realized series.
+            metrics::count_ledger_event(event.kind.as_str(), "duplicate");
+            metrics::count_duplicate_prevented("global_ledger_journal");
+            warn!(event = %event_id, "event already in the durable journal — treated as a duplicate");
+            return Applied::Duplicate;
+        }
+
+        let effect = inner.book.apply(&event, &event_id);
+        Self::fold_series(&mut inner.series, &event, &effect);
+        inner.ids.insert(event_id.clone());
+        inner
+            .canonical_events
+            .insert(event_id.clone(), event.clone());
+        inner.last_recorded_at = Some(stored.recorded_at);
+        inner.events.push(stored);
+        inner.entries.insert(event_id.clone(), entry);
+        if journaled.is_none() {
+            if !pending_blocked {
+                metrics::count_journal_error("record_event");
+            }
+            inner.pending.push(event_id.clone());
+            warn!(event = %event_id, "ledger journal unavailable — event parked as pending");
+        }
+        drop(inner);
         metrics::count_ledger_event(event.kind.as_str(), "new");
         if effect.transition != "cash" {
             if let Some(p) = self.inner.read().await.book.get(&effect.key) {
@@ -198,7 +231,12 @@ impl GlobalLedger {
     }
 
     fn fold_series(series: &mut RealizedSeries, event: &AccountingEvent, effect: &BookEffect) {
-        let net = effect.realized_delta - event.fee;
+        let fee = if event.kind == EventKind::Fee && event.fee <= 0.0 {
+            event.quote_amount
+        } else {
+            event.fee
+        };
+        let net = effect.realized_delta - fee;
         if net == 0.0 {
             return;
         }
@@ -215,34 +253,76 @@ impl GlobalLedger {
         }
     }
 
-    /// Retry the durable write of every pending event. Returns how many
-    /// were flushed.
-    pub async fn flush_pending(&self) -> usize {
-        let pending: Vec<(StoredEvent, Entry)> = {
-            let inner = self.inner.read().await;
-            inner
-                .pending
-                .iter()
-                .filter_map(|id| {
-                    let ev = inner.events.iter().find(|e| &e.event_id == id)?;
-                    let entry = inner.entries.get(id)?;
-                    Some((ev.clone(), entry.clone()))
-                })
-                .collect()
+    fn validate_series_update(
+        series: &RealizedSeries,
+        event: &AccountingEvent,
+        cost_of_slice: f64,
+    ) -> Result<(), String> {
+        let realized_delta =
+            if event.kind.moves_inventory() && event.side == Some(super::event::EventSide::Sell) {
+                event.gross_quote() - cost_of_slice
+            } else {
+                0.0
+            };
+        let fee = if event.kind == EventKind::Fee && event.fee <= 0.0 {
+            event.quote_amount
+        } else {
+            event.fee
         };
-        if pending.is_empty() {
-            return 0;
+        let net = realized_delta - fee;
+        if !realized_delta.is_finite() || !net.is_finite() {
+            return Err("event arithmetic would make realized PnL non-finite".into());
         }
+        if net == 0.0 {
+            return Ok(());
+        }
+        let day = event.ts.format("%Y-%m-%d").to_string();
+        let day_key = (day, event.quote_asset.clone());
+        let day_total = series.by_day.get(&day_key).copied().unwrap_or(0.0) + net;
+        let total = series.total.get(&event.quote_asset).copied().unwrap_or(0.0) + net;
+        let peak = series
+            .peak
+            .get(&event.quote_asset)
+            .copied()
+            .unwrap_or(0.0)
+            .max(total);
+        if day_total.is_finite() && total.is_finite() && peak.is_finite() {
+            Ok(())
+        } else {
+            Err("event arithmetic would make realized series non-finite".into())
+        }
+    }
+
+    /// Retry the durable write of every pending event. Returns how many
+    /// were flushed. The ledger write lock keeps later submissions from
+    /// overtaking these events in the durable journal.
+    pub async fn flush_pending(&self) -> usize {
         let store = self.store().await;
+        let mut inner = self.inner.write().await;
+        Self::flush_pending_locked(&mut inner, &store).await
+    }
+
+    async fn flush_pending_locked(inner: &mut Inner, store: &Arc<dyn LedgerStore>) -> usize {
+        let pending: Vec<(StoredEvent, Entry)> = inner
+            .pending
+            .iter()
+            .filter_map(|id| {
+                let event = inner.events.iter().find(|event| &event.event_id == id)?;
+                let entry = inner.entries.get(id)?;
+                Some((event.clone(), entry.clone()))
+            })
+            .collect();
         let mut flushed = Vec::new();
-        for (ev, entry) in pending {
-            match store.record_event(&ev, &entry).await {
-                Some(_) => flushed.push(ev.event_id.clone()),
-                None => break,
+        for (event, entry) in pending {
+            match store.record_event(&event, &entry).await {
+                Some(_) => flushed.push(event.event_id),
+                None => {
+                    metrics::count_journal_error("record_event");
+                    break;
+                }
             }
         }
         if !flushed.is_empty() {
-            let mut inner = self.inner.write().await;
             inner.pending.retain(|id| !flushed.contains(id));
         }
         flushed.len()
@@ -250,35 +330,78 @@ impl GlobalLedger {
 
     /// Load `events` (from the durable journal) into the book without
     /// re-journaling them. Returns `(applied, duplicates_skipped)`.
-    pub(crate) async fn hydrate(&self, events: Vec<StoredEvent>) -> (usize, usize) {
+    pub(crate) async fn hydrate(&self, events: Vec<StoredEvent>) -> (usize, usize, usize) {
         let mut inner = self.inner.write().await;
         let mut applied = 0usize;
         let mut dup = 0usize;
+        let mut invalid = 0usize;
         for stored in events {
+            inner.last_recorded_at = Some(
+                inner
+                    .last_recorded_at
+                    .map(|last| last.max(stored.recorded_at))
+                    .unwrap_or(stored.recorded_at),
+            );
             if inner.ids.contains(&stored.event_id) {
-                dup += 1;
+                if inner.canonical_events.get(&stored.event_id) == Some(&stored.event) {
+                    dup += 1;
+                } else {
+                    invalid += 1;
+                }
                 continue;
             }
-            if stored.event.validate().is_err() {
-                dup += 1;
+            if stored.event_id != stored.event.event_id() || stored.event.validate().is_err() {
+                invalid += 1;
                 continue;
             }
             let cost = inner.book.cost_of_slice(&stored.event);
             let entry = match expand(&stored.event, cost) {
                 Ok(e) => e,
                 Err(_) => {
-                    dup += 1;
+                    invalid += 1;
                     continue;
                 }
             };
+            if inner
+                .book
+                .validate_apply(&stored.event, &stored.event_id)
+                .is_err()
+                || Self::validate_series_update(&inner.series, &stored.event, cost).is_err()
+            {
+                invalid += 1;
+                continue;
+            }
             let effect = inner.book.apply(&stored.event, &stored.event_id);
             Self::fold_series(&mut inner.series, &stored.event, &effect);
             inner.ids.insert(stored.event_id.clone());
+            inner
+                .canonical_events
+                .insert(stored.event_id.clone(), stored.event.clone());
             inner.entries.insert(stored.event_id.clone(), entry);
             inner.events.push(stored);
             applied += 1;
         }
-        (applied, dup)
+        (applied, dup, invalid)
+    }
+
+    /// Number of applied events that are still missing from the durable journal.
+    pub async fn pending_count(&self) -> usize {
+        self.inner.read().await.pending.len()
+    }
+
+    /// Merge all events currently visible in the shared journal into this
+    /// replica's book. Returns false if the journal cannot answer, local
+    /// writes are pending, or any durable row fails replay validation.
+    pub async fn refresh_from_store(&self) -> bool {
+        if self.pending_count().await > 0 {
+            return false;
+        }
+        let store = self.store().await;
+        let Some(events) = store.load_events().await else {
+            return false;
+        };
+        let (_, _, invalid) = self.hydrate(events).await;
+        invalid == 0
     }
 
     /// Snapshot of the aggregated book.
@@ -473,6 +596,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn arithmetic_overflow_is_rejected_before_it_corrupts_the_book() {
+        let l = ledger();
+        let first = fill("huge-buy-a", EventSide::Buy, f64::MAX, 1.0);
+        assert!(l.submit(first).await.is_new());
+        let second = fill("huge-buy-b", EventSide::Buy, f64::MAX, 1.0);
+        assert!(matches!(l.submit(second).await, Applied::Rejected(_)));
+        assert_eq!(l.len().await, 1);
+        let book = l.book().await;
+        let position = book.positions().next().unwrap();
+        assert_eq!(position.qty, f64::MAX);
+        assert!(position.qty.is_finite());
+    }
+
+    #[tokio::test]
     async fn malformed_events_change_nothing() {
         let l = ledger();
         let mut e = fill("sig-bad", EventSide::Buy, 10.0, 1.0);
@@ -502,6 +639,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hydrate_reports_rows_whose_durable_id_does_not_match_the_event() {
+        let replay = ledger();
+        let event = fill("durable-id-check", EventSide::Buy, 10.0, 1.0);
+        let stored = StoredEvent {
+            event_id: "forged-id".into(),
+            event,
+            recorded_at: Utc::now(),
+            replica_id: "r-corrupt".into(),
+        };
+        assert_eq!(replay.hydrate(vec![stored]).await, (0, 0, 1));
+        assert!(replay.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn hydrate_rejects_same_event_id_with_changed_economics() {
+        let replay = ledger();
+        let event = fill("same-id-mutated", EventSide::Buy, 10.0, 1.0);
+        let event_id = event.event_id();
+        assert!(replay.submit(event.clone()).await.is_new());
+        let mut changed = event;
+        changed.quote_amount = 2.0;
+        let stored = StoredEvent {
+            event_id,
+            event: changed,
+            recorded_at: Utc::now(),
+            replica_id: "r-mutated".into(),
+        };
+        assert_eq!(replay.hydrate(vec![stored]).await, (0, 0, 1));
+        assert!((replay.book().await.positions().next().unwrap().cost_basis - 1.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn recovery_replays_append_order_not_out_of_order_fact_timestamps() {
+        let l = ledger();
+        let store = Arc::new(MemoryLedgerStore::new());
+        l.attach_store(store.clone()).await;
+        let t0 = Utc::now();
+        let mut buy = fill("arrival-buy", EventSide::Buy, 10.0, 1.0);
+        buy.ts = t0 + chrono::Duration::seconds(2);
+        let mut sell = fill("arrival-sell", EventSide::Sell, 5.0, 1.0);
+        sell.ts = t0;
+        assert!(l.submit(buy).await.is_new());
+        assert!(l.submit(sell).await.is_new());
+
+        let journal = store.load_events().await.unwrap();
+        assert_eq!(journal[0].event.reference_id, "arrival-buy");
+        assert_eq!(journal[1].event.reference_id, "arrival-sell");
+        let replay = ledger();
+        assert_eq!(replay.hydrate(journal).await, (2, 0, 0));
+        let live = l.book().await;
+        let restored = replay.book().await;
+        let live_position = live.positions().next().unwrap();
+        let restored_position = restored.positions().next().unwrap();
+        assert!((live_position.qty - 5.0).abs() < 1e-9);
+        assert!((restored_position.qty - live_position.qty).abs() < 1e-9);
+        assert!((restored_position.cost_basis - live_position.cost_basis).abs() < 1e-9);
+        assert!((restored_position.realized - live_position.realized).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn pending_journal_events_cannot_be_overtaken_by_new_submissions() {
+        let l = ledger();
+        let store = Arc::new(MemoryLedgerStore::new());
+        l.attach_store(store.clone()).await;
+        store.set_unavailable(true);
+        let t0 = Utc::now();
+        let mut buy = fill("pending-buy", EventSide::Buy, 10.0, 1.0);
+        buy.ts = t0;
+        let mut sell = fill("pending-sell", EventSide::Sell, 5.0, 1.0);
+        sell.ts = t0 + chrono::Duration::seconds(1);
+        assert!(l.submit(buy.clone()).await.is_new());
+        assert!(l.submit(sell.clone()).await.is_new());
+        assert_eq!(l.pending().await, vec![buy.event_id(), sell.event_id()]);
+
+        store.set_unavailable(false);
+        let mut later = fill("after-pending", EventSide::Buy, 5.0, 1.0);
+        later.ts = t0 + chrono::Duration::seconds(2);
+        assert!(l.submit(later.clone()).await.is_new());
+        assert!(l.pending().await.is_empty());
+        let journal = store.load_events().await.unwrap();
+        assert_eq!(
+            journal
+                .iter()
+                .map(|stored| stored.event.reference_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pending-buy", "pending-sell", "after-pending"]
+        );
+
+        let replay = ledger();
+        assert_eq!(replay.hydrate(journal).await, (3, 0, 0));
+        let live_position = l.book().await.positions().next().unwrap().clone();
+        let replay_position = replay.book().await.positions().next().unwrap().clone();
+        assert!((live_position.qty - replay_position.qty).abs() < 1e-9);
+        assert!((live_position.cost_basis - replay_position.cost_basis).abs() < 1e-9);
+    }
+
+    #[tokio::test]
     async fn journal_that_already_holds_the_fact_makes_it_a_duplicate() {
         let store = Arc::new(MemoryLedgerStore::new());
         let first = ledger();
@@ -511,8 +745,58 @@ mod tests {
         // A fresh process life that skipped recovery submits the same fact.
         let second = ledger();
         second.attach_store(store.clone()).await;
-        assert_eq!(second.submit(e).await, Applied::Duplicate);
+        assert_eq!(second.submit(e.clone()).await, Applied::Duplicate);
+        let mut altered_replay = e;
+        altered_replay.quantity = 20.0;
+        altered_replay.quote_amount = 2.0;
+        assert_eq!(second.submit(altered_replay).await, Applied::Duplicate);
+        assert_eq!(
+            second.len().await,
+            0,
+            "durable duplicates are not applied in memory"
+        );
+        assert_eq!(second.book().await.open_count(), 0);
         assert_eq!(store.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn realized_series_overflow_is_rejected_before_journaling() {
+        let l = ledger();
+        for (wallet, reference) in [("w1", "fee-a"), ("w2", "fee-b")] {
+            let mut fee = fill(reference, EventSide::Buy, 1.0, 1.0);
+            fee.kind = EventKind::Fee;
+            fee.side = None;
+            fee.quantity = 0.0;
+            fee.wallet = wallet.into();
+            fee.quote_amount = 0.0;
+            fee.fee = f64::MAX / 2.0;
+            assert!(l.submit(fee).await.is_new());
+        }
+        let mut overflow = fill("fee-c", EventSide::Buy, 1.0, 1.0);
+        overflow.kind = EventKind::Fee;
+        overflow.side = None;
+        overflow.quantity = 0.0;
+        overflow.wallet = "w3".into();
+        overflow.quote_amount = 0.0;
+        overflow.fee = f64::MAX / 2.0;
+        assert!(matches!(l.submit(overflow).await, Applied::Rejected(_)));
+        assert_eq!(l.len().await, 2);
+    }
+
+    #[tokio::test]
+    async fn standalone_fee_quote_amount_counts_as_realized_loss() {
+        let l = ledger();
+        let mut fee = fill("fee-fallback", EventSide::Buy, 1.0, 1.0);
+        fee.kind = EventKind::Fee;
+        fee.side = None;
+        fee.quantity = 0.0;
+        fee.quote_amount = 0.25;
+        fee.fee = 0.0;
+        assert!(l.submit(fee).await.is_new());
+        let series = l.realized_series().await;
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        assert!((series.by_day[&(today, "SOL".to_string())] + 0.25).abs() < 1e-9);
+        assert!((series.total["SOL"] + 0.25).abs() < 1e-9);
     }
 
     #[tokio::test]

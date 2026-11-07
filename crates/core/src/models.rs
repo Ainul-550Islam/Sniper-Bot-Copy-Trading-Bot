@@ -383,6 +383,15 @@ pub struct Position {
     pub cost_basis: f64,
     /// Quote received on exits (incl. fees deducted).
     pub realized_quote: f64,
+    /// Cumulative net PnL across exit fills. This remains stable as the
+    /// remaining cost basis shrinks after partial exits. `None` preserves
+    /// legacy rows whose partial-exit allocation cannot be reconstructed.
+    #[serde(default)]
+    pub realized_pnl_quote: Option<f64>,
+    /// Timestamp of the most recent exit fill. NULL preserves legacy rows
+    /// whose partial-exit day cannot be attributed safely.
+    #[serde(default)]
+    pub realized_at: Option<DateTime<Utc>>,
     /// Last observed mark price in quote units.
     pub last_mark: f64,
     pub stop_loss: Option<f64>,
@@ -431,6 +440,8 @@ impl Position {
             avg_entry: 0.0,
             cost_basis: 0.0,
             realized_quote: 0.0,
+            realized_pnl_quote: Some(0.0),
+            realized_at: None,
             last_mark: 0.0,
             stop_loss: None,
             take_profit: None,
@@ -455,9 +466,13 @@ impl Position {
         (self.last_mark - self.avg_entry) * self.qty
     }
 
-    /// Realised PnL in quote units.
+    /// Cumulative realized PnL in quote units, including all completed
+    /// partial exits in this position lifecycle. Legacy rows without a
+    /// trustworthy accumulator retain their old approximation for display;
+    /// risk and reporting repositories treat the persisted NULL as unknown.
     pub fn realised(&self) -> f64 {
-        self.realized_quote - self.cost_basis
+        self.realized_pnl_quote
+            .unwrap_or(self.realized_quote - self.cost_basis)
     }
 
     pub fn total_pnl(&self) -> f64 {
@@ -465,10 +480,17 @@ impl Position {
     }
 
     pub fn total_pnl_pct(&self) -> f64 {
-        if self.cost_basis <= 0.0 {
+        // Recover lifecycle invested basis from gross exit proceeds, realized
+        // PnL, and remaining basis. `cost_basis` alone shrinks on partial
+        // exits and reaches zero on close, making it an invalid denominator.
+        let lifecycle_basis = self
+            .realized_pnl_quote
+            .map(|pnl| self.realized_quote - pnl + self.cost_basis)
+            .unwrap_or(self.cost_basis);
+        if !lifecycle_basis.is_finite() || lifecycle_basis <= 0.0 {
             return 0.0;
         }
-        self.total_pnl() / self.cost_basis * 100.0
+        self.total_pnl() / lifecycle_basis * 100.0
     }
 
     pub fn notional(&self) -> f64 {
@@ -481,37 +503,102 @@ impl Position {
             .num_seconds()
     }
 
+    fn accounting_state_is_finite(&self) -> bool {
+        [
+            self.qty,
+            self.avg_entry,
+            self.cost_basis,
+            self.realized_quote,
+            self.last_mark,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && self.qty >= 0.0
+            && self.avg_entry >= 0.0
+            && self.cost_basis >= 0.0
+            && self.realized_quote >= 0.0
+            && self.last_mark >= 0.0
+            && self
+                .realized_pnl_quote
+                .map_or(true, |value| value.is_finite())
+    }
+
     /// Apply a fill to the position, maintaining a volume-weighted entry.
     pub fn apply_buy(&mut self, qty: f64, price: f64, quote_spent: f64) {
-        let new_qty = self.qty + qty;
-        if new_qty > 0.0 {
-            self.avg_entry = (self.avg_entry * self.qty + price * qty) / new_qty;
+        if !self.accounting_state_is_finite()
+            || !qty.is_finite()
+            || qty <= 0.0
+            || !price.is_finite()
+            || price < 0.0
+            || !quote_spent.is_finite()
+            || quote_spent < 0.0
+        {
+            return;
         }
+        let new_qty = self.qty + qty;
+        let new_avg_entry = (self.avg_entry * self.qty + price * qty) / new_qty;
+        let new_cost_basis = self.cost_basis + quote_spent;
+        if !new_qty.is_finite() || !new_avg_entry.is_finite() || !new_cost_basis.is_finite() {
+            return;
+        }
+        self.avg_entry = new_avg_entry;
         self.qty = new_qty;
-        self.cost_basis += quote_spent;
+        self.cost_basis = new_cost_basis;
         self.last_mark = price;
         self.updated_at = Utc::now();
         self.trailing_high_water = Some(self.trailing_high_water.map_or(price, |h| h.max(price)));
     }
 
-    /// Apply a partial or full exit. Returns the realised quote for this slice.
+    /// Apply a partial or full exit. Returns the net realized PnL for this slice.
     pub fn apply_sell(&mut self, qty: f64, price: f64, quote_received: f64) -> f64 {
+        if !self.accounting_state_is_finite()
+            || !qty.is_finite()
+            || qty <= 0.0
+            || !price.is_finite()
+            || price < 0.0
+            || !quote_received.is_finite()
+            || quote_received < 0.0
+        {
+            return 0.0;
+        }
         let qty = qty.min(self.qty);
         if qty <= 0.0 {
             return 0.0;
         }
-        let cost_of_slice = self.avg_entry * qty;
-        let realised = quote_received - cost_of_slice;
-        self.qty -= qty;
-        self.realized_quote += quote_received;
-        // Keep cost_basis proportional so `realised()` stays correct.
-        if self.qty <= f64::EPSILON {
-            self.qty = 0.0;
+        // Allocate the remaining all-in basis proportionally. Using avg_entry
+        // loses entry fees and repeated partial exits can accumulate drift.
+        let prior_qty = self.qty;
+        let cost_of_slice = if qty >= prior_qty - f64::EPSILON {
+            self.cost_basis
         } else {
-            self.cost_basis -= cost_of_slice;
+            self.cost_basis * (qty / prior_qty)
+        };
+        let realised = quote_received - cost_of_slice;
+        let new_realized_quote = self.realized_quote + quote_received;
+        let new_qty = (prior_qty - qty).max(0.0);
+        let (new_qty, new_cost_basis) = if new_qty <= f64::EPSILON {
+            (0.0, 0.0)
+        } else {
+            (new_qty, (self.cost_basis - cost_of_slice).max(0.0))
+        };
+        let new_realized_pnl = self.realized_pnl_quote.map(|pnl| pnl + realised);
+        if !cost_of_slice.is_finite()
+            || !realised.is_finite()
+            || !new_realized_quote.is_finite()
+            || !new_qty.is_finite()
+            || !new_cost_basis.is_finite()
+            || new_realized_pnl.is_some_and(|value| !value.is_finite())
+        {
+            return 0.0;
         }
+        self.qty = new_qty;
+        self.cost_basis = new_cost_basis;
+        self.realized_quote = new_realized_quote;
+        self.realized_pnl_quote = new_realized_pnl;
         self.last_mark = price;
-        self.updated_at = Utc::now();
+        let now = Utc::now();
+        self.realized_at = Some(now);
+        self.updated_at = now;
         realised
     }
 
@@ -719,5 +806,98 @@ impl PolyMarket {
         self.outcomes
             .iter()
             .find(|o| o.outcome.eq_ignore_ascii_case(name))
+    }
+}
+
+#[cfg(test)]
+mod position_realized_pnl_tests {
+    use super::{ExecutionMode, Position, TradeSource, Venue};
+
+    #[test]
+    fn repeated_partial_exits_accumulate_net_pnl_without_subtracting_remaining_basis() {
+        let mut position = Position::new(
+            "partial-exits".into(),
+            TradeSource::Sniper,
+            Venue::Paper,
+            ExecutionMode::Paper,
+            "TOKEN".into(),
+            "TOKEN".into(),
+            "USDC".into(),
+        );
+        position.apply_buy(10.0, 10.0, 105.0); // includes five units of entry fees
+
+        assert!((position.apply_sell(3.0, 12.0, 36.0) - 4.5).abs() < 1e-9);
+        assert!(position.realized_at.is_some());
+        assert!((position.realised() - 4.5).abs() < 1e-9);
+        assert!((position.cost_basis - 73.5).abs() < 1e-9);
+
+        assert!((position.apply_sell(2.0, 8.0, 16.0) + 5.0).abs() < 1e-9);
+        assert!((position.realised() + 0.5).abs() < 1e-9);
+        assert!((position.cost_basis - 52.5).abs() < 1e-9);
+
+        assert!((position.apply_sell(5.0, 11.0, 55.0) - 2.5).abs() < 1e-9);
+        assert_eq!(position.qty, 0.0);
+        assert_eq!(position.cost_basis, 0.0);
+        assert!((position.realised() - 2.0).abs() < 1e-9);
+        assert!((position.total_pnl() - 2.0).abs() < 1e-9);
+        assert!((position.total_pnl_pct() - (2.0 / 105.0 * 100.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_finite_or_overflowing_fills_leave_position_accounting_unchanged() {
+        let mut position = Position::new(
+            "invalid-fill".into(),
+            TradeSource::Sniper,
+            Venue::Paper,
+            ExecutionMode::Paper,
+            "TOKEN".into(),
+            "TOKEN".into(),
+            "USDC".into(),
+        );
+        position.apply_buy(2.0, 5.0, 10.0);
+        let before_qty = position.qty;
+        let before_basis = position.cost_basis;
+        let before_realized = position.realized_pnl_quote;
+
+        position.apply_buy(f64::NAN, 5.0, 10.0);
+        position.apply_buy(1.0, 5.0, f64::INFINITY);
+        assert_eq!(position.qty, before_qty);
+        assert_eq!(position.cost_basis, before_basis);
+
+        assert_eq!(position.apply_sell(f64::NAN, 5.0, 5.0), 0.0);
+        assert_eq!(position.apply_sell(1.0, 5.0, f64::NAN), 0.0);
+        assert_eq!(position.qty, before_qty);
+        assert_eq!(position.cost_basis, before_basis);
+        assert_eq!(position.realized_pnl_quote, before_realized);
+        assert_eq!(position.realized_quote, 0.0);
+        assert_eq!(position.realized_at, None);
+
+        position.cost_basis = f64::MAX;
+        position.qty = 1.0;
+        position.avg_entry = 1.0;
+        position.apply_buy(1.0, 1.0, f64::MAX);
+        assert_eq!(
+            position.cost_basis,
+            f64::MAX,
+            "overflow must not partially mutate"
+        );
+        assert_eq!(position.qty, 1.0);
+    }
+
+    #[test]
+    fn legacy_unknown_accumulator_stays_unknown_after_a_new_exit() {
+        let mut position = Position::new(
+            "legacy-partial".into(),
+            TradeSource::Sniper,
+            Venue::Paper,
+            ExecutionMode::Paper,
+            "TOKEN".into(),
+            "TOKEN".into(),
+            "USDC".into(),
+        );
+        position.realized_pnl_quote = None;
+        position.apply_buy(4.0, 10.0, 40.0);
+        position.apply_sell(1.0, 11.0, 11.0);
+        assert_eq!(position.realized_pnl_quote, None);
     }
 }

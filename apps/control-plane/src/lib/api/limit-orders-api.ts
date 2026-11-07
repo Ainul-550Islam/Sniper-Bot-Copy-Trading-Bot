@@ -61,16 +61,20 @@ export interface ListLimitOrdersOptions {
 }
 
 export const limitOrdersApi = {
-  list: (options: ListLimitOrdersOptions = {}) => {
+  list: async (options: ListLimitOrdersOptions = {}) => {
     const query = new URLSearchParams();
     if (options.status) query.set("status", options.status);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.before) query.set("before", options.before);
     const queryString = query.toString();
     const suffix = queryString ? `?${queryString}` : "";
-    return tenantRequest<LimitOrdersResponse>(
+    const response = await tenantRequest<LimitOrdersResponse>(
       `/api/tenant/limit-orders${suffix}`,
     );
+    if (!response || !Array.isArray(response.orders)) {
+      throw new Error("Invalid limit orders response");
+    }
+    return response;
   },
   create: (input: CreateLimitOrderInput) =>
     tenantRequest<CreateLimitOrderResponse>("/api/tenant/limit-orders", {

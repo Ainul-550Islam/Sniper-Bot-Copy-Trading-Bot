@@ -3,7 +3,7 @@
  * The client secret is write-only: the server returns only `client_secret_set`.
  */
 
-import { ApiError, request } from "../api";
+import { ApiError, request, type LoginResponse } from "../api";
 
 export type SsoProviderType = "oidc" | "google" | "okta" | "azure_ad";
 
@@ -51,7 +51,32 @@ export async function deleteSsoConfig(): Promise<void> {
   await request<unknown>("/api/saas/sso/config", { method: "DELETE" });
 }
 
-/** Path the browser opens to run a real sign-in against the IdP. */
-export function ssoAuthorizeUrl(organizationId: string): string {
-  return `/api/saas/sso/authorize?organization=${encodeURIComponent(organizationId)}`;
+/** State stored only for this browser tab to block unsolicited callback login swaps. */
+export const PENDING_SSO_STATE_KEY = "sniper.sso.pending-state";
+
+interface SsoAuthorizeResponse {
+  authorize_url: string;
+  state: string;
+}
+
+/** Begin a same-tab sign-in, retaining only the non-secret CSRF state. */
+export async function beginSsoLogin(organizationId: string): Promise<void> {
+  const result = await request<SsoAuthorizeResponse>(
+    `/api/saas/sso/authorize?organization=${encodeURIComponent(organizationId)}`,
+    { anonymous: true },
+  );
+  if (!result.authorize_url || !result.state) {
+    throw new Error("The SSO authorization response was incomplete.");
+  }
+  window.sessionStorage.setItem(PENDING_SSO_STATE_KEY, result.state);
+  window.location.assign(result.authorize_url);
+}
+
+/** Exchange an IdP authorization code after the callback page matches state. */
+export function completeSsoLogin(state: string, code: string): Promise<LoginResponse> {
+  return request<LoginResponse>("/api/saas/sso/callback", {
+    method: "POST",
+    body: { state, code },
+    anonymous: true,
+  });
 }

@@ -7,17 +7,20 @@
 //!
 //! How the election is observed without a live cluster: both replicas run
 //! paper mode with seeded balances (no RPC needed up to the claim) against a
-//! DEAD rpc port. The winner therefore errors at the bonding-curve load —
-//! which proves it got past the claim — while the loser returns `Ok(())`
-//! having done nothing. The shared claim row then names the winner, in
-//! `released` state (the pre-broadcast failure released it cleanly: nothing
-//! moved, so a redelivered event could proceed — §M).
+//! local gated HTTP endpoint. It holds the winner's curve lookup open while
+//! the competitor attempts its claim, so only a true claim loser can finish
+//! before the controlled pre-broadcast failure releases the winner.
 //!
 //! GATED: skipped unless `POSTGRES_URL` points at a real database. Run with
 //! `--test-threads=1`.
 
 use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 
 use bot_core::config::{AppConfig, Config, CopyWallet, DatabaseConfig};
 use bot_core::db::claims::PostgresClaimStore;
@@ -43,7 +46,7 @@ struct Ctx {
     replica: String,
 }
 
-async fn build_ctx(replica: &str) -> Option<Ctx> {
+async fn build_ctx(replica: &str, rpc_url: &str) -> Option<Ctx> {
     let url = std::env::var("POSTGRES_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())?;
@@ -75,9 +78,9 @@ async fn build_ctx(replica: &str) -> Option<Ctx> {
         max_exposure_sol: 0.0,
         max_open_positions: 0,
     }];
-    // Dead port with no retries/fallbacks: the winner's curve load fails
-    // fast and deterministically once it is past the claim gate.
-    raw.network.rpc_url = "http://127.0.0.1:9".into();
+    // A test-local HTTP endpoint holds the first curve lookup open until the
+    // competing replica has attempted its durable claim.
+    raw.network.rpc_url = rpc_url.to_string();
     raw.network.rpc_url_fallbacks = Vec::new();
     raw.network.max_retries = 0;
 
@@ -110,9 +113,42 @@ async fn build_ctx(replica: &str) -> Option<Ctx> {
 #[tokio::test]
 async fn two_replicas_one_whale_trade_one_execution() {
     let tag = run_id();
-    let (Some(mut a), Some(mut b)) = (
-        build_ctx(&format!("rep-A-{tag}")).await,
-        build_ctx(&format!("rep-B-{tag}")).await,
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local gated RPC endpoint");
+    let rpc_url = format!("http://{}", listener.local_addr().expect("RPC address"));
+    let (request_seen_tx, request_seen_rx) = oneshot::channel();
+    let (release_rpc_tx, mut release_rpc_rx) = oneshot::channel();
+    let rpc_server = tokio::spawn(async move {
+        // Keep the first request blocked until the competing replica has
+        // returned from its claim attempt. Any second connection is recorded
+        // and also held, making a missing claim gate fail deterministically.
+        let (first, _) = listener.accept().await.expect("first RPC request");
+        let mut sockets = vec![first];
+        let _ = request_seen_tx.send(());
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    if let Ok((socket, _)) = accepted {
+                        sockets.push(socket);
+                    }
+                }
+                _ = &mut release_rpc_rx => break,
+            }
+        }
+        let connection_count = sockets.len();
+        for mut socket in sockets {
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+        }
+        connection_count
+    });
+    let (Some(a), Some(b)) = (
+        build_ctx(&format!("rep-A-{tag}"), &rpc_url).await,
+        build_ctx(&format!("rep-B-{tag}"), &rpc_url).await,
     ) else {
         eprintln!("POSTGRES_URL not set — skipping two-replica mirror test");
         return;
@@ -155,26 +191,75 @@ async fn two_replicas_one_whale_trade_one_execution() {
         observed_at: chrono::Utc::now(),
     };
 
-    // Deliver the SAME trade to both replicas concurrently — the multi-feed
-    // scenario §H describes (each replica has its own feed connection).
-    let (ra, rb) = tokio::join!(
-        a.bot.mirror_trade(&trade, &a.cfg),
-        b.bot.mirror_trade(&trade, &b.cfg)
+    // Move each independent bot into a task. The first connection proves
+    // that one bot passed the claim and is blocked in the curve lookup. The
+    // other task must then return successfully as the claim loser, before the
+    // controlled HTTP failure releases the winner.
+    let Ctx {
+        bot: mut bot_a,
+        cfg: cfg_a,
+        db,
+        replica: replica_a,
+    } = a;
+    let Ctx {
+        bot: mut bot_b,
+        cfg: cfg_b,
+        replica: replica_b,
+        ..
+    } = b;
+    let shared_trade = Arc::new(trade);
+    let mut tasks = JoinSet::new();
+    let trade_a = shared_trade.clone();
+    tasks.spawn(async move { ("A", bot_a.mirror_trade(&trade_a, &cfg_a).await) });
+    tasks.spawn(async move { ("B", bot_b.mirror_trade(&shared_trade, &cfg_b).await) });
+
+    tokio::time::timeout(Duration::from_secs(10), request_seen_rx)
+        .await
+        .expect("one bot must reach the gated RPC endpoint before timeout")
+        .expect("RPC gate notification");
+    let (first_name, first_result) =
+        tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+            .await
+            .expect("the competing replica must finish while the winner is held")
+            .expect("one mirror task must finish")
+            .expect("join the first mirror task");
+    assert!(
+        first_result.is_ok(),
+        "the replica without the claim should skip cleanly before RPC: {first_name}={first_result:?}"
     );
 
-    // Exactly one replica proceeded past the claim gate: the winner errors
-    // at the bonding-curve load (dead port), the loser skips with Ok(()).
-    let (a_err, b_err) = (ra.is_err(), rb.is_err());
-    assert_ne!(
-        a_err, b_err,
-        "exactly one replica may pass the claim gate: A={ra:?} B={rb:?}"
+    release_rpc_tx
+        .send(())
+        .expect("release controlled pre-broadcast RPC failure");
+    let (second_name, second_result) = tasks
+        .join_next()
+        .await
+        .expect("the claimed replica must finish after RPC is released")
+        .expect("join the claimed mirror task");
+    assert_ne!(first_name, second_name);
+    assert!(
+        second_result.is_err(),
+        "the sole claim holder should reach the injected RPC failure: {second_name}={second_result:?}"
     );
-    let winner = if a_err { &a.replica } else { &b.replica };
-    let loser = if a_err { &b.replica } else { &a.replica };
+    assert_eq!(
+        rpc_server.await.expect("RPC gate task"),
+        1,
+        "only the claim holder may issue a curve lookup"
+    );
+    let winner = if second_name == "A" {
+        &replica_a
+    } else {
+        &replica_b
+    };
+    let loser = if first_name == "A" {
+        &replica_a
+    } else {
+        &replica_b
+    };
 
     // The shared claim row names the winner; the pre-broadcast failure
     // released it cleanly (determinate outcome → re-acquirable, §M).
-    let store = PostgresClaimStore::new(a.db.clone());
+    let store = PostgresClaimStore::new(db);
     let rec = store
         .get(&format!("copy:whale:{mint}"))
         .await

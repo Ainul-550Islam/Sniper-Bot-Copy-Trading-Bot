@@ -59,6 +59,9 @@ describe("exports and feeds", () => {
     requestMock.mockReset();
     originalCreateObjectURL = URL.createObjectURL;
     originalRevokeObjectURL = URL.revokeObjectURL;
+    // jsdom cannot perform downloads. Keep the click observable without
+    // scheduling an unsupported navigation after the test has finished.
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     createObjectURLMock = vi.fn(() => "blob:mock-download");
     revokeObjectURLMock = vi.fn();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

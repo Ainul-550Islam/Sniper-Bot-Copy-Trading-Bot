@@ -9,7 +9,8 @@
  */
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { sessionStore } from "@/lib/auth";
 import {
   classifyTradingError,
   customerTrading,
@@ -27,28 +28,62 @@ export default function PositionTable() {
   const [page, setPage] = useState<PositionsPage | null>(null);
   const [cursor, setCursor] = useState<string | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const selectedOrganizationId = sessionStore.getSnapshot().selectedOrganizationId;
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setPage(null);
+    setCursor(null);
+    setState({ kind: "loading" });
+  }), []);
 
   const load = useCallback(async (nextCursor: string | null) => {
+    if (selectedOrganizationId !== sessionStore.getSnapshot().selectedOrganizationId) return;
+    const requestId = ++requestVersion.current;
+    setPage(null);
     setState({ kind: "loading" });
+    if (!selectedOrganizationId) {
+      setCursor(null);
+      setState({ kind: "empty" });
+      return;
+    }
     try {
       const response = await customerTrading.positions(nextCursor);
+      if (requestId !== requestVersion.current) return;
+      if (response.organization_id !== selectedOrganizationId) {
+        throw new Error("Position response does not match the selected organization");
+      }
       setPage(response);
       setCursor(nextCursor);
       setState({ kind: response.items.length === 0 ? "empty" : "ready" });
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) {
+        setPage(null);
+        setState(classifyTradingError(e));
+      }
     }
-  }, []);
+  }, [selectedOrganizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load(null));
-  }, [load]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load(null);
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [load, sessionVersion]);
 
   return (
     <section className="card" aria-label="Positions">
       <h2>Positions</h2>
-      {state.kind === "loading" && <p>Loading positions…</p>}
-      {state.kind !== "loading" && state.kind !== "ready" && state.kind !== "empty" && (
+      {!selectedOrganizationId && <p>Select an organization to view positions.</p>}
+      {selectedOrganizationId && state.kind === "loading" && <p>Loading positions…</p>}
+      {selectedOrganizationId && state.kind !== "loading" && state.kind !== "ready" && state.kind !== "empty" && (
         <p role="alert" className="error">
           {tradingStateMessage(state)}
           {isRetryable(state) && (
@@ -61,8 +96,8 @@ export default function PositionTable() {
           )}
         </p>
       )}
-      {state.kind === "empty" && <p>No open or historical positions yet.</p>}
-      {state.kind === "ready" && page && (
+      {selectedOrganizationId && state.kind === "empty" && <p>No open or historical positions yet.</p>}
+      {selectedOrganizationId && state.kind === "ready" && page?.organization_id === selectedOrganizationId && page && (
         <>
           <table>
             <thead>

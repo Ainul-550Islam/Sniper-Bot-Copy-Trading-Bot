@@ -774,6 +774,7 @@ mod tests {
         p.qty = qty;
         p.cost_basis = cost;
         p.realized_quote = realized_quote;
+        p.realized_pnl_quote = Some(realized_quote - cost);
         if !open {
             p.status = PositionStatus::Closed;
         }

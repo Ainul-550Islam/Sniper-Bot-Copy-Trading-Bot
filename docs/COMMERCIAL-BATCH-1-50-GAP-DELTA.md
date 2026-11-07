@@ -1,15 +1,21 @@
 # COMMERCIAL-BATCH-1-50-GAP-DELTA.md
 ## Commercial & Market Readiness Gap Delta (Batch 1–50)
 
+> Historical commercial estimates, not measured audit completion or a current
+> production-readiness certificate. The percentages below were recorded at
+> that batch's date; they do not establish correct behavior in every path.
+> The current full manual audit is incomplete. A saved profile, rendered
+> route or passing fixture is not evidence of funded runtime behavior.
+
 - **Date:** 2026-10-03
 - **Evaluation Baseline:** Initial Commercial / Market Readiness (~45%)
-- **Post-Remediation Status:** Production Software-Asset Position (~95% Technical Product Readiness; Live-Funded Deployment Evidence Gated)
+- **Historical Post-Remediation Estimate:** ~95% technical product readiness; not independently established by the current audit. Live-funded deployment evidence remains gated.
 
 ---
 
 ### 1. Dimension-by-Dimension Gap Closure Matrix
 
-| Capability Dimension | Baseline Readiness | Post Batch 1–50 Readiness | Closed Defects / Added Features | Remaining Gated Requirement |
+| Capability Dimension | Historical Baseline Estimate | Historical Post Batch 1–50 Estimate | Closed Defects / Added Features | Remaining Gated Requirement |
 |:---|:---:|:---:|:---|:---|
 | **Control Plane Navigation & Shell** | 40% | **100%** | Replaced fragmented single-tab layout with cohesive SaaS multi-tier navigation model (25 static routes). | None (Fully client/server wired). |
 | **Strategy Creation & Versioning** | 10% | **95%** | Added Strategy Library (`/strategies`) with CRUD, parameter tuning, module association, and duplication. | Database persistence migration for custom user templates. |
@@ -29,9 +35,9 @@
 
 ---
 
-### 2. Evidence-Backed Readiness Summary
+### 2. Claims requiring code-path and execution evidence
 
-- **Total Gaps Closed in Batch 1–50:** 15 primary commercial gaps.
-- **Synthesized / Dummy Data:** 0% (All endpoints enforce fail-closed or honest empty states).
-- **Exact Numeric Accounting:** 100% (No floating-point rounding errors in monetary paths).
-- **Tenant Isolation Enforcement:** 100% (All client queries scoped strictly to authenticated tenant session).
+- **Historical gap count:** 15 commercial areas were listed as addressed; listing an area is not verification of every behavior.
+- **Data provenance:** empty/error-state behavior must be verified per endpoint. No universal zero-synthetic-data guarantee is established by this document.
+- **Numeric accounting:** some paths use integer atomic units, but the bootstrap order/trade/position schemas also use `double precision` (migrations 0001–0003). Exactness across all monetary paths is not established; integer wire conversion and floating-point boundary behavior need code-path review.
+- **Tenant isolation:** scoped access and RLS mechanisms exist. Their presence is not proof of correct authorization in every caller, global-identity path, worker or recovery operation; that manual review is not complete.

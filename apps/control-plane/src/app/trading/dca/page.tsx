@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { CancelConfirm } from "@/components/dca/CancelConfirm";
 import { RunsPanel } from "@/components/dca/RunsPanel";
@@ -23,9 +23,9 @@ import { getCapabilities, type MembershipRole } from "@/lib/permissions";
 
 function currentRole(): MembershipRole {
   const state = sessionStore.getSnapshot();
-  const organization =
-    state.organizations.find((item) => item.organization_id === state.selectedOrganizationId) ??
-    state.organizations[0];
+  const organization = state.selectedOrganizationId
+    ? state.organizations.find((item) => item.organization_id === state.selectedOrganizationId)
+    : state.organizations.length === 1 ? state.organizations[0] : undefined;
   const role = organization?.role.toLowerCase() ?? "";
   if (role.includes("owner")) return "owner";
   if (role.includes("admin")) return "admin";
@@ -35,7 +35,10 @@ function currentRole(): MembershipRole {
 }
 
 export default function DcaPage() {
-  const [, setSessionTick] = useState(0);
+  const [sessionTick, setSessionTick] = useState(0);
+  const tenantVersion = useRef(0);
+  const loadRequestVersion = useRef(0);
+  const runsRequestVersion = useRef(0);
   const [schedules, setSchedules] = useState<DcaSchedule[] | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
   const [actionError, setActionError] = useState<string | null>(null);
@@ -47,66 +50,110 @@ export default function DcaPage() {
   const [runsLoading, setRunsLoading] = useState(false);
   const [runsError, setRunsError] = useState<string | null>(null);
 
-  useEffect(() => sessionStore.subscribe(() => setSessionTick((value) => value + 1)), []);
+  useEffect(() => sessionStore.subscribe(() => {
+    tenantVersion.current += 1;
+    loadRequestVersion.current += 1;
+    runsRequestVersion.current += 1;
+    setSessionTick((value) => value + 1);
+    setSchedules(null);
+    setState({ kind: "loading" });
+    setActionError(null);
+    setCreating(false);
+    setBusyScheduleId(null);
+    setCancelTarget(null);
+    setRunsSchedule(null);
+    setRuns(null);
+    setRunsLoading(false);
+    setRunsError(null);
+  }), []);
   const capabilities = getCapabilities({ role: currentRole() });
   const canManage = capabilities.canCreateStrategies;
 
   const load = useCallback(async () => {
+    const requestTenantVersion = tenantVersion.current;
+    const requestVersion = ++loadRequestVersion.current;
+    setSchedules(null);
     setState({ kind: "loading" });
     try {
       const response = await dcaApi.list();
+      if (requestTenantVersion !== tenantVersion.current || requestVersion !== loadRequestVersion.current) return;
       setSchedules(response.schedules);
       setState({ kind: response.schedules.length === 0 ? "empty" : "ready" });
     } catch (error) {
-      setState(classifyTradingError(error));
+      if (requestTenantVersion === tenantVersion.current && requestVersion === loadRequestVersion.current) {
+        setSchedules(null);
+        setState(classifyTradingError(error));
+      }
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(load);
-  }, [load]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      loadRequestVersion.current += 1;
+    };
+  }, [load, sessionTick]);
 
   async function create(input: CreateDcaScheduleInput) {
+    const requestTenantVersion = tenantVersion.current;
     setCreating(true);
     setActionError(null);
     try {
       await dcaApi.create(input);
-      await load();
+      if (requestTenantVersion === tenantVersion.current) await load();
     } catch (error) {
-      setActionError(tradingStateMessage(classifyTradingError(error)));
+      if (requestTenantVersion === tenantVersion.current) {
+        setActionError(tradingStateMessage(classifyTradingError(error)));
+      }
     } finally {
-      setCreating(false);
+      if (requestTenantVersion === tenantVersion.current) setCreating(false);
     }
   }
 
   async function transition(schedule: DcaSchedule, action: "pause" | "resume" | "cancel") {
+    const requestTenantVersion = tenantVersion.current;
     setBusyScheduleId(schedule.id);
     setActionError(null);
     try {
       if (action === "pause") await dcaApi.pause(schedule.id);
       if (action === "resume") await dcaApi.resume(schedule.id);
       if (action === "cancel") await dcaApi.cancel(schedule.id);
+      if (requestTenantVersion !== tenantVersion.current) return;
       if (action === "cancel") setCancelTarget(null);
       await load();
     } catch (error) {
-      setActionError(tradingStateMessage(classifyTradingError(error)));
+      if (requestTenantVersion === tenantVersion.current) {
+        setActionError(tradingStateMessage(classifyTradingError(error)));
+      }
     } finally {
-      setBusyScheduleId(null);
+      if (requestTenantVersion === tenantVersion.current) setBusyScheduleId(null);
     }
   }
 
   async function showRuns(schedule: DcaSchedule) {
+    const requestTenantVersion = tenantVersion.current;
+    const requestVersion = ++runsRequestVersion.current;
     setRunsSchedule(schedule);
     setRuns(null);
     setRunsError(null);
     setRunsLoading(true);
     try {
       const response = await dcaApi.runs(schedule.id);
-      setRuns(response.runs);
+      if (requestTenantVersion === tenantVersion.current && requestVersion === runsRequestVersion.current) {
+        setRuns(response.runs);
+      }
     } catch (error) {
-      setRunsError(tradingStateMessage(classifyTradingError(error)));
+      if (requestTenantVersion === tenantVersion.current && requestVersion === runsRequestVersion.current) {
+        setRunsError(tradingStateMessage(classifyTradingError(error)));
+      }
     } finally {
-      setRunsLoading(false);
+      if (requestTenantVersion === tenantVersion.current && requestVersion === runsRequestVersion.current) {
+        setRunsLoading(false);
+      }
     }
   }
 
@@ -172,8 +219,10 @@ export default function DcaPage() {
             loading={runsLoading}
             error={runsError}
             onClose={() => {
+              runsRequestVersion.current += 1;
               setRunsSchedule(null);
               setRuns(null);
+              setRunsLoading(false);
               setRunsError(null);
             }}
           />

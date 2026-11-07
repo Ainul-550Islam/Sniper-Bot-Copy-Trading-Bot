@@ -314,10 +314,11 @@ impl AccountingEvent {
         )
     }
 
-    /// Reference id for a module trade record: the transaction signature
-    /// when the fill is on chain (a replayed confirmation of the same
-    /// signature is then a duplicate), otherwise a paper reference that is
-    /// unique across process lives (`paper:<trade id>@<ms>`).
+    /// Fallback reference id for a module trade record: the transaction
+    /// signature when on chain, otherwise a paper trade-id/timestamp key.
+    /// Entry paths with a deterministic intent must pass that intent as the
+    /// correlation id to [`fill_event_for_trade`] so paper replays are stable
+    /// across replicas; this fallback is only for legacy callers.
     pub fn reference_for_trade(trade: &Trade) -> String {
         match trade.signature.as_deref().map(str::trim) {
             Some(sig) if !sig.is_empty() => sig.to_string(),
@@ -396,9 +397,10 @@ pub fn fill_event(
 
 /// The fill event for one module [`Trade`] record: every field the trade
 /// carries is copied verbatim (module, venue, mode, side, quantities,
-/// price, fee, timestamp, position id, trade id) and the reference id is
-/// [`AccountingEvent::reference_for_trade`] unless the caller supplies a
-/// venue-level fill identity (`reference` — Polymarket passes its fill id).
+/// price, fee, timestamp, position id, trade id). Reference priority is an
+/// explicit venue fill id, then a chain signature, then the stable logical
+/// correlation id (important for paper fills across replicas), and finally
+/// the local trade-id/time fallback.
 pub fn fill_event_for_trade(
     trade: &Trade,
     wallet: impl Into<String>,
@@ -431,7 +433,23 @@ pub fn fill_event_for_trade(
         quote,
         trade.fee,
         trade.mode,
-        reference.unwrap_or_else(|| AccountingEvent::reference_for_trade(trade)),
+        reference.unwrap_or_else(|| {
+            if let Some(signature) = trade
+                .signature
+                .as_deref()
+                .map(str::trim)
+                .filter(|signature| !signature.is_empty())
+            {
+                signature.to_string()
+            } else {
+                correlation_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|correlation| !correlation.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| AccountingEvent::reference_for_trade(trade))
+            }
+        }),
         correlation_id,
         trade.position_id.clone(),
         trade.ts,
@@ -487,6 +505,50 @@ mod tests {
         assert_ne!(a.event_id(), e.event_id());
         assert!(a.event_id().starts_with(EVENT_ID_PREFIX));
         assert_eq!(a.event_id().len(), EVENT_ID_PREFIX.len() + 40);
+    }
+
+    #[test]
+    fn paper_fill_uses_its_stable_correlation_as_the_event_reference() {
+        let trade = Trade {
+            id: "t-1".into(),
+            ts: Utc::now(),
+            source: crate::models::TradeSource::Sniper,
+            venue: Venue::PumpFun,
+            mode: ExecutionMode::Paper,
+            side: crate::models::PositionSide::Long,
+            symbol: "MINT".into(),
+            symbol_display: "TOKEN".into(),
+            amount_in: 1.0,
+            amount_out: 100.0,
+            quote_symbol: "SOL".into(),
+            price: 0.01,
+            fee: 0.0,
+            slippage_bps: 0,
+            signature: None,
+            position_id: Some("p-1".into()),
+            note: None,
+            latency_ms: None,
+        };
+        let event = fill_event_for_trade(
+            &trade,
+            "wallet-a",
+            "sniper",
+            None,
+            Some("stable-entry-intent".into()),
+        );
+        assert_eq!(event.reference_id, "stable-entry-intent");
+        assert_eq!(event.correlation_id.as_deref(), Some("stable-entry-intent"));
+
+        let mut live = trade;
+        live.signature = Some("chain-signature".into());
+        let event = fill_event_for_trade(
+            &live,
+            "wallet-a",
+            "sniper",
+            None,
+            Some("intent-correlation".into()),
+        );
+        assert_eq!(event.reference_id, "chain-signature");
     }
 
     #[test]

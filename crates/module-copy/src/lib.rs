@@ -342,6 +342,12 @@ impl CopyBot {
         }
     }
 
+    /// Shared core state used by this bot. Tenant wrappers use it to persist
+    /// the current position projection after a scoped trade event.
+    pub fn state(&self) -> &Shared {
+        &self.state
+    }
+
     /// The leader registry (shared with the API / Telegram for read-only
     /// snapshots).
     pub fn leaders(&self) -> Arc<RwLock<LeaderRegistry>> {

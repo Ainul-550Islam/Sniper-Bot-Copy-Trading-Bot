@@ -84,18 +84,21 @@ export default function StrategyForm({ onSuccess, onCancel }: StrategyFormProps)
     setError(null);
 
     try {
-      let parsedParams: Record<string, unknown>;
+      let parsedParams: unknown;
       try {
         parsedParams = JSON.parse(rawParams);
       } catch {
         throw new Error("Parameters must be valid JSON object");
+      }
+      if (parsedParams === null || typeof parsedParams !== "object" || Array.isArray(parsedParams)) {
+        throw new Error("Parameters must be a JSON object");
       }
 
       const payload: CreateStrategyInput = {
         module_family: moduleFamily,
         name,
         description,
-        parameters: parsedParams,
+        parameters: parsedParams as Record<string, unknown>,
       };
 
       await createStrategy(payload);

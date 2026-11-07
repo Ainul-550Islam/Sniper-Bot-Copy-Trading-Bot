@@ -65,6 +65,9 @@ export interface BacktestRunInput {
  */
 export async function listBacktests(): Promise<BacktestRecord[]> {
   const res = await tenantRequest<BacktestsResponse>("/api/tenant/backtests");
+  if (!res || !Array.isArray(res.items)) {
+    throw new Error("Invalid backtests response");
+  }
   return res.items;
 }
 

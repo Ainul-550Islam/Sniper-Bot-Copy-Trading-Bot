@@ -1538,6 +1538,7 @@ impl TradeConsole {
             organization_id: org.clone(),
             user_id,
             chat_id,
+            consent_id: Some(consent.consent_id),
             action,
             mint: mint.clone(),
             amount_lamports,

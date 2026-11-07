@@ -153,6 +153,144 @@ impl Default for EmailConfig {
     }
 }
 
+impl EmailConfig {
+    /// Opt-in deployment configuration. Provider secrets remain in the named
+    /// environment variables; they are never copied into logs or config data.
+    pub fn from_env() -> Result<Self, EmailError> {
+        let enabled = match std::env::var("EMAIL_ENABLED") {
+            Ok(value) if value.eq_ignore_ascii_case("true") => true,
+            Ok(value) if value.eq_ignore_ascii_case("false") => false,
+            Ok(_) => {
+                return Err(EmailError::Config(
+                    "EMAIL_ENABLED must be true or false".into(),
+                ))
+            }
+            Err(std::env::VarError::NotPresent) => false,
+            Err(error) => {
+                return Err(EmailError::Config(format!(
+                    "EMAIL_ENABLED is not valid Unicode: {error}"
+                )))
+            }
+        };
+        let mut config = Self {
+            enabled,
+            ..Self::default()
+        };
+        if !enabled {
+            return Ok(config);
+        }
+        config.from_address = std::env::var("EMAIL_FROM")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                EmailError::Config("EMAIL_FROM must be set when EMAIL_ENABLED=true".into())
+            })?;
+        let backend = std::env::var("EMAIL_BACKEND").unwrap_or_else(|_| "resend".into());
+        config.backend = match backend.trim().to_ascii_lowercase().as_str() {
+            "resend" => EmailBackend::Resend {
+                api_key_env: std::env::var("EMAIL_RESEND_API_KEY_ENV")
+                    .unwrap_or_else(|_| "RESEND_API_KEY".into()),
+            },
+            "postmark" => EmailBackend::Postmark {
+                token_env: std::env::var("EMAIL_POSTMARK_TOKEN_ENV")
+                    .unwrap_or_else(|_| "POSTMARK_SERVER_TOKEN".into()),
+            },
+            "ses" => EmailBackend::Ses {
+                region: std::env::var("EMAIL_SES_REGION").unwrap_or_default(),
+                access_key_env: std::env::var("EMAIL_SES_ACCESS_KEY_ENV")
+                    .unwrap_or_else(|_| "AWS_ACCESS_KEY_ID".into()),
+                secret_key_env: std::env::var("EMAIL_SES_SECRET_KEY_ENV")
+                    .unwrap_or_else(|_| "AWS_SECRET_ACCESS_KEY".into()),
+            },
+            "smtp" => {
+                let host = std::env::var("EMAIL_SMTP_HOST").unwrap_or_default();
+                let port = std::env::var("EMAIL_SMTP_PORT")
+                    .unwrap_or_else(|_| "587".into())
+                    .parse::<u16>()
+                    .map_err(|_| {
+                        EmailError::Config("EMAIL_SMTP_PORT must be a valid TCP port".into())
+                    })?;
+                let implicit_tls = match std::env::var("EMAIL_SMTP_IMPLICIT_TLS").as_deref() {
+                    Ok("true") => true,
+                    Ok("false") | Err(_) => false,
+                    _ => {
+                        return Err(EmailError::Config(
+                            "EMAIL_SMTP_IMPLICIT_TLS must be true or false".into(),
+                        ))
+                    }
+                };
+                let username = std::env::var("EMAIL_SMTP_USERNAME").unwrap_or_default();
+                let password_env = std::env::var("EMAIL_SMTP_PASSWORD_ENV")
+                    .unwrap_or_else(|_| "SMTP_PASSWORD".into());
+                let ca_bundle_path = std::env::var("EMAIL_SMTP_CA_BUNDLE").ok();
+                EmailBackend::Smtp {
+                    host,
+                    port,
+                    implicit_tls,
+                    username,
+                    password_env,
+                    ca_bundle_path,
+                }
+            }
+            _ => {
+                return Err(EmailError::Config(
+                    "EMAIL_BACKEND must be resend, postmark, ses, or smtp".into(),
+                ))
+            }
+        };
+        config.per_minute_limit = std::env::var("EMAIL_PER_MINUTE_LIMIT")
+            .unwrap_or_else(|_| "0".into())
+            .parse::<u32>()
+            .map_err(|_| {
+                EmailError::Config("EMAIL_PER_MINUTE_LIMIT must be a non-negative integer".into())
+            })?;
+        Ok(config)
+    }
+
+    pub fn build_provider(&self) -> Result<std::sync::Arc<dyn EmailProvider>, EmailError> {
+        use std::sync::Arc;
+        let provider: Arc<dyn EmailProvider> = match &self.backend {
+            EmailBackend::Resend { api_key_env } => {
+                Arc::new(http_provider::HttpEmailProvider::resend(api_key_env)?)
+            }
+            EmailBackend::Postmark { token_env } => {
+                Arc::new(http_provider::HttpEmailProvider::postmark(token_env)?)
+            }
+            EmailBackend::Ses {
+                region,
+                access_key_env,
+                secret_key_env,
+            } => Arc::new(http_provider::HttpEmailProvider::ses(
+                region,
+                access_key_env,
+                secret_key_env,
+            )?),
+            EmailBackend::Smtp {
+                host,
+                port,
+                implicit_tls,
+                username,
+                password_env,
+                ca_bundle_path,
+            } => Arc::new(smtp::SmtpProvider::new(
+                host,
+                *port,
+                *implicit_tls,
+                username,
+                password_env,
+                ca_bundle_path.as_deref(),
+            )?),
+            EmailBackend::File { .. } => {
+                return Err(EmailError::Config(
+                    "file email backend is not wired for production startup".into(),
+                ))
+            }
+        };
+        Ok(provider)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

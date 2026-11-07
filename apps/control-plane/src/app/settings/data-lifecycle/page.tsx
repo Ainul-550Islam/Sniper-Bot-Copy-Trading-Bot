@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { AppShell } from "@/components/AppShell";
 import { commercial, toDisplayError, LifecycleStatus } from "@/lib/commercial";
 import { request, exportsApi, ApiError, type ExportEnvelope } from "@/lib/api";
 import { LifecycleActions, type LifecycleAction } from "@/components/lifecycle/LifecycleActions";
 import { lifecycleActionsApi } from "@/lib/api/lifecycle-actions-api";
 import { getCapabilities, type MembershipRole } from "@/lib/permissions";
+import { sessionStore } from "@/lib/auth";
 
 function membershipRole(role: string | undefined): MembershipRole {
   const normalized = role?.toLowerCase() ?? "";
@@ -28,28 +29,61 @@ export default function DataLifecyclePage() {
   const [exportKind, setExportKind] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<LifecycleAction | null>(null);
   const [canManageLifecycle, setCanManageLifecycle] = useState(false);
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState(
+    () => sessionStore.getSnapshot().selectedOrganizationId,
+  );
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    const nextOrganizationId = sessionStore.getSnapshot().selectedOrganizationId;
+    setSelectedOrganizationId(nextOrganizationId);
+    setStatus(null);
+    setCanManageLifecycle(false);
+    setExportData(null);
+  }), []);
 
   const loadData = useCallback(async () => {
+    const version = ++requestVersion.current;
+    setLoading(true);
     setError(null);
+    setStatus(null);
+    setCanManageLifecycle(false);
+    setExportData(null);
     try {
       const me = await request<{ organizations?: Array<{ organization_id: string; role: string }> }>("/api/saas/users/me");
-      const organization = me.organizations?.[0] ?? null;
-      const targetOrg = organization?.organization_id ?? null;
+      if (version !== requestVersion.current) return;
+      const memberships = me.organizations ?? [];
+      const organization = selectedOrganizationId
+        ? memberships.find((item) => item.organization_id === selectedOrganizationId) ?? null
+        : memberships.length === 1 ? memberships[0] ?? null : null;
+      if (!organization) {
+        throw new Error(
+          selectedOrganizationId
+            ? "The selected organization is not available for lifecycle management."
+            : "Select an organization before loading lifecycle controls.",
+        );
+      }
       setCanManageLifecycle(
-        getCapabilities({ role: membershipRole(organization?.role) }).canManageTeam,
+        getCapabilities({ role: membershipRole(organization.role) }).canManageTeam,
       );
-      if (!targetOrg) throw new Error("No organization found for lifecycle status");
-      const s = await commercial.lifecycleStatus(targetOrg);
-      setStatus(s);
+      const s = await commercial.lifecycleStatus(organization.organization_id);
+      if (version === requestVersion.current) setStatus(s);
     } catch (e) {
-      setError(toDisplayError(e));
+      if (version === requestVersion.current) setError(toDisplayError(e));
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
-  }, []);
+  }, [selectedOrganizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadData());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void loadData();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [loadData]);
 
   async function runLifecycleAction(action: LifecycleAction) {
@@ -183,7 +217,7 @@ export default function DataLifecyclePage() {
             </section>
 
             {/* Tenant Deprovisioning */}
-            <section className="card" style={{ borderLeft: "4px solid var(--bad)" }}>
+            {canManageLifecycle && <section className="card" style={{ borderLeft: "4px solid var(--bad)" }}>
               <h2>Request Organization Closure &amp; Data Purge</h2>
               <p className="muted small">
                 Closing an organization permanently disables automated trading, revokes API keys, disconnects WebSockets,
@@ -207,7 +241,7 @@ export default function DataLifecyclePage() {
                   {busy ? "Processing…" : "Request Irreversible Deprovisioning"}
                 </button>
               </div>
-            </section>
+            </section>}
           </>
         )}
       </div>

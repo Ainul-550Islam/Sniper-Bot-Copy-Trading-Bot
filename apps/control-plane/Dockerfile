@@ -18,9 +18,12 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
-USER node
-COPY --from=build /app/public ./public
-COPY --from=build /app/.next/standalone ./
-COPY --from=build /app/.next/static ./.next/static
+# The pinned Node image defines node as UID/GID 1000. Use numeric identity
+# and own the copied runtime/cache directories without requiring host name lookup.
+RUN chown 1000:1000 /app
+USER 1000:1000
+COPY --from=build --chown=1000:1000 /app/public ./public
+COPY --from=build --chown=1000:1000 /app/.next/standalone ./
+COPY --from=build --chown=1000:1000 /app/.next/static ./.next/static
 EXPOSE 3000
 CMD ["node", "server.js"]

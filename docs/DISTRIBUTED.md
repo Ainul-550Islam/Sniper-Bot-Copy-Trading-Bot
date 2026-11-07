@@ -204,13 +204,20 @@ open-position capacity uses `max(local_count, global_count)` and the daily
 realized-loss gate uses `min(local_pnl, global_pnl)` (more negative wins) —
 so global limits converge **within one query** instead of within
 `book_sync_secs`, and one replica's losses count against every replica's
-daily limit. Oracle failures return "unknown" and fall back to the local
-view (§K: risk never depends on store availability); an oracle can only
-TIGHTEN a limit, never loosen it. Honest approximation: `realized_today`
-attributes the full lifecycle PnL (`realized_quote - cost_basis`) of
-positions CLOSED today (UTC) to today; partial exits on still-open
-positions are visible only through each replica's local accumulator until
-the position closes.
+daily limit. Operator mode retains a local-only fallback for module daily-loss
+checks on genuine shared-store outages; tenant mode fails closed when scoped
+reads are unavailable. Deployment-wide aggregate limits fail closed when the
+ledger cannot be recovered, contains invalid rows, has pending writes, or no
+longer covers realized module positions. Each operator decision refreshes the
+shared journal before evaluating those limits. Incomplete PnL accounting
+fails closed in both modes. An oracle can only TIGHTEN a limit, never loosen it. Daily attribution is only considered
+complete for known position projections: unknown legacy partial-exit PnL,
+open positions with an exit fill today, or a lifecycle spanning UTC days
+returns unknown rather than summing a misleading full-lifecycle value. Exit
+timestamps are tracked separately from ordinary position updates so a later
+mark cannot make yesterday's partial exit look like today's PnL. Incomplete accounting blocks the daily-loss decision in both modes;
+operator mode retains its local-only fallback only when the shared store is
+actually unavailable.
 
 **Position book sync**: every `[ha].book_sync_secs` each replica merges
 `PositionRepo::list_open()` into local state (`AppState::merge_positions`):

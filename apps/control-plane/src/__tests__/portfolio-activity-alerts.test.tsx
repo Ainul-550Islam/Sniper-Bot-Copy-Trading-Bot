@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { ComponentType, ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import PortfolioPage from "@/app/portfolio/page";
 import ActivityPage from "@/app/activity/page";
 import AlertsPage from "@/app/alerts/page";
@@ -142,5 +142,16 @@ describe("portfolio, activity, alerts and analytics pages", () => {
     stubApi("error");
     render(<PortfolioPage />);
     expect(await screen.findByText(/portfolio service refused the request/)).toBeTruthy();
+  });
+
+  it("does not keep presenting an old portfolio as current after refresh fails", async () => {
+    stubApi("populated");
+    render(<PortfolioPage />);
+    expect(await screen.findByText("FIX")).toBeTruthy();
+
+    mode = "error";
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Portfolio" }));
+    expect(await screen.findByText(/portfolio service refused the request/)).toBeTruthy();
+    expect(screen.queryByText("FIX")).toBeNull();
   });
 });

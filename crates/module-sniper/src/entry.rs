@@ -119,6 +119,8 @@ struct Approved {
     market: MarketData,
     slippage: SlippageDecision,
     sized_lamports: u64,
+    // Retains aggregate risk capacity across approval, preparation, and send.
+    _reservation: Option<bot_core::global_risk::GlobalRiskReservation>,
 }
 
 /// A transaction ready for the execution engine.
@@ -735,7 +737,7 @@ impl Sniper {
         };
         *fee_out = Some(fee.total_lamports);
         // 16. The authoritative risk decision.
-        let decision = self
+        let mut decision = self
             .risk
             .check_entry(&EntryRequest {
                 module: BotModule::Sniper,
@@ -818,6 +820,7 @@ impl Sniper {
             market,
             slippage,
             sized_lamports,
+            _reservation: decision.take_reservation(),
         })
     }
 

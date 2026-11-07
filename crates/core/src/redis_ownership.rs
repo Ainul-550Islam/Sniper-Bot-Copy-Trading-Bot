@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! owner, epoch, status ('claimed'|'released'|'handed_off'),
-//! claimed_at, lease_until, lease_span, updated_at   (unix ms, Redis TIME)
+//! claimed_at, lease_until, lease_span, grace_span, updated_at   (unix ms, Redis TIME)
 //! takeovers, prev_owner, kind, module, strategy, symbol
 //! ```
 //!
@@ -21,8 +21,10 @@
 //! reads as absent → a replica may re-acquire with epoch 1 — which is why
 //! the intent journal + reconciliation remain the backstop for in-flight
 //! ambiguity, and why Postgres is the authoritative store whenever
-//! configured. Terminal (`released`/`handed_off`) hashes are kept 7 days
-//! for observability, then expire; Postgres rows are never deleted.
+//! configured. Terminal hashes are kept at least 7 days and cover recorded
+//! handoff grace. Legacy handoffs with unknown grace remain until normal
+//! reacquisition instead of guessing an expiration. Postgres rows are never
+//! deleted.
 //!
 //! Fail-closed: every method propagates Redis errors/timeouts as `Err` —
 //! [`crate::ownership::OwnershipRegistry`] turns them into
@@ -47,6 +49,22 @@ use crate::redis_kv::RedisKv;
 /// Terminal-state retention in Redis (audit lives in Postgres/logs).
 const TERMINAL_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 
+// Redis Lua uses IEEE-754 doubles. Reserve headroom for 2*lease + grace
+// and the server clock, rather than silently rounding large millisecond
+// grants or overflowing a signed Redis TTL. Lua also checks absolute time.
+const MAX_CLAIM_DURATION_MS: i64 = (1_i64 << 51) - 1;
+
+fn claim_duration_ms(duration: std::time::Duration) -> BotResult<i64> {
+    let ms = i64::try_from(duration.as_millis().max(1000))
+        .map_err(|_| BotError::config("Redis claim duration exceeds signed milliseconds"))?;
+    if ms > MAX_CLAIM_DURATION_MS {
+        return Err(BotError::config(
+            "Redis claim duration exceeds exact Lua millisecond range",
+        ));
+    }
+    Ok(ms)
+}
+
 fn claim_key(execution_id: &str) -> String {
     format!("own:claim:{execution_id}")
 }
@@ -68,18 +86,22 @@ local now_ms = t[1] * 1000 + math.floor(t[2] / 1000)
 local lease_ms = tonumber(ARGV[1])
 local grace_ms = tonumber(ARGV[2])
 local owner = ARGV[3]
+local retention_ms = lease_ms * 2 + grace_ms
+if retention_ms > 9007199254740991 - now_ms then
+    return redis.error_reply('claim expiration exceeds exact millisecond range')
+end
 local function stamp(status, epoch, takeovers, prev, reacq)
     redis.call('HSET', KEYS[1],
         'owner', owner, 'epoch', epoch, 'status', status,
-        'claimed_at', now_ms, 'lease_until', now_ms + lease_ms,
-        'lease_span', lease_ms, 'updated_at', now_ms,
+        'claimed_at', now_ms, 'lease_until', string.format('%.0f', now_ms + lease_ms),
+        'lease_span', ARGV[1], 'grace_span', ARGV[2], 'updated_at', now_ms,
         'takeovers', takeovers, 'prev_owner', prev,
         'kind', ARGV[4], 'module', ARGV[5], 'strategy', ARGV[6], 'symbol', ARGV[7])
     return {1, epoch, status, now_ms + lease_ms, takeovers, prev, now_ms, reacq}
 end
 if redis.call('EXISTS', KEYS[1]) == 0 then
     local out = stamp('claimed', 1, 0, '', 0)
-    redis.call('PEXPIRE', KEYS[1], lease_ms * 2 + grace_ms)
+    redis.call('PEXPIRE', KEYS[1], string.format('%.0f', retention_ms))
     return out
 end
 local status = redis.call('HGET', KEYS[1], 'status')
@@ -105,7 +127,7 @@ if reacq == 2 then
     takeovers = takeovers + 1
 end
 local out = stamp('claimed', epoch, takeovers, old_owner, reacq)
-redis.call('PEXPIRE', KEYS[1], lease_ms * 2 + grace_ms)
+redis.call('PEXPIRE', KEYS[1], string.format('%.0f', retention_ms))
 return out
 "#,
     )
@@ -123,7 +145,15 @@ if tonumber(redis.call('HGET', KEYS[1], 'epoch')) ~= tonumber(ARGV[2]) then retu
 if redis.call('HGET', KEYS[1], 'status') ~= 'claimed' then return 0 end
 if (tonumber(redis.call('HGET', KEYS[1], 'lease_until')) or 0) <= now_ms then return 0 end
 local span = tonumber(redis.call('HGET', KEYS[1], 'lease_span')) or 45000
-redis.call('HSET', KEYS[1], 'lease_until', now_ms + span, 'updated_at', now_ms)
+local grace = tonumber(redis.call('HGET', KEYS[1], 'grace_span')) or 0
+local retention = math.max(span * 2 + grace, redis.call('PTTL', KEYS[1]))
+if span <= 0 or grace < 0 or retention > 9007199254740991 - now_ms then
+    return redis.error_reply('renewal expiration exceeds exact millisecond range')
+end
+redis.call('HSET', KEYS[1], 'lease_until', string.format('%.0f', now_ms + span), 'updated_at', now_ms)
+-- Renew the hash lifetime as well as its logical lease. Otherwise a
+-- successful sequence of renewals can lose its fencing row to the old TTL.
+redis.call('PEXPIRE', KEYS[1], string.format('%.0f', retention))
 return 1
 "#,
     )
@@ -153,8 +183,24 @@ local now_ms = t[1] * 1000 + math.floor(t[2] / 1000)
 if redis.call('HGET', KEYS[1], 'owner') ~= ARGV[1] then return 0 end
 if tonumber(redis.call('HGET', KEYS[1], 'epoch')) ~= tonumber(ARGV[2]) then return 0 end
 if redis.call('HGET', KEYS[1], 'status') ~= 'claimed' then return 0 end
+local grace = tonumber(redis.call('HGET', KEYS[1], 'grace_span'))
+local retention = tonumber(ARGV[4])
+if ARGV[3] == 'handed_off' and grace then
+    local span = tonumber(redis.call('HGET', KEYS[1], 'lease_span')) or 1000
+    retention = math.max(retention, grace + span)
+end
+if retention <= 0 or retention > 9007199254740991 - now_ms then
+    return redis.error_reply('terminal expiration exceeds exact millisecond range')
+end
 redis.call('HSET', KEYS[1], 'status', ARGV[3], 'updated_at', now_ms)
-redis.call('PEXPIRE', KEYS[1], ARGV[4])
+if ARGV[3] == 'handed_off' and not grace then
+    -- Legacy rows did not record grace. Its length cannot be recovered
+    -- from a remaining TTL, so retain the fencing row instead of guessing
+    -- seven days. A later normal acquisition stamps the new finite layout.
+    redis.call('PERSIST', KEYS[1])
+else
+    redis.call('PEXPIRE', KEYS[1], string.format('%.0f', retention))
+end
 return 1
 "#,
     )
@@ -204,8 +250,8 @@ impl ClaimStore for RedisClaimStore {
 
     async fn claim(&self, req: &ClaimRequest, ctx: &StoreContext) -> BotResult<ClaimDecision> {
         let key = claim_key(&req.execution_id);
-        let lease_ms = ctx.lease.as_millis().max(1000) as i64;
-        let grace_ms = ctx.handoff_grace.as_millis().max(1000) as i64;
+        let lease_ms = claim_duration_ms(ctx.lease)?;
+        let grace_ms = claim_duration_ms(ctx.handoff_grace)?;
         let (owner, kind, module, strategy, symbol) = (
             ctx.owner_id.clone(),
             req.kind.clone(),

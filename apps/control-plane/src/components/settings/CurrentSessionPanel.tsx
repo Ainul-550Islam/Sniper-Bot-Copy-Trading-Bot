@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { auth } from "@/lib/api";
 import { getUserSessions, revokeUserSession, type UserSessionView } from "@/lib/api/security-api";
 import { clearSession, sessionStore } from "@/lib/auth";
@@ -18,22 +18,39 @@ export default function CurrentSessionPanel() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const sessionIdentity = session?.id ?? null;
+  const requestVersion = useRef(0);
 
   const loadSessions = useCallback(async () => {
-    setLoading(true);
+    const requestId = ++requestVersion.current;
+    setSessions([]);
     setLoadError(null);
+    if (!sessionIdentity) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     try {
       const response = await getUserSessions();
-      setSessions(response.items);
+      if (requestId === requestVersion.current) setSessions(response.items);
     } catch (err: unknown) {
-      setLoadError(err instanceof Error ? err.message : "Could not load session inventory");
+      if (requestId === requestVersion.current) {
+        setLoadError(err instanceof Error ? err.message : "Could not load session inventory");
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
-  }, []);
+  }, [sessionIdentity]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadSessions());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void loadSessions();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [loadSessions]);
 
   async function signOutCurrentSession() {

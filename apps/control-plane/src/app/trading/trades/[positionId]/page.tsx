@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
@@ -14,27 +14,46 @@ export default function TradesForPositionPage() {
   const [trades, setTrades] = useState<TenantTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
-    if (!positionId) return;
+    const requestId = ++requestVersion.current;
+    if (!positionId) {
+      setTrades([]);
+      setError("Position identifier is missing.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setTrades([]);
     try {
       const response = await tradingDetailApi.tradeForPosition(positionId);
-      setTrades(Array.isArray(response.trades) ? response.trades : []);
+      if (requestId === requestVersion.current) {
+        setTrades(Array.isArray(response.trades) ? response.trades : []);
+      }
     } catch (err: unknown) {
+      if (requestId !== requestVersion.current) return;
+      setTrades([]);
       if (err instanceof ApiError && err.status === 404) {
         setError(`No trades found for position ${positionId}`);
       } else {
         setError(toDisplayError(err));
       }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [positionId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

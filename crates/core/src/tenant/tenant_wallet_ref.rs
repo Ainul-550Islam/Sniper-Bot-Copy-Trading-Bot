@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::model::OrganizationId;
 use crate::error::{BotError, BotResult};
@@ -36,7 +36,7 @@ pub fn valid_public_address(value: &str) -> bool {
 }
 
 /// A tenant-scoped reference to one public wallet address.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct TenantWalletRef {
     /// The tenant that owns the wallet.
     organization_id: OrganizationId,
@@ -49,6 +49,7 @@ pub struct TenantWalletRef {
 impl TenantWalletRef {
     /// Build and validate. Fail closed on a malformed address.
     pub fn new(organization_id: OrganizationId, address: impl Into<String>) -> BotResult<Self> {
+        let organization_id = crate::tenant::require_valid_tenant_id(organization_id)?;
         let address = address.into();
         if !valid_public_address(&address) {
             return Err(BotError::Config(format!(
@@ -137,6 +138,12 @@ mod tests {
         assert!(TenantWalletRef::new(org, "has whitespace inside").is_err());
         assert!(TenantWalletRef::new(org, "bad!chars$").is_err());
         assert!(TenantWalletRef::new(org, "x".repeat(101)).is_err());
+    }
+
+    #[test]
+    fn nil_organization_is_rejected() {
+        let nil = OrganizationId::from(uuid::Uuid::nil());
+        assert!(TenantWalletRef::new(nil, ADDR).is_err());
     }
 
     #[test]

@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
 
 use super::model::OrganizationId;
 use crate::error::{BotError, BotResult};
@@ -66,7 +66,7 @@ impl fmt::Display for SignerProvider {
 pub const MAX_KEY_REF_LEN: usize = 128;
 
 /// A tenant-scoped signer reference (identifier only — no secrets).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TenantSignerRef {
     /// The tenant that owns the signer binding.
     organization_id: OrganizationId,
@@ -78,6 +78,31 @@ pub struct TenantSignerRef {
     active: bool,
 }
 
+impl fmt::Debug for TenantSignerRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TenantSignerRef")
+            .field("organization_id", &self.organization_id)
+            .field("provider", &self.provider)
+            .field("key_ref", &self.redacted())
+            .field("active", &self.active)
+            .finish()
+    }
+}
+
+impl Serialize for TenantSignerRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut record = serializer.serialize_struct("TenantSignerRef", 4)?;
+        record.serialize_field("organization_id", &self.organization_id)?;
+        record.serialize_field("provider", &self.provider)?;
+        record.serialize_field("key_ref_redacted", &self.redacted())?;
+        record.serialize_field("active", &self.active)?;
+        record.end()
+    }
+}
+
 impl TenantSignerRef {
     /// Build and validate. Fail closed on a malformed handle.
     pub fn new(
@@ -85,6 +110,7 @@ impl TenantSignerRef {
         provider: SignerProvider,
         key_ref: impl Into<String>,
     ) -> BotResult<Self> {
+        let organization_id = crate::tenant::require_valid_tenant_id(organization_id)?;
         let key_ref = key_ref.into();
         let trimmed = key_ref.trim();
         if trimmed.is_empty() || trimmed.len() > MAX_KEY_REF_LEN {
@@ -192,6 +218,12 @@ mod tests {
     }
 
     #[test]
+    fn nil_organization_is_rejected() {
+        let nil = OrganizationId::from(uuid::Uuid::nil());
+        assert!(TenantSignerRef::new(nil, SignerProvider::Custody, "key-main").is_err());
+    }
+
+    #[test]
     fn cross_tenant_and_revoked_fail_closed() {
         let a = OrganizationId::new();
         let b = OrganizationId::new();
@@ -211,6 +243,20 @@ mod tests {
         assert!(d.starts_with("custody:key-"));
         assert!(!d.contains("main"), "full handle must not leak: {d}");
         assert_eq!(s.redacted(), "custody:key-");
+
+        let debug = format!("{s:?}");
+        assert!(debug.contains("custody:key-"));
+        assert!(
+            !debug.contains("2024-main"),
+            "debug leaked key handle: {debug}"
+        );
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("key_ref_redacted"));
+        assert!(json.contains("custody:key-"));
+        assert!(
+            !json.contains("2024-main"),
+            "serialization leaked key handle: {json}"
+        );
     }
 
     #[test]

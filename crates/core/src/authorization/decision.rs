@@ -123,12 +123,12 @@ impl fmt::Display for DecisionKind {
 }
 
 /// A complete authorization outcome: the kind plus a stable, human reason.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Decision {
     /// What was decided.
-    pub kind: DecisionKind,
+    kind: DecisionKind,
     /// Why, in words a caller may see. Never contains secret material.
-    pub reason: String,
+    reason: String,
 }
 
 impl Decision {
@@ -140,8 +140,28 @@ impl Decision {
         }
     }
 
+    /// The authorization outcome.
+    pub fn kind(&self) -> DecisionKind {
+        self.kind
+    }
+
+    /// The human-readable explanation (never secret material).
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
     /// Deny with an explicit kind and reason.
+    ///
+    /// `Allow` is not a denial kind. If a caller supplies it accidentally,
+    /// fail closed as an unavailable authorization decision rather than
+    /// turning a refusal into an allow.
     pub fn deny(kind: DecisionKind, reason: impl Into<String>) -> Self {
+        if kind.is_allowed() {
+            return Decision {
+                kind: DecisionKind::DenyUnavailable,
+                reason: "invalid denial outcome".into(),
+            };
+        }
         Decision {
             kind,
             reason: reason.into(),
@@ -265,6 +285,18 @@ mod tests {
             }
             assert!(!Decision::deny(d, "x").is_allowed(), "{d}");
         }
+    }
+
+    #[test]
+    fn deny_cannot_turn_an_allow_kind_into_authorization_success() {
+        let decision = Decision::deny(
+            DecisionKind::Allow,
+            "caller supplied an invalid refusal kind",
+        );
+        assert_eq!(decision.kind, DecisionKind::DenyUnavailable);
+        assert!(!decision.is_allowed());
+        assert_eq!(decision.http_status(), 503);
+        assert_eq!(decision.reason, "invalid denial outcome");
     }
 
     #[test]

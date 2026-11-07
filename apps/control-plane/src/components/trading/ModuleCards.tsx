@@ -12,8 +12,9 @@
  * controls act ONLY on the caller's organization.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ModuleActionButton from "@/components/trading/ModuleActionButton";
+import { sessionStore } from "@/lib/auth";
 import {
   classifyTradingError,
   customerTrading,
@@ -33,11 +34,32 @@ interface ModuleCardProps {
 function ModuleCard({ module, title }: ModuleCardProps) {
   const [status, setStatus] = useState<ModuleStatusResponse | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const selectedOrganizationId = sessionStore.getSnapshot().selectedOrganizationId;
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setStatus(null);
+    setState({ kind: "loading" });
+  }), []);
 
   const load = useCallback(async () => {
+    if (selectedOrganizationId !== sessionStore.getSnapshot().selectedOrganizationId) return;
+    const requestId = ++requestVersion.current;
+    setStatus(null);
+    if (!selectedOrganizationId) {
+      setState({ kind: "empty" });
+      return;
+    }
     setState({ kind: "loading" });
     try {
       const response = await customerTrading[`${module}Status`]();
+      if (requestId !== requestVersion.current) return;
+      if (response.organization_id !== selectedOrganizationId) {
+        throw new Error("Module status response does not match the selected organization");
+      }
       setStatus(response);
       if (response.effective_state === "disabled") {
         setState({
@@ -53,19 +75,30 @@ function ModuleCard({ module, title }: ModuleCardProps) {
         setState({ kind: "ready" });
       }
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) {
+        setStatus(null);
+        setState(classifyTradingError(e));
+      }
     }
-  }, [module]);
+  }, [module, selectedOrganizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
-  }, [load]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [load, sessionVersion]);
 
   return (
     <section className="card" aria-label={`${title} status`}>
       <h3>{title}</h3>
-      {state.kind === "loading" && <p>Loading {title} status…</p>}
-      {state.kind !== "loading" && state.kind !== "ready" && (
+      {!selectedOrganizationId && <p>Select an organization to view module status.</p>}
+      {selectedOrganizationId && state.kind === "loading" && <p>Loading {title} status…</p>}
+      {selectedOrganizationId && state.kind !== "loading" && state.kind !== "ready" && state.kind !== "empty" && (
         <p role="alert" className={state.kind === "module_disabled" ? "warn" : "error"}>
           {tradingStateMessage(state)}
           {isRetryable(state) && (
@@ -78,7 +111,7 @@ function ModuleCard({ module, title }: ModuleCardProps) {
           )}
         </p>
       )}
-      {state.kind === "ready" && status && (
+      {selectedOrganizationId && state.kind === "ready" && status?.organization_id === selectedOrganizationId && status && (
         <ul>
           <li>
             Entitlement: <code>{status.entitlement.feature ?? "control plane"}</code> granted
@@ -98,7 +131,7 @@ function ModuleCard({ module, title }: ModuleCardProps) {
           )}
         </ul>
       )}
-      {status?.controls.available && (
+      {selectedOrganizationId && status?.organization_id === selectedOrganizationId && status.controls.available && (
         <div className="row">
           <ModuleActionButton
             module={module}

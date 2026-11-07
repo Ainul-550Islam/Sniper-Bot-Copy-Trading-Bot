@@ -53,9 +53,10 @@ services:
       # $remote_addr, $connection_upgrade … and silently blank them.
       NGINX_ENVSUBST_FILTER: "^SNIPER_"
     volumes:
-      - ../nginx/sniper-suite.conf:/etc/nginx/templates/sniper-suite.conf.template:ro
-      - ../nginx/tls-params.conf:/etc/nginx/tls-params.conf:ro
-      - ../nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
+      # Bind paths are relative to the first Compose file (repository root).
+      - ./deploy/nginx/sniper-suite.conf:/etc/nginx/templates/sniper-suite.conf.template:ro
+      - ./deploy/nginx/tls-params.conf:/etc/nginx/tls-params.conf:ro
+      - ./deploy/nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
       - letsencrypt:/etc/letsencrypt:ro
       - certbot-webroot:/var/www/certbot:ro
     ports:

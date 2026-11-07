@@ -50,10 +50,14 @@ WORKDIR /app
 # then the sources.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+# Both [patch.crates-io] overrides are local paths, required even before
+# Cargo can resolve the workspace. Keep the vendored sources in the build context.
+COPY vendor ./vendor
 
-# The release profile enables LTO/overflow-checks (see root Cargo.toml).
+# The release profile enables LTO (see root Cargo.toml).
 # `--offline` is intentionally NOT used: the builder fetches crates normally.
-RUN cargo build --release -p sniper-suite --bin sniper-suite
+# Refuse resolution drift from the committed dependency lockfile.
+RUN cargo build --locked --release -p sniper-suite --bin sniper-suite
 
 # ---- runtime ----------------------------------------------------------------
 # debian:bookworm-slim — digest-pinned, see the note on the builder stage.
@@ -85,6 +89,6 @@ ENV CONFIG_PATH=/app/config.toml \
 
 # Simple healthcheck against the control API.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/api/health || exit 1
+    CMD ["curl", "-fsS", "http://127.0.0.1:8080/api/health"]
 
 ENTRYPOINT ["/usr/local/bin/sniper-suite"]

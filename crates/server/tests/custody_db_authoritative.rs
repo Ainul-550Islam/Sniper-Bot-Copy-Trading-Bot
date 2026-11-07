@@ -480,3 +480,138 @@ async fn custody_mutations_are_immediately_visible_across_replica_pools() {
     db_a.close().await;
     db_b.close().await;
 }
+
+/// Freeze activation after its request-local hydration but before its durable
+/// UPDATE, then commit a terminal revocation from a second connection. No
+/// timing assumption is used: pg_blocking_pids proves the HTTP UPDATE is waiting
+/// behind our row lock before the revocation is committed.
+async fn activation_cannot_overwrite_committed_revocation(is_signer: bool) {
+    let Some(db) = replica().await else { return };
+    let app = router(test_state(db.clone()).await);
+    let (token, _) = create_owner(
+        app.clone(),
+        &format!("custody-race-{}@example.test", uuid::Uuid::new_v4()),
+    )
+    .await;
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/saas/custody/profiles",
+        Some(&token),
+        Some(json!({"name": "revocation-race", "provider_type": "local"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create profile: {body}");
+    let profile_id = body.parse::<Value>().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (table, resource, id) = if is_signer {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/saas/custody/profiles/{profile_id}/activate"),
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "activate parent: {body}");
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/saas/custody/signers",
+            Some(&token),
+            Some(json!({
+                "custody_profile_id": profile_id,
+                "logical_identity": "revocation-race",
+                "public_address": public_address(19),
+                "capabilities": ["solana.sign"],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create signer: {body}");
+        let id = body.parse::<Value>().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        ("custody_signers", "signers", id)
+    } else {
+        ("custody_profiles", "profiles", profile_id)
+    };
+    let uuid = uuid::Uuid::parse_str(&id).unwrap();
+    let mut revoker = db.pool().begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *revoker)
+        .await
+        .unwrap();
+    // Identifiers are private test constants, never external input.
+    sqlx::query(&format!("SELECT id FROM {table} WHERE id = $1 FOR UPDATE"))
+        .bind(uuid)
+        .fetch_one(&mut *revoker)
+        .await
+        .unwrap();
+    let activation = tokio::spawn(async move {
+        request(
+            app,
+            "POST",
+            &format!("/api/saas/custody/{resource}/{id}/activate"),
+            Some(&token),
+            None,
+        )
+        .await
+    });
+    let waiting = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE $2)",
+            )
+            .bind(blocker)
+            .bind(format!("UPDATE {table} SET status%"))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if waiting.is_err() {
+        revoker.rollback().await.unwrap();
+        activation.abort();
+        panic!("activation did not reach the synchronized durable UPDATE");
+    }
+    sqlx::query(&format!(
+        "UPDATE {table} SET status = 'revoked', revoked_at = now(), updated_at = now() WHERE id = $1"
+    ))
+    .bind(uuid)
+    .execute(&mut *revoker)
+    .await
+    .unwrap();
+    revoker.commit().await.unwrap();
+    let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(15), activation)
+        .await
+        .expect("activation completes after releasing the row lock")
+        .expect("activation task");
+    let stored: String = sqlx::query_scalar(&format!("SELECT status FROM {table} WHERE id = $1"))
+        .bind(uuid)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        (status, stored.as_str()),
+        (StatusCode::CONFLICT, "revoked"),
+        "a stale activation must not resurrect a terminally revoked {resource}: {body}"
+    );
+}
+
+#[tokio::test]
+async fn profile_activation_cannot_resurrect_concurrent_revocation() {
+    activation_cannot_overwrite_committed_revocation(false).await;
+}
+
+#[tokio::test]
+async fn signer_activation_cannot_resurrect_concurrent_revocation() {
+    activation_cannot_overwrite_committed_revocation(true).await;
+}

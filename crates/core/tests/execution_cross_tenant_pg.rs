@@ -388,3 +388,290 @@ async fn idempotency_keys_are_tenant_local_namespaces() {
         "B survives A's cleanup"
     );
 }
+
+/// Move a persisted lease's entire clock backwards between real renewals.
+/// This simulates elapsed time deterministically, without sleeping or mocking
+/// either renewal implementation. The grant interval must remain constant.
+async fn assert_claim_renewal_duration(
+    deployment: bool,
+    lease_ms: i64,
+    elapsed_ms: i64,
+    renewals: usize,
+) {
+    use bot_core::db::claims::PostgresClaimStore;
+    use bot_core::ownership::{ClaimStore, StoreContext};
+
+    let Some(db) = setup().await else {
+        assert_ne!(std::env::var("REQUIRE_POSTGRES").as_deref(), Ok("1"));
+        assert_ne!(std::env::var("REQUIRE_SERVICES").as_deref(), Ok("1"));
+        eprintln!("NOT_RUN: claim duration regression requires PostgreSQL");
+        return;
+    };
+    let run = run_id();
+    let organization = if deployment {
+        bot_core::db::deployment_org::deployment_org_uuid(&db)
+            .await
+            .unwrap()
+            .into()
+    } else {
+        org(&db, &format!("lease-{run}")).await
+    };
+    let scope = read_scope(organization);
+    let request = claim_req(&format!("lease-renew-{run}"));
+    let owner = "lease-owner";
+    let lease = Duration::from_millis(lease_ms.try_into().unwrap());
+    let grace = Duration::from_secs(30);
+    let legacy = PostgresClaimStore::new(db.clone());
+    let tenant = TenantClaimRepo::new(db.clone());
+    let decision = if deployment {
+        legacy
+            .claim(
+                &request,
+                &StoreContext {
+                    owner_id: owner.into(),
+                    lease,
+                    handoff_grace: grace,
+                },
+            )
+            .await
+            .unwrap()
+    } else {
+        tenant
+            .claim(&scope, &request, owner, lease, grace)
+            .await
+            .unwrap()
+    };
+    let ClaimDecision::Acquired(first) = decision else {
+        panic!("fresh claim")
+    };
+
+    for renewal in 0..renewals {
+        sqlx::query(
+            "UPDATE execution_claims
+                SET claimed_at = claimed_at - $3::bigint * interval '1 millisecond',
+                    last_heartbeat = last_heartbeat - $3::bigint * interval '1 millisecond',
+                    lease_until = lease_until - $3::bigint * interval '1 millisecond'
+              WHERE organization_id = $1 AND execution_id = $2",
+        )
+        .bind(organization.as_uuid())
+        .bind(&request.execution_id)
+        .bind(elapsed_ms)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let renewed = if deployment {
+            legacy
+                .renew(&request.execution_id, owner, first.epoch)
+                .await
+                .unwrap()
+        } else {
+            tenant
+                .renew(&scope, &request.execution_id, owner, first.epoch)
+                .await
+                .unwrap()
+        };
+        assert!(renewed, "unexpired owner must renew");
+        let span_ms: i64 = sqlx::query_scalar(
+            "SELECT (EXTRACT(EPOCH FROM (lease_until - last_heartbeat)) * 1000)::bigint
+               FROM execution_claims WHERE organization_id = $1 AND execution_id = $2",
+        )
+        .bind(organization.as_uuid())
+        .bind(&request.execution_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(span_ms, lease_ms, "deployment={deployment}, renewal={renewal}: the grant must not inflate or lose millisecond precision");
+    }
+
+    // Keep existing fencing guarantees: neither a different owner nor epoch
+    // can renew, and an expired lease is not silently resurrected.
+    for (candidate_owner, candidate_epoch) in
+        [("other-owner", first.epoch), (owner, first.epoch + 1)]
+    {
+        let renewed = if deployment {
+            legacy
+                .renew(&request.execution_id, candidate_owner, candidate_epoch)
+                .await
+                .unwrap()
+        } else {
+            tenant
+                .renew(
+                    &scope,
+                    &request.execution_id,
+                    candidate_owner,
+                    candidate_epoch,
+                )
+                .await
+                .unwrap()
+        };
+        assert!(!renewed);
+    }
+    sqlx::query(
+        "UPDATE execution_claims SET lease_until = now() - interval '1 second'
+          WHERE organization_id = $1 AND execution_id = $2",
+    )
+    .bind(organization.as_uuid())
+    .bind(&request.execution_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let renewed = if deployment {
+        legacy
+            .renew(&request.execution_id, owner, first.epoch)
+            .await
+            .unwrap()
+    } else {
+        tenant
+            .renew(&scope, &request.execution_id, owner, first.epoch)
+            .await
+            .unwrap()
+    };
+    assert!(!renewed, "expired leases must remain fenced");
+}
+
+#[tokio::test]
+async fn claim_renewal_keeps_original_tenant_duration() {
+    assert_claim_renewal_duration(false, 10_000, 5_000, 3).await;
+}
+
+#[tokio::test]
+async fn claim_renewal_keeps_original_deployment_duration() {
+    assert_claim_renewal_duration(true, 10_000, 5_000, 3).await;
+}
+
+#[tokio::test]
+async fn claim_renewal_preserves_subsecond_precision() {
+    assert_claim_renewal_duration(false, 1_250, 0, 2).await;
+    assert_claim_renewal_duration(true, 1_250, 0, 2).await;
+}
+
+#[tokio::test]
+async fn claim_renewal_fences_stale_or_expired_owner() {
+    assert_claim_renewal_duration(false, 10_000, 0, 0).await;
+    assert_claim_renewal_duration(true, 10_000, 0, 0).await;
+}
+
+async fn assert_claim_rejects_unrepresentable_duration(deployment: bool, huge_grace: bool) {
+    use bot_core::db::claims::PostgresClaimStore;
+    use bot_core::ownership::{ClaimStore, StoreContext};
+
+    let Some(db) = setup().await else {
+        assert_ne!(std::env::var("REQUIRE_POSTGRES").as_deref(), Ok("1"));
+        assert_ne!(std::env::var("REQUIRE_SERVICES").as_deref(), Ok("1"));
+        eprintln!("NOT_RUN: claim duration bounds require PostgreSQL");
+        return;
+    };
+    let run = run_id();
+    let organization = if deployment {
+        bot_core::db::deployment_org::deployment_org_uuid(&db)
+            .await
+            .unwrap()
+            .into()
+    } else {
+        org(&db, &format!("duration-bound-{run}")).await
+    };
+    let scope = read_scope(organization);
+    let request = claim_req(&format!("duration-bound-{run}"));
+    let huge = Duration::from_secs(u64::MAX);
+    let (lease, grace) = if huge_grace {
+        (Duration::from_secs(10), huge)
+    } else {
+        (huge, Duration::from_secs(30))
+    };
+    let owner = "duration-bound-owner";
+    let legacy = PostgresClaimStore::new(db.clone());
+    let tenant = TenantClaimRepo::new(db.clone());
+    let rejected = if deployment {
+        let decision = legacy
+            .claim(
+                &request,
+                &StoreContext {
+                    owner_id: owner.into(),
+                    lease,
+                    handoff_grace: grace,
+                },
+            )
+            .await;
+        if huge_grace {
+            if let Ok(ClaimDecision::Acquired(first)) = &decision {
+                assert!(legacy
+                    .release(
+                        &request.execution_id,
+                        owner,
+                        first.epoch,
+                        ClaimStatus::HandedOff
+                    )
+                    .await
+                    .unwrap());
+                let next = legacy
+                    .claim(
+                        &request,
+                        &StoreContext {
+                            owner_id: "next-owner".into(),
+                            lease,
+                            handoff_grace: grace,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                panic!("overflowing handoff grace was accepted; immediate reacquisition: {next:?}");
+            }
+        }
+        decision.is_err()
+    } else {
+        let decision = tenant.claim(&scope, &request, owner, lease, grace).await;
+        if huge_grace {
+            if let Ok(ClaimDecision::Acquired(first)) = &decision {
+                assert!(tenant
+                    .release(
+                        &scope,
+                        &request.execution_id,
+                        owner,
+                        first.epoch,
+                        ClaimStatus::HandedOff
+                    )
+                    .await
+                    .unwrap());
+                let next = tenant
+                    .claim(&scope, &request, "next-owner", lease, grace)
+                    .await
+                    .unwrap();
+                panic!("overflowing handoff grace was accepted; immediate reacquisition: {next:?}");
+            }
+        }
+        decision.is_err()
+    };
+    assert!(
+        rejected,
+        "unrepresentable duration must fail before acquiring a lease"
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM execution_claims WHERE organization_id = $1 AND execution_id = $2",
+    )
+    .bind(organization.as_uuid())
+    .bind(&request.execution_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows, 0, "rejected input must not create a claim row");
+}
+
+#[tokio::test]
+async fn claim_duration_tenant_rejects_unrepresentable_lease() {
+    assert_claim_rejects_unrepresentable_duration(false, false).await;
+}
+
+#[tokio::test]
+async fn claim_duration_deployment_rejects_unrepresentable_lease() {
+    assert_claim_rejects_unrepresentable_duration(true, false).await;
+}
+
+#[tokio::test]
+async fn claim_duration_tenant_rejects_overflowing_handoff_grace() {
+    assert_claim_rejects_unrepresentable_duration(false, true).await;
+}
+
+#[tokio::test]
+async fn claim_duration_deployment_rejects_overflowing_handoff_grace() {
+    assert_claim_rejects_unrepresentable_duration(true, true).await;
+}

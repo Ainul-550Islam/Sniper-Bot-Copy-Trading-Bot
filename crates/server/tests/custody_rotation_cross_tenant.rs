@@ -126,7 +126,7 @@ async fn org_owner(app: axum::Router, email: &str, org_name: &str) -> String {
         "POST",
         "/api/saas/organizations",
         Some(&unscoped),
-        Some(json!({ "name": org_name })),
+        Some(json!({ "name": org_name, "slug": format!("test-{}", uuid::Uuid::new_v4()) })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "create org: {body}");

@@ -12,8 +12,8 @@
 //!    (token rotation) → revoke, scoped so one organization never sees
 //!    another's invitations.
 //!
-//! The invitation token is returned EXACTLY once (in the create response)
-//! because no external email provider is configured; both tests pin that.
+//! Invitation credentials are queued to the recipient in the same transaction
+//! as the invitation hash; no inviter-facing response ever contains a token.
 
 use std::sync::Arc;
 
@@ -238,6 +238,28 @@ async fn without_a_database_the_invite_is_an_honest_503() {
 // Durable flow (POSTGRES_URL required)
 // ---------------------------------------------------------------------
 
+async fn invitation_token(db: &Arc<Database>, email: &str, invite_id: &str) -> String {
+    let row: (String,) = sqlx::query_as(
+        "SELECT body_text FROM email_outbox
+          WHERE recipient = $1 AND template_key = 'member_invite'
+            AND dedup_key LIKE $2
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(email)
+    .bind(format!("member_invite:{invite_id}:%"))
+    .fetch_one(db.pool())
+    .await
+    .expect("recipient invitation email queued in outbox");
+    row.0
+        .split("token=")
+        .nth(1)
+        .expect("token in recipient email link")
+        .split_whitespace()
+        .next()
+        .expect("invitation token")
+        .to_string()
+}
+
 fn pg_url() -> Option<String> {
     std::env::var("POSTGRES_URL")
         .ok()
@@ -269,7 +291,62 @@ async fn invite_lifecycle_create_list_resend_revoke() {
     );
     let scoped = org_scoped_session(saas.clone(), Some(db.clone()), "Acme Invites").await;
 
-    // CREATE — the token is returned exactly once, here.
+    // A mail-queue insert failure must roll the invitation hash back too.
+    let fault = format!("invite_outbox_fault_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "CREATE FUNCTION {fault}() RETURNS trigger AS $$
+         BEGIN
+           IF NEW.template_key = 'member_invite' THEN
+             RAISE EXCEPTION 'injected invitation outbox failure';
+           END IF;
+           RETURN NEW;
+         END $$ LANGUAGE plpgsql"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("outbox fault function");
+    sqlx::query(&format!(
+        "CREATE TRIGGER {fault}_trg BEFORE INSERT ON email_outbox
+         FOR EACH ROW EXECUTE FUNCTION {fault}()"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("outbox fault trigger");
+    let failed_email = format!("outbox-failure-{}@example.com", Uuid::new_v4());
+    let (failed_status, failed_body) = request(
+        state_with(saas.clone(), Some(db.clone())),
+        "POST",
+        "/api/saas/team/invites",
+        Some(serde_json::json!({ "email": failed_email, "role": "viewer" })),
+        Some(&scoped),
+    )
+    .await;
+    sqlx::query(&format!("DROP TRIGGER {fault}_trg ON email_outbox"))
+        .execute(db.pool())
+        .await
+        .expect("drop outbox fault trigger");
+    sqlx::query(&format!("DROP FUNCTION {fault}()"))
+        .execute(db.pool())
+        .await
+        .expect("drop outbox fault function");
+    assert_eq!(
+        failed_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{failed_body}"
+    );
+    let (failed_invites,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM invites WHERE email = $1 AND status = 'pending'")
+            .bind(&failed_email)
+            .fetch_one(db.pool())
+            .await
+            .expect("failed invitation count");
+    assert_eq!(
+        failed_invites, 0,
+        "no usable invite may outlive missing mail"
+    );
+
+    // CREATE — the token is never returned to the inviter; inspect only the
+    // recipient outbox as the test's simulated delivery channel.
     let (status, created) = request(
         state_with(saas.clone(), Some(db.clone())),
         "POST",
@@ -280,8 +357,21 @@ async fn invite_lifecycle_create_list_resend_revoke() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let invitation_id = created["invitation_id"].as_str().expect("id").to_string();
-    assert!(created["invitation_token"].as_str().is_some());
+    assert!(created.get("invitation_token").is_none());
+    assert_eq!(created["token_delivery"], "queued_for_delivery");
     assert_eq!(created["email"], MEMBER_EMAIL);
+    let initial_token = invitation_token(&db, MEMBER_EMAIL, &invitation_id).await;
+    let (queued_to,): (String,) = sqlx::query_as(
+        "SELECT recipient FROM email_outbox WHERE recipient = $1 AND template_key = 'member_invite' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(MEMBER_EMAIL)
+    .fetch_one(db.pool())
+    .await
+    .expect("invite mail recipient");
+    assert_eq!(
+        queued_to, MEMBER_EMAIL,
+        "invitation secrets are addressed to the invitee"
+    );
 
     // LIST — the invitation shows up for its own organization.
     let (status, listed) = request(
@@ -302,11 +392,69 @@ async fn invite_lifecycle_create_list_resend_revoke() {
         "created invite must be listed: {listed}"
     );
     // The plaintext token is never re-served by the list endpoint.
-    assert!(!listed
-        .to_string()
-        .contains(created["invitation_token"].as_str().unwrap()));
+    assert!(!listed.to_string().contains(&initial_token));
 
-    // RESEND — rotates the token (a new one is returned, once).
+    // Failed resend enqueue must roll back token rotation so the previously
+    // queued recipient link remains the active invite credential.
+    let (active_hash_before,): (String,) =
+        sqlx::query_as("SELECT token_hash FROM invites WHERE id = $1")
+            .bind(Uuid::parse_str(&invitation_id).expect("invite UUID"))
+            .fetch_one(db.pool())
+            .await
+            .expect("active token hash before resend");
+    let resend_fault = format!("invite_resend_outbox_fault_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!(
+        "CREATE FUNCTION {resend_fault}() RETURNS trigger AS $$
+         BEGIN
+           IF NEW.template_key = 'member_invite' THEN
+             RAISE EXCEPTION 'injected resend outbox failure';
+           END IF;
+           RETURN NEW;
+         END $$ LANGUAGE plpgsql"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("resend fault function");
+    sqlx::query(&format!(
+        "CREATE TRIGGER {resend_fault}_trg BEFORE INSERT ON email_outbox
+         FOR EACH ROW EXECUTE FUNCTION {resend_fault}()"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("resend fault trigger");
+    let (failed_resend_status, failed_resend_body) = request(
+        state_with(saas.clone(), Some(db.clone())),
+        "POST",
+        &format!("/api/saas/team/invites/{invitation_id}/resend"),
+        None,
+        Some(&scoped),
+    )
+    .await;
+    sqlx::query(&format!("DROP TRIGGER {resend_fault}_trg ON email_outbox"))
+        .execute(db.pool())
+        .await
+        .expect("drop resend fault trigger");
+    sqlx::query(&format!("DROP FUNCTION {resend_fault}()"))
+        .execute(db.pool())
+        .await
+        .expect("drop resend fault function");
+    assert_eq!(
+        failed_resend_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{failed_resend_body}"
+    );
+    let (active_hash_after,): (String,) =
+        sqlx::query_as("SELECT token_hash FROM invites WHERE id = $1")
+            .bind(Uuid::parse_str(&invitation_id).expect("invite UUID"))
+            .fetch_one(db.pool())
+            .await
+            .expect("active token hash after failed resend");
+    assert_eq!(
+        active_hash_before, active_hash_after,
+        "failed resend preserves active token"
+    );
+
+    // RESEND — rotates the recipient-delivered token.
     let (status, resent) = request(
         state_with(saas.clone(), Some(db.clone())),
         "POST",
@@ -316,9 +464,13 @@ async fn invite_lifecycle_create_list_resend_revoke() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{resent}");
-    if let Some(new_token) = resent["invitation_token"].as_str() {
-        assert_ne!(new_token, created["invitation_token"].as_str().unwrap());
-    }
+    assert!(resent.get("invitation_token").is_none());
+    assert_eq!(resent["token_delivery"], "queued_for_delivery");
+    let resent_token = invitation_token(&db, MEMBER_EMAIL, &invitation_id).await;
+    assert_ne!(
+        resent_token, initial_token,
+        "resend rotates recipient-delivered token"
+    );
 
     // REVOKE — the invitation disappears from the list.
     let (status, _) = request(
@@ -375,7 +527,7 @@ async fn invite_lifecycle_create_list_resend_revoke() {
         state_with(saas.clone(), Some(db.clone())),
         "POST",
         "/api/saas/team/invites/accept",
-        Some(serde_json::json!({ "token": resent["invitation_token"], "password": PASSWORD })),
+        Some(serde_json::json!({ "token": resent_token, "password": PASSWORD })),
         None,
     )
     .await;

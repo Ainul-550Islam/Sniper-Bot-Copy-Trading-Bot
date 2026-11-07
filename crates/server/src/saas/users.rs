@@ -41,6 +41,18 @@ pub const MIN_PASSWORD_LEN: usize = 12;
 pub const MAX_PASSWORD_LEN: usize = 512;
 /// Prevent unbounded user-controlled profile payloads from entering storage.
 pub const MAX_DISPLAY_NAME_LEN: usize = 256;
+
+fn user_session_required() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "user_session_required",
+            "reason": "this profile endpoint is available only to a user session",
+        })),
+    )
+        .into_response()
+}
+
 const DUMMY_PASSWORD_HASH: &str =
     "pbkdf2-sha256$600000$pcTXkx8rboBanELX4R9rgA$mrXKihu3Ze1lxX5c7tiPcM8oJKSx-t6QB222NARelhk";
 
@@ -301,10 +313,6 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
     // must never become a bypass around an organization policy.
     if body.organization.is_none() {
         if let Some(db) = state.db.as_deref() {
-            // `saas_runtime_records` is the authoritative membership store.
-            // The normalized `organization_members` table is not written by
-            // the current SaaS repository and must not decide whether MFA is
-            // required for an unscoped login.
             let protected = sqlx::query(
                 "SELECT EXISTS (SELECT 1 FROM saas_runtime_records m JOIN tenant_security_policies tsp ON tsp.organization_id = m.organization_id WHERE m.kind = 'membership' AND m.user_id = $1 AND m.record->>'status' IS DISTINCT FROM 'removed' AND tsp.mfa_enforced = true) AS protected",
             )
@@ -398,6 +406,40 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
                     .into_response();
             }
         }
+        if let Some(db) = state.db.as_deref() {
+            let sso_required = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM tenant_sso_configs WHERE organization_id = $1 AND status = 'active' AND enforce_sso = true)",
+            )
+            .bind(org.id.as_uuid())
+            .fetch_one(db.pool())
+            .await;
+            match sso_required {
+                Ok(true) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({
+                            "error": "sso_required",
+                            "organization_id": org.id,
+                            "organization_slug": org.slug,
+                            "reason": "use the organization's configured SSO provider"
+                        })),
+                    )
+                        .into_response();
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, organization = %org.id, "SSO enforcement lookup during login failed");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "identity_storage_unavailable",
+                            "reason": "SSO policy could not be loaded"
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
         let mfa_subject = format!("{}:{}", user.id, org.id);
         if let Some(response) =
             crate::saas::rate_limit::reject_sensitive_attempt(&state, "login_totp", &mfa_subject)
@@ -437,19 +479,26 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
                     enrollment_now,
                 );
                 enrollment_session.mfa_enrollment_only = true;
-                if let Err(error) = state.saas.create_session(&enrollment_session).await {
-                    tracing::error!(error = %error, user = %user.id, organization = %org.id, "MFA enrollment session could not be created");
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(json!({ "error": "identity_storage_unavailable", "reason": "an MFA enrollment session could not be created" })),
+                user = match state
+                    .saas
+                    .create_authenticated_session(
+                        &user.password_hash,
+                        &enrollment_session,
+                        enrollment_now,
                     )
-                        .into_response();
-                }
-                user.last_login_at = Some(enrollment_now);
-                user.updated_at = enrollment_now;
-                if let Err(error) = state.saas.update_user(&user).await {
-                    tracing::warn!(error = %error, user = %user.id, "MFA enrollment last-login timestamp could not be persisted");
-                }
+                    .await
+                {
+                    Ok(Some(current_user)) => current_user,
+                    Ok(None) => return unauthorized(),
+                    Err(error) => {
+                        tracing::error!(error = %error, user = %user.id, organization = %org.id, "MFA enrollment session could not be committed atomically");
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({ "error": "identity_storage_unavailable", "reason": "an MFA enrollment session could not be created" })),
+                        )
+                            .into_response();
+                    }
+                };
                 state
                     .audit
                     .success(
@@ -507,12 +556,25 @@ pub async fn login(State(state): State<ApiState>, Json(body): Json<LoginBody>) -
         now,
     );
     session.mfa_policy_updated_at = mfa_policy_version;
-    if let Err(e) = state.saas.create_session(&session).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
-    user.last_login_at = Some(now);
-    user.updated_at = now;
-    let _ = state.saas.update_user(&user).await;
+    user = match state
+        .saas
+        .create_authenticated_session(&user.password_hash, &session, now)
+        .await
+    {
+        Ok(Some(current_user)) => current_user,
+        Ok(None) => return unauthorized(),
+        Err(error) => {
+            tracing::error!(error = %error, user = %user.id, "authenticated session could not be committed atomically");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "identity_storage_unavailable",
+                    "reason": "an authenticated session could not be created",
+                })),
+            )
+                .into_response();
+        }
+    };
     state
         .audit
         .success("saas", "saas.session.created", Some(&session.token_prefix))
@@ -557,6 +619,12 @@ pub async fn current_user(State(state): State<ApiState>, headers: HeaderMap) -> 
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if !matches!(
+        &ctx.authorization.principal,
+        bot_core::authorization::Principal::UserSession { .. }
+    ) {
+        return user_session_required();
+    }
     let memberships = match &ctx.user {
         Some(u) => match state.saas.memberships_of_user(u.id).await {
             Ok(value) => value,
@@ -649,6 +717,12 @@ pub async fn update_profile(
         Ok(c) => c,
         Err(d) => return deny_response(&state, &d).await,
     };
+    if !matches!(
+        &ctx.authorization.principal,
+        bot_core::authorization::Principal::UserSession { .. }
+    ) {
+        return user_session_required();
+    }
     let Some(mut user) = ctx.user.clone() else {
         return (
             StatusCode::FORBIDDEN,
@@ -658,6 +732,11 @@ pub async fn update_profile(
     };
 
     let now = Utc::now();
+    let expected_password_hash = user.password_hash.clone();
+    let requested_display_name = body
+        .display_name
+        .as_deref()
+        .map(|name| name.trim().to_string());
     let mut password_changed = false;
     if let Some(new_password) = body.new_password.as_deref() {
         let Some(current) = body.current_password.as_deref() else {
@@ -707,12 +786,28 @@ pub async fn update_profile(
     // transaction. A failed revocation must never leave the new password
     // committed while old credentials remain usable.
     let revoked = if password_changed {
-        let count = match state
+        let (current_user, count) = match state
             .saas
-            .update_user_and_revoke_sessions(&user, "password changed", now)
+            .update_user_and_revoke_sessions(
+                &user,
+                &expected_password_hash,
+                requested_display_name.as_deref(),
+                "password changed",
+                now,
+            )
             .await
         {
-            Ok(value) => value,
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "credentials_changed",
+                        "reason": "the account credentials changed during this request; sign in again",
+                    })),
+                )
+                    .into_response();
+            }
             Err(error) => {
                 tracing::error!(error = %error, user = %user.id, "password change and session revocation could not be committed");
                 return (
@@ -725,6 +820,7 @@ pub async fn update_profile(
                     .into_response();
             }
         };
+        user = current_user;
         state
             .audit
             .success(
@@ -735,14 +831,17 @@ pub async fn update_profile(
             .await;
         count
     } else {
-        if let Err(error) = state.saas.update_user(&user).await {
-            tracing::error!(error = %error, user = %user.id, "profile update could not be committed");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "profile_storage_unavailable" })),
-            )
-                .into_response();
-        }
+        user = match state.saas.update_user(&user).await {
+            Ok(current_user) => current_user,
+            Err(error) => {
+                tracing::error!(error = %error, user = %user.id, "profile update could not be committed");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "profile_storage_unavailable" })),
+                )
+                    .into_response();
+            }
+        };
         0
     };
 
@@ -905,7 +1004,7 @@ pub async fn revoke_session(
                 .into_response();
         }
     };
-    let Some(mut target) = sessions.into_iter().find(|session| session.id == target_id) else {
+    let Some(target) = sessions.into_iter().find(|session| session.id == target_id) else {
         // A missing or another user's id gets the same response, so this
         // endpoint cannot be used to enumerate account session identifiers.
         return (
@@ -918,9 +1017,18 @@ pub async fn revoke_session(
             .into_response();
     };
     let target_id_text = target.id.to_string();
-    let revoked = target.revoke("revoked from security settings", Utc::now());
-    if revoked {
-        if let Err(error) = state.saas.update_session(&target).await {
+    let revoked = match state
+        .saas
+        .revoke_session(
+            target.id,
+            &target.token_hash,
+            "revoked from security settings",
+            Utc::now(),
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
             tracing::error!(error = %error, session = %target.id, "session revocation failed");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -931,6 +1039,8 @@ pub async fn revoke_session(
             )
                 .into_response();
         }
+    };
+    if revoked {
         state
             .audit
             .success(
@@ -985,12 +1095,16 @@ pub async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> Respon
         }
     };
     let mut revoked = false;
-    for s in sessions {
-        if s.id.to_string() == *session_id {
-            let mut s = s;
-            if s.revoke("logout", now) {
-                if let Err(error) = state.saas.update_session(&s).await {
-                    tracing::error!(error = %error, session = %s.id, "session revocation failed");
+    for session in sessions {
+        if session.id.to_string() == *session_id {
+            match state
+                .saas
+                .revoke_session(session.id, &session.token_hash, "logout", now)
+                .await
+            {
+                Ok(value) => revoked = value,
+                Err(error) => {
+                    tracing::error!(error = %error, session = %session.id, "session revocation failed");
                     return (
                         StatusCode::SERVICE_UNAVAILABLE,
                         Json(json!({
@@ -1000,7 +1114,6 @@ pub async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> Respon
                     )
                         .into_response();
                 }
-                revoked = true;
             }
         }
     }

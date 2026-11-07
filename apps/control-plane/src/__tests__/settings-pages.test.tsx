@@ -24,6 +24,18 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/settings",
   useSearchParams: () => new URLSearchParams(),
 }));
+const sessionSnapshot = vi.hoisted(() => ({
+  session: { id: "session-fixture" },
+  organizations: [{ organization_id: "a6666666-6666-4666-8666-666666666666", slug: "settings-test", name: "Settings Test", status: "active", role: "owner", membership_status: "active" }],
+  selectedOrganizationId: "a6666666-6666-4666-8666-666666666666",
+}));
+vi.mock("@/lib/auth", () => ({
+  sessionStore: {
+    getSnapshot: () => sessionSnapshot,
+    subscribe: () => () => {},
+  },
+  clearSession: vi.fn(),
+}));
 
 type Mode = "empty" | "populated" | "error" | "pending";
 type Component = ComponentType;
@@ -71,6 +83,8 @@ function apiResponse(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
     payload = { organization_id: org, items: populated ? [{ channel: "email", enabled: true, detail: "Security notices" }] : [], updated_at: now };
   } else if (url.pathname === "/api/saas/webhooks") {
     payload = { organization_id: org, items: populated ? [{ id: "webhook-fixture", organization_id: org, url: "https://hooks.example.test/events", description: "Fixture endpoint", events: ["trade.filled"], is_active: true, created_at: now }] : [], count: populated ? 1 : 0 };
+  } else if (url.pathname === "/api/saas/webhooks/webhook-fixture/deliveries") {
+    payload = { endpoint_id: "webhook-fixture", items: [], count: 0 };
   } else if (url.pathname === "/api/saas/wallet-pools") {
     payload = { organization_id: org, pools: populated ? [{ id: "pool-fixture", name: "Server pool", allocation: "round_robin", status: "active", rotation_cursor: 0, active_members: 1, created_at: now }] : [] };
   } else if (url.pathname === "/api/saas/wallet-pools/pool-fixture") {
@@ -155,5 +169,12 @@ describe("organization settings pages", () => {
     render(<SecurityPage />);
     const errors = await screen.findAllByText(/settings API refused the request/);
     expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it("does not offer SSO creation from an unverified default form after a read failure", async () => {
+    stubApi("error");
+    render(<SsoPage />);
+    expect(await screen.findByText(/settings API refused the request/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Enable SSO" })).toBeNull();
   });
 });

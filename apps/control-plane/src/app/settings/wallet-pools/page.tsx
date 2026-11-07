@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { MemberManager } from "@/components/wallet-pools/MemberManager";
 import { PoolDetailPanel } from "@/components/wallet-pools/PoolDetail";
@@ -22,9 +22,9 @@ import { getCapabilities, type MembershipRole } from "@/lib/permissions";
 
 function currentRole(): MembershipRole {
   const state = sessionStore.getSnapshot();
-  const organization =
-    state.organizations.find((item) => item.organization_id === state.selectedOrganizationId) ??
-    state.organizations[0];
+  const organization = state.selectedOrganizationId
+    ? state.organizations.find((item) => item.organization_id === state.selectedOrganizationId)
+    : state.organizations.length === 1 ? state.organizations[0] : undefined;
   const role = organization?.role.toLowerCase() ?? "";
   if (role.includes("owner")) return "owner";
   if (role.includes("admin")) return "admin";
@@ -34,7 +34,10 @@ function currentRole(): MembershipRole {
 }
 
 export default function WalletPoolsPage() {
-  const [, setSessionTick] = useState(0);
+  const [sessionTick, setSessionTick] = useState(0);
+  const tenantVersion = useRef(0);
+  const loadRequestVersion = useRef(0);
+  const detailRequestVersion = useRef(0);
   const [pools, setPools] = useState<WalletPoolSummary[] | null>(null);
   const [selectedPool, setSelectedPool] = useState<WalletPoolDetail | null>(null);
   const [signers, setSigners] = useState<CustodySigner[]>([]);
@@ -47,7 +50,18 @@ export default function WalletPoolsPage() {
   const [busyAuthorize, setBusyAuthorize] = useState<string | null>(null);
   const [authorizeModule, setAuthorizeModule] = useState<"module.sniper" | "module.copy" | "module.polymarket">("module.sniper");
 
-  useEffect(() => sessionStore.subscribe(() => setSessionTick((value) => value + 1)), []);
+  useEffect(() => sessionStore.subscribe(() => {
+    tenantVersion.current += 1;
+    detailRequestVersion.current += 1;
+    setSessionTick((value) => value + 1);
+    setPools(null);
+    setSelectedPool(null);
+    setSigners([]);
+    setBindings([]);
+    setLoading(true);
+    setDetailLoading(false);
+    setError(null);
+  }), []);
   const canManage = getCapabilities({ role: currentRole() }).canManageTeam;
 
   async function authorize(id: string, module: "module.sniper" | "module.copy" | "module.polymarket") {
@@ -65,25 +79,42 @@ export default function WalletPoolsPage() {
   }
 
   const loadDetail = useCallback(async (id: string) => {
+    const requestTenantVersion = tenantVersion.current;
+    const requestVersion = ++detailRequestVersion.current;
     setDetailLoading(true);
     try {
-      setSelectedPool(await walletPoolsApi.get(id));
+      const detail = await walletPoolsApi.get(id);
+      if (requestTenantVersion === tenantVersion.current && requestVersion === detailRequestVersion.current) {
+        setSelectedPool(detail);
+      }
     } catch (loadError) {
-      setError(toDisplayError(loadError));
+      if (requestTenantVersion === tenantVersion.current && requestVersion === detailRequestVersion.current) {
+        setError(toDisplayError(loadError));
+      }
     } finally {
-      setDetailLoading(false);
+      if (requestTenantVersion === tenantVersion.current && requestVersion === detailRequestVersion.current) {
+        setDetailLoading(false);
+      }
     }
   }, []);
 
   const load = useCallback(async (selectedId?: string | null) => {
+    const requestTenantVersion = tenantVersion.current;
+    const requestVersion = ++loadRequestVersion.current;
+    detailRequestVersion.current += 1;
     setLoading(true);
     setError(null);
+    setPools(null);
+    setSelectedPool(null);
+    setSigners([]);
+    setBindings([]);
     try {
       const [poolResponse, signerResponse, bindingsResponse] = await Promise.all([
         walletPoolsApi.list(),
         custodyApi.listSigners(),
         wallets.list(),
       ]);
+      if (requestTenantVersion !== tenantVersion.current || requestVersion !== loadRequestVersion.current) return;
       // Array-shape guards: a non-conforming body (e.g. an unmocked proxy
       // answering `{}`) must render empty server truth, never crash the page.
       const pools = Array.isArray(poolResponse.pools) ? poolResponse.pools : [];
@@ -97,15 +128,19 @@ export default function WalletPoolsPage() {
         setSelectedPool(null);
       }
     } catch (loadError) {
-      setError(toDisplayError(loadError));
+      if (requestTenantVersion === tenantVersion.current && requestVersion === loadRequestVersion.current) {
+        setError(toDisplayError(loadError));
+      }
     } finally {
-      setLoading(false);
+      if (requestTenantVersion === tenantVersion.current && requestVersion === loadRequestVersion.current) {
+        setLoading(false);
+      }
     }
   }, [loadDetail]);
 
   useEffect(() => {
     void Promise.resolve().then(() => load());
-  }, [load]);
+  }, [load, sessionTick]);
 
   async function create(input: CreateWalletPoolInput) {
     setCreating(true);

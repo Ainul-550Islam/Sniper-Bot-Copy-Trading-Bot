@@ -336,7 +336,11 @@ export default function ReferralsPage() {
               activity. Attribution recorded above is the source of truth; when a
               payout applies to your account it appears on your invoices. This page
               does not estimate or display projected amounts. Questions?{" "}
-              <a href={`mailto:${branding.supportEmail}`}>{branding.supportEmail}</a>.
+              {branding.supportEmail ? (
+                <a href={`mailto:${branding.supportEmail}`}>{branding.supportEmail}</a>
+              ) : (
+                "Support contact not published."
+              )}
             </p>
           </div>
         </>

@@ -4,7 +4,7 @@
  * Strategy Detail & Version History Page (THIRD.md §103).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import StrategyVersionHistory from "@/components/strategy/StrategyVersionHistory";
@@ -17,23 +17,41 @@ export default function StrategyDetailPage() {
   const [strategy, setStrategy] = useState<StrategyRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
-    if (!strategyId) return;
+    const requestId = ++requestVersion.current;
+    if (!strategyId) {
+      setStrategy(null);
+      setError("Strategy identifier is missing.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setStrategy(null);
     try {
       const data = await getStrategy(strategyId);
-      setStrategy(data);
+      if (requestId === requestVersion.current) setStrategy(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load strategy details");
+      if (requestId === requestVersion.current) {
+        setStrategy(null);
+        setError(err instanceof Error ? err.message : "Failed to load strategy details");
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [strategyId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

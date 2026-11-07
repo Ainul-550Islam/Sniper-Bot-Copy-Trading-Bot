@@ -14,7 +14,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use bot_core::error::{BotError, BotResult};
 
@@ -60,6 +60,22 @@ pub trait DatasetStore: Send + Sync {
     fn list(&self) -> BotResult<Vec<String>>;
 }
 
+// Dataset IDs are one directory name, never a path. These checks protect
+// store IO from lexical traversal; the root and filesystem permissions must
+// still be protected against hostile symlink replacement by local writers.
+pub(super) fn validate_dataset_id(dataset_id: &str) -> BotResult<()> {
+    let mut components = Path::new(dataset_id).components();
+    if dataset_id.contains(['/', '\\'])
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(BotError::InvalidArgument(format!(
+            "dataset_id must be a single directory name: {dataset_id:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Filesystem-backed dataset store.
 #[derive(Debug, Clone)]
 pub struct FsDatasetStore {
@@ -79,6 +95,7 @@ impl FsDatasetStore {
     /// the handle; the recorder fsyncs after each line. Used for the
     /// streaming append path, not part of the read-only trait surface.
     pub fn open_chunk_append(&self, dataset_id: &str, chunk_index: u64) -> BotResult<File> {
+        validate_dataset_id(dataset_id)?;
         let path = self.chunk_path(dataset_id, chunk_index);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -93,6 +110,7 @@ impl FsDatasetStore {
 
     /// Remove a chunk file (used to drop an empty trailing chunk on seal).
     pub fn remove_chunk(&self, dataset_id: &str, chunk_index: u64) -> BotResult<()> {
+        validate_dataset_id(dataset_id)?;
         let path = self.chunk_path(dataset_id, chunk_index);
         if path.exists() {
             fs::remove_file(&path)?;
@@ -175,11 +193,13 @@ impl DatasetStore for FsDatasetStore {
     }
 
     fn create(&self, manifest: &DatasetManifest) -> BotResult<()> {
+        validate_dataset_id(&manifest.dataset_id)?;
         fs::create_dir_all(self.dataset_dir(&manifest.dataset_id))?;
         self.write_manifest(manifest)
     }
 
     fn write_manifest(&self, manifest: &DatasetManifest) -> BotResult<()> {
+        validate_dataset_id(&manifest.dataset_id)?;
         let text = encode_manifest(manifest)?;
         atomic_write(&self.manifest_path(&manifest.dataset_id), text.as_bytes())
     }
@@ -191,10 +211,18 @@ impl DatasetStore for FsDatasetStore {
     }
 
     fn load_manifest(&self, dataset_id: &str) -> BotResult<DatasetManifest> {
+        validate_dataset_id(dataset_id)?;
         let path = self.manifest_path(dataset_id);
         let text = fs::read_to_string(&path)
             .map_err(|e| BotError::NotFound(format!("dataset manifest {}: {e}", path.display())))?;
-        decode_manifest(&text)
+        let manifest = decode_manifest(&text)?;
+        if manifest.dataset_id != dataset_id {
+            return Err(BotError::Encoding(format!(
+                "dataset manifest identity mismatch: requested {dataset_id:?}, found {:?}",
+                manifest.dataset_id
+            )));
+        }
+        Ok(manifest)
     }
 
     fn append_chunk(
@@ -203,6 +231,7 @@ impl DatasetStore for FsDatasetStore {
         chunk: &ChunkManifest,
         content: &[u8],
     ) -> BotResult<()> {
+        validate_dataset_id(dataset_id)?;
         if content.len() as u64 != chunk.byte_len {
             return Err(BotError::Encoding(format!(
                 "chunk {} byte_len mismatch: manifest {} vs content {}",
@@ -216,6 +245,7 @@ impl DatasetStore for FsDatasetStore {
     }
 
     fn read_chunk(&self, dataset_id: &str, chunk_index: u64) -> BotResult<Vec<u8>> {
+        validate_dataset_id(dataset_id)?;
         let path = self.chunk_path(dataset_id, chunk_index);
         fs::read(&path).map_err(|e| {
             BotError::NotFound(format!("chunk {} ({}): {e}", chunk_index, path.display()))

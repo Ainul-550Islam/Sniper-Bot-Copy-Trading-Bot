@@ -8,34 +8,66 @@
  * operator believe that notifications are configured when they are not.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import AppShell from "@/components/AppShell";
 import WebhookForm from "@/components/settings/webhook-form";
 import { WebhookEndpoint, listWebhooks } from "@/lib/api/webhook-api";
 import { toDisplayError } from "@/lib/api";
+import { sessionStore } from "@/lib/auth";
 
 export default function WebhooksPage() {
   const [webhooks, setWebhooks] = useState<WebhookEndpoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const selectedOrganizationId = sessionStore.getSnapshot().selectedOrganizationId;
+  const requestVersion = useRef(0);
 
-  const loadWebhooks = useCallback(async () => {
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setWebhooks([]);
     setLoading(true);
     setError(null);
+  }), []);
+
+  const loadWebhooks = useCallback(async () => {
+    if (selectedOrganizationId !== sessionStore.getSnapshot().selectedOrganizationId) return;
+    const requestId = ++requestVersion.current;
+    setWebhooks([]);
+    setLoading(true);
+    setError(null);
+    if (!selectedOrganizationId) {
+      setLoading(false);
+      return;
+    }
     try {
       const data = await listWebhooks();
+      if (requestId !== requestVersion.current) return;
+      if (data.some((webhook) => webhook.organization_id !== selectedOrganizationId)) {
+        throw new Error("Webhook endpoint response does not match the selected organization");
+      }
       setWebhooks(data);
     } catch (err: unknown) {
-      setWebhooks([]);
-      setError(toDisplayError(err));
+      if (requestId === requestVersion.current) {
+        setWebhooks([]);
+        setError(toDisplayError(err));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
-  }, []);
+  }, [selectedOrganizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadWebhooks());
-  }, [loadWebhooks]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void loadWebhooks();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [loadWebhooks, sessionVersion]);
 
   return (
     <AppShell title="Webhooks">
@@ -57,8 +89,14 @@ export default function WebhooksPage() {
 
       {loading ? (
         <div className="card">Loading webhook endpoints...</div>
+      ) : !selectedOrganizationId ? (
+        <div className="card">Select an organization to manage webhook endpoints.</div>
       ) : (
-        <WebhookForm webhooks={webhooks} onRefresh={() => void loadWebhooks()} />
+        <WebhookForm
+          key={selectedOrganizationId}
+          webhooks={webhooks}
+          onRefresh={() => void loadWebhooks()}
+        />
       )}
     </AppShell>
   );

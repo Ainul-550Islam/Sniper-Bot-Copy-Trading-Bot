@@ -182,6 +182,11 @@ describe("operator-api client", () => {
     expectOperatorRequest({ path: "/api/keys/abc123hash", method: "DELETE" });
   });
 
+  it("getAuditTrail preserves an explicitly supplied zero limit", async () => {
+    await getAuditTrail(0);
+    expectOperatorRequest({ path: "/api/audit?limit=0" });
+  });
+
   it("getAuditTrail calls GET /api/audit with optional limit", async () => {
     await getAuditTrail(50);
     expectOperatorRequest({ path: "/api/audit?limit=50" });
@@ -212,6 +217,11 @@ describe("operator-api client", () => {
     expectOperatorRequest({ path: "/api/config" });
   });
 
+  it("getReconciliationFindings preserves an explicitly supplied zero limit", async () => {
+    await getReconciliationFindings(0);
+    expectOperatorRequest({ path: "/api/reconciliation/findings?limit=0" });
+  });
+
   it("getReconciliationFindings calls GET /api/reconciliation/findings", async () => {
     await getReconciliationFindings(25);
     expectOperatorRequest({ path: "/api/reconciliation/findings?limit=25" });
@@ -232,6 +242,11 @@ describe("operator-api client", () => {
     expectOperatorRequest({ path: "/api/executions/exec-123" });
   });
 
+  it("getTrades preserves an explicitly supplied zero limit", async () => {
+    await getTrades(0);
+    expectOperatorRequest({ path: "/api/trades?limit=0" });
+  });
+
   it("getTrades calls GET /api/trades", async () => {
     await getTrades(20);
     expectOperatorRequest({ path: "/api/trades?limit=20" });
@@ -240,6 +255,11 @@ describe("operator-api client", () => {
   it("getWallets calls GET /api/wallets", async () => {
     await getWallets();
     expectOperatorRequest({ path: "/api/wallets" });
+  });
+
+  it("getAccountingEvents preserves an explicitly supplied zero limit", async () => {
+    await getAccountingEvents(0);
+    expectOperatorRequest({ path: "/api/accounting/events?limit=0" });
   });
 
   it("getAccountingEvents calls GET /api/accounting/events", async () => {
@@ -441,5 +461,23 @@ describe("operator-api client", () => {
     ]) {
       expect(typeof operatorApi[name as keyof typeof operatorApi], name).toBe("function");
     }
+  });
+});
+
+// Readiness metadata must not imply verified health without any observations.
+import { mapToDisplay } from "../lib/release-status";
+
+describe("readiness summary evidence", () => {
+  it("does not call an empty service map healthy", () => {
+    expect(mapToDisplay({})).toBe("unknown");
+  });
+  it("keeps explicit healthy observations healthy", () => {
+    expect(mapToDisplay({ database: "ok", redis: "healthy", worker: "ready" })).toBe("healthy");
+  });
+  it("does not invent health for an unrecognized observation", () => {
+    expect(mapToDisplay({ worker: "starting" })).toBe("unknown");
+  });
+  it("lets an explicit blocked observation override healthy observations", () => {
+    expect(mapToDisplay({ database: "healthy", signer: "blocked" })).toBe("blocked");
   });
 });

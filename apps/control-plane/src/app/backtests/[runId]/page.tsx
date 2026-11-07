@@ -4,7 +4,7 @@
  * Backtest Simulation Detail Page (THIRD.md §105).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import BacktestMetrics from "@/components/backtest/BacktestMetrics";
@@ -18,23 +18,41 @@ export default function BacktestDetailPage() {
   const [backtest, setBacktest] = useState<BacktestRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
-    if (!runId) return;
+    const version = ++requestVersion.current;
+    if (!runId) {
+      setBacktest(null);
+      setError("A backtest run ID is required.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setBacktest(null);
     try {
       const data = await getBacktest(runId);
-      setBacktest(data);
+      if (requestVersion.current === version) setBacktest(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load backtest result");
+      if (requestVersion.current === version) {
+        setBacktest(null);
+        setError(err instanceof Error ? err.message : "Failed to load backtest result");
+      }
     } finally {
-      setLoading(false);
+      if (requestVersion.current === version) setLoading(false);
     }
   }, [runId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

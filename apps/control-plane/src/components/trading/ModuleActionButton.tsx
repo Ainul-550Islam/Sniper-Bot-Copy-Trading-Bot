@@ -55,11 +55,12 @@ export default function ModuleActionButton({
   const [notice, setNotice] = useState<string | null>(null);
 
   async function fire() {
-    const reason =
-      action === "disable"
-        ? window.prompt("Reason for disabling (kept in your audit trail):") ?? ""
-        : undefined;
-    if (action === "disable" && (reason === undefined || reason === null)) return;
+    let reason: string | undefined;
+    if (action === "disable") {
+      const enteredReason = window.prompt("Reason for disabling (kept in your audit trail):");
+      if (enteredReason === null || enteredReason.trim() === "") return;
+      reason = enteredReason.trim();
+    }
     setBusy(true);
     try {
       const response = await customerTrading.moduleControl(module, action, reason);

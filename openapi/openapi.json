@@ -8328,7 +8328,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "The authenticated user plus the organizations they belong to.",
+        "summary": "The authenticated user's profile and organizations. User sessions only; tenant API keys cannot impersonate their creator.",
         "tags": [
           "users"
         ]
@@ -8376,7 +8376,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Update safe profile fields of the current user.",
+        "summary": "Update safe profile fields of the current user. User sessions only; tenant API keys cannot impersonate their creator.",
         "tags": [
           "users"
         ]

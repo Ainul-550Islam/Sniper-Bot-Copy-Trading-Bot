@@ -16,8 +16,9 @@
 //! LIMIT $4 + 1                          -- continuation proof
 //! ```
 //!
-//! The cursor is opaque (base64 JSON), tenant-bound and carries no ids
-//! of other tenants.
+//! The cursor is a JSON string treated as opaque by clients. It is not
+//! base64-encoded or cryptographically signed. Its tenant claim is checked
+//! against the authenticated organization, and SQL still binds that organization.
 
 pub use crate::db::tenant_pagination::{
     TenantPage, TenantPageCursor, TenantPageRequest, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,

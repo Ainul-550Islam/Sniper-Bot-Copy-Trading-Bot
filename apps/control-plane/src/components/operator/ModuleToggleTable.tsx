@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { TypedConfirm } from "@/components/lifecycle/TypedConfirm";
 import {
   enableModule,
@@ -22,8 +22,11 @@ export function ModuleToggleTable({ modules, onRefresh }: ModuleToggleTableProps
   const [busyModule, setBusyModule] = useState<string | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<{ name: string; action: "enable" | "disable" } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const actionInFlight = useRef(false);
 
   const handleAction = async (name: string, action: "enable" | "disable") => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
     setBusyModule(name);
     setActionError(null);
     try {
@@ -37,6 +40,7 @@ export function ModuleToggleTable({ modules, onRefresh }: ModuleToggleTableProps
     } catch (err) {
       setActionError(getErrorMessage(err));
     } finally {
+      actionInFlight.current = false;
       setBusyModule(null);
     }
   };
@@ -126,7 +130,7 @@ export function ModuleToggleTable({ modules, onRefresh }: ModuleToggleTableProps
                       <button
                         type="button"
                         className="danger"
-                        disabled={busyModule === m.module}
+                        disabled={busyModule !== null}
                         onClick={() => setConfirmTarget({ name: m.module, action: "disable" })}
                       >
                         Disable
@@ -135,7 +139,7 @@ export function ModuleToggleTable({ modules, onRefresh }: ModuleToggleTableProps
                       <button
                         type="button"
                         className="primary"
-                        disabled={busyModule === m.module}
+                        disabled={busyModule !== null}
                         onClick={() => setConfirmTarget({ name: m.module, action: "enable" })}
                       >
                         Enable

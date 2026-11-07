@@ -23,13 +23,23 @@ export function BacktestTruthBanner({ backtest }: { backtest: BacktestRecord }) 
   if (blocked) {
     text = blocked;
     tone = "var(--warn, #b7791f)";
-  } else if (isSynthetic && !backtest.authoritative) {
+  } else if (isSynthetic && backtest.authoritative) {
+    text =
+      "Provenance conflict: this result is labeled synthetic but also authoritative. Do not treat it as a recorded-data result.";
+    tone = "var(--bad)";
+  } else if (isSynthetic) {
     text =
       "SYNTHETIC SIMULATION — not based on recorded market data and not authoritative. Use it only to compare settings, not as proof of performance.";
     tone = "var(--warn, #b7791f)";
-  } else if (backtest.status === "completed" && backtest.authoritative) {
+  } else if (backtest.data_source === "recorded" && backtest.status === "completed" && backtest.authoritative) {
     text = "Recorded-data result.";
     tone = "var(--ok)";
+  } else if (backtest.authoritative && backtest.data_source !== "recorded") {
+    text = "Provenance conflict: the result is marked authoritative without a recorded data source. Do not rely on it as recorded-data evidence.";
+    tone = "var(--bad)";
+  } else if (backtest.data_source === "recorded" && !backtest.authoritative) {
+    text = "Recorded market data is reported, but this result is not marked authoritative.";
+    tone = "var(--warn, #b7791f)";
   } else {
     text = "Result pending.";
     tone = "var(--muted)";

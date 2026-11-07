@@ -195,9 +195,19 @@ impl fmt::Display for Permission {
 ///
 /// Stored sorted so two sets built in different orders compare and
 /// serialise identically (deterministic matching, stable audit lines).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[serde(transparent)]
 pub struct PermissionSet(Vec<Permission>);
+
+impl<'de> Deserialize<'de> for PermissionSet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let permissions = Vec::<Permission>::deserialize(deserializer)?;
+        Ok(PermissionSet::from_iter(permissions))
+    }
+}
 
 impl PermissionSet {
     /// An empty set (grants nothing).
@@ -330,6 +340,16 @@ mod tests {
         );
         assert_eq!(PermissionSet::all().len(), Permission::ALL.len());
         assert!(PermissionSet::empty().is_empty());
+    }
+
+    #[test]
+    fn deserialization_restores_sorted_deduplicated_invariant() {
+        let set: PermissionSet =
+            serde_json::from_str(r#"["bot_start","bot_read","bot_start"]"#).unwrap();
+        assert_eq!(set.as_slice(), &[Permission::BotRead, Permission::BotStart]);
+        assert!(set.contains(Permission::BotRead));
+        assert!(set.contains(Permission::BotStart));
+        assert_eq!(set.len(), 2);
     }
 
     #[test]

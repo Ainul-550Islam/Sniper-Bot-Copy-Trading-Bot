@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { AlertItem, acknowledgeAlert } from "@/lib/api/alerts-api";
 
 interface AlertCenterProps {
@@ -10,15 +10,21 @@ interface AlertCenterProps {
 
 export function AlertCenter({ alerts, onRefresh }: AlertCenterProps) {
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  const [ackError, setAckError] = useState<string | null>(null);
+  const ackInFlight = useRef(false);
 
   const handleAck = async (id: string) => {
+    if (ackInFlight.current) return;
+    ackInFlight.current = true;
     setLoadingId(id);
+    setAckError(null);
     try {
       await acknowledgeAlert(id);
       onRefresh();
     } catch {
-      // Ignore
+      setAckError("Could not acknowledge this alert. Please try again.");
     } finally {
+      ackInFlight.current = false;
       setLoadingId(null);
     }
   };
@@ -37,6 +43,7 @@ export function AlertCenter({ alerts, onRefresh }: AlertCenterProps) {
         <h3 style={{ margin: 0 }}>Incident &amp; Risk Alert Ledger ({alerts.length})</h3>
       </div>
 
+      {ackError && <p className="error" role="alert" style={{ margin: "1rem" }}>{ackError}</p>}
       <table className="table" style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ background: "rgba(255,255,255,0.02)", textAlign: "left" }}>

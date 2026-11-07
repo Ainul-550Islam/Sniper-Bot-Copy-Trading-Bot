@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { UsageLimits } from "@/lib/api/billing-status-api";
 import { billingStatusApi } from "@/lib/api/billing-status-api";
 import { toDisplayError } from "@/lib/api";
@@ -18,24 +18,35 @@ export function UsageLimitsPanel({ organizationId }: UsageLimitsPanelProps) {
   const [limits, setLimits] = useState<UsageLimits | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++requestVersion.current;
     setLoading(true);
+    setLimits(null);
     setError(null);
     try {
       const reported = await billingStatusApi.usageLimits(organizationId);
+      if (requestId !== requestVersion.current) return;
       // Server truth only: without a plan code and a limits array the panel
       // shows its honest empty state instead of crashing the page around it.
       setLimits(reported && typeof reported.plan_code === "string" && Array.isArray(reported.limits) ? reported : null);
     } catch (err: unknown) {
-      setError(toDisplayError(err));
+      if (requestId === requestVersion.current) setError(toDisplayError(err));
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [organizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

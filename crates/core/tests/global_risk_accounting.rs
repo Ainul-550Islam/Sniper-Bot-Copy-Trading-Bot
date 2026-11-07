@@ -177,6 +177,141 @@ fn audit_actions(
 // ------------------------------------------------------- exposure limits --
 
 #[tokio::test]
+async fn aggregate_global_limits_fail_closed_when_recovery_is_not_trustworthy() {
+    let state = state_with(|c| c.global_risk.max_portfolio_exposure_ref = 10_000.0);
+    state.global_risk().set_portfolio_ready(false).await;
+    let decision = RiskEngine::new(state.clone())
+        .check_entry(&entry(
+            BotModule::Sniper,
+            Venue::PumpFun,
+            "MINT-UNRECOVERED",
+            0.1,
+            "wallet",
+            "sniper",
+        ))
+        .await;
+    assert!(!decision.allowed());
+    assert_eq!(decision.code, Some(RiskCode::GlobalUnavailable));
+    assert!(decision.reason.contains("accounting is incomplete"));
+}
+
+#[tokio::test]
+async fn concurrent_entry_checks_reserve_global_exposure_until_the_entry_finishes() {
+    let state = state_with(|c| c.global_risk.max_portfolio_exposure_ref = 100.0);
+    let engine = RiskEngine::new(state.clone());
+    let first = entry(
+        BotModule::Sniper,
+        Venue::PumpFun,
+        "asset-a",
+        0.8,
+        "wallet-a",
+        "sniper",
+    );
+    let second = entry(
+        BotModule::Copy,
+        Venue::PumpSwap,
+        "asset-b",
+        0.8,
+        "wallet-b",
+        "copy:leader-b",
+    );
+
+    // Each request is individually below the cap (80 reference units), but
+    // together they exceed it. The atomic reservation allows only one while
+    // its RiskDecision is still held by the in-flight entry path.
+    let (a, b) = tokio::join!(engine.check_entry(&first), engine.check_entry(&second));
+    assert_ne!(a.allowed(), b.allowed(), "one entry must reserve capacity");
+    let blocked = if a.allowed() { b } else { a };
+    assert_eq!(blocked.code, Some(RiskCode::GlobalExposure));
+}
+
+#[tokio::test]
+async fn concurrent_entry_checks_reserve_module_position_slots() {
+    let state = state_with(|c| {
+        c.risk.max_open_positions = 1;
+        c.global_risk.max_portfolio_exposure_ref = 0.0;
+    });
+    let engine = RiskEngine::new(state);
+    let first = entry(
+        BotModule::Sniper,
+        Venue::PumpFun,
+        "asset-slot-a",
+        0.1,
+        "wallet-a",
+        "sniper",
+    );
+    let second = entry(
+        BotModule::Sniper,
+        Venue::PumpFun,
+        "asset-slot-b",
+        0.1,
+        "wallet-a",
+        "sniper",
+    );
+    let (a, b) = tokio::join!(engine.check_entry(&first), engine.check_entry(&second));
+    assert_ne!(
+        a.allowed(),
+        b.allowed(),
+        "one in-flight entry consumes the slot"
+    );
+    let blocked = if a.allowed() { b } else { a };
+    assert_eq!(blocked.code, Some(RiskCode::MaxOpenPositions));
+}
+
+#[tokio::test]
+async fn global_risk_refreshes_shared_journal_events_before_evaluating_caps() {
+    let replica_a = state_with(|c| c.global_risk.max_portfolio_exposure_ref = 150.0);
+    let replica_b = state_with(|c| c.global_risk.max_portfolio_exposure_ref = 150.0);
+    let shared = Arc::new(MemoryLedgerStore::new());
+    replica_a.ledger().attach_store(shared.clone()).await;
+    replica_b.ledger().attach_store(shared).await;
+    assert!(replica_a
+        .ledger()
+        .submit(sol_buy("wallet-a", "sniper", "MINT-REMOTE", 1.0, "remote"))
+        .await
+        .is_new());
+
+    let decision = RiskEngine::new(replica_b)
+        .check_entry(&entry(
+            BotModule::Copy,
+            Venue::RaydiumAmmV4,
+            "MINT-OTHER",
+            1.0,
+            "wallet-b",
+            "copy:leader",
+        ))
+        .await;
+    assert!(!decision.allowed());
+    assert_eq!(decision.code, Some(RiskCode::GlobalExposure));
+}
+
+#[tokio::test]
+async fn aggregate_global_limits_fail_closed_while_journal_writes_are_pending() {
+    let state = state_with(|c| c.global_risk.max_portfolio_exposure_ref = 10_000.0);
+    let store = Arc::new(MemoryLedgerStore::new());
+    store.set_unavailable(true);
+    state.ledger().attach_store(store).await;
+    assert!(state
+        .ledger()
+        .submit(sol_buy("wallet", "sniper", "MINT-PENDING", 0.1, "pending"))
+        .await
+        .is_new());
+    assert_eq!(state.ledger().pending_count().await, 1);
+    let decision = RiskEngine::new(state.clone())
+        .check_entry(&entry(
+            BotModule::Sniper,
+            Venue::PumpFun,
+            "MINT-PENDING-2",
+            0.1,
+            "wallet",
+            "sniper",
+        ))
+        .await;
+    assert!(!decision.allowed());
+    assert_eq!(decision.code, Some(RiskCode::GlobalUnavailable));
+}
+
+#[tokio::test]
 async fn portfolio_exposure_limit_is_enforced_across_modules() {
     let state = state_with(|c| c.global_risk.max_portfolio_exposure_ref = 250.0);
     let mut rx = state.events.subscribe();
@@ -213,6 +348,7 @@ async fn portfolio_exposure_limit_is_enforced_across_modules() {
         ))
         .await;
     assert!(ok.allowed(), "{}", ok.reason);
+    drop(ok);
     let d = risk
         .check_entry(&entry(
             BotModule::Copy,
@@ -486,6 +622,139 @@ async fn daily_loss_limit_reads_the_ledger_not_the_module() {
     assert!(d.reason.contains("daily_loss"), "{}", d.reason);
     let view = state.global_risk().portfolio(HashMap::new()).await;
     assert!((view.realized_today_ref + 60.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn missing_rate_for_closed_realized_loss_fails_closed() {
+    let state = state_with(|c| {
+        c.global_risk.max_daily_loss_ref = 50.0;
+        c.global_risk.reference_rates = HashMap::from([("USDC".to_string(), 1.0)]);
+    });
+    let risk = RiskEngine::new(state.clone());
+    state
+        .ledger()
+        .submit(sol_buy("w1", "sniper", "MINT-A", 1.0, "a"))
+        .await;
+    state
+        .ledger()
+        .submit(fill(
+            BotModule::Sniper,
+            Venue::PumpFun,
+            "w1",
+            "sniper",
+            "MINT-A",
+            EventSide::Sell,
+            1_000.0,
+            0.4,
+            0.0,
+            "b",
+        ))
+        .await;
+    let view = state.global_risk().portfolio(HashMap::new()).await;
+    assert!(view.missing_rates.is_empty(), "position is fully closed");
+    assert_eq!(view.missing_daily_loss_rates, vec!["SOL".to_string()]);
+    let decision = risk
+        .check_entry(&entry(
+            BotModule::Polymarket,
+            Venue::PolymarketClob,
+            "TOKEN",
+            10.0,
+            "0xeoa",
+            "value",
+        ))
+        .await;
+    assert_eq!(decision.code, Some(RiskCode::GlobalUnavailable));
+    assert!(decision.reason.contains("reference_rate_missing"));
+    assert!(decision.reason.contains("realized PnL"));
+}
+
+#[tokio::test]
+async fn malformed_global_risk_attribution_is_rejected() {
+    let state = state_with(|_| {});
+    let risk = state.global_risk();
+    let mut request = GlobalRiskRequest {
+        module: BotModule::Sniper,
+        venue: Venue::PumpFun,
+        wallet: "w1".into(),
+        strategy: "sniper".into(),
+        asset: "MINT-A".into(),
+        quote_asset: "SOL".into(),
+        requested_quote: 0.1,
+        mode: ExecutionMode::Paper,
+    };
+    for (field, value) in [
+        ("wallet", ""),
+        ("strategy", "  "),
+        ("asset", "MINT-A "),
+        ("quote_asset", "SOL "),
+    ] {
+        match field {
+            "wallet" => request.wallet = value.into(),
+            "strategy" => request.strategy = value.into(),
+            "asset" => request.asset = value.into(),
+            "quote_asset" => request.quote_asset = value.into(),
+            _ => unreachable!(),
+        }
+        let decision = risk.decide(&request, &DecisionContext::default()).await;
+        assert_eq!(decision.reason, Some(GlobalRejectReason::InvalidRequest));
+        assert!(!decision.accepted(), "invalid {field} was accepted");
+        request = GlobalRiskRequest {
+            module: BotModule::Sniper,
+            venue: Venue::PumpFun,
+            wallet: "w1".into(),
+            strategy: "sniper".into(),
+            asset: "MINT-A".into(),
+            quote_asset: "SOL".into(),
+            requested_quote: 0.1,
+            mode: ExecutionMode::Paper,
+        };
+    }
+}
+
+#[tokio::test]
+async fn malformed_runtime_global_risk_config_fails_closed() {
+    let state = state_with(|_| {});
+    state
+        .update_config(|c| c.global_risk.max_daily_loss_ref = f64::NAN)
+        .await;
+    let risk = RiskEngine::new(state.clone());
+    let decision = risk
+        .check_entry(&entry(
+            BotModule::Sniper,
+            Venue::PumpFun,
+            "MINT-A",
+            0.1,
+            "w1",
+            "sniper",
+        ))
+        .await;
+    assert_eq!(decision.code, Some(RiskCode::GlobalUnavailable));
+    assert!(decision.reason.contains("invalid_portfolio"));
+}
+
+#[tokio::test]
+async fn non_finite_portfolio_conversion_fails_closed() {
+    let state = state_with(|c| {
+        c.global_risk.max_portfolio_exposure_ref = f64::MAX;
+        c.global_risk.reference_rates = HashMap::from([("SOL".to_string(), f64::MAX)]);
+    });
+    let risk = RiskEngine::new(state.clone());
+    state
+        .ledger()
+        .submit(sol_buy("w1", "sniper", "MINT-A", 2.0, "a"))
+        .await;
+    let decision = risk
+        .check_entry(&entry(
+            BotModule::Copy,
+            Venue::RaydiumAmmV4,
+            "MINT-B",
+            0.1,
+            "w2",
+            "copy:l",
+        ))
+        .await;
+    assert_eq!(decision.code, Some(RiskCode::GlobalUnavailable));
+    assert!(decision.reason.contains("invalid_portfolio"));
 }
 
 #[tokio::test]
@@ -1518,6 +1787,7 @@ async fn config_reload_updates_limits_and_kill_lists_live() {
         ))
         .await;
     assert!(ok.allowed(), "{}", ok.reason);
+    drop(ok);
     state
         .update_config(|c| c.global_risk.killed_venues = vec!["polymarket".into()])
         .await;

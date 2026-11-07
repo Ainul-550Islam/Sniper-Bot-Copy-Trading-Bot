@@ -107,6 +107,13 @@ impl EffectiveTenantConfig {
 fn tightest_f64(bounds: &[Option<f64>]) -> Option<f64> {
     let mut tightest: Option<f64> = None;
     for bound in bounds.iter().flatten() {
+        // Invalid configuration must never disappear through floating-point
+        // comparison semantics (NaN compares false and could otherwise
+        // replace a real cap). Zero is an invalid sentinel that the risk
+        // guard rejects before evaluating an order.
+        if !bound.is_finite() || *bound <= 0.0 {
+            return Some(0.0);
+        }
         tightest = Some(match tightest {
             Some(current) if current < *bound => current,
             _ => *bound,

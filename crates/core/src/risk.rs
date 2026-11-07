@@ -2,8 +2,9 @@
 //! must call [`RiskEngine::check_entry`] before building an order and
 //! [`RiskEngine::check_exit`] on every price update.
 //!
-//! The engine is deliberately conservative: anything it cannot verify is
-//! rejected, and the kill switch short-circuits every check.
+//! The engine is deliberately conservative: tenant-bound checks require
+//! tenant-scoped oracle data for portfolio/loss inputs, and the kill switch
+//! short-circuits every check.
 
 use std::sync::Arc;
 
@@ -15,19 +16,30 @@ use crate::config::RiskConfig;
 use crate::models::{BotModule, Position, TokenLaunch, Venue, WalletTrade};
 use crate::state::Shared;
 
-/// Cluster-wide risk view (Prompt 3 gap closure for §Q items 3/4). When
-/// attached (server-side, Postgres-backed), the risk engine consults the
-/// shared store IN ADDITION to the eventually-consistent local book and
-/// daily accumulator, so global limits converge within one query instead of
-/// within `[ha].book_sync_secs`.
+/// Result of a durable realized-PnL read. Unavailable storage may use the
+/// operator-mode local fallback; incomplete accounting must never do so.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RealizedPnlRead {
+    /// Complete PnL value for the requested scope and UTC day.
+    Known(f64),
+    /// The backing read failed. Operator mode may use its local view;
+    /// tenant mode fails closed.
+    Unavailable,
+    /// Rows/fills exist but their PnL or daily attribution is incomplete.
+    /// This is not equivalent to a storage outage and fails closed in all modes.
+    Incomplete,
+}
+
+/// Durable risk view across replicas. Operator mode combines it with the
+/// local book; tenant-bound mode requires tenant-scoped oracle methods and
+/// conservatively combines them with local state until tenant projections
+/// are complete (which may over-restrict, never loosen, a limit).
 ///
 /// Rules:
-/// * every method returns `None` = "unknown" (store unavailable) — the
-///   engine then falls back to the local-only view; risk checks must never
-///   DEPEND on store availability (§K);
-/// * values combine conservatively: `max` for open-position counts, `min`
-///   (more negative wins) for realized PnL — an oracle can only tighten a
-///   limit, never loosen it.
+/// * unavailable storage may use the operator-mode local fallback; known
+///   incomplete accounting fails closed in every mode;
+/// * portfolio counts/exposure use `max`, and realized PnL uses `min` (the
+///   more negative value wins), so a view can only tighten a limit.
 #[async_trait]
 pub trait GlobalRiskOracle: Send + Sync {
     /// Open positions across ALL replicas for `module`, DEPLOYMENT-WIDE.
@@ -49,16 +61,17 @@ pub trait GlobalRiskOracle: Send + Sync {
     /// everyone's daily-loss gate, and a tenant can infer the deployment's
     /// aggregate book by probing where its own gate flips.
     ///
-    /// The default implementation delegates to the deployment-wide method,
-    /// which preserves the exact behaviour of oracles that have no tenant
-    /// dimension (in-memory/test oracles). A store-backed oracle MUST
-    /// override it — see `bot_core::db::claims::PostgresRiskOracle`.
+    /// The default implementation returns `None` for tenant-scoped reads;
+    /// it never silently substitutes deployment-wide data. Store-backed
+    /// multi-tenant oracles must override this method.
     async fn count_open_for(
         &self,
         organization: Option<crate::tenant::OrganizationId>,
         module: BotModule,
     ) -> Option<usize> {
-        let _ = organization;
+        if organization.is_some() {
+            return None;
+        }
         self.count_open(module).await
     }
 
@@ -70,8 +83,70 @@ pub trait GlobalRiskOracle: Send + Sync {
         &self,
         organization: Option<crate::tenant::OrganizationId>,
     ) -> Option<f64> {
-        let _ = organization;
+        if organization.is_some() {
+            return None;
+        }
         self.realized_today().await
+    }
+
+    /// Detailed read status lets risk distinguish an unavailable store from
+    /// a successful read that found incomplete accounting projections.
+    async fn realized_today_status_for(
+        &self,
+        organization: Option<crate::tenant::OrganizationId>,
+    ) -> RealizedPnlRead {
+        self.realized_today_for(organization)
+            .await
+            .map(RealizedPnlRead::Known)
+            .unwrap_or(RealizedPnlRead::Unavailable)
+    }
+
+    /// Today's realized PnL for one module, restricted to one tenant when
+    /// provided. Store-backed multi-tenant implementations should override
+    /// this method; the fallback is conservative and preserves old oracles.
+    async fn realized_today_for_module(
+        &self,
+        organization: Option<crate::tenant::OrganizationId>,
+        module: BotModule,
+    ) -> Option<f64> {
+        let _ = module;
+        self.realized_today_for(organization).await
+    }
+
+    /// Detailed module-specific PnL read status. Old implementations remain
+    /// source-compatible and report None as storage unavailability.
+    async fn realized_today_status_for_module(
+        &self,
+        organization: Option<crate::tenant::OrganizationId>,
+        module: BotModule,
+    ) -> RealizedPnlRead {
+        self.realized_today_for_module(organization, module)
+            .await
+            .map(RealizedPnlRead::Known)
+            .unwrap_or(RealizedPnlRead::Unavailable)
+    }
+
+    /// Whether a symbol is already open for this module and tenant. A tenant
+    /// oracle should return `None` on storage failure so entry checks fail
+    /// closed instead of consulting another tenant's process cache.
+    async fn has_open_symbol_for(
+        &self,
+        organization: crate::tenant::OrganizationId,
+        module: BotModule,
+        symbol: &str,
+    ) -> Option<bool> {
+        let _ = (organization, module, symbol);
+        None
+    }
+
+    /// Open notional in the module's configured quote unit for one tenant.
+    async fn open_exposure_for(
+        &self,
+        organization: crate::tenant::OrganizationId,
+        module: BotModule,
+    ) -> Option<f64> {
+        let _ = (organization, module);
+        None
     }
 }
 
@@ -205,7 +280,9 @@ impl RiskCode {
             | G::AssetExposure => RiskCode::GlobalExposure,
             G::DailyLoss => RiskCode::GlobalDailyLoss,
             G::Drawdown => RiskCode::GlobalDrawdown,
-            G::ReferenceRateMissing | G::InvalidRequest => RiskCode::GlobalUnavailable,
+            G::ReferenceRateMissing | G::InvalidRequest | G::InvalidPortfolio => {
+                RiskCode::GlobalUnavailable
+            }
         }
     }
 
@@ -246,9 +323,27 @@ pub struct RiskDecision {
     pub take_profit: Option<f64>,
     pub trailing_stop_pct: Option<f64>,
     pub max_hold_secs: Option<i64>,
+    /// Keeps aggregate capacity reserved until the caller completes the
+    /// corresponding entry operation. It is process-local and not API data.
+    #[serde(skip)]
+    _reservation: Option<crate::global_risk::GlobalRiskReservation>,
 }
 
 impl RiskDecision {
+    /// Transfer the in-flight capacity lease to the execution operation that
+    /// will outlive this decision value (e.g. Sniper's approval/prepare split).
+    pub fn take_reservation(&mut self) -> Option<crate::global_risk::GlobalRiskReservation> {
+        self._reservation.take()
+    }
+
+    /// Release a held capacity lease synchronously at a known completion
+    /// point; dropping the decision remains a safe best-effort fallback.
+    pub async fn release_reservation(&mut self) {
+        if let Some(reservation) = self._reservation.take() {
+            reservation.release().await;
+        }
+    }
+
     pub fn allowed(&self) -> bool {
         !matches!(self.verdict, RiskVerdict::Reject)
     }
@@ -283,6 +378,7 @@ impl RiskDecision {
             take_profit: None,
             trailing_stop_pct: None,
             max_hold_secs: None,
+            _reservation: None,
         }
     }
 }
@@ -448,9 +544,10 @@ pub struct RiskEngine {
     /// runtime. `None` = the deployment-global operator mode, whose
     /// behaviour is unchanged.
     ///
-    /// The cluster-wide oracle is consulted THROUGH this scope, so one
-    /// tenant's open positions and realized PnL can never consume another
-    /// tenant's capacity or trip another tenant's daily-loss gate.
+    /// Every oracle read is tenant-scoped. The conservative local process
+    /// cache is still combined with scoped results until tenant position/PnL
+    /// projections are proven complete; this can over-restrict, not loosen,
+    /// limits across tenants.
     tenant: Option<crate::tenant::OrganizationId>,
 }
 
@@ -500,7 +597,7 @@ impl RiskEngine {
         }
         let risk = self.risk_config().await;
         let daily = self.state.daily_stats().await;
-        if daily.loss_limit_tripped {
+        if self.tenant.is_none() && daily.loss_limit_tripped {
             return Err((
                 RiskCode::DailyLossLimit,
                 format!(
@@ -513,7 +610,12 @@ impl RiskEngine {
             ));
         }
         if risk.daily_loss_limit_quote > 0.0 {
-            let realized = self.effective_realized(daily.realized_pnl).await;
+            let Some(realized) = self.effective_realized(daily.realized_pnl).await else {
+                return Err((
+                    RiskCode::GlobalUnavailable,
+                    "tenant-scoped daily PnL is unavailable; refusing entry".into(),
+                ));
+            };
             if realized <= -risk.daily_loss_limit_quote {
                 return Err((
                     RiskCode::DailyLossLimit,
@@ -532,7 +634,16 @@ impl RiskEngine {
                 ));
             }
             if risk.sniper_daily_loss_limit_quote > 0.0 {
-                let sniper_realized = self.state.daily_realized(BotModule::Sniper).await;
+                let local = self.state.daily_realized(BotModule::Sniper).await;
+                let Some(sniper_realized) = self
+                    .effective_module_realized(BotModule::Sniper, local)
+                    .await
+                else {
+                    return Err((
+                        RiskCode::GlobalUnavailable,
+                        "tenant-scoped sniper PnL is unavailable; refusing entry".into(),
+                    ));
+                };
                 if sniper_realized <= -risk.sniper_daily_loss_limit_quote {
                     return Err((
                         RiskCode::SniperDailyLoss,
@@ -552,7 +663,15 @@ impl RiskEngine {
                 ));
             }
             if risk.copy_daily_loss_limit_quote > 0.0 {
-                let copy_realized = self.state.daily_realized(BotModule::Copy).await;
+                let local = self.state.daily_realized(BotModule::Copy).await;
+                let Some(copy_realized) =
+                    self.effective_module_realized(BotModule::Copy, local).await
+                else {
+                    return Err((
+                        RiskCode::GlobalUnavailable,
+                        "tenant-scoped copy PnL is unavailable; refusing entry".into(),
+                    ));
+                };
                 if copy_realized <= -risk.copy_daily_loss_limit_quote {
                     return Err((
                         RiskCode::CopyDailyLoss,
@@ -572,7 +691,16 @@ impl RiskEngine {
                 ));
             }
             if risk.poly_daily_loss_limit_quote > 0.0 {
-                let poly_realized = self.state.daily_realized(BotModule::Polymarket).await;
+                let local = self.state.daily_realized(BotModule::Polymarket).await;
+                let Some(poly_realized) = self
+                    .effective_module_realized(BotModule::Polymarket, local)
+                    .await
+                else {
+                    return Err((
+                        RiskCode::GlobalUnavailable,
+                        "tenant-scoped polymarket PnL is unavailable; refusing entry".into(),
+                    ));
+                };
                 if poly_realized <= -risk.poly_daily_loss_limit_quote {
                     return Err((
                         RiskCode::PolyDailyLoss,
@@ -616,29 +744,91 @@ impl RiskEngine {
             .count()
     }
 
-    /// Conservative combination of the LOCAL daily realized PnL with the
-    /// cluster-wide view (when an oracle is attached): the more negative of
-    /// the two wins. Oracle failures keep the local view (§K: risk checks
-    /// never depend on store availability).
-    async fn effective_realized(&self, local: f64) -> f64 {
-        if let Some(oracle) = self.state.risk_oracle() {
-            if let Some(global) = oracle.realized_today_for(self.tenant).await {
-                return local.min(global);
-            }
+    /// Conservative combination of local and durable realized PnL. An
+    /// unavailable store preserves the documented operator fallback, while
+    /// a successful-but-incomplete projection fails closed in every mode.
+    async fn effective_realized(&self, local: f64) -> Option<f64> {
+        let organization = self.tenant;
+        let Some(oracle) = self.state.risk_oracle() else {
+            return if organization.is_some() {
+                None
+            } else {
+                Some(local)
+            };
+        };
+        match oracle.realized_today_status_for(organization).await {
+            RealizedPnlRead::Known(value) => Some(local.min(value)),
+            RealizedPnlRead::Unavailable if organization.is_none() => Some(local),
+            RealizedPnlRead::Unavailable | RealizedPnlRead::Incomplete => None,
         }
-        local
     }
 
-    /// Open-position count combining the local book with the cluster-wide
-    /// view: the LARGER of the two wins (a position opened on another
-    /// replica counts against this replica's capacity immediately).
-    async fn effective_open_count(&self, module: BotModule, local: usize) -> usize {
+    async fn effective_module_realized(&self, module: BotModule, local: f64) -> Option<f64> {
+        let organization = self.tenant;
+        let Some(oracle) = self.state.risk_oracle() else {
+            return if organization.is_some() {
+                None
+            } else {
+                Some(local)
+            };
+        };
+        match oracle
+            .realized_today_status_for_module(organization, module)
+            .await
+        {
+            RealizedPnlRead::Known(value) => Some(local.min(value)),
+            RealizedPnlRead::Unavailable if organization.is_none() => Some(local),
+            RealizedPnlRead::Unavailable | RealizedPnlRead::Incomplete => None,
+        }
+    }
+
+    /// Operator mode combines local and deployment-wide counts. Tenant mode
+    /// requires a tenant-scoped count and takes the maximum with local state
+    /// as a conservative fallback until tenant position projections are complete.
+    async fn effective_open_count(&self, module: BotModule, local: usize) -> Option<usize> {
+        if let Some(organization) = self.tenant {
+            let scoped = self
+                .state
+                .risk_oracle()?
+                .count_open_for(Some(organization), module)
+                .await?;
+            return Some(local.max(scoped));
+        }
         if let Some(oracle) = self.state.risk_oracle() {
-            if let Some(global) = oracle.count_open_for(self.tenant, module).await {
-                return local.max(global);
+            if let Some(global) = oracle.count_open_for(None, module).await {
+                return Some(local.max(global));
             }
         }
-        local
+        Some(local)
+    }
+
+    async fn effective_has_open_symbol(
+        &self,
+        module: BotModule,
+        symbol: &str,
+        local: bool,
+    ) -> Option<bool> {
+        if let Some(organization) = self.tenant {
+            let scoped = self
+                .state
+                .risk_oracle()?
+                .has_open_symbol_for(organization, module, symbol)
+                .await?;
+            return Some(local || scoped);
+        }
+        Some(local)
+    }
+
+    async fn effective_open_exposure(&self, module: BotModule, local: f64) -> Option<f64> {
+        if let Some(organization) = self.tenant {
+            let scoped = self
+                .state
+                .risk_oracle()?
+                .open_exposure_for(organization, module)
+                .await?;
+            return Some(local.max(scoped));
+        }
+        Some(local)
     }
 
     /// Full entry check. Returns a decision; never panics, never sends anything.
@@ -668,12 +858,25 @@ impl RiskEngine {
             );
         }
 
-        // 2b. TASK 5 — the ONE global decision (portfolio limits, venue /
-        //     strategy kill switches, daily loss, drawdown) over the global
-        //     ledger's book. Only an accept reaches the module checks below.
-        if let Some(rejected) = self.global_gate(req).await {
-            return rejected;
+        // A missing/invalid balance is not spendable capacity. In particular,
+        // comparisons against NaN are false and f64::min can discard NaN,
+        // otherwise allowing the requested size through the balance gate.
+        if !req.available_quote.is_finite() || req.available_quote < 0.0 {
+            return RiskDecision::reject(
+                RiskCode::InsufficientBalance,
+                req.requested_quote,
+                "available balance must be finite and non-negative",
+            );
         }
+
+        // 2b. TASK 5 — operator mode evaluates deployment-wide portfolio
+        //     limits; tenant-bound mode applies global/venue/strategy kill
+        //     switches without exposing the deployment-wide ledger snapshot.
+        //     Only an accept reaches the remaining module checks below.
+        let reservation = match self.global_gate(req).await {
+            Ok(reservation) => reservation,
+            Err(rejected) => return rejected,
+        };
 
         // 3. Slippage cap --------------------------------------------------
         if req.slippage_bps > risk.max_slippage_bps {
@@ -688,12 +891,31 @@ impl RiskEngine {
         }
 
         // 4. Position count ------------------------------------------------
-        //    Cluster-wide when an oracle is attached: the local book only
-        //    converges via book sync, so the shared count (max of both) is
-        //    what caps global exposure (§Q). The sniper may carry a tighter
-        //    concurrent-position cap of its own; the generic one still holds.
+        //    Operator mode combines local and deployment-wide state. Tenant
+        //    mode requires a tenant-scoped durable count and conservatively
+        //    combines it with local state until tenant projections are complete.
         let open = self.state.open_positions_for(req.module).await;
-        let open_count = self.effective_open_count(req.module, open.len()).await;
+        let local_open_count = open.len();
+        let Some(durable_open_count) = self
+            .effective_open_count(req.module, local_open_count)
+            .await
+        else {
+            return RiskDecision::reject(
+                RiskCode::GlobalUnavailable,
+                req.requested_quote,
+                "tenant-scoped open-position count is unavailable; refusing entry",
+            );
+        };
+        let reservation_id = reservation.as_ref().and_then(|r| r.id());
+        let (reserved_open_count, reserved_exposure, reserved_symbol) =
+            self.state.global_risk().reserved_entry_usage(
+                req.module,
+                self.tenant,
+                crate::global_risk::quote_asset_for(req.venue),
+                &req.symbol,
+                reservation_id,
+            );
+        let open_count = durable_open_count.saturating_add(reserved_open_count);
         let position_limit = if is_sniper {
             risk.sniper_position_limit().min(risk.max_open_positions)
         } else if is_copy {
@@ -715,7 +937,18 @@ impl RiskEngine {
         }
 
         // 5. Duplicate symbol ---------------------------------------------
-        if open.iter().any(|p| p.symbol == req.symbol) {
+        let local_duplicate = open.iter().any(|p| p.symbol == req.symbol) || reserved_symbol;
+        let Some(already_open) = self
+            .effective_has_open_symbol(req.module, &req.symbol, local_duplicate)
+            .await
+        else {
+            return RiskDecision::reject(
+                RiskCode::GlobalUnavailable,
+                req.requested_quote,
+                "tenant-scoped symbol position state is unavailable; refusing entry",
+            );
+        };
+        if already_open {
             return RiskDecision::reject(
                 RiskCode::DuplicateSymbol,
                 req.requested_quote,
@@ -776,10 +1009,28 @@ impl RiskEngine {
         }
 
         // 8. Size caps: absolute, fraction of balance, and remaining exposure
-        // clamp is NaN-transparent, but TOML config cannot express NaN, so the
-        // fraction is always a real number here.
+        // Fraction limits come from validated configuration; request amounts
+        // and observed balances are checked separately at this boundary.
         let fraction_cap = spendable * risk.max_position_fraction.clamp(0.0, 1.0);
-        let exposure = self.state.open_exposure(req.module).await;
+        let local_exposure = self.state.open_exposure(req.module).await;
+        let Some(durable_exposure) = self
+            .effective_open_exposure(req.module, local_exposure)
+            .await
+        else {
+            return RiskDecision::reject(
+                RiskCode::GlobalUnavailable,
+                req.requested_quote,
+                "tenant-scoped exposure is unavailable; refusing entry",
+            );
+        };
+        let exposure = durable_exposure + reserved_exposure;
+        if !exposure.is_finite() || exposure < 0.0 {
+            return RiskDecision::reject(
+                RiskCode::GlobalUnavailable,
+                req.requested_quote,
+                "tenant-scoped exposure is invalid; refusing entry",
+            );
+        }
         let position_cap = if is_sniper {
             risk.sniper_position_cap().min(risk.max_position_quote)
         } else if is_copy {
@@ -857,6 +1108,13 @@ impl RiskEngine {
                 }
             }
             if let Some(liq) = req.liquidity {
+                if !liq.is_finite() || liq < 0.0 {
+                    return RiskDecision::reject(
+                        RiskCode::VenueCheck,
+                        req.requested_quote,
+                        "liquidity must be finite and non-negative",
+                    );
+                }
                 if liq < risk.poly_min_liquidity_usd {
                     return RiskDecision::reject(
                         RiskCode::VenueCheck,
@@ -865,6 +1123,15 @@ impl RiskEngine {
                             "liquidity {liq:.0} below minimum {:.0}",
                             risk.poly_min_liquidity_usd
                         ),
+                    );
+                }
+            }
+            if let Some(fair) = req.fair_value {
+                if !fair.is_finite() || !(0.0..=1.0).contains(&fair) {
+                    return RiskDecision::reject(
+                        RiskCode::VenueCheck,
+                        req.requested_quote,
+                        "fair probability must be finite and in [0, 1]",
                     );
                 }
             }
@@ -900,26 +1167,36 @@ impl RiskEngine {
             take_profit: take_profit.filter(|v| v.is_finite()),
             trailing_stop_pct: risk.trailing_stop_pct,
             max_hold_secs: risk.max_hold_secs,
+            _reservation: reservation,
         }
     }
 
     /// Step 2b of [`RiskEngine::check_entry`]: the global engine's verdict,
     /// mapped onto the module-facing [`RiskCode`]. `None` = accepted.
-    async fn global_gate(&self, req: &EntryRequest) -> Option<RiskDecision> {
+    async fn global_gate(
+        &self,
+        req: &EntryRequest,
+    ) -> Result<Option<crate::global_risk::GlobalRiskReservation>, RiskDecision> {
         let global = self.state.global_risk();
         let request = req.global_request(&self.state).await;
         let ctx = crate::global_risk::DecisionContext {
             global_kill: self.state.kill_switch(),
             marks: self.state.marks().await,
         };
-        let decision = global.decide(&request, &ctx).await;
+        let (decision, reservation) = if let Some(organization) = self.tenant {
+            global
+                .decide_tenant_with_reservation(&request, &ctx, organization)
+                .await
+        } else {
+            global.decide_with_reservation(&request, &ctx).await
+        };
         if decision.accepted() {
-            return None;
+            return Ok(reservation);
         }
         let reason = decision
             .reason
             .unwrap_or(crate::global_risk::GlobalRejectReason::InvalidRequest);
-        Some(RiskDecision::reject(
+        Err(RiskDecision::reject(
             RiskCode::from_global(reason),
             req.requested_quote,
             format!("global risk [{}]: {}", reason, decision.detail),
@@ -1026,6 +1303,12 @@ impl RiskEngine {
         if launch.mint.trim().is_empty() {
             return Err("launch has no mint".into());
         }
+        if !launch.initial_buy_sol.is_finite() || launch.initial_buy_sol < 0.0 {
+            return Err("creator initial buy must be finite and non-negative".into());
+        }
+        if !launch.market_cap_sol.is_finite() || launch.market_cap_sol < 0.0 {
+            return Err("launch market cap must be finite and non-negative".into());
+        }
         if risk.min_creator_buy_sol > 0.0 && launch.initial_buy_sol < risk.min_creator_buy_sol {
             return Err(format!(
                 "creator initial buy {:.4} SOL below minimum {:.4}",
@@ -1115,10 +1398,18 @@ impl RiskEngine {
         leader_caps: Option<(f64, usize)>,
     ) -> Result<(), (RiskCode, String)> {
         self.preflight_coded(BotModule::Copy).await?;
-        if trade.sol_amount <= 0.0 {
+        if !trade.sol_amount.is_finite() || trade.sol_amount <= 0.0 {
             return Err((
                 RiskCode::InvalidSize,
-                "whale trade has no SOL amount".into(),
+                "whale trade must have a finite positive SOL amount".into(),
+            ));
+        }
+        // Zero is the documented legacy sentinel, not a license for NaN or
+        // negative sizes to skip the leader-exposure checks below.
+        if !requested_quote.is_finite() || requested_quote < 0.0 {
+            return Err((
+                RiskCode::InvalidSize,
+                "copy request must be finite and non-negative".into(),
             ));
         }
         if !self.state.copy_allowed(&trade.wallet, &trade.mint).await {
@@ -1197,6 +1488,18 @@ impl RiskEngine {
             return Err((
                 RiskCode::InvalidSize,
                 "polymarket order has no positive notional".into(),
+            ));
+        }
+        // NaN.max(0.0) is zero: never turn unknown committed collateral into
+        // an apparently empty book before evaluating the exposure limits.
+        if !resting_quote.is_finite()
+            || resting_quote < 0.0
+            || !market_quote.is_finite()
+            || market_quote < 0.0
+        {
+            return Err((
+                RiskCode::InvalidSize,
+                "committed collateral must be finite and non-negative".into(),
             ));
         }
         if risk.poly_max_open_orders > 0 && open_orders >= risk.poly_max_open_orders {
@@ -1336,14 +1639,26 @@ impl RiskEngine {
     }
 
     /// Record realised PnL and trip the daily loss limit if it is breached.
+    /// Tenant-bound engines retain this as a conservative local loss floor
+    /// until durable tenant projections are complete, but never trip the
+    /// process-wide loss latch from a tenant-only call.
     pub async fn book_pnl(&self, module: BotModule, pnl: f64) {
+        if self.tenant.is_some() {
+            // Keep local loss telemetry as a conservative guard until the
+            // tenant fill projection is complete. Do not trip the shared
+            // process latch or disable every tenant's modules here.
+            self.state.add_realized(module, pnl).await;
+            return;
+        }
         self.state.add_realized(module, pnl).await;
         let risk = self.risk_config().await;
         if risk.daily_loss_limit_quote <= 0.0 {
             return;
         }
         let daily = self.state.daily_stats().await;
-        let realized = self.effective_realized(daily.realized_pnl).await;
+        let Some(realized) = self.effective_realized(daily.realized_pnl).await else {
+            return;
+        };
         if realized <= -risk.daily_loss_limit_quote && !daily.loss_limit_tripped {
             let first_time = self.state.mark_loss_limit_tripped().await;
             if first_time {
@@ -1415,6 +1730,62 @@ mod tests {
         async fn realized_today(&self) -> Option<f64> {
             self.pnl
         }
+        async fn count_open_for(
+            &self,
+            _organization: Option<crate::tenant::OrganizationId>,
+            module: BotModule,
+        ) -> Option<usize> {
+            self.count_open(module).await
+        }
+        async fn realized_today_for(
+            &self,
+            _organization: Option<crate::tenant::OrganizationId>,
+        ) -> Option<f64> {
+            self.realized_today().await
+        }
+        async fn has_open_symbol_for(
+            &self,
+            _organization: crate::tenant::OrganizationId,
+            _module: BotModule,
+            _symbol: &str,
+        ) -> Option<bool> {
+            Some(false)
+        }
+        async fn open_exposure_for(
+            &self,
+            _organization: crate::tenant::OrganizationId,
+            _module: BotModule,
+        ) -> Option<f64> {
+            Some(0.0)
+        }
+    }
+
+    struct IncompletePnlOracle;
+
+    #[async_trait]
+    impl GlobalRiskOracle for IncompletePnlOracle {
+        async fn count_open(&self, _module: BotModule) -> Option<usize> {
+            Some(0)
+        }
+
+        async fn realized_today(&self) -> Option<f64> {
+            None
+        }
+
+        async fn realized_today_status_for(
+            &self,
+            _organization: Option<crate::tenant::OrganizationId>,
+        ) -> RealizedPnlRead {
+            RealizedPnlRead::Incomplete
+        }
+
+        async fn realized_today_status_for_module(
+            &self,
+            _organization: Option<crate::tenant::OrganizationId>,
+            _module: BotModule,
+        ) -> RealizedPnlRead {
+            RealizedPnlRead::Incomplete
+        }
     }
 
     /// Records which tenant the engine asked the oracle about.
@@ -1437,14 +1808,31 @@ mod tests {
             _module: BotModule,
         ) -> Option<usize> {
             self.seen.lock().expect("spy").push(organization);
-            None
+            Some(0)
         }
         async fn realized_today_for(
             &self,
             organization: Option<crate::tenant::OrganizationId>,
         ) -> Option<f64> {
             self.seen.lock().expect("spy").push(organization);
-            None
+            Some(0.0)
+        }
+        async fn has_open_symbol_for(
+            &self,
+            organization: crate::tenant::OrganizationId,
+            _module: BotModule,
+            _symbol: &str,
+        ) -> Option<bool> {
+            self.seen.lock().expect("spy").push(Some(organization));
+            Some(false)
+        }
+        async fn open_exposure_for(
+            &self,
+            organization: crate::tenant::OrganizationId,
+            _module: BotModule,
+        ) -> Option<f64> {
+            self.seen.lock().expect("spy").push(Some(organization));
+            Some(0.0)
         }
     }
 
@@ -1467,6 +1855,205 @@ mod tests {
             seen.iter().all(|o| *o == Some(org)),
             "tenant-bound engine leaked an unscoped oracle read: {seen:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn incomplete_durable_pnl_fails_closed_in_operator_mode() {
+        let e = engine();
+        e.state()
+            .update_config(|config| config.risk.daily_loss_limit_quote = 1.0)
+            .await;
+        e.state().attach_risk_oracle(Arc::new(IncompletePnlOracle));
+
+        let decision = e.check_entry(&request(0.01, 10.0)).await;
+        assert_eq!(decision.code, Some(RiskCode::GlobalUnavailable));
+    }
+
+    #[tokio::test]
+    async fn operator_mode_uses_local_pnl_only_when_the_store_is_unavailable() {
+        let e = engine();
+        e.state()
+            .update_config(|config| config.risk.daily_loss_limit_quote = 1.0)
+            .await;
+        e.state().attach_risk_oracle(Arc::new(FakeOracle {
+            open: Some(0),
+            pnl: None,
+        }));
+        assert!(e.check_entry(&request(0.01, 10.0)).await.allowed());
+    }
+
+    #[tokio::test]
+    async fn operator_module_daily_loss_combines_the_durable_module_total() {
+        let e = engine();
+        e.state()
+            .update_config(|config| {
+                config.risk.daily_loss_limit_quote = 0.0;
+                config.risk.sniper_daily_loss_limit_quote = 0.5;
+            })
+            .await;
+        e.state().attach_risk_oracle(Arc::new(FakeOracle {
+            open: Some(0),
+            pnl: Some(-0.5),
+        }));
+
+        let decision = e.check_entry(&request(0.01, 10.0)).await;
+        assert_eq!(decision.code, Some(RiskCode::SniperDailyLoss));
+    }
+
+    #[tokio::test]
+    async fn tenant_daily_loss_gate_conservatively_combines_local_and_scoped_values() {
+        let mut config = AppConfig::from_defaults();
+        config.raw.sniper.enabled = true;
+        config.raw.risk.daily_loss_limit_quote = 1.0;
+        let state = crate::state::AppState::new(config);
+        let engine =
+            RiskEngine::new(state.clone()).with_tenant(crate::tenant::OrganizationId::new());
+        state.attach_risk_oracle(Arc::new(FakeOracle {
+            open: Some(0),
+            pnl: Some(0.0),
+        }));
+        state.add_realized(BotModule::Sniper, -1_000.0).await;
+        state.mark_loss_limit_tripped().await;
+
+        let decision = engine.check_entry(&request(0.01, 10.0)).await;
+        assert_eq!(decision.code, Some(RiskCode::DailyLossLimit));
+    }
+
+    #[tokio::test]
+    async fn tenant_open_position_limits_conservatively_combine_local_and_scoped_state() {
+        let mut config = AppConfig::from_defaults();
+        config.raw.sniper.enabled = true;
+        let state = crate::state::AppState::new(config);
+        state
+            .update_config(|c| {
+                c.risk.max_position_quote = 1.0;
+                c.risk.max_position_fraction = 1.0;
+                c.risk.max_open_positions = 2;
+                c.risk.sniper_max_position_quote = 1.0;
+                c.risk.sniper_max_concurrent_positions = 2;
+                c.risk.sniper_max_total_exposure_quote = 1.0;
+                c.risk.min_sol_reserve = 0.0;
+            })
+            .await;
+        let mut other_tenant_position = Position::new(
+            "other-tenant-position".into(),
+            TradeSource::Sniper,
+            Venue::PumpFun,
+            crate::models::ExecutionMode::Paper,
+            "OTHER-MINT".into(),
+            "OTHER".into(),
+            "SOL".into(),
+        );
+        other_tenant_position.apply_buy(100.0, 0.006, 0.6);
+        state.upsert_position(other_tenant_position).await;
+
+        let engine = RiskEngine::new(state).with_tenant(crate::tenant::OrganizationId::new());
+        engine.state().attach_risk_oracle(Arc::new(FakeOracle {
+            open: Some(0),
+            pnl: Some(0.0),
+        }));
+        let decision = engine.check_entry(&request(0.5, 10.0)).await;
+        assert!(decision.allowed(), "{}", decision.reason);
+        assert_eq!(decision.verdict, RiskVerdict::AllowReduced);
+        assert!((decision.sized_quote - 0.4).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn tenant_entry_ignores_the_process_loss_latch_when_scoped_pnl_is_clean() {
+        let mut config = AppConfig::from_defaults();
+        config.raw.sniper.enabled = true;
+        config.raw.risk.daily_loss_limit_quote = 1.0;
+        let state = crate::state::AppState::new(config);
+        let engine =
+            RiskEngine::new(state.clone()).with_tenant(crate::tenant::OrganizationId::new());
+        state.attach_risk_oracle(Arc::new(FakeOracle {
+            open: Some(0),
+            pnl: Some(0.0),
+        }));
+        state.mark_loss_limit_tripped().await;
+        assert!(engine.check_entry(&request(0.01, 10.0)).await.allowed());
+    }
+
+    #[tokio::test]
+    async fn tenant_book_pnl_keeps_a_conservative_local_floor_without_global_trip() {
+        let e = engine().with_tenant(crate::tenant::OrganizationId::new());
+        let before = e.state().daily_stats().await;
+        e.book_pnl(BotModule::Sniper, -1_000.0).await;
+        let after = e.state().daily_stats().await;
+        assert_eq!(after.realized_pnl, before.realized_pnl - 1_000.0);
+        assert_eq!(after.loss_limit_tripped, before.loss_limit_tripped);
+        assert!(e.state().is_enabled(BotModule::Sniper).await);
+    }
+
+    struct LegacyOracle;
+
+    #[async_trait]
+    impl GlobalRiskOracle for LegacyOracle {
+        async fn count_open(&self, _module: BotModule) -> Option<usize> {
+            Some(99)
+        }
+        async fn realized_today(&self) -> Option<f64> {
+            Some(-1_000.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_oracle_without_scoped_methods_fails_closed() {
+        let e = engine().with_tenant(crate::tenant::OrganizationId::new());
+        e.state().attach_risk_oracle(Arc::new(LegacyOracle));
+        let decision = e.check_entry(&request(0.01, 10.0)).await;
+        assert_eq!(decision.code, Some(RiskCode::GlobalUnavailable));
+    }
+
+    /// Tenant mode must not consume or expose the deployment snapshot, and
+    /// must refuse rather than bypass an enabled portfolio-wide cap.
+    #[tokio::test]
+    async fn tenant_entry_fails_closed_on_portfolio_cap_without_exposing_snapshot() {
+        let mut config = AppConfig::from_defaults();
+        config.raw.sniper.enabled = true;
+        config.raw.global_risk.max_portfolio_exposure_ref = 50.0;
+        config
+            .raw
+            .global_risk
+            .reference_rates
+            .insert("SOL".into(), 100.0);
+        let state = crate::state::AppState::new(config);
+        let org = crate::tenant::OrganizationId::new();
+        let engine = RiskEngine::new(state.clone()).with_tenant(org);
+        state.attach_risk_oracle(Arc::new(FakeOracle {
+            open: Some(0),
+            pnl: Some(0.0),
+        }));
+        let exposure = crate::accounting::fill_event(
+            BotModule::Sniper,
+            Venue::PumpFun,
+            "another-tenant-wallet",
+            "sniper",
+            "OTHER-MINT",
+            "SOL",
+            crate::accounting::EventSide::Buy,
+            1_000.0,
+            0.001,
+            1.0,
+            0.0,
+            crate::models::ExecutionMode::Paper,
+            "other-tenant-fill",
+            None,
+            None,
+            Utc::now(),
+            "",
+        );
+        assert!(state.ledger().submit(exposure).await.is_new());
+
+        let decision = engine.check_entry(&request(0.01, 10.0)).await;
+        assert!(!decision.allowed(), "configured global cap was bypassed");
+        assert!(decision
+            .reason
+            .contains("tenant-scoped aggregate portfolio"));
+        let recorded = state.global_risk().recent_decisions(1).await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].snapshot.portfolio_ref, 0.0);
+        assert_eq!(recorded[0].snapshot.capital_base_ref, 0.0);
     }
 
     /// The deployment-global operator mode is unchanged: no tenant bound,
@@ -1750,6 +2337,7 @@ mod tests {
         let ok = e.check_entry(&request(0.01, 10.0)).await;
         assert!(ok.allowed());
         assert_eq!(ok.code, None);
+        drop(ok);
 
         e.state().set_kill_switch(true, "test").await;
         let d = e.check_entry(&request(0.01, 10.0)).await;
@@ -1853,6 +2441,7 @@ mod tests {
         assert!(d.allowed());
         assert_eq!(d.verdict, RiskVerdict::AllowReduced);
         assert!((d.sized_quote - 0.05).abs() < 1e-12, "{}", d.sized_quote);
+        drop(d);
 
         // Total exposure: 0.06 already open → only 0.02 of the 0.08 left.
         let mut p = Position::new(

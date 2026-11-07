@@ -372,6 +372,8 @@ impl PositionRepo {
         p.avg_entry = row.try_get("avg_entry").unwrap_or(0.0);
         p.cost_basis = row.try_get("cost_basis").unwrap_or(0.0);
         p.realized_quote = row.try_get("realized_quote").unwrap_or(0.0);
+        p.realized_pnl_quote = row.try_get("realized_pnl_quote").ok().flatten();
+        p.realized_at = row.try_get("realized_at").ok().flatten();
         p.last_mark = row.try_get("last_mark").unwrap_or(0.0);
         p.stop_loss = row.try_get("stop_loss").ok().flatten();
         p.take_profit = row.try_get("take_profit").ok().flatten();
@@ -412,17 +414,19 @@ impl PositionRepo {
                     r#"INSERT INTO positions
                         (organization_id, id, source, venue, mode, status, symbol,
                          symbol_display, quote_symbol, qty, avg_entry, cost_basis,
-                         realized_quote, last_mark, stop_loss, take_profit,
+                         realized_quote, realized_pnl_quote, realized_at, last_mark, stop_loss, take_profit,
                          trailing_stop, trailing_high_water, max_hold_secs,
                          entry_signature, exit_signature, entry_latency_ms,
                          copied_wallet, market_id, outcome, reason_closed,
                          opened_at, updated_at, closed_at)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                               $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+                               $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
                        ON CONFLICT (id) DO UPDATE SET
                          status = EXCLUDED.status, qty = EXCLUDED.qty,
                          avg_entry = EXCLUDED.avg_entry, cost_basis = EXCLUDED.cost_basis,
                          realized_quote = EXCLUDED.realized_quote,
+                         realized_pnl_quote = EXCLUDED.realized_pnl_quote,
+                         realized_at = EXCLUDED.realized_at,
                          last_mark = EXCLUDED.last_mark, stop_loss = EXCLUDED.stop_loss,
                          take_profit = EXCLUDED.take_profit,
                          trailing_stop = EXCLUDED.trailing_stop,
@@ -447,6 +451,8 @@ impl PositionRepo {
                 .bind(p.avg_entry)
                 .bind(p.cost_basis)
                 .bind(p.realized_quote)
+                .bind(p.realized_pnl_quote)
+                .bind(p.realized_at)
                 .bind(p.last_mark)
                 .bind(p.stop_loss)
                 .bind(p.take_profit)

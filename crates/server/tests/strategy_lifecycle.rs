@@ -199,7 +199,7 @@ async fn register_login_org(
         state_with(saas.clone(), Some(db.clone()), Some(trading.clone())),
         "POST",
         "/api/saas/organizations",
-        Some(serde_json::json!({ "name": "Strategy Co" })),
+        Some(serde_json::json!({ "name": "Strategy Co", "slug": format!("test-{}", uuid::Uuid::new_v4()) })),
         Some(&token),
     )
     .await;

@@ -325,7 +325,8 @@ async fn concurrent_confirms_with_one_token_yield_exactly_one_success() {
     request_reset_for(saas.clone(), &db, &email).await;
     let token = latest_reset_token(&db, &email).await;
 
-    // Both requests race for the same token; the row lock serialises them.
+    // Both requests race for the same token; the transactional lock/consume
+    // permits one winner and an opaque denial for the other request.
     let (first, second) = tokio::join!(
         confirm(&db, saas.clone(), &token, NEW_PASSWORD),
         confirm(&db, saas.clone(), &token, "other-horse-battery-y"),
@@ -491,5 +492,316 @@ async fn overlong_reset_password_does_not_consume_the_token() {
     assert_eq!(
         login(saas, &db, &email, NEW_PASSWORD).await.0,
         StatusCode::OK
+    );
+}
+
+/// A busy token is an opaque denial, not a statement-timeout outage. The
+/// competing transaction deliberately keeps the row locked until the HTTP
+/// request returns; no scheduler timing or slow password hash is required.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn locked_reset_token_is_denied_without_waiting_or_consuming_it() {
+    let Some(db) = setup_db().await else {
+        assert!(
+            std::env::var_os("REQUIRE_POSTGRES").is_none(),
+            "POSTGRES_URL is required for the reset lock regression"
+        );
+        eprintln!("NOT_RUN: reset lock contention — POSTGRES_URL missing");
+        return;
+    };
+    let saas = durable_store(&db).await;
+    let email = format!("reset-locked-{}@example.com", Uuid::new_v4());
+    register(saas.clone(), &db, &email).await;
+    request_reset_for(saas.clone(), &db, &email).await;
+    let token = latest_reset_token(&db, &email).await;
+
+    let mut holder = db.pool().begin().await.expect("lock transaction");
+    let token_id: (Uuid,) =
+        sqlx::query_as("SELECT id FROM password_reset_tokens WHERE token_hash = $1 FOR UPDATE")
+            .bind(bot_core::session::token::hash_token(&token))
+            .fetch_one(&mut *holder)
+            .await
+            .expect("hold this token row");
+
+    // A separate pool makes the deadline apply to the HTTP transaction's
+    // connection, rather than depending on which pooled connection it gets.
+    let contender = Arc::new(
+        Database::connect(
+            &DatabaseConfig {
+                enabled: true,
+                statement_timeout_ms: 100,
+                ..Default::default()
+            },
+            &pg_url().expect("Postgres already required above"),
+        )
+        .await
+        .expect("contending pool"),
+    );
+    let denied = confirm(&contender, saas.clone(), &token, NEW_PASSWORD).await;
+    holder.rollback().await.expect("release token lock");
+    let used: (Option<chrono::DateTime<chrono::Utc>>,) =
+        sqlx::query_as("SELECT used_at FROM password_reset_tokens WHERE id = $1")
+            .bind(token_id.0)
+            .fetch_one(db.pool())
+            .await
+            .expect("token state after contention");
+    assert_eq!(
+        used.0, None,
+        "the losing request must not consume the token"
+    );
+    assert_eq!(denied.0, StatusCode::UNPROCESSABLE_ENTITY, "{denied:?}");
+    assert_eq!(denied.1["error"], "invalid_or_expired_token");
+    assert_eq!(
+        confirm(&db, saas, &token, NEW_PASSWORD).await.0,
+        StatusCode::OK,
+        "the token must remain usable once the unrelated holder releases it"
+    );
+}
+
+/// A login cannot create a session after password reset and then write its
+/// stale user snapshot back over the reset. Two database gates force the
+/// vulnerable ordering without relying on scheduler timing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_interleaved_with_password_reset_never_resurrects_stale_credentials() {
+    let Some(db) = setup_db().await else {
+        assert!(
+            std::env::var_os("REQUIRE_POSTGRES").is_none(),
+            "POSTGRES_URL is required for the login/reset interleaving regression"
+        );
+        eprintln!("NOT_RUN: login/reset interleaving — POSTGRES_URL missing");
+        return;
+    };
+    let email = format!("login-reset-race-{}@example.com", Uuid::new_v4());
+    let saas = durable_store(&db).await;
+    register(saas.clone(), &db, &email).await;
+    let original_hash: (String,) = sqlx::query_as(
+        "SELECT record->>'password_hash' FROM saas_runtime_records
+          WHERE kind='user' AND record->>'email'=$1",
+    )
+    .bind(&email)
+    .fetch_one(db.pool())
+    .await
+    .expect("original canonical password hash");
+    request_reset_for(saas.clone(), &db, &email).await;
+    let reset_token = latest_reset_token(&db, &email).await;
+    let user_id: (Uuid,) = sqlx::query_as("SELECT id FROM users WHERE lower(email)=lower($1)")
+        .bind(&email)
+        .fetch_one(db.pool())
+        .await
+        .expect("canonical test user");
+    let token_hash = bot_core::session::token::hash_token(&reset_token);
+
+    let session_gate_fn = format!("login_reset_session_gate_{}", Uuid::new_v4().simple());
+    let reset_gate_fn = format!("login_reset_token_gate_{}", Uuid::new_v4().simple());
+    let session_key_a: i32 = 781_240_031;
+    let session_key_b: i32 = 1_942_703_811;
+    let reset_key_a: i32 = 781_240_032;
+    let reset_key_b: i32 = 1_942_703_812;
+    sqlx::query(&format!(
+        "CREATE FUNCTION {session_gate_fn}() RETURNS trigger AS $$
+         BEGIN
+           PERFORM pg_advisory_xact_lock({session_key_a}, {session_key_b});
+           RETURN NEW;
+         END $$ LANGUAGE plpgsql"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("create session-insert gate");
+    sqlx::query(&format!(
+        "CREATE TRIGGER {session_gate_fn}_trg BEFORE INSERT ON saas_runtime_records
+         FOR EACH ROW WHEN (NEW.kind = 'session') EXECUTE FUNCTION {session_gate_fn}()"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("attach session-insert gate");
+    sqlx::query(&format!(
+        "CREATE FUNCTION {reset_gate_fn}() RETURNS trigger AS $$
+         BEGIN
+           PERFORM pg_advisory_xact_lock({reset_key_a}, {reset_key_b});
+           RETURN NEW;
+         END $$ LANGUAGE plpgsql"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("create reset-token gate");
+    sqlx::query(&format!(
+        "CREATE TRIGGER {reset_gate_fn}_trg BEFORE UPDATE ON password_reset_tokens
+         FOR EACH ROW WHEN (OLD.token_hash = '{token_hash}' AND NEW.used_at IS NOT NULL)
+         EXECUTE FUNCTION {reset_gate_fn}()"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("attach reset-token gate");
+
+    let mut session_gate_holder = db.pool().begin().await.expect("session gate transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(session_key_a)
+        .bind(session_key_b)
+        .execute(&mut *session_gate_holder)
+        .await
+        .expect("hold session-insert gate");
+    let mut reset_gate_holder = db.pool().begin().await.expect("reset gate transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(reset_key_a)
+        .bind(reset_key_b)
+        .execute(&mut *reset_gate_holder)
+        .await
+        .expect("hold reset-token gate");
+
+    let login_saas = saas.clone();
+    let login_db = db.clone();
+    let login_email = email.clone();
+    let login_task =
+        tokio::spawn(async move { login(login_saas, &login_db, &login_email, OLD_PASSWORD).await });
+    let session_gate_reached = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: (bool,) = sqlx::query_as(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND wait_event_type = 'Lock' AND wait_event = 'advisory'
+                       AND query ILIKE 'INSERT INTO saas_runtime_records%'
+                 )",
+            )
+            .fetch_one(db.pool())
+            .await
+            .expect("observe login paused before session insert");
+            if waiting.0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        session_gate_reached.is_ok(),
+        "login did not reach the controlled session insert"
+    );
+
+    let reset_db = db.clone();
+    let reset_saas = saas.clone();
+    let reset_token_for_task = reset_token.clone();
+    let reset_task = tokio::spawn(async move {
+        confirm(&reset_db, reset_saas, &reset_token_for_task, NEW_PASSWORD).await
+    });
+    // The buggy implementation reaches token consumption while login's
+    // session insert is paused. The atomic implementation first locks the
+    // user row, so reset must wait there. Observe the actual SQL lock point.
+    let phase = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let (phase,): (String,) = sqlx::query_as(
+                "SELECT CASE
+                    WHEN EXISTS (
+                      SELECT 1 FROM pg_stat_activity
+                       WHERE datname=current_database()
+                         AND wait_event_type='Lock' AND wait_event='advisory'
+                         AND query ILIKE 'UPDATE password_reset_tokens SET used_at%'
+                    ) THEN 'reset_gate'
+                    WHEN EXISTS (
+                      SELECT 1 FROM pg_stat_activity
+                       WHERE datname=current_database()
+                         AND wait_event_type='Lock'
+                         AND query ILIKE 'SELECT record FROM saas_runtime_records%'
+                    ) THEN 'user_row_lock'
+                    ELSE 'pending' END",
+            )
+            .fetch_one(db.pool())
+            .await
+            .expect("observe reset lock point");
+            if phase != "pending" {
+                break phase;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("reset did not reach either controlled transaction gate");
+
+    let reset_can_commit_before_login_release = phase == "reset_gate";
+    let ((login_status, login_body), (reset_status, reset_body)) =
+        if reset_can_commit_before_login_release {
+            // Reproduce the vulnerable order exactly: reset commits while login
+            // has already created a session but has not yet written last_login.
+            reset_gate_holder
+                .commit()
+                .await
+                .expect("release reset token gate");
+            let reset_result = reset_task.await.expect("join early password reset");
+            session_gate_holder
+                .commit()
+                .await
+                .expect("release late login session insert");
+            let login_result = login_task.await.expect("join late login");
+            (login_result, reset_result)
+        } else {
+            // Correct implementation: login owns the user row lock before it
+            // reaches the session-insert trigger, so reset waits until login
+            // commits. Reset then revokes the just-created session.
+            session_gate_holder
+                .commit()
+                .await
+                .expect("release atomic login transaction");
+            let login_result = login_task.await.expect("join login");
+            reset_gate_holder
+                .commit()
+                .await
+                .expect("release reset token gate after user lock");
+            let reset_result = reset_task.await.expect("join password reset");
+            (login_result, reset_result)
+        };
+    assert_eq!(login_status, StatusCode::OK, "racing login: {login_body}");
+    assert_eq!(reset_status, StatusCode::OK, "password reset: {reset_body}");
+
+    sqlx::query(&format!(
+        "DROP TRIGGER IF EXISTS {session_gate_fn}_trg ON saas_runtime_records"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("drop session-insert gate");
+    sqlx::query(&format!("DROP FUNCTION IF EXISTS {session_gate_fn}()"))
+        .execute(db.pool())
+        .await
+        .expect("drop session-insert gate function");
+    sqlx::query(&format!(
+        "DROP TRIGGER IF EXISTS {reset_gate_fn}_trg ON password_reset_tokens"
+    ))
+    .execute(db.pool())
+    .await
+    .expect("drop reset-token gate");
+    sqlx::query(&format!("DROP FUNCTION IF EXISTS {reset_gate_fn}()"))
+        .execute(db.pool())
+        .await
+        .expect("drop reset-token gate function");
+
+    assert!(
+        phase == "reset_gate" || phase == "user_row_lock",
+        "the race must be serialized at one of the intended gates: {phase}"
+    );
+    let (active_sessions,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM saas_runtime_records
+          WHERE kind='session' AND user_id=$1 AND record->>'revoked_at' IS NULL",
+    )
+    .bind(user_id.0)
+    .fetch_one(db.pool())
+    .await
+    .expect("count surviving sessions");
+    assert_eq!(
+        active_sessions, 0,
+        "no pre-reset or racing session may survive reset"
+    );
+    let (persisted_hash,): (String,) = sqlx::query_as(
+        "SELECT record->>'password_hash' FROM saas_runtime_records
+          WHERE kind='user' AND id=$1",
+    )
+    .bind(user_id.0.to_string())
+    .fetch_one(db.pool())
+    .await
+    .expect("final canonical password hash");
+    assert_ne!(
+        persisted_hash, original_hash.0,
+        "late login's stale snapshot must not overwrite reset password"
+    );
+    assert!(
+        bot_core::session::token::verify_password(NEW_PASSWORD, &persisted_hash),
+        "the confirmed reset password must remain authoritative"
     );
 }

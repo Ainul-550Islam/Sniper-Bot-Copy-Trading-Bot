@@ -45,18 +45,26 @@ impl AccountingRepo {
         AccountingRepo { db }
     }
 
+    /// Global accounting records belong to the deployment organization and
+    /// are written by background risk/accounting workers, not an ambient
+    /// user request. Use the RLS-bypassing system pool with explicit org
+    /// predicates whenever it is configured.
+    fn pool(&self) -> &sqlx::PgPool {
+        self.db.system_pool().unwrap_or_else(|| self.db.pool())
+    }
+
     // ------------------------------------------------------------- events --
 
     /// Guarded insert of one event and its postings (one transaction).
     /// `Ok(true)` = new, `Ok(false)` = the event id was already journaled.
     pub async fn record_event(&self, stored: &StoredEvent, entry: &Entry) -> RepoResult<bool> {
-        // 0033: ledger_events PK is the tenant composite
-        // (organization_id, event_id); ledger_postings carries the org to
-        // satisfy the rebuilt composite FK while keeping its GLOBAL
-        // chain-signature UNIQUE (event_id, seq).
+        // 0033/0070: both the event identity and its posting sequence are
+        // tenant-local. Include organization_id in the posting conflict target
+        // so the same deterministic event id can be booked independently by
+        // different tenants.
         let e = &stored.event;
         let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
-        let mut tx = self.db.pool().begin().await.map_err(TimedDbError::Error)?;
+        let mut tx = self.pool().begin().await.map_err(TimedDbError::Error)?;
         let res = sqlx::query(
             r#"INSERT INTO ledger_events
                    (organization_id, event_id, kind, module, venue, wallet, strategy,
@@ -104,7 +112,7 @@ impl AccountingRepo {
                        (organization_id, event_id, seq, account, wallet, asset, side,
                         amount, quantity, base_asset)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                   ON CONFLICT (event_id, seq) DO NOTHING"#,
+                   ON CONFLICT (organization_id, event_id, seq) DO NOTHING"#,
             )
             .bind(org)
             .bind(&p.event_id)
@@ -124,7 +132,7 @@ impl AccountingRepo {
         Ok(true)
     }
 
-    /// Every event, oldest first (fact time, then record time, then id).
+    /// Every event in durable append order (record time, then event id).
     pub async fn load_events(&self) -> RepoResult<Vec<StoredEvent>> {
         let rows = self
             .db
@@ -137,13 +145,63 @@ impl AccountingRepo {
                               detail, ts, recorded_at, replica_id
                        FROM ledger_events
                        WHERE organization_id = $1
-                       ORDER BY ts ASC, recorded_at ASC, event_id ASC"#,
+                       ORDER BY recorded_at ASC, event_id ASC"#,
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
-                .fetch_all(self.db.pool()),
+                .fetch_all(self.pool()),
             )
             .await?;
-        Ok(rows.iter().filter_map(stored_from_row).collect())
+        rows.iter()
+            .map(stored_from_row)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                TimedDbError::Error(sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "one or more ledger journal rows could not be decoded",
+                ))))
+            })
+    }
+
+    /// Whether every persisted closed position and every current-day open
+    /// partial exit has corresponding ledger history. A decoded event stream
+    /// alone cannot prove completeness when module facts predate the ledger.
+    pub async fn position_ledger_coverage_complete(&self) -> RepoResult<bool> {
+        let row = self
+            .db
+            .timed(
+                "ledger_position_coverage",
+                sqlx::query(
+                    "SELECT NOT EXISTS (
+                         SELECT 1 FROM positions p
+                         WHERE p.organization_id = $1
+                           AND (
+                               ((p.closed_at IS NOT NULL OR p.realized_quote <> 0
+                                 OR COALESCE(p.realized_pnl_quote, 0) <> 0)
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM ledger_events e
+                                    WHERE e.organization_id = p.organization_id
+                                      AND e.position_id = p.id
+                                ))
+                               OR
+                               (p.status IN ('open','closing')
+                                AND p.realized_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                                AND p.realized_at < (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC'
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM ledger_events e
+                                    WHERE e.organization_id = p.organization_id
+                                      AND e.position_id = p.id
+                                      AND e.ts >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                                      AND e.side = 'sell'
+                                ))
+                           )
+                     ) AS complete",
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .fetch_one(self.pool()),
+            )
+            .await?;
+        row.try_get("complete")
+            .map_err(|error| TimedDbError::Error(sqlx::Error::Decode(Box::new(error))))
     }
 
     /// Postings of one event, in sequence.
@@ -160,7 +218,7 @@ impl AccountingRepo {
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(event_id)
-                .fetch_all(self.db.pool()),
+                .fetch_all(self.pool()),
             )
             .await?;
         Ok(rows.iter().filter_map(posting_from_row).collect())
@@ -184,7 +242,7 @@ impl AccountingRepo {
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 1000))
-                .fetch_all(self.db.pool()),
+                .fetch_all(self.pool()),
             )
             .await?;
         Ok(rows.iter().filter_map(stored_from_row).collect())
@@ -243,7 +301,7 @@ impl AccountingRepo {
                 .bind(&p.position_ids)
                 .bind(p.opened_at)
                 .bind(p.updated_at)
-                .execute(self.db.pool()),
+                .execute(self.pool()),
             )
             .await?;
         Ok(())
@@ -265,7 +323,7 @@ impl AccountingRepo {
                         ORDER BY position_key"#,
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
-                .fetch_all(self.db.pool()),
+                .fetch_all(self.pool()),
             )
             .await?;
         Ok(rows.iter().filter_map(position_from_row).collect())
@@ -306,7 +364,7 @@ impl AccountingRepo {
                 .bind(&d.detail)
                 .bind(snapshot)
                 .bind(&d.replica_id)
-                .execute(self.db.pool()),
+                .execute(self.pool()),
             )
             .await?;
         Ok(())
@@ -327,7 +385,7 @@ impl AccountingRepo {
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 1000))
-                .fetch_all(self.db.pool()),
+                .fetch_all(self.pool()),
             )
             .await?;
         Ok(rows.iter().filter_map(decision_from_row).collect())
@@ -356,7 +414,7 @@ impl AccountingRepo {
                 .bind(&s.reason)
                 .bind(&s.actor)
                 .bind(s.updated_at)
-                .execute(self.db.pool()),
+                .execute(self.pool()),
             )
             .await?;
         Ok(())
@@ -379,7 +437,7 @@ impl AccountingRepo {
                 .bind(&e.actor)
                 .bind(&e.replica_id)
                 .bind(e.ts)
-                .execute(self.db.pool()),
+                .execute(self.pool()),
             )
             .await?;
         Ok(())
@@ -396,7 +454,7 @@ impl AccountingRepo {
                      WHERE organization_id = $1 ORDER BY scope",
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
-                .fetch_all(self.db.pool()),
+                .fetch_all(self.pool()),
             )
             .await?;
         Ok(rows
@@ -445,7 +503,7 @@ impl AccountingRepo {
                 .bind(&f.action)
                 .bind(&f.replica_id)
                 .bind(f.ts)
-                .execute(self.db.pool()),
+                .execute(self.pool()),
             )
             .await?;
         Ok(())
@@ -466,7 +524,7 @@ impl AccountingRepo {
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(limit.clamp(1, 1000))
-                .fetch_all(self.db.pool()),
+                .fetch_all(self.pool()),
             )
             .await?;
         Ok(rows.iter().filter_map(finding_from_row).collect())
@@ -510,33 +568,37 @@ fn stored_from_row_inner(r: &PgRow) -> Option<StoredEvent> {
     let module: BotModule = r.try_get::<String, _>("module").ok()?.parse().ok()?;
     let venue = Venue::parse(&r.try_get::<String, _>("venue").ok()?)?;
     let mode: ExecutionMode = r.try_get::<String, _>("mode").ok()?.parse().ok()?;
-    let side = opt_string(r, "side").and_then(|s| EventSide::parse(&s));
+    let side_raw = r.try_get::<Option<String>, _>("side").ok()?;
+    let side = match side_raw {
+        Some(value) => Some(EventSide::parse(&value)?),
+        None => None,
+    };
     Some(StoredEvent {
         event_id: r.try_get("event_id").ok()?,
         event: AccountingEvent {
             kind,
             module,
             venue,
-            wallet: r.try_get("wallet").unwrap_or_default(),
-            strategy: r.try_get("strategy").unwrap_or_default(),
-            asset: r.try_get("asset").unwrap_or_default(),
-            quote_asset: r.try_get("quote_asset").unwrap_or_default(),
+            wallet: r.try_get("wallet").ok()?,
+            strategy: r.try_get("strategy").ok()?,
+            asset: r.try_get("asset").ok()?,
+            quote_asset: r.try_get("quote_asset").ok()?,
             side,
-            quantity: r.try_get("quantity").unwrap_or_default(),
-            price: r.try_get::<Option<f64>, _>("price").ok().flatten(),
-            quote_amount: r.try_get("quote_amount").unwrap_or_default(),
-            fee: r.try_get("fee").unwrap_or_default(),
+            quantity: r.try_get("quantity").ok()?,
+            price: r.try_get::<Option<f64>, _>("price").ok()?,
+            quote_amount: r.try_get("quote_amount").ok()?,
+            fee: r.try_get("fee").ok()?,
             mode,
-            reference_id: r.try_get("reference_id").unwrap_or_default(),
-            correlation_id: opt_string(r, "correlation_id"),
-            position_id: opt_string(r, "position_id"),
-            trade_id: opt_string(r, "trade_id"),
-            counterparty_wallet: opt_string(r, "counterparty_wallet"),
-            ts: ts_or_now(r, "ts"),
-            detail: r.try_get("detail").unwrap_or_default(),
+            reference_id: r.try_get("reference_id").ok()?,
+            correlation_id: r.try_get::<Option<String>, _>("correlation_id").ok()?,
+            position_id: r.try_get::<Option<String>, _>("position_id").ok()?,
+            trade_id: r.try_get::<Option<String>, _>("trade_id").ok()?,
+            counterparty_wallet: r.try_get::<Option<String>, _>("counterparty_wallet").ok()?,
+            ts: r.try_get("ts").ok()?,
+            detail: r.try_get("detail").ok()?,
         },
-        recorded_at: ts_or_now(r, "recorded_at"),
-        replica_id: r.try_get("replica_id").unwrap_or_default(),
+        recorded_at: r.try_get("recorded_at").ok()?,
+        replica_id: r.try_get("replica_id").ok()?,
     })
 }
 

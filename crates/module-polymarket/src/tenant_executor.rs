@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use bot_core::config::PolymarketConfig;
 use bot_core::error::BotResult;
 use bot_core::execution::TenantExecutionContext;
-use bot_core::models::{ExecutionMode, PolyMarket};
+use bot_core::models::{ExecutionMode, PolyMarket, TradeSource};
 use bot_core::state::Shared;
 use bot_core::tenant::{OrganizationId, RuntimeGeneration, RuntimeId};
 
@@ -269,6 +269,14 @@ pub trait TenantPolySink: Send + Sync {
         fill: &crate::backfill::BackfilledFill,
         organization: OrganizationId,
     ) -> BotResult<()>;
+
+    /// Persist the current tenant position projection after a fill updates
+    /// the existing Polymarket lifecycle state.
+    async fn record_position(
+        &self,
+        position: &bot_core::models::Position,
+        organization: OrganizationId,
+    ) -> BotResult<()>;
 }
 
 /// A no-op sink (module-crate tests; the server always attaches the
@@ -301,6 +309,83 @@ impl TenantPolySink for NullPolySink {
     ) -> BotResult<()> {
         Ok(())
     }
+
+    async fn record_position(
+        &self,
+        _position: &bot_core::models::Position,
+        _organization: OrganizationId,
+    ) -> BotResult<()> {
+        Ok(())
+    }
+}
+
+fn spawn_position_projection(
+    state: Shared,
+    organization: OrganizationId,
+    sink: Arc<dyn TenantPolySink>,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = state.events.subscribe();
+    tokio::spawn(async move {
+        // Reconcile the pre-existing in-memory book before consuming live
+        // updates; a lagged broadcast is repaired by the same full snapshot.
+        persist_polymarket_positions(&state, organization, &sink).await;
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    let position = match event.as_ref() {
+                        bot_core::events::AppEvent::PositionUpdate { position, .. }
+                        | bot_core::events::AppEvent::PositionClosed { position, .. }
+                            if position.source == TradeSource::Polymarket =>
+                        {
+                            Some(position)
+                        }
+                        _ => None,
+                    };
+                    if let Some(position) = position {
+                        if let Err(error) = sink.record_position(position, organization).await {
+                            tracing::error!(position = %position.id, %error, "tenant Polymarket position projection failed");
+                            state
+                                .record_error(
+                                    bot_core::models::BotModule::Polymarket,
+                                    &format!("tenant position projection: {error}"),
+                                )
+                                .await;
+                            state
+                                .set_running(bot_core::models::BotModule::Polymarket, false, true)
+                                .await;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    persist_polymarket_positions(&state, organization, &sink).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+async fn persist_polymarket_positions(
+    state: &Shared,
+    organization: OrganizationId,
+    sink: &Arc<dyn TenantPolySink>,
+) {
+    for position in state.all_positions().await {
+        if position.source == TradeSource::Polymarket {
+            if let Err(error) = sink.record_position(&position, organization).await {
+                tracing::error!(position = %position.id, %error, "tenant Polymarket position projection failed during reconciliation");
+                state
+                    .record_error(
+                        bot_core::models::BotModule::Polymarket,
+                        &format!("tenant position projection: {error}"),
+                    )
+                    .await;
+                state
+                    .set_running(bot_core::models::BotModule::Polymarket, false, true)
+                    .await;
+            }
+        }
+    }
 }
 
 /// The tenant-scoped polymarket executor: a private engine bound to
@@ -310,6 +395,7 @@ pub struct TenantPolyExecutor {
     context: PolyTenantContext,
     state: Mutex<TenantPolyState>,
     sink: Arc<dyn TenantPolySink>,
+    position_pump: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TenantPolyExecutor {
@@ -338,12 +424,21 @@ impl TenantPolyExecutor {
             context,
             state: Mutex::new(tenant_state),
             sink: Arc::new(NullPolySink),
+            position_pump: None,
         })
     }
 
     /// Attach the tenant-scoped persistence sink.
     #[must_use]
     pub fn with_poly_sink(mut self, sink: Arc<dyn TenantPolySink>) -> Self {
+        if let Some(task) = self.position_pump.take() {
+            task.abort();
+        }
+        self.position_pump = Some(spawn_position_projection(
+            self.bot.state.clone(),
+            self.context.organization_id(),
+            Arc::clone(&sink),
+        ));
         self.sink = sink;
         self
     }
@@ -496,6 +591,17 @@ impl TenantPolyExecutor {
             .record_signal(signal, &outcome, self.context.organization_id())
             .await
         {
+            self.bot
+                .state
+                .record_error(
+                    bot_core::models::BotModule::Polymarket,
+                    &format!("tenant signal persistence: {e}"),
+                )
+                .await;
+            self.bot
+                .state
+                .set_running(bot_core::models::BotModule::Polymarket, false, true)
+                .await;
             return Err(PolyExecutorError::PersistFailed(e.to_string()));
         }
         if outcome.venue_order_id.is_some() {
@@ -506,10 +612,61 @@ impl TenantPolyExecutor {
                         .upsert_order(&tracked, self.context.organization_id())
                         .await
                     {
+                        self.bot
+                            .state
+                            .record_error(
+                                bot_core::models::BotModule::Polymarket,
+                                &format!("tenant order persistence: {e}"),
+                            )
+                            .await;
+                        self.bot
+                            .state
+                            .set_running(bot_core::models::BotModule::Polymarket, false, true)
+                            .await;
                         return Err(PolyExecutorError::PersistFailed(e.to_string()));
                     }
                     break;
                 }
+            }
+        }
+        // Persist the position AFTER its signal/order records. If this write
+        // fails after a venue fill, the durable order row still reserves
+        // capacity while the local module is stopped.
+        if let Some(position_id) = outcome.position_id.as_deref() {
+            if let Some(position) = self.bot.state.position(position_id).await {
+                if let Err(error) = self
+                    .sink
+                    .record_position(&position, self.context.organization_id())
+                    .await
+                {
+                    self.bot
+                        .state
+                        .record_error(
+                            bot_core::models::BotModule::Polymarket,
+                            &format!("tenant position persistence: {error}"),
+                        )
+                        .await;
+                    self.bot
+                        .state
+                        .set_running(bot_core::models::BotModule::Polymarket, false, true)
+                        .await;
+                    return Err(PolyExecutorError::PersistFailed(error.to_string()));
+                }
+            } else {
+                self.bot
+                    .state
+                    .record_error(
+                        bot_core::models::BotModule::Polymarket,
+                        "fill has no local position projection",
+                    )
+                    .await;
+                self.bot
+                    .state
+                    .set_running(bot_core::models::BotModule::Polymarket, false, true)
+                    .await;
+                return Err(PolyExecutorError::PersistFailed(
+                    "Polymarket fill has no local position projection".into(),
+                ));
             }
         }
         Ok(outcome)
@@ -593,6 +750,14 @@ impl TenantPolyExecutor {
     }
 }
 
+impl Drop for TenantPolyExecutor {
+    fn drop(&mut self) {
+        if let Some(task) = self.position_pump.take() {
+            task.abort();
+        }
+    }
+}
+
 /// Build the manual outcome for a tenant-deduplicated repeat.
 fn duplicate_outcome(signal: &OrderSignal) -> SignalOutcome {
     SignalOutcome {
@@ -606,5 +771,82 @@ fn duplicate_outcome(signal: &OrderSignal) -> SignalOutcome {
         approved_stake: None,
         size_tokens: None,
         total_ms: 0,
+    }
+}
+
+#[cfg(test)]
+mod position_projection_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    struct PositionSink {
+        count: AtomicUsize,
+        changed: Notify,
+    }
+
+    #[async_trait]
+    impl TenantPolySink for PositionSink {
+        async fn record_signal(
+            &self,
+            _: &OrderSignal,
+            _: &SignalOutcome,
+            _: OrganizationId,
+        ) -> BotResult<()> {
+            Ok(())
+        }
+
+        async fn upsert_order(&self, _: &TrackedOrder, _: OrganizationId) -> BotResult<()> {
+            Ok(())
+        }
+
+        async fn record_fill(
+            &self,
+            _: &crate::backfill::BackfilledFill,
+            _: OrganizationId,
+        ) -> BotResult<()> {
+            Ok(())
+        }
+
+        async fn record_position(
+            &self,
+            position: &bot_core::models::Position,
+            _: OrganizationId,
+        ) -> BotResult<()> {
+            if position.source == TradeSource::Polymarket {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                self.changed.notify_one();
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn position_update_events_are_projected_to_the_tenant_sink() {
+        let state = bot_core::state::AppState::new(bot_core::config::AppConfig::from_defaults());
+        let organization = OrganizationId::new();
+        let sink = Arc::new(PositionSink {
+            count: AtomicUsize::new(0),
+            changed: Notify::new(),
+        });
+        let task = spawn_position_projection(state.clone(), organization, sink.clone());
+        let position = bot_core::models::Position::new(
+            "poly-projection-test".into(),
+            TradeSource::Polymarket,
+            bot_core::models::Venue::PolymarketClob,
+            ExecutionMode::Paper,
+            "token-id".into(),
+            "YES".into(),
+            "USDC".into(),
+        );
+        state.upsert_position(position).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while sink.count.load(Ordering::SeqCst) == 0 {
+                sink.changed.notified().await;
+            }
+        })
+        .await
+        .expect("position update must reach the tenant sink");
+        task.abort();
     }
 }

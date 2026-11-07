@@ -25,8 +25,8 @@ use crate::event::LaunchEvent;
 
 use super::format::{decode_line, DatasetManifest, DatasetRecord, RecordedEvent};
 use super::policy::VerifierPolicy;
-use super::store::{DatasetStore, FsDatasetStore};
-use super::verifier::{verify_dir, VerificationOutcome, VerificationReport};
+use super::store::ChunkData;
+use super::verifier::{load_verified_dir, VerificationOutcome, VerificationReport};
 
 /// The replay source contract (see module docs for the adaptation note).
 pub trait ReplayEventSource {
@@ -83,11 +83,15 @@ impl RecordedReplaySource {
     /// Load `dataset_dir`, run the verifier (fresh, never trusting labels),
     /// decode all records and sort them by (slot, seq).
     pub fn open(dataset_dir: &Path, policy: &VerifierPolicy) -> BotResult<Self> {
-        let (manifest, report) = verify_dir(dataset_dir, policy)?;
-        let root = dataset_dir.parent().unwrap_or_else(|| Path::new("."));
-        let store = FsDatasetStore::new(root);
-        let chunks = store.open_chunks(&manifest.dataset_id)?;
+        let (manifest, chunks, report) = load_verified_dir(dataset_dir, policy)?;
+        Self::from_verified_snapshot(manifest, chunks, report)
+    }
 
+    fn from_verified_snapshot(
+        manifest: DatasetManifest,
+        chunks: Vec<ChunkData>,
+        report: VerificationReport,
+    ) -> BotResult<Self> {
         let mut records: Vec<DatasetRecord> = Vec::new();
         for chunk in &chunks {
             if chunk.missing {
@@ -179,5 +183,55 @@ impl ReplayEventSource for RecordedReplaySource {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::dataset::fixture_import::import_fixtures;
+    use crate::dataset::format::DatasetSource;
+    use crate::dataset::store::{DatasetStore, FsDatasetStore};
+    use crate::dataset::verifier::verify;
+
+    #[test]
+    fn replay_uses_the_verified_bytes_after_the_files_change() {
+        let root = std::env::temp_dir().join(format!(
+            "sniper-snapshot-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/replay");
+        let store = FsDatasetStore::new(&root);
+        let mut manifest = import_fixtures(&fixtures, &root).unwrap();
+        // Test-only label, not an attestation of real-world fixture provenance.
+        manifest.source = DatasetSource::Recorded;
+        store.write_manifest(&manifest).unwrap();
+        let policy = VerifierPolicy::default();
+        let (snapshot_manifest, chunks, report) =
+            load_verified_dir(&root.join(&manifest.dataset_id), &policy).unwrap();
+        assert!(report.authoritative);
+        let expected_records = report.record_count;
+
+        // A replacement after verification must not replace replay's bytes.
+        std::fs::write(
+            store.chunk_path(&manifest.dataset_id, 1),
+            b"unverified replacement\n",
+        )
+        .unwrap();
+        let source =
+            RecordedReplaySource::from_verified_snapshot(snapshot_manifest, chunks, report)
+                .unwrap();
+        let reread_report = verify(&store, &manifest.dataset_id, &policy).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(
+            !reread_report.hash_chain_ok,
+            "disk replacement control must be corrupt"
+        );
+        assert_eq!(source.launch_events().len() as u64, expected_records);
+        assert!(
+            source.authoritative_replay().unwrap().authoritative,
+            "the retained, verified ORIGINAL snapshot must remain usable"
+        );
     }
 }

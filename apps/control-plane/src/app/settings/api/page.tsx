@@ -21,15 +21,18 @@ export default function ApiKeysSettingsPage() {
   const [revokingPrefix, setRevokingPrefix] = useState<string | null>(null);
   const [newSecret, setNewSecret] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const loadKeys = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setLoadFailed(false);
     try {
       const response = await apiKeys.list();
       setKeys(response.keys ?? []);
     } catch (err: unknown) {
       setKeys([]);
+      setLoadFailed(true);
       setError(toDisplayError(err));
     } finally {
       setLoading(false);
@@ -126,9 +129,9 @@ export default function ApiKeysSettingsPage() {
       {error && (
         <div className="card" style={{ color: "var(--bad)", background: "var(--bad-glow)", marginBottom: "1.5rem" }}>
           <div>{error}</div>
-          {error.startsWith("http_401:") || error.startsWith("http_403:") ? (
+          {loadFailed ? (
             <button type="button" onClick={() => void loadKeys()} className="btn btn-secondary" style={{ marginTop: "0.75rem" }}>
-              Retry
+              Retry loading API keys
             </button>
           ) : null}
         </div>

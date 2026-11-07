@@ -122,6 +122,11 @@ pub struct PortfolioView {
     pub native: BTreeMap<String, NativeSlice>,
     /// Quote assets that carry open exposure but have no reference rate.
     pub missing_rates: Vec<String>,
+    /// Quote assets with non-zero realized PnL today that cannot be converted.
+    pub missing_daily_loss_rates: Vec<String>,
+    /// Quote assets with non-zero cumulative/peak realized PnL that cannot
+    /// be converted for the drawdown guard.
+    pub missing_drawdown_rates: Vec<String>,
 }
 
 impl PortfolioView {
@@ -133,6 +138,8 @@ impl PortfolioView {
             ..Default::default()
         };
         let mut missing: Vec<String> = Vec::new();
+        let mut missing_daily_loss: Vec<String> = Vec::new();
+        let mut missing_drawdown: Vec<String> = Vec::new();
         for p in book.positions() {
             let mark = input.marks.get(&p.key.asset).copied();
             let exposure = p.exposure(mark);
@@ -196,17 +203,23 @@ impl PortfolioView {
                 view.native.entry(quote.clone()).or_default().realized_today += net;
                 if let Some(rate) = input.rate(quote) {
                     view.realized_today_ref += net * rate;
+                } else if *net != 0.0 && !missing_daily_loss.contains(quote) {
+                    missing_daily_loss.push(quote.clone());
                 }
             }
         }
         for (quote, total) in &series.total {
             if let Some(rate) = input.rate(quote) {
                 view.cumulative_realized_ref += total * rate;
+            } else if *total != 0.0 && !missing_drawdown.contains(quote) {
+                missing_drawdown.push(quote.clone());
             }
         }
         for (quote, peak) in &series.peak {
             if let Some(rate) = input.rate(quote) {
                 view.peak_realized_ref += peak * rate;
+            } else if *peak != 0.0 && !missing_drawdown.contains(quote) {
+                missing_drawdown.push(quote.clone());
             }
         }
         // Open positions on quote assets without a rate still count.
@@ -219,6 +232,10 @@ impl PortfolioView {
         };
         missing.sort();
         view.missing_rates = missing;
+        missing_daily_loss.sort();
+        view.missing_daily_loss_rates = missing_daily_loss;
+        missing_drawdown.sort();
+        view.missing_drawdown_rates = missing_drawdown;
         view
     }
 
@@ -313,6 +330,23 @@ mod tests {
         assert!((v.by_asset["MINT"].unrealized_ref - 200.0).abs() < 1e-9);
         assert!((v.by_asset["MINT"].exposure_ref - 300.0).abs() < 1e-9);
         assert!((v.net_pnl_ref - (v.realized_ref + v.unrealized_ref - v.fees_ref)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn missing_rates_for_closed_position_pnl_are_reported() {
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        let series = RealizedSeries {
+            by_day: HashMap::from([((day.clone(), "SOL".to_string()), -0.6)]),
+            total: HashMap::from([("SOL".to_string(), -0.6)]),
+            peak: HashMap::from([("SOL".to_string(), 0.0)]),
+        };
+        let mut i = inputs();
+        i.rates.remove("SOL");
+        let view = PortfolioView::compute(&PositionBook::new(), &series, &i);
+        assert_eq!(view.missing_rates, Vec::<String>::new());
+        assert_eq!(view.missing_daily_loss_rates, vec!["SOL".to_string()]);
+        assert_eq!(view.missing_drawdown_rates, vec!["SOL".to_string()]);
+        assert_eq!(view.realized_today_ref, 0.0);
     }
 
     #[test]

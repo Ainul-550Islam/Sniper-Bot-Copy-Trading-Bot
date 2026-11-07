@@ -58,8 +58,12 @@ async fn pg() -> Option<Arc<Database>> {
         auto_migrate: true,
         ..Default::default()
     };
-    let db = Database::connect(&cfg, &url).await.ok()?;
-    let _ = db.migrate().await;
+    let db = Database::connect(&cfg, &url)
+        .await
+        .expect("configured PostgreSQL must connect");
+    db.migrate()
+        .await
+        .expect("custody test migrations must apply");
     Some(Arc::new(db))
 }
 
@@ -166,7 +170,7 @@ async fn org_owner(app: axum::Router, email: &str) -> (String, String) {
         "POST",
         "/api/saas/organizations",
         Some(&unscoped),
-        Some(json!({ "name": "Rotation Persistence Org" })),
+        Some(json!({ "name": "Rotation Persistence Org", "slug": format!("test-{}", uuid::Uuid::new_v4()) })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "create org: {body}");
@@ -383,4 +387,121 @@ async fn profile_creation_is_durable_in_postgres() {
     .await
     .expect("count profile rows");
     assert_eq!(count.0, 1, "exactly one durable row for this profile");
+}
+
+#[tokio::test]
+async fn another_user_cannot_claim_an_existing_organization_slug() {
+    let Some(db) = pg().await else {
+        not_run("organization slug ownership");
+        return;
+    };
+    let state = test_state(Some(db)).await;
+    let store = state.saas.clone();
+    let app = router(state);
+    let owner_email = format!("slug-owner-{}@example.test", uuid::Uuid::new_v4());
+    let (owner_token, organization) = org_owner(app.clone(), &owner_email).await;
+    let org_id = bot_core::tenant::OrganizationId::parse(&organization).unwrap();
+    let original = store.organization(org_id).await.unwrap().unwrap();
+    let attacker_email = format!("slug-other-{}@example.test", uuid::Uuid::new_v4());
+    let password = "Sup3r-Secret-Passphrase-42";
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/saas/users",
+        None,
+        Some(json!({"email": attacker_email, "password": password})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "register other user: {body}");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/saas/sessions",
+        None,
+        Some(json!({"email": attacker_email, "password": password})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "login other user: {body}");
+    let attacker_token = body.parse::<Value>().unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let attacker = store.user_by_email(&attacker_email).await.unwrap().unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/saas/organizations",
+        Some(&attacker_token),
+        Some(json!({"name": "Unrelated organization", "slug": original.slug})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "foreign slug must not grant ownership: {body}"
+    );
+    assert!(store
+        .membership(org_id, attacker.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store
+            .organization(org_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .created_by,
+        original.created_by
+    );
+
+    // Even a persisted job already pointing at the victim organization must
+    // be rejected before its membership step. This models a stale partial job.
+    let request_key =
+        bot_core::provisioning::ProvisioningJob::request_key_for(&attacker_email, &original.slug);
+    let mut stale = store
+        .job_by_request_key(&request_key)
+        .await
+        .unwrap()
+        .unwrap();
+    stale.organization_id = Some(org_id);
+    stale.complete_step(
+        bot_core::provisioning::ProvisioningStep::OrganizationCreated,
+        chrono::Utc::now(),
+    );
+    store.update_job(&stale).await.unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/saas/organizations",
+        Some(&attacker_token),
+        Some(json!({"name": "Stale foreign job", "slug": original.slug})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stale job must not grant ownership: {body}"
+    );
+    assert!(store
+        .membership(org_id, attacker.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    // Retrying the same creator's provisioning remains idempotent.
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/saas/organizations",
+        Some(&owner_token),
+        Some(json!({"name": original.name, "slug": original.slug})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "creator retry: {body}");
+    assert_eq!(
+        body.parse::<Value>().unwrap()["organization"]["id"],
+        organization
+    );
+    assert_eq!(store.members(org_id).await.unwrap().len(), 1);
 }

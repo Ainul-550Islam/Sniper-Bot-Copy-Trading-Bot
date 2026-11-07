@@ -107,6 +107,13 @@ describe("onboarding, support, referrals and entry pages", () => {
     expect(requests).toContain("GET /api/saas/referrals/codes");
   });
 
+  it("does not render a dead mailto link when support contact is unpublished", async () => {
+    stubApi("empty");
+    render(<ReferralsPage />);
+    expect(await screen.findByText(/Support contact not published/)).toBeTruthy();
+    expect(document.querySelector('a[href="mailto:null"]')).toBeNull();
+  });
+
   it("preserves the referral loading state and reports backend refusal", async () => {
     stubApi("pending");
     render(<ReferralsPage />);

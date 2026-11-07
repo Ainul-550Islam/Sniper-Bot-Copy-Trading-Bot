@@ -25,6 +25,7 @@ export type DisplayStatus = "healthy" | "degraded" | "blocked" | "unknown";
 
 export function mapToDisplay(services: Record<string, string>): DisplayStatus {
   const values = Object.values(services).map((v) => v.toLowerCase());
+  if (values.length === 0) return "unknown";
   if (values.some((v) => v.includes("blocked") || v.includes("mismatch"))) return "blocked";
   if (values.some((v) => v.includes("degraded") || v.includes("unreachable") || v.includes("not_configured"))) return "degraded";
   if (values.every((v) => v === "ok" || v === "healthy" || v === "ready")) return "healthy";

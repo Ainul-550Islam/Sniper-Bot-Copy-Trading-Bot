@@ -15,6 +15,7 @@ use bot_core::session::token::generate_token;
 use bot_core::tenant::MembershipId;
 
 use crate::api::ApiState;
+use crate::email::templates;
 use crate::saas::middleware::{authorize_request, deny_response};
 
 pub fn routes() -> Router<ApiState> {
@@ -173,6 +174,20 @@ pub async fn invite_member(
     let token = generate_token("inv");
     let invitation_id = uuid::Uuid::new_v4();
     let expires_at = Utc::now() + Duration::days(7);
+    let rendered = invitation_email(
+        &email,
+        &ctx.actor_label(),
+        &ctx.organization.name,
+        &token.plaintext,
+        role.as_str(),
+    );
+    let mut transaction = match db.pool().begin().await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, organization = %ctx.organization.id, "team invitation transaction could not start");
+            return storage_error("team invitation could not be persisted");
+        }
+    };
     let result = sqlx::query(
         "INSERT INTO invites (id, organization_id, email, role, token_hash, invited_by, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
@@ -183,10 +198,29 @@ pub async fn invite_member(
     .bind(&token.hash)
     .bind(ctx.authorization.user_id.map(|value| value.as_uuid()))
     .bind(expires_at)
-    .execute(db.pool())
+    .execute(&mut *transaction)
     .await;
     if let Err(error) = result {
         tracing::error!(error = %error, organization = %ctx.organization.id, "team invitation insert failed");
+        let _ = transaction.rollback().await;
+        return storage_error("team invitation could not be persisted");
+    }
+    if let Err(error) = enqueue_invitation(
+        &mut transaction,
+        invitation_id,
+        ctx.organization.id.as_uuid(),
+        &email,
+        &rendered,
+        &token.prefix,
+    )
+    .await
+    {
+        tracing::error!(error = %error, organization = %ctx.organization.id, invite = %invitation_id, "invitation mail could not be enqueued");
+        let _ = transaction.rollback().await;
+        return storage_error("invitation delivery could not be queued");
+    }
+    if let Err(error) = transaction.commit().await {
+        tracing::error!(error = %error, organization = %ctx.organization.id, invite = %invitation_id, "team invitation transaction could not commit");
         return storage_error("team invitation could not be persisted");
     }
     state
@@ -206,8 +240,7 @@ pub async fn invite_member(
             "email": email,
             "role": role.as_str(),
             "expires_at": expires_at.to_rfc3339(),
-            "invitation_token": token.plaintext,
-            "token_delivery": "returned_once; external email delivery is not configured",
+            "token_delivery": "queued_for_delivery",
         })),
     )
         .into_response()
@@ -306,21 +339,29 @@ pub async fn resend_invite(
     };
     let token = generate_token("inv");
     let expires_at = Utc::now() + Duration::days(7);
-    let result = sqlx::query(
+    let mut transaction = match db.pool().begin().await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, invite = %invite_id, "invite resend transaction could not start");
+            return storage_error("invitation could not be resent");
+        }
+    };
+    let row = sqlx::query(
         "UPDATE invites SET token_hash = $1, expires_at = $2, status = 'pending' WHERE id = $3 AND organization_id = $4 AND status IN ('pending', 'expired') RETURNING email, role",
     )
     .bind(&token.hash)
     .bind(expires_at)
     .bind(invite_id)
     .bind(ctx.organization.id.as_uuid())
-    .fetch_optional(db.pool())
+    .fetch_optional(&mut *transaction)
     .await;
-    match result {
+    match row {
         Ok(Some(row)) => {
             let email: String = match row.try_get("email") {
                 Ok(value) => value,
                 Err(error) => {
                     tracing::error!(error = %error, invite = %invite_id, "resent invite row could not be decoded");
+                    let _ = transaction.rollback().await;
                     return storage_error("resent invitation data is invalid");
                 }
             };
@@ -328,9 +369,35 @@ pub async fn resend_invite(
                 Ok(value) => value,
                 Err(error) => {
                     tracing::error!(error = %error, invite = %invite_id, "resent invite role could not be decoded");
+                    let _ = transaction.rollback().await;
                     return storage_error("resent invitation data is invalid");
                 }
             };
+            let rendered = invitation_email(
+                &email,
+                &ctx.actor_label(),
+                &ctx.organization.name,
+                &token.plaintext,
+                &role,
+            );
+            if let Err(error) = enqueue_invitation(
+                &mut transaction,
+                invite_id,
+                ctx.organization.id.as_uuid(),
+                &email,
+                &rendered,
+                &token.prefix,
+            )
+            .await
+            {
+                tracing::error!(error = %error, invite = %invite_id, "resent invitation mail could not be enqueued");
+                let _ = transaction.rollback().await;
+                return storage_error("invitation delivery could not be queued");
+            }
+            if let Err(error) = transaction.commit().await {
+                tracing::error!(error = %error, invite = %invite_id, "invite resend transaction could not commit");
+                return storage_error("invitation could not be resent");
+            }
             state
                 .audit
                 .success(
@@ -347,22 +414,67 @@ pub async fn resend_invite(
                     "email": email,
                     "role": role,
                     "expires_at": expires_at.to_rfc3339(),
-                    "invitation_token": token.plaintext,
-                    "token_delivery": "returned_once; external email delivery is not configured",
+                    "token_delivery": "queued_for_delivery",
                 })),
             )
                 .into_response()
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "invite_not_found" })),
-        )
-            .into_response(),
+        Ok(None) => {
+            let _ = transaction.rollback().await;
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "invite_not_found" })),
+            )
+                .into_response()
+        }
         Err(error) => {
+            let _ = transaction.rollback().await;
             tracing::error!(error = %error, organization = %ctx.organization.id, invite = %invite_id, "invite resend failed");
             storage_error("invitation could not be resent")
         }
     }
+}
+
+fn invitation_email(
+    email: &str,
+    inviter_name: &str,
+    organization_name: &str,
+    plaintext_token: &str,
+    role: &str,
+) -> templates::Rendered {
+    let base = std::env::var("PUBLIC_BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let link = format!("{base}/accept-invite?token={plaintext_token}");
+    templates::member_invite(email, inviter_name, organization_name, &link, role)
+}
+
+async fn enqueue_invitation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    invitation_id: uuid::Uuid,
+    organization_id: uuid::Uuid,
+    email: &str,
+    rendered: &templates::Rendered,
+    token_prefix: &str,
+) -> Result<(), sqlx::Error> {
+    let dedup_key = format!("member_invite:{invitation_id}:{token_prefix}");
+    sqlx::query(
+        "INSERT INTO email_outbox
+             (organization_id, recipient, template_key, subject, body_text, body_html, dedup_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(organization_id)
+    .bind(email)
+    .bind(rendered.template_key)
+    .bind(&rendered.subject)
+    .bind(&rendered.body_text)
+    .bind(&rendered.body_html)
+    .bind(dedup_key)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 pub async fn remove_member(

@@ -17,7 +17,7 @@
 //! A stage that receives this context never has to re-derive tenant
 //! identity; a stage that receives nothing CANNOT execute for a tenant.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::models::{BotModule, ExecutionMode};
 use crate::tenant::{
@@ -29,7 +29,7 @@ use super::execution_scope::{ExecutionScope, ScopeError};
 use super::execution_trace::ExecutionTrace;
 
 /// Everything a stage needs to execute as a tenant.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TenantExecutionContext {
     scope: ExecutionScope,
     authority: ExecutionAuthority,

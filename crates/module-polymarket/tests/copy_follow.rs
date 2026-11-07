@@ -46,15 +46,15 @@ fn config_with_copy(venue: &MockVenue) -> bot_core::config::Config {
 /// One leader BUY of the fixture market's YES outcome at 0.39.
 fn leader_buy(price: f64, size: f64, wallet: &str) -> Value {
     json!({
-        "proxyWallet": wallet,
+        "proxy_wallet": wallet,
         "side": "BUY",
-        "asset": YES,
-        "conditionId": CONDITION,
+        "token_id": YES,
+        "condition_id": CONDITION,
         "size": size,
         "price": price,
         "timestamp": 1_700_000_000i64,
         "outcome": "Yes",
-        "negRisk": false,
+        "neg_risk": false,
         "title": "Will market 0x1111 resolve Yes?"
     })
 }
@@ -274,7 +274,7 @@ async fn malformed_rows_are_counted_not_turned_into_orders() {
     let poly = poly_cfg(&state).await;
 
     venue.set_leader_trades(vec![
-        json!({"proxyWallet": LEADER, "side": "BUY"}), // missing everything else
+        json!({"proxy_wallet": LEADER, "side": "BUY"}), // missing everything else
         leader_buy(0.39, 20.0, LEADER),
     ]);
     let feed = CopyFeedClient::with_base_url(venue.data_url());

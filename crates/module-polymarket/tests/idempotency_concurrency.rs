@@ -46,7 +46,12 @@ async fn concurrent_identical_signals_produce_exactly_one_order() {
         .collect();
     let open: Vec<_> = outcomes
         .iter()
-        .filter(|o| o.reject_reason == Some(RejectReason::OrderAlreadyOpen))
+        .filter(|o| {
+            matches!(
+                o.reject_reason,
+                Some(RejectReason::OrderAlreadyOpen | RejectReason::AlreadyInMarket)
+            )
+        })
         .collect();
     assert_eq!(submitted.len(), 1, "{outcomes:?}");
     assert_eq!(

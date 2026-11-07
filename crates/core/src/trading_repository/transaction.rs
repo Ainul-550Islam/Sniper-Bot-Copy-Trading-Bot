@@ -47,8 +47,17 @@ impl<'a> TradingTransaction<'a> {
     /// Attach the write scope (actor/origin) the mutations in this
     /// transaction are attributed to. Must be set before the first
     /// mutation; returns the previous scope if one was already set.
-    pub fn for_write(&mut self, write: TenantWriteScope) -> Option<TenantWriteScope> {
-        self.write.replace(write)
+    ///
+    /// A scope for another organization is rejected before attribution is
+    /// changed. An error leaves the previous scope intact (or read-only).
+    pub fn for_write(
+        &mut self,
+        write: TenantWriteScope,
+    ) -> Result<Option<TenantWriteScope>, RepositoryError> {
+        if write.organization_id() != self.organization_id() {
+            return Err(RepositoryError::TenantMismatch);
+        }
+        Ok(self.write.replace(write))
     }
 
     /// The acting organization.

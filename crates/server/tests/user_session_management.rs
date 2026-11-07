@@ -137,6 +137,82 @@ async fn create_scoped_user(saas: Arc<SaasStore>, email: &str) -> (String, Strin
 }
 
 #[tokio::test]
+async fn api_keys_cannot_read_or_mutate_their_creators_profile() {
+    use bot_core::membership::MembershipRole;
+    use bot_core::tenant::{Organization, OrganizationId, User, UserId, UserStatus};
+    use chrono::Utc;
+    use sniper_suite::saas::api_keys::build_api_key;
+
+    let now = Utc::now();
+    let saas = Arc::new(SaasStore::new_in_memory_identity());
+    let creator = User {
+        id: UserId::new(),
+        email: "creator@example.test".into(),
+        email_verified: true,
+        display_name: "Creator".into(),
+        password_hash: "not-used-by-this-test".into(),
+        status: UserStatus::Active,
+        platform_admin: false,
+        created_at: now,
+        updated_at: now,
+        last_login_at: None,
+    };
+    let organization = Organization::new(
+        OrganizationId::new(),
+        format!("api-key-profile-{}", Uuid::new_v4().simple()),
+        "API key profile test",
+        Some(creator.id),
+        now,
+    );
+    saas.create_user(&creator).await.expect("create user");
+    saas.create_organization(&organization)
+        .await
+        .expect("create organization");
+    // Viewer grants TenantRead, which is enough for both handlers' ordinary
+    // authorization checks but must not turn a machine key into the human.
+    let key = build_api_key(
+        organization.id,
+        "profile test",
+        MembershipRole::Viewer,
+        vec![],
+        Some(creator.id),
+        None,
+        now,
+    );
+    saas.create_api_key(&key.key).await.expect("create key");
+
+    let (status, body) = request(
+        saas.clone(),
+        "GET",
+        "/api/saas/users/me",
+        None,
+        Some(&key.plaintext),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "profile read: {body}");
+    assert_eq!(body["error"], "user_session_required", "{body}");
+
+    let (status, body) = request(
+        saas.clone(),
+        "PATCH",
+        "/api/saas/users/me",
+        Some(serde_json::json!({ "display_name": "Changed by machine key" })),
+        Some(&key.plaintext),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "profile mutation: {body}");
+    assert_eq!(body["error"], "user_session_required", "{body}");
+    assert_eq!(
+        saas.user(creator.id)
+            .await
+            .expect("read creator")
+            .expect("creator remains")
+            .display_name,
+        "Creator"
+    );
+}
+
+#[tokio::test]
 async fn a_user_can_list_and_revoke_only_their_own_sessions_without_exposing_secrets() {
     let saas = Arc::new(SaasStore::new_in_memory_identity());
     let (org_a, token_a, session_a) =

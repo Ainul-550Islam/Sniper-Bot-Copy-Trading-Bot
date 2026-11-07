@@ -48,7 +48,7 @@ impl TenantJobScheduler {
 
         let handle = tokio::spawn(async move {
             let key = task_key;
-            let mut token = match current_fence(&runtime, &key).await {
+            let token = match current_fence(&runtime, &key).await {
                 Some(token) => token,
                 None => {
                     info!(job = ?key, "tenant job found no live runtime; exiting");
@@ -89,11 +89,10 @@ impl TenantJobScheduler {
                     }
                 }
 
-                // The runtime may have rotated between ticks: re-read it
-                // so the next tick verifies against the live record.
-                if let Some(fresh) = current_fence(&runtime, &key).await {
-                    token = fresh;
-                }
+                // Keep the ORIGINAL fence for the lifetime of this task.
+                // A rotation cannot authorize the old job/engine to act as
+                // its successor. The next tick re-verifies this same token
+                // and exits if rotation happened during the completed run.
             }
         });
 
@@ -186,6 +185,69 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
         let ticks = observed.ticks.load(Ordering::SeqCst);
         assert!(ticks >= 2, "expected several ticks, got {ticks}");
+    }
+
+    struct RotateDuringRun {
+        key: JobKey,
+        runtime: Arc<RuntimeRegistryService>,
+        ticks: AtomicU32,
+        rotated: tokio::sync::Notify,
+        repeated: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::jobs::TenantJob for RotateDuringRun {
+        fn key(&self) -> JobKey {
+            self.key.clone()
+        }
+        fn interval(&self) -> Duration {
+            Duration::from_millis(1)
+        }
+        async fn run(&self, _token: &FenceToken) -> bot_core::error::BotResult<()> {
+            if self.ticks.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Force rotation INSIDE an in-flight tick, after its original
+                // fence was verified but before the scheduler starts another.
+                self.runtime
+                    .rotate(self.key.organization_id, "successor", Utc::now())
+                    .await?;
+                self.rotated.notify_one();
+            } else {
+                self.repeated.notify_one();
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_old_job_must_not_adopt_a_rotated_runtime_after_its_tick() {
+        let runtime = Arc::new(RuntimeRegistryService::new(Arc::new(
+            MemoryRuntimeStore::new(),
+        )));
+        let org = OrganizationId::new();
+        runtime
+            .ensure_active(org, "original", Utc::now())
+            .await
+            .unwrap();
+        let scheduler = TenantJobScheduler::new(runtime.clone());
+        let job = Arc::new(RotateDuringRun {
+            key: JobKey::new(org, ModuleKind::Copy, "rotate-in-flight"),
+            runtime,
+            ticks: AtomicU32::new(0),
+            rotated: tokio::sync::Notify::new(),
+            repeated: tokio::sync::Notify::new(),
+        });
+        scheduler.spawn(job.clone()).await;
+        tokio::time::timeout(Duration::from_secs(5), job.rotated.notified())
+            .await
+            .expect("the original runtime must run and rotate on its first tick");
+        let repeated =
+            tokio::time::timeout(Duration::from_millis(200), job.repeated.notified()).await;
+        scheduler.stop_tenant(org).await;
+        assert!(
+            repeated.is_err(),
+            "the old job adopted its successor's fence and ran again"
+        );
+        assert_eq!(job.ticks.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

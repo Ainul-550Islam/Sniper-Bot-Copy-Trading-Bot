@@ -580,6 +580,19 @@ async fn list_profiles(State(state): State<ApiState>, headers: HeaderMap) -> Res
         .into_response()
 }
 
+/// A request-local snapshot cannot authorize overwriting a newer durable
+/// lifecycle state (in particular terminal revocation/rotation).
+fn activation_conflict() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "concurrent_custody_change",
+            "reason": "custody state changed before activation; reload and retry",
+        })),
+    )
+        .into_response()
+}
+
 async fn activate_profile(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -633,23 +646,19 @@ async fn activate_profile(
     // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
         let update = sqlx::query(
-            "UPDATE custody_profiles SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5",
+            "UPDATE custody_profiles SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5 AND status = $6",
         )
         .bind(profile.status.as_str())
         .bind(profile.updated_at)
         .bind(profile.activated_at)
         .bind(pid.as_uuid())
         .bind(ctx.organization.id.as_uuid())
+        .bind(&from_status)
         .execute(db.pool())
         .await;
         match update {
             Ok(result) if result.rows_affected() == 1 => {}
-            Ok(_) => {
-                return (
-                    axum::http::StatusCode::NOT_FOUND,
-                    Json(json!({"error":"not_found","reason":"custody profile disappeared before activation"})),
-                ).into_response();
-            }
+            Ok(_) => return activation_conflict(),
             Err(error) => {
                 warn!(%error, profile = %pid, "custody profile durable activation write failed");
                 return (
@@ -661,6 +670,11 @@ async fn activate_profile(
     }
     if state.db.is_none() {
         let mut map = profiles_store().lock().unwrap_or_else(|e| e.into_inner());
+        if !map.get(&pid).is_some_and(|current| {
+            current.organization_id == ctx.organization.id && current.status.as_str() == from_status
+        }) {
+            return activation_conflict();
+        }
         map.insert(pid, profile.clone());
     }
     if let Err(reason) = record_durable_custody_audit(
@@ -1111,23 +1125,19 @@ async fn activate_signer(
     // Durable status write (fail-closed: DB first).
     if let Some(db) = &state.db {
         let update = sqlx::query(
-            "UPDATE custody_signers SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5",
+            "UPDATE custody_signers SET status = $1, updated_at = $2, activated_at = $3 WHERE id = $4 AND organization_id = $5 AND status = $6",
         )
         .bind(signer.status.as_str())
         .bind(signer.updated_at)
         .bind(signer.activated_at)
         .bind(sid.as_uuid())
         .bind(ctx.organization.id.as_uuid())
+        .bind(&from_status)
         .execute(db.pool())
         .await;
         match update {
             Ok(result) if result.rows_affected() == 1 => {}
-            Ok(_) => {
-                return (
-                    axum::http::StatusCode::NOT_FOUND,
-                    Json(json!({"error":"not_found","reason":"custody signer disappeared before activation"})),
-                ).into_response();
-            }
+            Ok(_) => return activation_conflict(),
             Err(error) => {
                 warn!(%error, signer = %sid, "custody signer durable activation write failed");
                 return (
@@ -1139,6 +1149,11 @@ async fn activate_signer(
     }
     if state.db.is_none() {
         let mut map = signers_store().lock().unwrap_or_else(|e| e.into_inner());
+        if !map.get(&sid).is_some_and(|current| {
+            current.organization_id == ctx.organization.id && current.status.as_str() == from_status
+        }) {
+            return activation_conflict();
+        }
         map.insert(sid, signer.clone());
     }
     if let Err(reason) = record_durable_custody_audit(

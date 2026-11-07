@@ -9,7 +9,7 @@ import {
   deleteSsoConfig,
   getSsoConfig,
   putSsoConfig,
-  ssoAuthorizeUrl,
+  beginSsoLogin,
   type SsoConfig,
   type SsoProviderType,
 } from "@/lib/api/sso-api";
@@ -24,7 +24,7 @@ const PROVIDERS: Array<{ value: SsoProviderType; label: string }> = [
 /** Callback URL the IdP must be given. Derived from the page origin, never typed. */
 function defaultRedirectUri(): string {
   if (typeof window === "undefined") return "";
-  return `${window.location.origin}/api/saas/sso/callback`;
+  return `${window.location.origin}/sso/callback`;
 }
 
 export default function SsoSettingsPage() {
@@ -33,6 +33,7 @@ export default function SsoSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [startingLogin, setStartingLogin] = useState(false);
 
   const [providerType, setProviderType] = useState<SsoProviderType>("oidc");
   const [issuerUrl, setIssuerUrl] = useState("");
@@ -78,7 +79,7 @@ export default function SsoSettingsPage() {
         issuer_url: issuerUrl.trim(),
         client_id: clientId.trim(),
         ...(clientSecret ? { client_secret: clientSecret } : {}),
-        redirect_uri: config?.redirect_uri || defaultRedirectUri(),
+        redirect_uri: defaultRedirectUri(),
         allowed_domains: domains
           .split(",")
           .map((d) => d.trim().toLowerCase())
@@ -107,7 +108,24 @@ export default function SsoSettingsPage() {
     }
   }
 
-  const redirect = config?.redirect_uri || defaultRedirectUri();
+  async function testConnection() {
+    if (!config) return;
+    if (config.redirect_uri !== defaultRedirectUri()) {
+      setError("Save SSO settings first so the identity provider uses the browser callback URL shown above.");
+      return;
+    }
+    setStartingLogin(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await beginSsoLogin(config.organization_id);
+    } catch (err: unknown) {
+      setError(toDisplayError(err));
+      setStartingLogin(false);
+    }
+  }
+
+  const redirect = defaultRedirectUri();
 
   return (
     <AppShell title="Single sign-on">
@@ -127,7 +145,7 @@ export default function SsoSettingsPage() {
 
       {loading ? (
         <div className="card">Loading SSO settings…</div>
-      ) : (
+      ) : error ? null : (
         <form className="card" onSubmit={save} style={{ display: "grid", gap: "0.9rem", maxWidth: 640 }}>
           <label>
             Provider
@@ -182,9 +200,9 @@ export default function SsoSettingsPage() {
               {saving ? "Saving…" : config ? "Save changes" : "Enable SSO"}
             </button>
             {config ? (
-              <a className="btn btn-secondary" href={ssoAuthorizeUrl(config.organization_id)} target="_blank" rel="noopener noreferrer">
-                Test connection (opens IdP sign-in)
-              </a>
+              <button type="button" className="btn btn-secondary" onClick={() => void testConnection()} disabled={startingLogin || saving}>
+                {startingLogin ? "Opening identity provider…" : "Test connection (opens IdP sign-in)"}
+              </button>
             ) : null}
             {config ? (
               <button type="button" className="btn btn-secondary" onClick={() => void remove()} style={{ color: "var(--bad)" }}>

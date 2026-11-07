@@ -90,11 +90,12 @@ fn consent_for(org: &str, chat: i64, now: DateTime<Utc>) -> module_telegram::Con
     .expect("consent drafts")
 }
 
-fn spec(org: &str, chat: i64) -> PendingSpec {
+fn spec(org: &str, chat: i64, consent_id: Option<Uuid>) -> PendingSpec {
     PendingSpec {
         organization_id: org.to_string(),
         user_id: 111,
         chat_id: chat,
+        consent_id,
         action: TradeAction::Buy,
         mint: "So11111111111111111111111111111111111111112".to_string(),
         amount_lamports: Some(10_000_000),
@@ -236,11 +237,18 @@ async fn commands_round_trip_and_only_one_may_be_pending() {
     let org = fresh_org();
     let chat = fresh_chat();
 
-    let (first, nonce) = TradeCommand::open(spec(&org, chat), at(1_000));
+    let consent = consent_for(&org, chat, at(0));
+    store
+        .consents()
+        .insert(&consent)
+        .await
+        .expect("insert consent");
+    let (first, nonce) = TradeCommand::open(spec(&org, chat, Some(consent.consent_id)), at(1_000));
     commands.insert(&first).await.expect("insert pending");
     let loaded = commands.get(first.command_id).await.unwrap().expect("row");
     assert_eq!(loaded.status, CommandStatus::Pending);
     assert_eq!(loaded.mint, first.mint);
+    assert_eq!(loaded.consent_id, first.consent_id);
     assert_eq!(loaded.amount_lamports, Some(10_000_000));
     assert_eq!(loaded.slippage_bps, 100);
     assert_eq!(loaded.idempotency_key, first.command_id);
@@ -268,14 +276,14 @@ async fn commands_round_trip_and_only_one_may_be_pending() {
         .is_none());
 
     // One pending command per chat (partial unique index).
-    let (second, _) = TradeCommand::open(spec(&org, chat), at(1_001));
+    let (second, _) = TradeCommand::open(spec(&org, chat, None), at(1_001));
     match commands.insert(&second).await {
         Err(StoreError::Conflict(_)) => {}
         other => panic!("a second pending command must conflict, got {other:?}"),
     }
     // …but another chat of the same tenant is unaffected.
     let other_chat = chat + 1;
-    let (third, _) = TradeCommand::open(spec(&org, other_chat), at(1_001));
+    let (third, _) = TradeCommand::open(spec(&org, other_chat, None), at(1_001));
     commands.insert(&third).await.expect("other chat");
 
     assert_eq!(
@@ -351,11 +359,23 @@ async fn spent_and_count_only_see_this_chats_committed_buys() {
     let commands = store.commands();
     let org = fresh_org();
     let chat = fresh_chat();
+    let consent = consent_for(&org, chat, at(0));
+    store
+        .consents()
+        .insert(&consent)
+        .await
+        .expect("insert consent");
+    let sell_consent = consent_for(&org, chat + 1, at(0));
+    store
+        .consents()
+        .insert(&sell_consent)
+        .await
+        .expect("insert sell consent");
     // Everything this test writes is stamped from 1_000 onward.
     let since = at(0);
 
     // Pending does not consume the rolling cap; confirmed and executed do.
-    let (pending, _) = TradeCommand::open(spec(&org, chat), at(1_000));
+    let (pending, _) = TradeCommand::open(spec(&org, chat, Some(consent.consent_id)), at(1_000));
     commands.insert(&pending).await.expect("pending");
     assert_eq!(commands.spent_since(&org, chat, since).await.unwrap(), 0);
     assert_eq!(
@@ -383,7 +403,7 @@ async fn spent_and_count_only_see_this_chats_committed_buys() {
         10_000_000
     );
     // A sell never contributes lamports to the rolling spend.
-    let mut sell_spec = spec(&org, chat + 1);
+    let mut sell_spec = spec(&org, chat + 1, Some(sell_consent.consent_id));
     sell_spec.action = TradeAction::Sell;
     sell_spec.amount_lamports = None;
     sell_spec.percent_bps = Some(5_000);
@@ -443,7 +463,7 @@ async fn cancellation_and_expiry_stamp_every_pending_row() {
     // `expire_overdue` is deliberately GLOBAL (it is a sweeper), so this test
     // keeps its timestamps in the 0..1_000 band: a sweep at t < 1_000 can never
     // reach the rows another test in this binary created at t ≥ 1_000.
-    let (live, _) = TradeCommand::open(spec(&org, chat), at(0));
+    let (live, _) = TradeCommand::open(spec(&org, chat, None), at(0));
     commands.insert(&live).await.expect("insert live");
     let cancelled = commands.cancel_pending(&org, chat, at(10)).await.unwrap();
     assert_eq!(cancelled, vec![live.command_id]);
@@ -459,7 +479,7 @@ async fn cancellation_and_expiry_stamp_every_pending_row() {
         .is_empty());
 
     // Anything whose TTL has passed is swept to expired.
-    let (old, _) = TradeCommand::open(spec(&org, chat + 1), at(100));
+    let (old, _) = TradeCommand::open(spec(&org, chat + 1, None), at(100));
     commands.insert(&old).await.expect("insert old");
     let expires = old.expires_at;
     assert!(commands

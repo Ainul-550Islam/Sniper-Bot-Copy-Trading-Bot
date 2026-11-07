@@ -8,12 +8,13 @@
  * No synthetic demo data — each widget renders its own loading / empty / error state honestly.
  */
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import RuntimeCard from "@/components/trading/RuntimeCard";
 import PnlCard from "@/components/trading/PnlCard";
 import ModuleCards from "@/components/trading/ModuleCards";
+import { sessionStore } from "@/lib/auth";
 import {
   customerTrading,
   classifyTradingError,
@@ -28,25 +29,50 @@ export default function TradingDashboardPage() {
   const [orders, setOrders] = useState<OrdersPage | null>(null);
   const [positions, setPositions] = useState<PositionsPage | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setOrders(null);
+    setPositions(null);
+    setState({ kind: "loading" });
+  }), []);
 
   const loadData = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    setOrders(null);
+    setPositions(null);
     setState({ kind: "loading" });
     try {
       const [ord, pos] = await Promise.all([
         customerTrading.orders(),
         customerTrading.positions(),
       ]);
+      if (requestId !== requestVersion.current) return;
       setOrders(ord);
       setPositions(pos);
       setState({ kind: "ready" });
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) {
+        setOrders(null);
+        setPositions(null);
+        setState(classifyTradingError(e));
+      }
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadData());
-  }, [loadData]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void loadData();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [loadData, sessionVersion]);
 
   return (
     <AppShell>

@@ -7,11 +7,12 @@
  * dry-run / paper mode controls, risk gates, and fast strategy tuning.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import ModuleActionButton from "@/components/trading/ModuleActionButton";
 import SavedStrategiesPanel from "@/components/trading/SavedStrategiesPanel";
+import { sessionStore } from "@/lib/auth";
 import {
   classifyTradingError,
   customerTrading,
@@ -26,14 +27,28 @@ export default function SniperPage() {
   const [status, setStatus] = useState<ModuleStatusResponse | null>(null);
   const [config, setConfig] = useState<SniperConfig | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const requestVersion = useRef(0);
+
+  useEffect(() => sessionStore.subscribe(() => {
+    requestVersion.current += 1;
+    setSessionVersion((version) => version + 1);
+    setStatus(null);
+    setConfig(null);
+    setState({ kind: "loading" });
+  }), []);
 
   const loadData = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    setStatus(null);
+    setConfig(null);
     setState({ kind: "loading" });
     try {
       const [st, cfg] = await Promise.all([
         customerTrading.sniperStatus(),
         customerTrading.sniperConfig(),
       ]);
+      if (requestId !== requestVersion.current) return;
       setStatus(st);
       setConfig(cfg);
       if (st.effective_state === "disabled") {
@@ -50,13 +65,24 @@ export default function SniperPage() {
         setState({ kind: "ready" });
       }
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) {
+        setStatus(null);
+        setConfig(null);
+        setState(classifyTradingError(e));
+      }
     }
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => loadData());
-  }, [loadData]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void loadData();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
+  }, [loadData, sessionVersion]);
 
   return (
     <AppShell>

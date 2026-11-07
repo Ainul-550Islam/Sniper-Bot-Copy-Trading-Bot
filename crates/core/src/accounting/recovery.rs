@@ -15,7 +15,8 @@
 //! | `duplicate_skipped` | a journaled event id was already present |
 //! | `pending_flushed` | an event parked before the restart reached the journal |
 //! | `gap_reported` | an open module position has no ledger history |
-//! | `journal_unavailable` | the journal could not be read — the ledger starts empty and reconciliation will flag every position |
+//! | `journal_unavailable` | the journal could not be read — aggregate risk stays unready |
+//! | `invalid_journal_event` | a journal row failed validation/replay — aggregate risk stays unready |
 
 use serde::Serialize;
 
@@ -38,16 +39,19 @@ pub enum AccountingRecoveryAction {
     GapReported,
     /// Journal unreadable.
     JournalUnavailable,
+    /// Journal event failed validation or could not be replayed consistently.
+    InvalidJournalEvent,
 }
 
 impl AccountingRecoveryAction {
     /// Every action, stable order.
-    pub const ALL: [AccountingRecoveryAction; 5] = [
+    pub const ALL: [AccountingRecoveryAction; 6] = [
         AccountingRecoveryAction::Rebuilt,
         AccountingRecoveryAction::DuplicateSkipped,
         AccountingRecoveryAction::PendingFlushed,
         AccountingRecoveryAction::GapReported,
         AccountingRecoveryAction::JournalUnavailable,
+        AccountingRecoveryAction::InvalidJournalEvent,
     ];
 
     /// Stable label.
@@ -58,6 +62,7 @@ impl AccountingRecoveryAction {
             AccountingRecoveryAction::PendingFlushed => "pending_flushed",
             AccountingRecoveryAction::GapReported => "gap_reported",
             AccountingRecoveryAction::JournalUnavailable => "journal_unavailable",
+            AccountingRecoveryAction::InvalidJournalEvent => "invalid_journal_event",
         }
     }
 }
@@ -71,6 +76,8 @@ pub struct AccountingRecoveryReport {
     pub rebuilt: usize,
     /// Journaled ids that were already present.
     pub duplicates_skipped: usize,
+    /// Journal rows that failed validation or replay.
+    pub invalid_events: usize,
     /// Pending events flushed.
     pub pending_flushed: usize,
     /// Open aggregated positions after the rebuild.
@@ -83,10 +90,11 @@ impl AccountingRecoveryReport {
     /// Single-line summary for logs / audit.
     pub fn summary(&self) -> String {
         format!(
-            "journal_available={} rebuilt={} duplicates_skipped={} pending_flushed={} open_positions={} gaps={}",
+            "journal_available={} rebuilt={} duplicates_skipped={} invalid_events={} pending_flushed={} open_positions={} gaps={}",
             self.journal_available,
             self.rebuilt,
             self.duplicates_skipped,
+            self.invalid_events,
             self.pending_flushed,
             self.open_positions,
             self.gaps.len()
@@ -104,13 +112,18 @@ impl GlobalLedger {
         match store.load_events().await {
             Some(events) => {
                 report.journal_available = true;
-                let (applied, dup) = self.hydrate(events).await;
+                let (applied, dup, invalid) = self.hydrate(events).await;
                 report.rebuilt = applied;
                 report.duplicates_skipped = dup;
+                report.invalid_events = invalid;
                 metrics::count_recovery_action(AccountingRecoveryAction::Rebuilt.as_str(), applied);
                 metrics::count_recovery_action(
                     AccountingRecoveryAction::DuplicateSkipped.as_str(),
                     dup,
+                );
+                metrics::count_recovery_action(
+                    AccountingRecoveryAction::InvalidJournalEvent.as_str(),
+                    invalid,
                 );
             }
             None => {

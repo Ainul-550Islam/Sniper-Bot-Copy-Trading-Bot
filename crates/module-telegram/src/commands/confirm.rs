@@ -168,6 +168,51 @@ impl TradeConsole {
                 .await;
             return reply::confirm_in_flight(row.action);
         }
+        // Bind each command to the exact consent that authorized it. Checking
+        // only for *some* current consent would allow a revoked or replaced
+        // consent to authorize an old pending command.
+        let consent_denial = match self.consent_store.active(&org, chat_id, now).await {
+            Err(err) => Some(("consent_store_unavailable", err.detail().to_owned())),
+            Ok(current) => {
+                match crate::consent::policy::require_active(current.as_ref(), row.action, now) {
+                    Err(err) => Some((
+                        err.code(),
+                        "active Telegram trading consent is required".into(),
+                    )),
+                    Ok(consent) if row.consent_id != Some(consent.consent_id) => Some((
+                        "consent_changed",
+                        "the consent authorizing this command is no longer active".into(),
+                    )),
+                    Ok(_) => None,
+                }
+            }
+        };
+        if let Some((code, explanation)) = consent_denial {
+            let terminal = match row.status {
+                CommandStatus::Pending => CommandStatus::Cancelled,
+                CommandStatus::Confirmed => CommandStatus::Failed,
+                _ => row.status,
+            };
+            let _ = self
+                .command_store
+                .transition(row.command_id, row.status, terminal, now, Some(code))
+                .await;
+            let _ = self
+                .audit(
+                    Some(row.command_id),
+                    Some(&org),
+                    chat_id,
+                    AuditEvent::Denied,
+                    AuditDetail::new()
+                        .reason(code)
+                        .status(row.status.as_str())
+                        .action(row.action),
+                    now,
+                )
+                .await;
+            return reply::denied(code, &explanation);
+        }
+
         let already_confirmed = row.status == CommandStatus::Confirmed;
         if !already_confirmed {
             match pending::transition_confirm(&row, now) {

@@ -8,7 +8,7 @@
  */
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import {
   classifyTradingError,
@@ -19,26 +19,74 @@ import {
   type TradingSurfaceState,
 } from "@/lib/customer-trading-api";
 
+function toUtcIso(value: string): string | null {
+  if (!value) return null;
+  const date = new Date(`${value}:00Z`);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
 export default function ExecutionsPage() {
-  const [since, setSince] = useState<string>(() => new Date(Date.now() - 24 * 3600 * 1000).toISOString());
-  const [until, setUntil] = useState<string>(() => new Date().toISOString());
+  const [windowInput, setWindowInput] = useState(() => {
+    const until = new Date();
+    const since = new Date(until.getTime() - 24 * 3600 * 1000);
+    return { since: since.toISOString().slice(0, 16), until: until.toISOString().slice(0, 16) };
+  });
+  const [queryWindow, setQueryWindow] = useState(windowInput);
   const [page, setPage] = useState<ExecutionsPage | null>(null);
   const [state, setState] = useState<TradingSurfaceState>({ kind: "loading" });
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++requestVersion.current;
+    const from = toUtcIso(queryWindow.since);
+    const to = toUtcIso(queryWindow.until);
+    if (!from || !to || from > to) {
+      setPage(null);
+      setValidationError("Enter a valid UTC time window with Since no later than Until.");
+      setState({ kind: "empty" });
+      return;
+    }
+    setValidationError(null);
+    setPage(null);
     setState({ kind: "loading" });
     try {
-      const response = await customerTrading.executionsWindow(since, until);
+      const response = await customerTrading.executionsWindow(from, to);
+      if (requestId !== requestVersion.current) return;
       setPage(response);
       setState({ kind: response.items.length === 0 ? "empty" : "ready" });
     } catch (e) {
-      setState(classifyTradingError(e));
+      if (requestId === requestVersion.current) {
+        setPage(null);
+        setState(classifyTradingError(e));
+      }
     }
-  }, [since, until]);
+  }, [queryWindow]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
+
+  function queryExecutions() {
+    const from = toUtcIso(windowInput.since);
+    const to = toUtcIso(windowInput.until);
+    if (!from || !to || from > to) {
+      requestVersion.current += 1;
+      setPage(null);
+      setValidationError("Enter a valid UTC time window with Since no later than Until.");
+      setState({ kind: "empty" });
+      return;
+    }
+    setValidationError(null);
+    setQueryWindow({ ...windowInput });
+  }
 
   return (
     <AppShell>
@@ -61,8 +109,8 @@ export default function ExecutionsPage() {
               <input
                 id="since"
                 type="datetime-local"
-                value={since.slice(0, 16)}
-                onChange={(e) => setSince(new Date(e.target.value).toISOString())}
+                value={windowInput.since}
+                onChange={(e) => setWindowInput((value) => ({ ...value, since: e.target.value }))}
               />
             </div>
             <div className="form-group">
@@ -70,12 +118,12 @@ export default function ExecutionsPage() {
               <input
                 id="until"
                 type="datetime-local"
-                value={until.slice(0, 16)}
-                onChange={(e) => setUntil(new Date(e.target.value).toISOString())}
+                value={windowInput.until}
+                onChange={(e) => setWindowInput((value) => ({ ...value, until: e.target.value }))}
               />
             </div>
             <div className="form-group" style={{ justifyContent: "flex-end" }}>
-              <button className="primary" onClick={() => void load()}>
+              <button className="primary" onClick={queryExecutions}>
                 Query Executions
               </button>
             </div>
@@ -96,7 +144,8 @@ export default function ExecutionsPage() {
               )}
             </div>
           )}
-          {state.kind === "empty" && <p className="muted">No executions recorded in this window.</p>}
+          {validationError && <p className="notice warn" role="alert">{validationError}</p>}
+          {state.kind === "empty" && !validationError && <p className="muted">No executions recorded in this window.</p>}
           {state.kind === "ready" && page && (
             <div style={{ marginTop: "1rem", overflowX: "auto" }}>
               <table>
@@ -110,6 +159,7 @@ export default function ExecutionsPage() {
                     <th>Price</th>
                     <th>Solana Tx Signature</th>
                     <th>Error Detail</th>
+                    <th>Details</th>
                   </tr>
                 </thead>
                 <tbody>

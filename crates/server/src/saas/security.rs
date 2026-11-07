@@ -813,7 +813,7 @@ async fn promote_verified_enrollment_session(
     };
     let session_id = bot_core::session::SessionId::parse(session_id)
         .ok_or_else(|| "MFA enrollment session id is invalid".to_string())?;
-    let mut session = state
+    let session = state
         .saas
         .session(session_id)
         .await
@@ -849,14 +849,18 @@ async fn promote_verified_enrollment_session(
     {
         return Ok(false);
     }
-    session.mfa_policy_updated_at = policy_version;
-    session.mfa_enrollment_only = false;
-    state
+    let promoted = state
         .saas
-        .update_session(&session)
+        .set_session_mfa_state(
+            session.id,
+            &session.token_hash,
+            policy_version,
+            false,
+            chrono::Utc::now(),
+        )
         .await
         .map_err(|error| format!("MFA enrollment session could not be promoted: {error}"))?;
-    Ok(true)
+    Ok(promoted)
 }
 
 pub async fn verify_totp(

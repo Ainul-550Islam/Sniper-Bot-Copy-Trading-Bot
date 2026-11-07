@@ -64,7 +64,7 @@ pub fn spawn_heartbeat_loop(
         loop {
             ticker.tick().await;
             // Fence first: a rotated runtime must not "revive" itself.
-            match super::fencing::verify(&store, &token).await {
+            match super::fencing::verify_with_policy(&store, &token, &policy).await {
                 Ok(verdict) if verdict.is_current() => {}
                 Ok(verdict) => {
                     info!(
@@ -148,6 +148,45 @@ mod tests {
             .await
             .unwrap();
         assert!(!record(&store, rec.runtime_id, later).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_loop_must_not_revive_a_runtime_stale_under_its_policy() {
+        let store: Arc<dyn RuntimeStore> = Arc::new(MemoryRuntimeStore::new());
+        let record = super::super::model::TenantRuntimeRecord::new_active(
+            OrganizationId::new(),
+            RuntimeId::new(),
+            RuntimeGeneration::first(),
+            "tight-policy",
+            Utc::now() - Duration::seconds(5),
+        );
+        store.insert(&record).await.unwrap();
+        let policy = LeasePolicy {
+            heartbeat_interval: Duration::seconds(1),
+            stale_after: Duration::seconds(1),
+            ..LeasePolicy::default()
+        };
+        let mut handle = spawn_heartbeat_loop(store.clone(), record.fence_token(), policy);
+        let outcome = tokio::time::timeout(StdDuration::from_millis(2500), &mut handle).await;
+        let exited_cleanly = matches!(outcome, Ok(Ok(())));
+        if !handle.is_finished() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        assert!(
+            exited_cleanly,
+            "a policy-stale runtime must stop, not renew its own heartbeat"
+        );
+        assert_eq!(
+            store
+                .get(record.runtime_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .heartbeat_at,
+            record.heartbeat_at,
+            "the stale runtime must never be revived by a heartbeat write"
+        );
     }
 
     #[tokio::test]

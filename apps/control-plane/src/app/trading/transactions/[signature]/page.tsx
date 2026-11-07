@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { ErrorState } from "@/components/common/ErrorState";
@@ -14,32 +14,50 @@ export default function TransactionDetailPage() {
   const [transaction, setTransaction] = useState<TransactionDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
-    if (!signature) return;
+    const requestId = ++requestVersion.current;
+    if (!signature) {
+      setTransaction(null);
+      setError("Transaction signature is missing.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    setTransaction(null);
     try {
       const next = await tradingDetailApi.transaction(signature);
+      if (requestId !== requestVersion.current) return;
       // A body without a signature is not a transaction record; surface honestly.
-      if (next && typeof next.signature === "string") {
+      if (next && typeof next.signature === "string" && next.signature.length > 0) {
         setTransaction(next);
       } else {
         setError(`The server returned no transaction record for ${signature}.`);
       }
     } catch (err: unknown) {
+      if (requestId !== requestVersion.current) return;
+      setTransaction(null);
       if (err instanceof ApiError && err.status === 404) {
         setError(`Transaction ${signature.slice(0, 14)}… not found`);
       } else {
         setError(toDisplayError(err));
       }
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [signature]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

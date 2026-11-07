@@ -124,6 +124,9 @@ pub struct TradeCommand {
     pub user_id: i64,
     /// Telegram chat that requested it (only this chat may confirm).
     pub chat_id: i64,
+    /// Consent that authorized the request. `None` is retained for legacy rows
+    /// and must fail closed at confirmation.
+    pub consent_id: Option<Uuid>,
     /// Buy or sell.
     pub action: TradeAction,
     /// Base58 mint, frozen at request time.
@@ -159,6 +162,8 @@ pub struct PendingSpec {
     pub user_id: i64,
     /// Requesting Telegram chat.
     pub chat_id: i64,
+    /// Exact consent row that authorized this request.
+    pub consent_id: Option<Uuid>,
     /// Buy or sell.
     pub action: TradeAction,
     /// Validated mint.
@@ -182,6 +187,7 @@ impl TradeCommand {
             organization_id: spec.organization_id,
             user_id: spec.user_id,
             chat_id: spec.chat_id,
+            consent_id: spec.consent_id,
             action: spec.action,
             mint: spec.mint,
             amount_lamports: spec.amount_lamports,
@@ -760,6 +766,7 @@ mod tests {
             organization_id: "org-1".into(),
             user_id: 42,
             chat_id: 100,
+            consent_id: None,
             action,
             mint: "So11111111111111111111111111111111111111112".into(),
             amount_lamports: amount,

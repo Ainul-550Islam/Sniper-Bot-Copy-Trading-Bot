@@ -491,10 +491,6 @@ pub async fn open(cfg: &DatabaseConfig) -> BotResult<Option<Database>> {
             "database.enabled requires database.rls_enabled=true; legacy unscoped pools are not allowed at runtime",
         ));
     }
-    required_database_url(&cfg.system_url_env)?;
-    if cfg.auto_migrate {
-        required_database_url(&cfg.migration_url_env)?;
-    }
     let Some(url) = resolve_url(cfg) else {
         let msg = format!("database enabled but env var {} is not set", cfg.url_env);
         if cfg.required {
@@ -512,5 +508,24 @@ pub async fn open(cfg: &DatabaseConfig) -> BotResult<Option<Database>> {
             warn!(error = %error, "database unavailable — continuing without it");
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn optional_database_without_primary_url_degrades_before_auxiliary_urls() {
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let mut config = DatabaseConfig::default();
+        config.enabled = true;
+        config.rls_enabled = true;
+        config.required = false;
+        config.url_env = format!("SNIPER_TEST_DB_URL_{unique}");
+        config.system_url_env = format!("SNIPER_TEST_DB_SYSTEM_URL_{unique}");
+        config.migration_url_env = format!("SNIPER_TEST_DB_MIGRATION_URL_{unique}");
+
+        assert!(open(&config).await.unwrap().is_none());
     }
 }

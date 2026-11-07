@@ -1,10 +1,9 @@
 //! Tenant PnL reporting (PROMPT 3/10 §I57).
 //!
-//! Realized PnL mirrors the risk oracle's shape
-//! (`SUM(realized_quote - cost_basis)` over closed positions, day
-//! window by default) but is computed for the acting tenant IN SQL.
-//! The legacy deployment-org path stays in the risk oracle; the data
-//! plane serves this tenant-scoped twin.
+//! Realized PnL uses persisted cumulative exit PnL over closed positions.
+//! Legacy rows without a trustworthy partial-exit allocation and closed
+//! lifecycles spanning the report window's start fail closed instead of
+//! being reconstructed from remaining cost basis or misattributed by close date.
 
 use std::sync::Arc;
 
@@ -28,9 +27,8 @@ impl TenantPnlReport {
     }
 
     /// Realized PnL of the acting tenant over `[since, until)`:
-    /// positions closed in the window contribute
-    /// `realized_quote - cost_basis`; closed-position count and trade
-    /// fees come along.
+    /// positions closed in the window contribute their persisted cumulative
+    /// `realized_pnl_quote`; unknown legacy rows return a storage error.
     pub async fn realized_between(
         &self,
         scope: &TradingQueryScope,
@@ -43,8 +41,11 @@ impl TenantPnlReport {
                 "tenant_report_realized_pnl",
                 sqlx::query(
                     r#"SELECT
-                           COALESCE(SUM(p.realized_quote - p.cost_basis), 0)::double precision
-                               AS realized_net,
+                           CASE WHEN COUNT(*) FILTER (
+                                    WHERE p.realized_pnl_quote IS NULL OR p.opened_at < $2
+                                ) > 0 THEN NULL::double precision
+                                ELSE COALESCE(SUM(p.realized_pnl_quote), 0)::double precision
+                           END AS realized_net,
                            COUNT(*)::bigint AS positions_closed,
                            (SELECT COALESCE(SUM(t.fee), 0)::double precision
                               FROM trades t
@@ -63,7 +64,13 @@ impl TenantPnlReport {
             .await?;
         Ok(TenantRealizedPnl {
             organization_id: scope.organization_id(),
-            realized_net: row.try_get("realized_net").unwrap_or(0.0),
+            realized_net: row
+                .try_get::<Option<f64>, _>("realized_net")
+                .ok()
+                .flatten()
+                .ok_or_else(|| {
+                    RepositoryError::Storage("realized PnL projection is unknown".into())
+                })?,
             positions_closed: row.try_get("positions_closed").unwrap_or(0),
             fees_paid: row.try_get("fees_paid").unwrap_or(0.0),
         })
@@ -93,6 +100,26 @@ impl TenantPnlReport {
         until: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<TenantSymbolPnl>, RepositoryError> {
+        let unknown = self
+            .db
+            .timed(
+                "tenant_report_pnl_projection_check",
+                sqlx::query(
+                    "SELECT EXISTS (SELECT 1 FROM positions p
+                     WHERE p.organization_id = $1 AND p.closed_at >= $2 AND p.closed_at < $3
+                       AND (p.realized_pnl_quote IS NULL OR p.opened_at < $2)) AS unknown",
+                )
+                .bind(scope.organization_id().as_uuid())
+                .bind(since)
+                .bind(until)
+                .fetch_one(self.db.pool()),
+            )
+            .await?;
+        if unknown.try_get::<bool, _>("unknown").unwrap_or(true) {
+            return Err(RepositoryError::Storage(
+                "realized PnL projection is unknown".into(),
+            ));
+        }
         let rows = self
             .db
             .timed(
@@ -100,13 +127,13 @@ impl TenantPnlReport {
                 sqlx::query(
                     r#"SELECT p.organization_id, p.symbol,
                               COUNT(*)::bigint AS closed_trades,
-                              COALESCE(SUM(p.realized_quote - p.cost_basis), 0)::double precision
-                                  AS realized_quote,
+                              SUM(p.realized_pnl_quote)::double precision AS realized_quote,
                               0::double precision AS fees
                          FROM positions p
                         WHERE p.organization_id = $1
                           AND p.closed_at IS NOT NULL
                           AND p.closed_at >= $2 AND p.closed_at < $3
+                          AND p.realized_pnl_quote IS NOT NULL
                         GROUP BY p.organization_id, p.symbol
                         ORDER BY realized_quote DESC, symbol ASC
                         LIMIT $4"#,

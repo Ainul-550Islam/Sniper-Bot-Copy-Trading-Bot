@@ -199,7 +199,7 @@ pub async fn authenticate_saas_ws(
             Err(d) => {
                 return Err((
                     StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": d.kind.as_str(), "reason": d.reason})),
+                    Json(json!({"error": d.kind().as_str(), "reason": d.reason()})),
                 )
                     .into_response());
             }
@@ -249,7 +249,7 @@ pub async fn authenticate_saas_ws(
             Err(d) => {
                 return Err((
                     StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": d.kind.as_str(), "reason": d.reason})),
+                    Json(json!({"error": d.kind().as_str(), "reason": d.reason()})),
                 )
                     .into_response());
             }

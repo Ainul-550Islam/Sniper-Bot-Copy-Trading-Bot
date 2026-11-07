@@ -24,6 +24,10 @@ pub struct TenantPosition {
     pub avg_entry: f64,
     pub cost_basis: f64,
     pub realized_quote: f64,
+    /// Cumulative realized PnL. NULL denotes legacy/incomplete projection.
+    #[serde(default)]
+    pub realized_pnl_quote: Option<f64>,
+    pub realized_at: Option<DateTime<Utc>>,
     pub last_mark: f64,
     pub stop_loss: Option<f64>,
     pub take_profit: Option<f64>,
@@ -122,6 +126,8 @@ pub(super) fn position_from_row(row: &PgRow) -> TenantPosition {
         avg_entry: row.try_get("avg_entry").unwrap_or_default(),
         cost_basis: row.try_get("cost_basis").unwrap_or_default(),
         realized_quote: row.try_get("realized_quote").unwrap_or_default(),
+        realized_pnl_quote: row.try_get("realized_pnl_quote").ok().flatten(),
+        realized_at: row.try_get("realized_at").ok().flatten(),
         last_mark: row.try_get("last_mark").unwrap_or_default(),
         stop_loss: row.try_get("stop_loss").ok().flatten(),
         take_profit: row.try_get("take_profit").ok().flatten(),

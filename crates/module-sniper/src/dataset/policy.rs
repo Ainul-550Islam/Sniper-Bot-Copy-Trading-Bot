@@ -121,10 +121,12 @@ impl RecorderConfig {
                 "DATASET_CHUNK_MAX_BYTES must be >= 1".into(),
             ));
         }
-        if self.channel_capacity == 0 {
-            return Err(BotError::InvalidArgument(
-                "DATASET_CHANNEL_CAPACITY must be >= 1".into(),
-            ));
+        if self.channel_capacity == 0 || self.channel_capacity > tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return Err(BotError::InvalidArgument(format!(
+                "DATASET_CHANNEL_CAPACITY must be between 1 and {}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            )));
         }
         Ok(())
     }
@@ -161,7 +163,10 @@ where
             .trim()
             .parse::<T>()
             .map_err(|_| BotError::InvalidArgument(format!("{name} is not a valid value: {v:?}"))),
-        _ => Ok(default),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(BotError::InvalidArgument(format!(
+            "{name} must be valid UTF-8"
+        ))),
     }
 }
 

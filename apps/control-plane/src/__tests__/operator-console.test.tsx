@@ -92,6 +92,14 @@ describe("operator console components", () => {
   });
 
   describe("ModeSwitcher typed confirmation", () => {
+    it("tracks an externally updated server mode", () => {
+      const view = render(<ModeSwitcher currentMode="paper" />);
+      expect((screen.getByRole("button", { name: "Paper Mode" }) as HTMLButtonElement).className).toContain("primary");
+      view.rerender(<ModeSwitcher currentMode="simulate" />);
+      expect((screen.getByRole("button", { name: "Simulate Mode" }) as HTMLButtonElement).className).toContain("primary");
+      expect((screen.getByRole("button", { name: "Paper Mode" }) as HTMLButtonElement).className).not.toContain("primary");
+    });
+
     it("requires typed confirm before switching to live mode", async () => {
       setModeMock.mockResolvedValue({ ok: true, mode: "live", live_allowed: true });
       render(<ModeSwitcher currentMode="paper" />);
@@ -163,6 +171,34 @@ describe("operator console components", () => {
       await settle(() => {
         expect(disableModuleMock).toHaveBeenCalledWith("sniper");
       });
+    });
+
+    it("serializes module mutations so concurrent actions cannot clear each other’s busy state", async () => {
+      let finishDisable!: (value: { ok: boolean; module: string; enabled: boolean }) => void;
+      disableModuleMock.mockReturnValue(new Promise((resolve) => { finishDisable = resolve; }));
+      const firstModule = {
+        module: "sniper",
+        enabled: true,
+        running: true,
+        healthy: true,
+        connected: true,
+        events_seen: 100,
+        signals_generated: 10,
+        orders_sent: 5,
+        orders_filled: 4,
+        orders_failed: 1,
+        orders_rejected_by_risk: 0,
+        realized_pnl: 12.5,
+        unrealized_pnl: 0,
+        consecutive_errors: 0,
+      };
+      render(<ModuleToggleTable modules={[firstModule, { ...firstModule, module: "copy" }]} onRefresh={() => {}} />);
+      fireEvent.click(screen.getAllByRole("button", { name: "Disable" })[0]!);
+      fireEvent.change(screen.getByLabelText(/Type DISABLE SNIPER to confirm/i), { target: { value: "DISABLE SNIPER" } });
+      fireEvent.click(screen.getByRole("button", { name: "Confirm disable" }));
+      await settle(() => expect(disableModuleMock).toHaveBeenCalledTimes(1));
+      expect(screen.getAllByRole("button", { name: "Disable" }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+      finishDisable({ ok: true, module: "sniper", enabled: false });
     });
   });
 

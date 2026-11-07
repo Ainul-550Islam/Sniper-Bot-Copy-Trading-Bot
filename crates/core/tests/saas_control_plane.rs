@@ -126,7 +126,7 @@ fn b_tenant_b_cannot_access_tenant_a_resources() {
     ] {
         let d = authorize(Some(&c), &request, Some(&ents));
         assert_eq!(
-            d.kind,
+            d.kind(),
             DecisionKind::DenyResource,
             "{} must be refused across tenants",
             request.permission
@@ -158,7 +158,7 @@ fn c_a_suspended_tenant_cannot_trade_or_control_resources() {
     ] {
         let d = authorize(Some(&c), &request, Some(&ents));
         assert_eq!(
-            d.kind,
+            d.kind(),
             DecisionKind::DenySuspended,
             "{} must be refused while suspended",
             request.permission
@@ -184,7 +184,7 @@ fn c_a_suspended_tenant_cannot_trade_or_control_resources() {
     let closed = org("closed", OrganizationStatus::Closed);
     let cc = ctx(&closed, &owner, MembershipRole::OrgOwner);
     assert_eq!(
-        authorize(Some(&cc), &AccessRequest::read(Permission::OrderRead), None).kind,
+        authorize(Some(&cc), &AccessRequest::read(Permission::OrderRead), None).kind(),
         DecisionKind::DenySuspended
     );
 }
@@ -208,7 +208,7 @@ fn d_a_role_without_the_permission_is_denied() {
                 assert!(d.is_allowed(), "{role} should hold {permission}: {d}");
             } else {
                 assert_eq!(
-                    d.kind,
+                    d.kind(),
                     DecisionKind::DenyPermission,
                     "{role} must not hold {permission}"
                 );
@@ -224,7 +224,7 @@ fn d_a_role_without_the_permission_is_denied() {
             &AccessRequest::manage(Permission::ApiKeyCreate),
             Some(&ents)
         )
-        .kind,
+        .kind(),
         DecisionKind::DenyPermission
     );
     let security = ctx(&a, &user("s@a.test"), MembershipRole::SecurityAdmin);
@@ -234,7 +234,7 @@ fn d_a_role_without_the_permission_is_denied() {
             &AccessRequest::trade(Permission::BotStart),
             Some(&ents)
         )
-        .kind,
+        .kind(),
         DecisionKind::DenyPermission,
         "a security admin must not be able to trade"
     );
@@ -288,7 +288,7 @@ fn d_a_role_without_the_permission_is_denied() {
             &AccessRequest::read(Permission::TenantRead),
             Some(&ents)
         )
-        .kind,
+        .kind(),
         DecisionKind::DenyPermission
     );
 }
@@ -378,7 +378,7 @@ fn e_an_api_key_created_before_a_restart_still_works_after_it() {
             &AccessRequest::read(Permission::BotRead).on_resource(other.id),
             None
         )
-        .kind,
+        .kind(),
         DecisionKind::DenyResource
     );
 }
@@ -572,7 +572,11 @@ fn j_two_organizations_with_identical_looking_resource_ids_cannot_cross_read() {
         &AccessRequest::read(Permission::OrderRead).on_resource(resource_in_a),
         None,
     );
-    assert_eq!(d.kind, DecisionKind::DenyResource, "{shared_resource_name}");
+    assert_eq!(
+        d.kind(),
+        DecisionKind::DenyResource,
+        "{shared_resource_name}"
+    );
 
     // And the reverse.
     let d = authorize(
@@ -580,7 +584,7 @@ fn j_two_organizations_with_identical_looking_resource_ids_cannot_cross_read() {
         &AccessRequest::read(Permission::OrderRead).on_resource(resource_in_b),
         None,
     );
-    assert_eq!(d.kind, DecisionKind::DenyResource);
+    assert_eq!(d.kind(), DecisionKind::DenyResource);
 
     // A platform admin (role AND user flag) may cross, and that is the only
     // way anyone can.
@@ -712,7 +716,7 @@ fn plan_entitlements_gate_features_and_limits() {
             &AccessRequest::trade(Permission::BotStart).requiring(features::LIVE_TRADING),
             Some(&starter)
         )
-        .kind,
+        .kind(),
         DecisionKind::DenyEntitlement
     );
     assert_eq!(
@@ -725,7 +729,7 @@ fn plan_entitlements_gate_features_and_limits() {
             ),
             Some(&starter)
         )
-        .kind,
+        .kind(),
         DecisionKind::DenyEntitlement
     );
 
@@ -795,7 +799,7 @@ fn api_key_scopes_can_only_narrow_never_widen() {
             &AccessRequest::billing(Permission::BillingManage),
             None
         )
-        .kind,
+        .kind(),
         DecisionKind::DenyPermission,
         "a scope naming a permission the ROLE lacks must not grant it"
     );
@@ -813,8 +817,12 @@ fn a_plan_without_a_subscription_denies_with_the_right_reason() {
         &AccessRequest::trade(Permission::BotStart).requiring(features::LIVE_TRADING),
         Some(&none),
     );
-    assert_eq!(d.kind, DecisionKind::DenyEntitlement);
-    assert!(d.reason.contains("no_active_subscription"), "{}", d.reason);
+    assert_eq!(d.kind(), DecisionKind::DenyEntitlement);
+    assert!(
+        d.reason().contains("no_active_subscription"),
+        "{}",
+        d.reason()
+    );
     assert_eq!(d.http_status(), 402);
 }
 
@@ -826,7 +834,7 @@ fn unauthenticated_requests_never_reach_a_tenant() {
         AccessRequest::manage(Permission::ApiKeyCreate),
     ] {
         let d = authorize(None, &request, None);
-        assert_eq!(d.kind, DecisionKind::DenyUnauthenticated);
+        assert_eq!(d.kind(), DecisionKind::DenyUnauthenticated);
         assert_eq!(d.http_status(), 401);
     }
 }

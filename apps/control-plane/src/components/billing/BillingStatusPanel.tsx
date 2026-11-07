@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { BillingStatus } from "@/lib/api/billing-status-api";
 import { billingStatusApi } from "@/lib/api/billing-status-api";
 import { toDisplayError } from "@/lib/api";
@@ -18,25 +18,36 @@ export function BillingStatusPanel({ organizationId }: BillingStatusPanelProps) 
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const requestId = ++requestVersion.current;
     setLoading(true);
+    setBilling(null);
     setError(null);
     try {
       const reported = await billingStatusApi.status(organizationId);
+      if (requestId !== requestVersion.current) return;
       // Render only what the server actually reported. A body without a
       // plan code (e.g. an unmocked or foreign endpoint answering `{}`)
       // must never crash the hosting page or fabricate a plan.
       setBilling(reported && typeof reported.plan_code === "string" ? reported : null);
     } catch (err: unknown) {
-      setError(toDisplayError(err));
+      if (requestId === requestVersion.current) setError(toDisplayError(err));
     } finally {
-      setLoading(false);
+      if (requestId === requestVersion.current) setLoading(false);
     }
   }, [organizationId]);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load());
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) void load();
+    });
+    return () => {
+      active = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
 
   return (

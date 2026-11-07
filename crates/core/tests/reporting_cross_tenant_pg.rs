@@ -34,6 +34,8 @@ fn position(tenant: bot_core::tenant::OrganizationId, id: String, status: &str) 
         avg_entry: 100.0,
         cost_basis: 100.0,
         realized_quote: realized,
+        realized_pnl_quote: Some(realized - 100.0),
+        realized_at: closed_at,
         last_mark: 100.0,
         stop_loss: None,
         take_profit: None,
@@ -247,6 +249,26 @@ async fn dashboard_aggregates_exclude_the_other_tenant() {
         .unwrap();
     assert_eq!(pnl_b.positions_closed, 0);
     assert!((pnl_b.realized_net - 0.0).abs() < 1e-6);
+
+    // Cumulative lifecycle PnL cannot be attributed to a report window when
+    // the position was already open before that window began.
+    let c = org(&db, &format!("cross-window-{run}")).await;
+    let mut spanning = position(c, format!("p-spanning-{run}"), "closed");
+    spanning.opened_at = at(3.0);
+    spanning.updated_at = at(1.0);
+    spanning.closed_at = Some(at(1.0));
+    spanning.realized_at = Some(at(1.0));
+    pos_write.upsert(&write_scope(c), &spanning).await.unwrap();
+    assert!(reporting
+        .pnl()
+        .realized_between(&read_scope(c), at(2.0), at(-1.0))
+        .await
+        .is_err());
+    assert!(reporting
+        .pnl()
+        .by_symbol(&read_scope(c), at(2.0), at(-1.0), 10)
+        .await
+        .is_err());
 
     // Balance totals never mix.
     assert_eq!(

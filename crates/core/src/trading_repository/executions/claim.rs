@@ -32,8 +32,10 @@ use crate::ownership::{ClaimDecision, ClaimRequest, ClaimStatus, ExecutionClaim}
 use crate::trading_repository::query_scope::TradingQueryScope;
 use crate::trading_repository::repository_error::RepositoryError;
 
-fn ms(d: Duration) -> i64 {
-    d.as_millis().max(1) as i64
+fn ms(d: Duration) -> Result<i64, RepositoryError> {
+    i64::try_from(d.as_millis().max(1)).map_err(|_| {
+        RepositoryError::Validation("claim duration exceeds the signed millisecond range")
+    })
 }
 
 fn claim_from_row(row: &PgRow) -> ExecutionClaim {
@@ -108,6 +110,8 @@ impl TenantClaimRepo {
         if owner_id.trim().is_empty() {
             return Err(RepositoryError::Validation("owner_id"));
         }
+        let lease_ms = ms(lease)?;
+        let grace_ms = ms(handoff_grace)?;
         const SQL: &str = r#"
 WITH prev AS (
     SELECT status AS prev_status FROM execution_claims
@@ -161,8 +165,8 @@ FROM ins LEFT JOIN prev ON TRUE
                         .bind(&req.strategy)
                         .bind(&req.symbol)
                         .bind(owner_id)
-                        .bind(ms(lease))
-                        .bind(ms(handoff_grace))
+                        .bind(lease_ms)
+                        .bind(grace_ms)
                         .fetch_optional(self.db.pool()),
                 )
                 .await?;
@@ -200,11 +204,13 @@ FROM ins LEFT JOIN prev ON TRUE
         owner_id: &str,
         epoch: i64,
     ) -> Result<bool, RepositoryError> {
+        // Preserve the last grant's duration, not time since acquisition;
+        // use the interval directly to retain millisecond precision.
         const SQL: &str = r#"
 UPDATE execution_claims
 SET lease_until    = now() + GREATEST(
-        EXTRACT(EPOCH FROM (lease_until - claimed_at))::bigint, 1
-    ) * interval '1 second',
+        lease_until - last_heartbeat, interval '1 millisecond'
+    ),
     last_heartbeat = now(),
     updated_at     = now()
 WHERE organization_id = $1 AND execution_id = $2

@@ -20,11 +20,15 @@
 //!   the verifier held in the pending store;
 //! * **state is one-shot**: a callback consumes its pending entry, so a
 //!   replayed callback cannot re-issue a session;
+//! * the OIDC `nonce` is bound to the one-shot state and checked in the signed
+//!   id_token, preventing token substitution across authorization attempts;
 //! * **the id_token signature is ALWAYS verified** against the issuer's
 //!   JWKS (RS256). Unverifiable tokens are rejected — there is no
 //!   "skip verification" mode;
 //! * `allowed_domains` restricts JIT provisioning to the tenant's email
 //!   domains (empty list = unrestricted, documented in the config);
+//! * `enforce_sso` is enforced both when scoping a password login and on each
+//!   tenant-scoped session request; SSO proof is bound to its issuing tenant;
 //! * **platform admin can never be granted through SSO** — the role mapper
 //!   refuses it even if the mapping json contains it (the DB trigger in
 //!   0053 also excludes it);
@@ -99,6 +103,14 @@ pub fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// Derive a separate, domain-separated OIDC nonce from the high-entropy
+/// one-shot state so no new persistence field is needed.
+fn oidc_nonce(state: &str) -> String {
+    let mut input = b"sniper-oidc-nonce\0".to_vec();
+    input.extend_from_slice(state.as_bytes());
+    URL_SAFE_NO_PAD.encode(Sha256::digest(input))
+}
+
 /// An opaque `state` value binding authorize → callback.
 pub fn state_token() -> String {
     let mut bytes = [0u8; 16];
@@ -123,10 +135,11 @@ pub fn build_authorize_url(
         '?'
     };
     format!(
-        "{authorization_endpoint}{sep}response_type=code&client_id={}&redirect_uri={}&scope=openid%20email%20profile&state={}&code_challenge={}&code_challenge_method=S256",
+        "{authorization_endpoint}{sep}response_type=code&client_id={}&redirect_uri={}&scope=openid%20email%20profile&state={}&nonce={}&code_challenge={}&code_challenge_method=S256",
         urlencode(client_id),
         urlencode(redirect_uri),
         urlencode(state),
+        urlencode(&oidc_nonce(state)),
         urlencode(challenge),
     )
 }
@@ -212,6 +225,8 @@ pub enum SsoError {
     BadClaims,
     /// No email claim (or empty).
     NoEmail,
+    /// The identity provider did not assert that the email is verified.
+    EmailNotVerified,
     /// Email domain not in allowed_domains.
     DomainNotAllowed,
     /// The account exists but may not authenticate.
@@ -226,6 +241,7 @@ impl SsoError {
             SsoError::InvalidState | SsoError::DomainNotAllowed | SsoError::NoEmail => {
                 StatusCode::BAD_REQUEST
             }
+            SsoError::EmailNotVerified => StatusCode::FORBIDDEN,
             SsoError::NotConfigured => StatusCode::NOT_FOUND,
             SsoError::UserInactive => StatusCode::FORBIDDEN,
             _ => StatusCode::BAD_GATEWAY,
@@ -241,6 +257,7 @@ impl SsoError {
             SsoError::BadSignature => "sso_id_token_signature_invalid",
             SsoError::BadClaims => "sso_id_token_claims_invalid",
             SsoError::NoEmail => "sso_email_missing",
+            SsoError::EmailNotVerified => "sso_email_not_verified",
             SsoError::DomainNotAllowed => "sso_email_domain_not_allowed",
             SsoError::UserInactive => "sso_user_inactive",
             SsoError::Storage => "sso_storage_unavailable",
@@ -302,6 +319,7 @@ pub fn validate_claims(
     payload_b64: &str,
     expected_iss: &str,
     expected_aud: &str,
+    expected_nonce: &str,
     now: DateTime<Utc>,
 ) -> Result<IdTokenClaims, SsoError> {
     let payload = b64url_decode(payload_b64)?;
@@ -314,15 +332,33 @@ pub fn validate_claims(
     if iss.trim_end_matches('/') != expected_iss.trim_end_matches('/') {
         return Err(SsoError::BadClaims);
     }
-    // aud may be a string or an array containing our client_id.
-    let aud_ok = match claims.get("aud") {
-        Some(serde_json::Value::String(a)) => a == expected_aud,
-        Some(serde_json::Value::Array(list)) => {
-            list.iter().any(|v| v.as_str() == Some(expected_aud))
-        }
-        _ => false,
+    // aud may be a string or an array containing our client_id. For multiple
+    // audiences, require `azp` to identify this client; if `azp` is present
+    // even for a single audience, it must still match.
+    let (aud_ok, multiple_audiences) = match claims.get("aud") {
+        Some(serde_json::Value::String(a)) => (a == expected_aud, false),
+        Some(serde_json::Value::Array(list)) => (
+            list.iter().any(|v| v.as_str() == Some(expected_aud)),
+            list.len() > 1,
+        ),
+        _ => (false, false),
     };
     if !aud_ok {
+        return Err(SsoError::BadClaims);
+    }
+    let azp_matches = match claims.get("azp") {
+        Some(serde_json::Value::String(azp)) => azp == expected_aud,
+        Some(_) => false,
+        None => !multiple_audiences,
+    };
+    if !azp_matches {
+        return Err(SsoError::BadClaims);
+    }
+    let nonce = claims
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or(SsoError::BadClaims)?;
+    if nonce != expected_nonce {
         return Err(SsoError::BadClaims);
     }
     let exp = claims
@@ -332,11 +368,21 @@ pub fn validate_claims(
     if exp <= now.timestamp() {
         return Err(SsoError::BadClaims);
     }
+    let issued_at = claims
+        .get("iat")
+        .and_then(|v| v.as_i64())
+        .ok_or(SsoError::BadClaims)?;
+    if issued_at > now.timestamp().saturating_add(60) || issued_at >= exp {
+        return Err(SsoError::BadClaims);
+    }
     let sub = claims
         .get("sub")
         .and_then(|v| v.as_str())
         .ok_or(SsoError::BadClaims)?
         .to_string();
+    if sub.trim().is_empty() {
+        return Err(SsoError::BadClaims);
+    }
     let email = claims
         .get("email")
         .and_then(|v| v.as_str())
@@ -347,6 +393,12 @@ pub fn validate_claims(
         .get("email_verified")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    if email.is_empty() {
+        return Err(SsoError::NoEmail);
+    }
+    if !email_verified {
+        return Err(SsoError::EmailNotVerified);
+    }
     let role = claims
         .get("role")
         .and_then(|v| v.as_str())
@@ -460,41 +512,122 @@ struct TokenResponse {
     id_token: Option<String>,
 }
 
-fn http_client() -> Result<reqwest::Client, SsoError> {
-    reqwest::Client::builder()
-        .timeout(IDP_TIMEOUT)
-        .build()
-        .map_err(|_| SsoError::DiscoveryFailed)
+fn validate_https_url(raw: &str) -> Result<reqwest::Url, SsoError> {
+    let url = reqwest::Url::parse(raw).map_err(|_| SsoError::DiscoveryFailed)?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(SsoError::DiscoveryFailed);
+    }
+    Ok(url)
 }
 
-async fn fetch_discovery(
-    client: &reqwest::Client,
-    issuer_url: &str,
-) -> Result<DiscoveryDoc, SsoError> {
-    let url = format!(
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !(ip.is_unspecified()
+                || ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || a == 0
+                || (a == 100 && (64..=127).contains(&b)) // shared address space
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2) // documentation
+                || (a == 192 && b == 88 && c == 99) // 6to4 relay anycast
+                || (a == 198 && (b == 18 || b == 19)) // benchmarking
+                || (a == 198 && b == 51 && c == 100) // documentation
+                || (a == 203 && b == 0 && c == 113) // documentation
+                || a >= 224)
+        }
+        std::net::IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_public_ip(std::net::IpAddr::V4(v4));
+            }
+            let segments = ip.segments();
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00 // unique local
+                || (segments[0] & 0xffc0) == 0xfe80 // link local
+                || (segments[0] & 0xe000) != 0x2000 // not global unicast
+                || (segments[0] == 0x2001
+                    && (segments[1] <= 0x01ff || segments[1] == 0x0db8)) // special-use/docs
+                || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0) // documentation
+                || segments[0] == 0x2002) // 6to4
+        }
+    }
+}
+
+/// Build a one-request client pinned to resolved public addresses. Redirects
+/// and ambient proxy settings are disabled so the peer cannot redirect a
+/// validated OIDC request into a private network or another credential sink.
+async fn pinned_https_client(url: &reqwest::Url) -> Result<reqwest::Client, SsoError> {
+    let host = url.host_str().ok_or(SsoError::DiscoveryFailed)?;
+    let port = url
+        .port_or_known_default()
+        .ok_or(SsoError::DiscoveryFailed)?;
+    let ip = host.parse::<std::net::IpAddr>();
+    let mut builder = reqwest::Client::builder()
+        .timeout(IDP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if let Ok(ip) = ip {
+        if !is_public_ip(ip) {
+            return Err(SsoError::DiscoveryFailed);
+        }
+    } else {
+        let addresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|_| SsoError::DiscoveryFailed)?
+            .collect();
+        if addresses.is_empty() || addresses.iter().any(|addr| !is_public_ip(addr.ip())) {
+            return Err(SsoError::DiscoveryFailed);
+        }
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+    builder.build().map_err(|_| SsoError::DiscoveryFailed)
+}
+
+async fn fetch_discovery(issuer_url: &str) -> Result<DiscoveryDoc, SsoError> {
+    let mut url = validate_https_url(issuer_url)?;
+    if url.query().is_some() {
+        return Err(SsoError::DiscoveryFailed);
+    }
+    let path = format!(
         "{}/.well-known/openid-configuration",
-        issuer_url.trim_end_matches('/')
+        url.path().trim_end_matches('/')
     );
+    url.set_path(&path);
+    let client = pinned_https_client(&url).await?;
     let resp = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .map_err(|_| SsoError::DiscoveryFailed)?;
     if !resp.status().is_success() {
         return Err(SsoError::DiscoveryFailed);
     }
-    resp.json::<DiscoveryDoc>()
+    let discovery = resp
+        .json::<DiscoveryDoc>()
         .await
-        .map_err(|_| SsoError::DiscoveryFailed)
+        .map_err(|_| SsoError::DiscoveryFailed)?;
+    validate_https_url(&discovery.authorization_endpoint)?;
+    validate_https_url(&discovery.token_endpoint)?;
+    validate_https_url(&discovery.jwks_uri)?;
+    Ok(discovery)
 }
 
-async fn fetch_jwk_for_kid(
-    client: &reqwest::Client,
-    jwks_uri: &str,
-    kid: &str,
-) -> Result<(String, String), SsoError> {
+async fn fetch_jwk_for_kid(jwks_uri: &str, kid: &str) -> Result<(String, String), SsoError> {
+    let url = validate_https_url(jwks_uri)?;
+    let client = pinned_https_client(&url).await?;
     let resp = client
-        .get(jwks_uri)
+        .get(url)
         .send()
         .await
         .map_err(|_| SsoError::DiscoveryFailed)?;
@@ -526,7 +659,6 @@ async fn fetch_jwk_for_kid(
 }
 
 async fn exchange_code(
-    client: &reqwest::Client,
     token_endpoint: &str,
     code: &str,
     redirect_uri: &str,
@@ -534,6 +666,8 @@ async fn exchange_code(
     client_secret: Option<&str>,
     code_verifier: &str,
 ) -> Result<TokenResponse, SsoError> {
+    let url = validate_https_url(token_endpoint)?;
+    let client = pinned_https_client(&url).await?;
     let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -549,7 +683,7 @@ async fn exchange_code(
         form.push(("client_secret", &secret_owned));
     }
     let resp = client
-        .post(token_endpoint)
+        .post(url)
         .form(&form)
         .send()
         .await
@@ -651,8 +785,8 @@ pub struct SsoConfigBody {
     /// IdP role claim value -> application role.
     #[serde(default)]
     pub role_mapping: serde_json::Value,
-    /// Require SSO for this org's members (advisory flag; the login flow
-    /// consults it).
+    /// Require this org's members to use its SSO provider; tenant authorization
+    /// checks that the session was issued by this organization's SSO flow.
     #[serde(default)]
     pub enforce_sso: bool,
 }
@@ -694,7 +828,7 @@ pub async fn put_config(
         )
             .into_response();
     }
-    if body.issuer_url.trim().is_empty() || !body.issuer_url.trim().starts_with("https://") {
+    if !matches!(validate_https_url(body.issuer_url.trim()), Ok(url) if url.query().is_none()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -714,7 +848,7 @@ pub async fn put_config(
         )
             .into_response();
     }
-    if !body.redirect_uri.trim().starts_with("https://") {
+    if validate_https_url(body.redirect_uri.trim()).is_err() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -944,11 +1078,11 @@ pub async fn delete_config(State(state): State<ApiState>, headers: HeaderMap) ->
 
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
-    /// The tenant slug whose IdP the browser should be sent to.
+    /// The tenant slug or id whose IdP the browser should be sent to.
     pub organization: String,
 }
 
-/// `GET /api/saas/sso/authorize?organization=<slug>` — begin the flow.
+/// `GET /api/saas/sso/authorize?organization=<id-or-slug>` — begin the flow.
 /// Returns the IdP URL the front-end should redirect to (never redirects
 /// server-side: the SPA owns navigation).
 pub async fn authorize(
@@ -958,9 +1092,18 @@ pub async fn authorize(
     let Some(db) = state.db.as_deref() else {
         return db_unavailable("SSO authorization");
     };
-    let org = match state.saas.organization_by_slug(&query.organization).await {
-        Ok(Some(o)) => o,
-        _ => return sso_error_response(&SsoError::NotConfigured),
+    let organization = if let Some(id) = OrganizationId::parse(&query.organization) {
+        state.saas.organization(id).await
+    } else {
+        state.saas.organization_by_slug(&query.organization).await
+    };
+    let org = match organization {
+        Ok(Some(organization)) => organization,
+        Ok(None) => return sso_error_response(&SsoError::NotConfigured),
+        Err(error) => {
+            tracing::error!(error = %error, "sso authorization organization lookup failed");
+            return db_unavailable("SSO authorization");
+        }
     };
     let row = sqlx::query(
         "SELECT id, issuer_url, client_id, redirect_uri, status \
@@ -983,11 +1126,7 @@ pub async fn authorize(
 
     // Discovery BEFORE minting state: a broken IdP fails fast with a
     // typed error instead of leaving dead pending entries.
-    let client = match http_client() {
-        Ok(c) => c,
-        Err(e) => return sso_error_response(&e),
-    };
-    let discovery = match fetch_discovery(&client, &issuer_url).await {
+    let discovery = match fetch_discovery(&issuer_url).await {
         Ok(d) => d,
         Err(e) => return sso_error_response(&e),
     };
@@ -1087,17 +1226,12 @@ pub async fn callback(State(state): State<ApiState>, Json(body): Json<CallbackBo
         None => None,
     };
 
-    let client = match http_client() {
-        Ok(c) => c,
-        Err(e) => return sso_error_response(&e),
-    };
     // Discovery + token exchange.
-    let discovery = match fetch_discovery(&client, &issuer_url).await {
+    let discovery = match fetch_discovery(&issuer_url).await {
         Ok(d) => d,
         Err(e) => return sso_error_response(&e),
     };
     let tokens = match exchange_code(
-        &client,
         &discovery.token_endpoint,
         &body.code,
         &pending.redirect_uri,
@@ -1117,7 +1251,7 @@ pub async fn callback(State(state): State<ApiState>, Json(body): Json<CallbackBo
         Ok(parts) => parts,
         Err(e) => return sso_error_response(&e),
     };
-    let jwk = match fetch_jwk_for_kid(&client, &discovery.jwks_uri, &kid).await {
+    let jwk = match fetch_jwk_for_kid(&discovery.jwks_uri, &kid).await {
         Ok(j) => j,
         Err(e) => return sso_error_response(&e),
     };
@@ -1131,13 +1265,17 @@ pub async fn callback(State(state): State<ApiState>, Json(body): Json<CallbackBo
     }
 
     // Claims validation.
-    let claims = match validate_claims(&payload_b64, &issuer_url, &client_id, Utc::now()) {
+    let expected_nonce = oidc_nonce(&body.state);
+    let claims = match validate_claims(
+        &payload_b64,
+        &issuer_url,
+        &client_id,
+        &expected_nonce,
+        Utc::now(),
+    ) {
         Ok(c) => c,
         Err(e) => return sso_error_response(&e),
     };
-    if claims.email.is_empty() {
-        return sso_error_response(&SsoError::NoEmail);
-    }
     if !email_domain_allowed(&claims.email, &allowed_domains) {
         state
             .audit
@@ -1212,7 +1350,7 @@ pub async fn callback(State(state): State<ApiState>, Json(body): Json<CallbackBo
     // Session (mirrors users::login issuance exactly).
     let now = Utc::now();
     let token = generate_token("ses");
-    let session = SessionRecord::new(
+    let mut session = SessionRecord::new(
         user.id,
         Some(org_id),
         token.hash.clone(),
@@ -1220,10 +1358,19 @@ pub async fn callback(State(state): State<ApiState>, Json(body): Json<CallbackBo
         Duration::hours(DEFAULT_SESSION_TTL_HOURS),
         now,
     );
-    if let Err(e) = state.saas.create_session(&session).await {
-        tracing::error!(error = %e, "sso session creation failed");
-        return sso_error_response(&SsoError::Storage);
-    }
+    session.sso_organization_id = Some(org_id);
+    let user = match state
+        .saas
+        .create_authenticated_session(&user.password_hash, &session, now)
+        .await
+    {
+        Ok(Some(current_user)) => current_user,
+        Ok(None) => return sso_error_response(&SsoError::UserInactive),
+        Err(error) => {
+            tracing::error!(error = %error, "sso session could not be committed atomically");
+            return sso_error_response(&SsoError::Storage);
+        }
+    };
     state
         .audit
         .success(
@@ -1241,9 +1388,11 @@ pub async fn callback(State(state): State<ApiState>, Json(body): Json<CallbackBo
                 "id": session.id,
                 "prefix": session.token_prefix,
                 "expires_at": session.expires_at,
+                "organization_id": session.organization_id,
             },
             // The ONLY time the session token is ever returned.
             "token": token.plaintext,
+            "mfa_enrollment_required": false,
         })),
     )
         .into_response()
@@ -1288,11 +1437,51 @@ mod tests {
         assert!(url.contains("client_id=client%20one"));
         assert!(url.contains("redirect_uri=https%3A%2F%2Fapp.example.com%2Fsso%2Fcallback"));
         assert!(url.contains("state=st%40te"));
+        assert!(url.contains(&format!("nonce={}", urlencode(&oidc_nonce("st@te")))));
         assert!(url.contains("code_challenge=ch%40llenge"));
         assert!(url.contains("code_challenge_method=S256"));
         // An endpoint that already has a query uses &.
         let url2 = build_authorize_url("https://idp.example.com/auth?x=1", "c", "r", "s", "ch");
         assert!(url2.contains("?x=1&response_type=code"));
+    }
+
+    #[test]
+    fn oidc_endpoint_validation_rejects_plaintext_and_private_addresses() {
+        assert!(validate_https_url("https://idp.example.com/path").is_ok());
+        for invalid in [
+            "http://idp.example.com",
+            "https://user:password@idp.example.com",
+            "https://idp.example.com/path#fragment",
+        ] {
+            assert!(validate_https_url(invalid).is_err(), "accepted {invalid}");
+        }
+
+        for blocked in [
+            "127.0.0.1",
+            "10.2.3.4",
+            "169.254.169.254",
+            "192.168.1.10",
+            "100.64.0.1",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "2001:db8::1",
+            "3fff::1",
+        ] {
+            let ip = blocked.parse().unwrap();
+            assert!(!is_public_ip(ip), "treated {blocked} as public");
+        }
+        for allowed in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            let ip = allowed.parse().unwrap();
+            assert!(is_public_ip(ip), "treated {allowed} as non-public");
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_oidc_client_rejects_private_literal_hosts_before_connecting() {
+        let url =
+            reqwest::Url::parse("https://127.0.0.1/.well-known/openid-configuration").unwrap();
+        assert!(pinned_https_client(&url).await.is_err());
     }
 
     #[test]
@@ -1342,49 +1531,221 @@ mod tests {
     }
 
     #[test]
-    fn claims_validation_enforces_iss_aud_exp() {
+    fn claims_validation_enforces_oidc_identity_and_time_claims() {
         let now = DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let expected_nonce = oidc_nonce("state-1");
         let claims = json!({
             "iss": "https://idp.example.com/",
             "aud": "client-1",
             "sub": "user-9",
             "exp": 2_000_000,
+            "iat": 900_000,
+            "nonce": expected_nonce.clone(),
             "email": "Alice@Example.com",
             "email_verified": true,
             "role": "trader",
         });
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-        let parsed = validate_claims(&payload, "https://idp.example.com", "client-1", now).unwrap();
+        let parsed = validate_claims(
+            &payload,
+            "https://idp.example.com",
+            "client-1",
+            &expected_nonce,
+            now,
+        )
+        .unwrap();
         assert_eq!(parsed.email, "Alice@Example.com");
         assert!(parsed.email_verified);
         assert_eq!(parsed.role.as_deref(), Some("trader"));
 
-        // Wrong audience.
+        // Wrong audience, issuer, nonce and expiry are rejected.
         assert_eq!(
-            validate_claims(&payload, "https://idp.example.com", "other-client", now).unwrap_err(),
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "other-client",
+                &expected_nonce,
+                now
+            )
+            .unwrap_err(),
             SsoError::BadClaims
         );
-        // Wrong issuer.
         assert_eq!(
-            validate_claims(&payload, "https://evil.example.com", "client-1", now).unwrap_err(),
+            validate_claims(
+                &payload,
+                "https://evil.example.com",
+                "client-1",
+                &expected_nonce,
+                now
+            )
+            .unwrap_err(),
             SsoError::BadClaims
         );
-        // Expired.
+        assert_eq!(
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "client-1",
+                "other-state",
+                now
+            )
+            .unwrap_err(),
+            SsoError::BadClaims
+        );
         let later = DateTime::from_timestamp(3_000_000, 0).unwrap();
         assert_eq!(
-            validate_claims(&payload, "https://idp.example.com", "client-1", later).unwrap_err(),
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "client-1",
+                &expected_nonce,
+                later
+            )
+            .unwrap_err(),
             SsoError::BadClaims
         );
-        // aud as array also validates.
+
+        let mut future_iat = claims.clone();
+        future_iat["iat"] = json!(now.timestamp() + 61);
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&future_iat).unwrap());
+        assert_eq!(
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "client-1",
+                &expected_nonce,
+                now,
+            )
+            .unwrap_err(),
+            SsoError::BadClaims
+        );
+        let mut empty_sub = claims.clone();
+        empty_sub["sub"] = json!("");
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&empty_sub).unwrap());
+        assert_eq!(
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "client-1",
+                &expected_nonce,
+                now,
+            )
+            .unwrap_err(),
+            SsoError::BadClaims
+        );
+
+        // Email-based account linking is permitted only when the IdP asserts
+        // that the address is verified; an unverified address could belong to
+        // a different local account.
+        for email_verified in [false, true] {
+            let mut changed = claims.clone();
+            changed["email_verified"] = json!(email_verified);
+            let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&changed).unwrap());
+            if email_verified {
+                assert!(validate_claims(
+                    &payload,
+                    "https://idp.example.com",
+                    "client-1",
+                    &expected_nonce,
+                    now,
+                )
+                .is_ok());
+            } else {
+                assert_eq!(
+                    validate_claims(
+                        &payload,
+                        "https://idp.example.com",
+                        "client-1",
+                        &expected_nonce,
+                        now,
+                    )
+                    .unwrap_err(),
+                    SsoError::EmailNotVerified
+                );
+            }
+        }
+        let mut missing_verified = claims.clone();
+        missing_verified
+            .as_object_mut()
+            .unwrap()
+            .remove("email_verified");
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&missing_verified).unwrap());
+        assert_eq!(
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "client-1",
+                &expected_nonce,
+                now,
+            )
+            .unwrap_err(),
+            SsoError::EmailNotVerified
+        );
+
+        let mut missing_nonce = claims.clone();
+        missing_nonce.as_object_mut().unwrap().remove("nonce");
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&missing_nonce).unwrap());
+        assert_eq!(
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "client-1",
+                &expected_nonce,
+                now,
+            )
+            .unwrap_err(),
+            SsoError::BadClaims
+        );
+
+        // aud as array also validates when the email and nonce are verified.
         let arr_claims = json!({
             "iss": "https://idp.example.com",
             "aud": ["other", "client-1"],
             "sub": "u",
             "exp": 2_000_000,
+            "iat": 900_000,
+            "azp": "client-1",
+            "nonce": expected_nonce.clone(),
             "email": "x@y.z",
+            "email_verified": true,
         });
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&arr_claims).unwrap());
-        assert!(validate_claims(&payload, "https://idp.example.com", "client-1", now).is_ok());
+        assert!(validate_claims(
+            &payload,
+            "https://idp.example.com",
+            "client-1",
+            &expected_nonce,
+            now,
+        )
+        .is_ok());
+        let mut wrong_azp = arr_claims.clone();
+        wrong_azp["azp"] = json!("other-client");
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&wrong_azp).unwrap());
+        assert_eq!(
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "client-1",
+                &expected_nonce,
+                now,
+            )
+            .unwrap_err(),
+            SsoError::BadClaims
+        );
+        let mut missing_azp = arr_claims;
+        missing_azp.as_object_mut().unwrap().remove("azp");
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&missing_azp).unwrap());
+        assert_eq!(
+            validate_claims(
+                &payload,
+                "https://idp.example.com",
+                "client-1",
+                &expected_nonce,
+                now,
+            )
+            .unwrap_err(),
+            SsoError::BadClaims
+        );
     }
 
     #[test]

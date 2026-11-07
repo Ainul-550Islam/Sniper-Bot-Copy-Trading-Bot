@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use solana_sdk::pubkey::Pubkey;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use bot_core::error::{BotError, BotResult};
 use bot_core::events::AppEvent;
@@ -161,6 +161,41 @@ fn count_action(action: &str) {
 }
 
 impl Sniper {
+    /// Synchronously refresh the tenant position projection after an exit.
+    /// The chain fill is already final, so persistence failure must not be
+    /// reported as a failed sell (which could trigger a duplicate retry).
+    /// Instead stop further entries and leave the existing DB projection
+    /// untouched; the risk oracle itself fails closed on storage outages.
+    async fn persist_tenant_position(&self, position: &Position) {
+        let Some(tenant) = self.tenant.as_ref() else {
+            return;
+        };
+        let Some(sink) = self.tenant_position_sink.as_ref() else {
+            error!(position = %position.id, "tenant exit has no position persistence sink");
+            self.state
+                .record_error(
+                    BotModule::Sniper,
+                    "tenant exit position persistence sink missing",
+                )
+                .await;
+            self.state.set_running(BotModule::Sniper, false, true).await;
+            return;
+        };
+        if let Err(error) = sink
+            .record_position(tenant.organization_id(), position)
+            .await
+        {
+            error!(position = %position.id, %error, "tenant exit position persistence failed");
+            self.state
+                .record_error(
+                    BotModule::Sniper,
+                    &format!("tenant exit position persistence: {error}"),
+                )
+                .await;
+            self.state.set_running(BotModule::Sniper, false, true).await;
+        }
+    }
+
     /// The exit sweeper loop. Runs until the task is aborted.
     pub async fn exit_sweeper(&mut self) {
         info!("sniper exit sweeper started");
@@ -429,13 +464,17 @@ impl Sniper {
                 p.cost_basis = 0.0;
             })
             .await;
-        self.state
+        if let Some(closed) = self
+            .state
             .close_position(
                 &position.id,
                 PositionStatus::Failed,
                 "entry never landed (execution ledger: failed/expired)",
             )
-            .await;
+            .await
+        {
+            self.persist_tenant_position(&closed).await;
+        }
         // No tokens were ever received, so this cleanup is not a creator
         // outcome. Drop only the open-position attribution reference.
         if let Ok(mint) = Pubkey::try_from(position.symbol.as_str()) {
@@ -618,43 +657,56 @@ impl Sniper {
         // money-moving branch — a taken-over replica must not sell.
         permit.fence().await?;
 
+        let intent_id = match &route {
+            ExitVenue::Curve(_) => {
+                exit_intent_id("sniper", position, sell_raw, EntryRoute::PumpCurve.as_str())
+            }
+            ExitVenue::PumpSwap(_) => exit_intent_id(
+                "sniper",
+                position,
+                sell_raw,
+                EntryRoute::PumpSwapDirect.as_str(),
+            ),
+            ExitVenue::Raydium(_) => exit_intent_id(
+                "sniper",
+                position,
+                sell_raw,
+                EntryRoute::RaydiumV4Direct.as_str(),
+            ),
+            ExitVenue::RaydiumCpmm(_) => exit_intent_id(
+                "sniper",
+                position,
+                sell_raw,
+                EntryRoute::RaydiumCpmmDirect.as_str(),
+            ),
+            ExitVenue::RaydiumLaunchLab(_) => exit_intent_id(
+                "sniper",
+                position,
+                sell_raw,
+                EntryRoute::RaydiumLaunchLabDirect.as_str(),
+            ),
+            ExitVenue::Jupiter => {
+                exit_intent_id("sniper", position, sell_raw, EntryRoute::Jupiter.as_str())
+            }
+        };
+
         let (quote_sol, signature, venue, status) = match route {
             ExitVenue::Curve(ctx) => {
-                let intent_id =
-                    exit_intent_id("sniper", position, sell_raw, EntryRoute::PumpCurve.as_str());
                 self.sell_on_curve(&ctx, sell_raw, slippage_pct, &cfg, &intent_id)
                     .await?
             }
             ExitVenue::PumpSwap(ctx) => {
                 let pct = cfg.sniper.pumpswap_slippage_pct.unwrap_or(slippage_pct);
-                let intent_id = exit_intent_id(
-                    "sniper",
-                    position,
-                    sell_raw,
-                    EntryRoute::PumpSwapDirect.as_str(),
-                );
                 self.sell_on_pumpswap(&ctx, sell_raw, pct, &cfg, &intent_id)
                     .await?
             }
             ExitVenue::Raydium(pool) => {
                 let pct = cfg.sniper.raydium_slippage_pct.unwrap_or(slippage_pct);
-                let intent_id = exit_intent_id(
-                    "sniper",
-                    position,
-                    sell_raw,
-                    EntryRoute::RaydiumV4Direct.as_str(),
-                );
                 self.sell_on_raydium(&pool, &mint, sell_raw, pct, &cfg, &intent_id)
                     .await?
             }
             ExitVenue::RaydiumCpmm(pool) => {
                 let pct = cfg.sniper.raydium_cpmm_slippage_pct.unwrap_or(slippage_pct);
-                let intent_id = exit_intent_id(
-                    "sniper",
-                    position,
-                    sell_raw,
-                    EntryRoute::RaydiumCpmmDirect.as_str(),
-                );
                 self.sell_on_raydium_cpmm(&pool, &mint, sell_raw, pct, &cfg, &intent_id)
                     .await?
             }
@@ -663,18 +715,10 @@ impl Sniper {
                     .sniper
                     .raydium_launchlab_slippage_pct
                     .unwrap_or(slippage_pct);
-                let intent_id = exit_intent_id(
-                    "sniper",
-                    position,
-                    sell_raw,
-                    EntryRoute::RaydiumLaunchLabDirect.as_str(),
-                );
                 self.sell_on_raydium_launchlab(&market, &mint, sell_raw, pct, &cfg, &intent_id)
                     .await?
             }
             ExitVenue::Jupiter => {
-                let intent_id =
-                    exit_intent_id("sniper", position, sell_raw, EntryRoute::Jupiter.as_str());
                 self.sell_via_jupiter(mint, sell_raw, &cfg, &intent_id)
                     .await?
             }
@@ -740,7 +784,7 @@ impl Sniper {
             self.wallet.pubkey.to_string(),
             bot_core::global_risk::strategy_label(BotModule::Sniper, None),
             None,
-            None,
+            Some(intent_id),
         );
         self.state.record_trade(trade.clone()).await;
         self.state.events.publish(AppEvent::Fill {
@@ -753,12 +797,16 @@ impl Sniper {
         // capture the realised slice through a mutable local.
         let mut realized = 0.0;
         let mut exit_sig = signature.clone();
-        self.state
+        let updated = self
+            .state
             .with_position(&position.id, |p| {
                 realized = p.apply_sell(sell_qty_human, price, quote_sol);
                 p.exit_signature = exit_sig.take();
             })
             .await;
+        if let Some(updated) = updated.as_ref() {
+            self.persist_tenant_position(updated).await;
+        }
 
         self.risk.book_pnl(BotModule::Sniper, realized).await;
         // The global ledger is the only mutator of global accounting state;
@@ -779,9 +827,13 @@ impl Sniper {
             } else {
                 PositionStatus::Closed
             };
-            self.state
+            if let Some(closed) = self
+                .state
                 .close_position(&position.id, status, reason)
-                .await;
+                .await
+            {
+                self.persist_tenant_position(&closed).await;
+            }
             // A full close is an observed launch outcome. The service only
             // attributes it when entry actually observed this mint's
             // creator; it never guesses a creator from the position alone.

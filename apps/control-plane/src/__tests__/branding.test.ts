@@ -15,10 +15,10 @@ import {
 } from "../config/branding";
 
 describe("branding defaults", () => {
-  it("ships a complete, non-empty default identity", () => {
+  it("ships a complete identity without inventing a support contact", () => {
     expect(DEFAULT_BRANDING.productName.length).toBeGreaterThan(0);
     expect(DEFAULT_BRANDING.tagline.length).toBeGreaterThan(0);
-    expect(DEFAULT_BRANDING.supportEmail).toContain("@");
+    expect(DEFAULT_BRANDING.supportEmail).toBeNull();
     expect(DEFAULT_BRANDING.colors.primary).toMatch(/^#/);
     expect(DEFAULT_BRANDING.colors.accent).toMatch(/^#/);
   });

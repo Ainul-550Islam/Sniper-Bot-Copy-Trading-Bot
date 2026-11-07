@@ -108,6 +108,7 @@ pub async fn deliver_once(url: &str, secret: &str, event_id: &str, body: &[u8]) 
     let client = match reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(DELIVERY_TIMEOUT)
+        .no_proxy()
         .resolve(&host, socket)
         .build()
     {

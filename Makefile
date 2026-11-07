@@ -78,6 +78,7 @@ gates: ## Every cargo-free repository gate (hygiene, migrations, openapi, routes
 	@bash scripts/check-routes-vs-ui.sh
 	@bash scripts/scan-secrets.sh
 	@bash tests/release/helm_image_contract.sh
+	@python3 -m unittest discover -s tests/release -p 'test_*_contract.py' -v
 	@bash tests/release/container_assets_live.sh
 	@bash tests/release/marketing_claims.sh
 	@echo "  note: tests/release/stats_current.sh and manifest_current.sh are the"

@@ -16,7 +16,9 @@ export interface ModeSwitcherProps {
 }
 
 export function ModeSwitcher({ currentMode, liveAllowed, onModeChanged }: ModeSwitcherProps) {
-  const [selectedMode, setSelectedMode] = useState<string>(currentMode || "paper");
+  const [selectedOverride, setSelectedOverride] = useState<{ baseMode: string; mode: string } | null>(null);
+  const serverMode = currentMode || "paper";
+  const selectedMode = selectedOverride?.baseMode === serverMode ? selectedOverride.mode : serverMode;
   const [pendingLive, setPendingLive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ModeResponse | null>(null);
@@ -28,7 +30,7 @@ export function ModeSwitcher({ currentMode, liveAllowed, onModeChanged }: ModeSw
     try {
       const res = await setMode(mode);
       setResult(res);
-      setSelectedMode(res.mode);
+      setSelectedOverride({ baseMode: serverMode, mode: res.mode });
       setPendingLive(false);
       onModeChanged?.(res);
     } catch (err) {

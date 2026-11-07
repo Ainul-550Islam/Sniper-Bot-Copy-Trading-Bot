@@ -50,7 +50,8 @@ export interface Branding {
     readonly primary: string;
     readonly accent: string;
   };
-  readonly supportEmail: string;
+  /** Support email address, or null when no real contact is configured. */
+  readonly supportEmail: string | null;
   /** Help-centre URL, or null when support is email-only. */
   readonly supportUrl: string | null;
   readonly docsUrl: string | null;
@@ -66,7 +67,7 @@ export const DEFAULT_BRANDING: Branding = Object.freeze({
     primary: "#2f6fed",
     accent: "#22c55e",
   }),
-  supportEmail: "support@snipersuite.example",
+  supportEmail: null,
   supportUrl: null,
   docsUrl: null,
   legalLinks: Object.freeze({
@@ -102,8 +103,7 @@ export function resolveBranding(
       primary: envOrNull(env.NEXT_PUBLIC_BRAND_PRIMARY) ?? DEFAULT_BRANDING.colors.primary,
       accent: envOrNull(env.NEXT_PUBLIC_BRAND_ACCENT) ?? DEFAULT_BRANDING.colors.accent,
     }),
-    supportEmail:
-      envOrNull(env.NEXT_PUBLIC_SUPPORT_EMAIL) ?? DEFAULT_BRANDING.supportEmail,
+    supportEmail: envOrNull(env.NEXT_PUBLIC_SUPPORT_EMAIL),
     supportUrl: envOrNull(env.NEXT_PUBLIC_SUPPORT_URL),
     docsUrl: envOrNull(env.NEXT_PUBLIC_DOCS_URL),
     legalLinks: Object.freeze({

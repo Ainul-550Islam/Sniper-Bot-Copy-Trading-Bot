@@ -378,7 +378,7 @@ export async function revokeKey(hash: string): Promise<RevokeKeyResponse> {
 }
 
 export async function getAuditTrail(limit?: number): Promise<AuditListResponse> {
-  const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
+  const query = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : "";
   return opRequest<AuditListResponse>(`/api/audit${query}`);
 }
 
@@ -405,7 +405,7 @@ export async function getConfig(): Promise<Record<string, unknown>> {
 }
 
 export async function getReconciliationFindings(limit?: number): Promise<ReconciliationFindingsResponse> {
-  const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
+  const query = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : "";
   return opRequest<ReconciliationFindingsResponse>(`/api/reconciliation/findings${query}`);
 }
 
@@ -431,7 +431,7 @@ export async function getExecutionById(id: string): Promise<Record<string, unkno
 }
 
 export async function getTrades(limit?: number): Promise<unknown[]> {
-  const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
+  const query = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : "";
   return opRequest<unknown[]>(`/api/trades${query}`);
 }
 
@@ -440,7 +440,7 @@ export async function getWallets(): Promise<WalletsResponse> {
 }
 
 export async function getAccountingEvents(limit?: number): Promise<AccountingEventsResponse> {
-  const query = limit ? `?limit=${encodeURIComponent(limit)}` : "";
+  const query = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : "";
   return opRequest<AccountingEventsResponse>(`/api/accounting/events${query}`);
 }
 

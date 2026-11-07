@@ -181,9 +181,31 @@ async fn invite(saas: Arc<SaasStore>, db: &Arc<Database>, scoped: &str, email: &
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "invite create: {body}");
-    body["invitation_token"]
-        .as_str()
-        .expect("invitation_token")
+    assert!(
+        body.get("invitation_token").is_none(),
+        "no bearer token to inviter: {body}"
+    );
+    let row: (String,) = sqlx::query_as(
+        "SELECT body_text FROM email_outbox
+          WHERE recipient = $1 AND template_key = 'member_invite'
+            AND dedup_key LIKE $2
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(email)
+    .bind(format!(
+        "member_invite:{}:%",
+        body["invitation_id"].as_str().expect("invitation id")
+    ))
+    .fetch_one(db.pool())
+    .await
+    .expect("invite queued to recipient");
+    row.0
+        .split("token=")
+        .nth(1)
+        .expect("token link")
+        .split_whitespace()
+        .next()
+        .expect("token")
         .to_string()
 }
 

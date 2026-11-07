@@ -227,6 +227,60 @@ impl PositionBook {
             .unwrap_or(0.0)
     }
 
+    /// Check the arithmetic effect of an event without touching this book.
+    /// Only the affected position and cash keys are copied, so a malformed
+    /// amount cannot poison the live aggregates and the check remains O(1).
+    pub fn validate_apply(&self, event: &AccountingEvent, event_id: &str) -> Result<(), String> {
+        let mut candidate = PositionBook::new();
+        let position_key = PositionKey::of(event);
+        if let Some(position) = self.positions.get(&position_key) {
+            candidate.positions.insert(position_key, position.clone());
+        }
+        let cash_key = (event.wallet.clone(), event.quote_asset.clone());
+        if let Some(value) = self.cash.get(&cash_key) {
+            candidate.cash.insert(cash_key.clone(), *value);
+        }
+        if event.kind == EventKind::Transfer {
+            if let Some(to) = &event.counterparty_wallet {
+                let recipient_key = (to.clone(), event.quote_asset.clone());
+                if let Some(value) = self.cash.get(&recipient_key) {
+                    candidate.cash.insert(recipient_key, *value);
+                }
+            }
+        }
+        if event.kind == EventKind::Fee {
+            if let Some(value) = self.standalone_fees.get(&cash_key) {
+                candidate.standalone_fees.insert(cash_key, *value);
+            }
+        }
+        candidate.apply(event, event_id);
+        let finite_position = candidate.positions.values().all(|position| {
+            [
+                position.qty,
+                position.cost_basis,
+                position.realized,
+                position.fees,
+                position.bought_quote,
+                position.sold_quote,
+                position.bought_qty,
+                position.sold_qty,
+                position.last_price,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+        });
+        let finite_cash = candidate.cash.values().all(|value| value.is_finite())
+            && candidate
+                .standalone_fees
+                .values()
+                .all(|value| value.is_finite());
+        if finite_position && finite_cash {
+            Ok(())
+        } else {
+            Err("event arithmetic would make accounting state non-finite".into())
+        }
+    }
+
     /// Apply one (already validated, already deduplicated) event.
     pub fn apply(&mut self, event: &AccountingEvent, event_id: &str) -> BookEffect {
         let key = PositionKey::of(event);
@@ -308,7 +362,7 @@ impl PositionBook {
             pos.last_price = event.quote_amount / event.quantity;
         }
         pos.updated_at = event.ts.max(pos.updated_at);
-        pos.event_count += 1;
+        pos.event_count = pos.event_count.saturating_add(1);
         pos.last_event_id = event_id.to_string();
         if let Some(id) = &event.position_id {
             if !pos.position_ids.iter().any(|x| x == id) {

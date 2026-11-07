@@ -26,6 +26,7 @@ export default function RiskPage() {
       const data = await getRiskDashboard();
       setRisk(data);
     } catch (err: unknown) {
+      setRisk(null);
       setError(err instanceof Error ? err.message : "Failed to load risk posture");
     } finally {
       setLoading(false);

@@ -35,6 +35,9 @@ export interface CreateWebhookInput {
  */
 export async function listWebhooks(): Promise<WebhookEndpoint[]> {
   const res = await request<WebhooksResponse>("/api/saas/webhooks");
+  if (!res || !Array.isArray(res.items)) {
+    throw new Error("Invalid webhook endpoints response");
+  }
   return res.items;
 }
 
@@ -107,6 +110,9 @@ export async function listWebhookDeliveries(endpointId: string): Promise<Webhook
   const res = await request<WebhookDeliveriesResponse>(
     `/api/saas/webhooks/${encodeURIComponent(endpointId)}/deliveries`,
   );
+  if (!res || !Array.isArray(res.items)) {
+    throw new Error("Invalid webhook deliveries response");
+  }
   return res.items;
 }
 

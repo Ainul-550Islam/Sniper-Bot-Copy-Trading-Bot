@@ -34,7 +34,9 @@ export function RiskLimitPanel({ rules, referenceAsset = "reference units" }: Ri
             {rules.map((rule) => {
               const isWarning = rule.status === "warning";
               const isBreached = rule.status === "breached";
-              const pct = rule.utilization_pct ?? 0;
+              const pct = rule.utilization_pct !== null && Number.isFinite(rule.utilization_pct)
+                ? rule.utilization_pct
+                : null;
               return (
                 <tr key={rule.id} style={{ borderTop: "1px solid var(--line)" }}>
                   <td style={{ padding: "0.75rem 1rem" }}>
@@ -46,7 +48,9 @@ export function RiskLimitPanel({ rules, referenceAsset = "reference units" }: Ri
                     {rule.limit_ref === null ? "Not configured" : `${rule.limit_ref.toLocaleString()} ${referenceAsset}`}
                   </td>
                   <td style={{ padding: "0.75rem 1rem" }}>
-                    {rule.current_utilization_ref === null ? "Not measured" : (
+                    {rule.current_utilization_ref === null ? "Not measured" : pct === null ? (
+                      <span>{rule.current_utilization_ref.toLocaleString()} (percentage unavailable)</span>
+                    ) : (
                       <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                         <div style={{ flex: 1, height: "6px", background: "rgba(255,255,255,0.1)", borderRadius: "3px", overflow: "hidden", minWidth: "60px" }}>
                           <div style={{ height: "100%", width: `${Math.min(100, Math.max(0, pct))}%`, background: isBreached ? "var(--bad)" : isWarning ? "var(--warn)" : "var(--ok)" }} />
