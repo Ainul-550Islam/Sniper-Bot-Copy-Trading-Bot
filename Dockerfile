@@ -61,7 +61,7 @@ RUN cargo build --locked --release -p sniper-suite --bin sniper-suite
 
 # ---- runtime ----------------------------------------------------------------
 # debian:bookworm-slim — digest-pinned, see the note on the builder stage.
-FROM debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+FROM debian@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6 AS runtime
 
 # (same reason as the builder stage above: Debian apt sources are not frozen)
 # hadolint ignore=DL3008
