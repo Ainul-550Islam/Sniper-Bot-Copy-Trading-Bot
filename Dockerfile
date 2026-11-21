@@ -25,7 +25,7 @@
 # Refresh with ./scripts/pin-base-image-digests.sh (keeps
 # deploy/release/base-images.lock.json authoritative).
 # rust:1.98.1-bookworm
-FROM rust@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
+FROM rust@sha256:223cc32ddca8f3ee90c436dbc94b6b5f052ea7f9653c5201e9612f08ad7d21b8 AS builder
 
 # Solana/reqwest builds want these native tools present.
 #
