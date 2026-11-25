@@ -75,7 +75,7 @@ jobs:
       REQUIRE_SERVICES: "1"
       REQUIRE_POSTGRES: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml pins the exact version + components. The action
       # is pinned to the SAME version explicitly: `@stable` would silently
@@ -248,7 +248,7 @@ jobs:
       REQUIRE_SERVICES: "1"
       REQUIRE_POSTGRES: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
@@ -276,7 +276,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: OpenAPI coverage (saas + tenant scope)
         run: bash scripts/check-openapi-coverage.sh
@@ -309,7 +309,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Asserts protocol floor, cipher posture, HSTS and the other
       # security headers, the :80 -> :443 redirect, that /metrics is not
@@ -537,12 +537,12 @@ jobs:
       run:
         working-directory: programs/staking-suite
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Pinned explicitly to MIRROR the root rust-toolchain.toml (1.98.1):
       # this job's working-directory is programs/staking-suite, which has no
       # rust-toolchain.toml of its own, so the root pin would not apply here.
       # Keep in sync with rust-toolchain.toml when the pin is bumped.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: program
@@ -601,7 +601,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Prebuilt binaries — fast, no compile.
       - uses: taiki-e/install-action@v2
@@ -630,15 +630,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # Build the production image exactly as an operator would. Layer cache
       # keeps repeat builds fast; the image itself is NOT pushed (no registry
       # credentials in CI by design).
       - name: build image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -678,8 +678,8 @@ jobs:
     timeout-minutes: 30
     needs: [app, security]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
@@ -753,8 +753,8 @@ jobs:
     timeout-minutes: 30
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: external
