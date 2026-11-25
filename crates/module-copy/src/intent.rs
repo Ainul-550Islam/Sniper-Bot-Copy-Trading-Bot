@@ -81,6 +81,13 @@ pub fn is_entry_label(label: &str) -> bool {
     label.starts_with("copy-") && !label.starts_with("copy-exit")
 }
 
+/// One ownership key for every exit path and rule affecting a copy position.
+/// This is a lease identity, not the per-attempt execution intent or durable
+/// evidence that an earlier broadcast did not land.
+pub fn exit_claim_id(position_id: &str) -> String {
+    format!("exit:copy:{position_id}")
+}
+
 /// Which venue path a copy exit takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,18 +147,17 @@ pub fn is_exit_label(label: &str) -> bool {
 }
 
 /// Fresh write-ahead intent record for one copy-trade broadcast (§I crash
-/// point C). The journal id is process-unique (`intent-N`) on purpose — it
-/// identifies the *attempt* in the durable journal, while the ledger intent
-/// id identifies the *logical trade*.
+/// point C). A fresh UUID-based journal id identifies this *attempt* across
+/// replicas and restarts; the ledger intent id identifies the *logical trade*.
 pub fn journal_record(
-    state: &Shared,
+    _state: &Shared,
     wallet: &Arc<Wallet>,
     symbol: &str,
     side: &str,
     qty: &str,
 ) -> IntentRecord {
     IntentRecord {
-        intent_id: state.next_id("intent"),
+        intent_id: bot_core::recovery::new_journal_intent_id(),
         module: "copy".into(),
         symbol: symbol.to_string(),
         wallet: wallet.pubkey.to_string(),

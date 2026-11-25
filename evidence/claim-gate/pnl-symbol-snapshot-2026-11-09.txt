@@ -1,0 +1,13 @@
+Tenant per-symbol realized PnL snapshot, 2026-11-09.
+Source review found old validity and aggregate executed separately. Real PG test deterministically runs former check, commits an unknown PnL row, then executes former aggregate, which omits it and returns 50. New method uses one materialized filtered CTE and one SQL statement snapshot, then returns error if unknown. Real PG reporting suite 2/2 passes for empty/known/unknown/spanning. The interleaving is reproduced with former SQL steps, not with a forced production-call race; no live impact asserted. Whole dashboard still combines separate snapshots and window PnL semantics remain limited.
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 0.97s
+     Running tests/reporting_cross_tenant_pg.rs (target/debug/deps/reporting_cross_tenant_pg-5aea095aff9ea2c2)
+
+running 2 tests
+test dashboard_aggregates_exclude_the_other_tenant ... ok
+test symbol_pnl_fails_closed_on_unknown_and_handles_empty_books ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+EXIT=0

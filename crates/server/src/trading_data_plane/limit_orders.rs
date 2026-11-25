@@ -62,6 +62,12 @@ pub struct ListQuery {
     /// Exclusive upper bound on `created_at` (RFC 3339) for keyset paging.
     #[serde(default)]
     pub before: Option<DateTime<Utc>>,
+    /// Tie-breaker for [`ListQuery::before`]: the `id` of the last order on
+    /// the previous page. Together they form the full `(created_at, id)`
+    /// cursor, so rows sharing a timestamp are never skipped. Required
+    /// alongside `before` for a lossless page boundary.
+    #[serde(default)]
+    pub before_id: Option<String>,
 }
 
 /// Public view of one order. Never exposes lease internals.
@@ -262,6 +268,43 @@ pub async fn create(
         .into_response()
 }
 
+/// ONE page of this organization's limit orders.
+///
+/// The keyset predicate lives here rather than inline in the handler so the
+/// real-Postgres suite exercises the production SQL instead of a copy of it:
+/// page order is `(created_at DESC, id DESC)`, so the cursor must be the FULL
+/// pair. `before` alone compares `created_at` only and loses every row that
+/// shares the boundary timestamp.
+pub async fn fetch_page(
+    db: &bot_core::db::Database,
+    organization_id: uuid::Uuid,
+    status: Option<&str>,
+    cursor: Option<(DateTime<Utc>, Option<String>)>,
+    limit: i64,
+) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+    let before_ts = cursor.as_ref().map(|(ts, _)| *ts);
+    let before_id = cursor.as_ref().and_then(|(_, id)| id.clone());
+    sqlx::query(
+        "SELECT id, mint, side, trigger_kind, price_sol::float8 AS price_sol, \
+                amount::float8 AS amount, status, created_at, expires_at, resolved_at, \
+                attempts, last_error \
+         FROM limit_orders \
+         WHERE organization_id = $1 \
+           AND ($2::text IS NULL OR status = $2) \
+           AND ($3::timestamptz IS NULL OR created_at < $3 \
+                OR (created_at = $3 AND id < $5)) \
+         ORDER BY created_at DESC, id DESC \
+         LIMIT $4",
+    )
+    .bind(organization_id)
+    .bind(status)
+    .bind(before_ts)
+    .bind(limit)
+    .bind(before_id)
+    .fetch_all(db.pool())
+    .await
+}
+
 /// `GET /api/tenant/limit-orders`
 pub async fn list(
     State(state): State<ApiState>,
@@ -294,23 +337,22 @@ pub async fn list(
         return validation_error("limit must be between 1 and 200");
     }
 
-    let rows = sqlx::query(
-        "SELECT id, mint, side, trigger_kind, price_sol::float8 AS price_sol, \
-                amount::float8 AS amount, status, created_at, expires_at, resolved_at, \
-                attempts, last_error \
-         FROM limit_orders \
-         WHERE organization_id = $1 \
-           AND ($2::text IS NULL OR status = $2) \
-           AND ($3::timestamptz IS NULL OR created_at < $3) \
-         ORDER BY created_at DESC, id DESC \
-         LIMIT $4",
-    )
-    .bind(ctx.organization.id.as_uuid())
-    .bind(status)
-    .bind(query.before)
-    .bind(limit)
-    .fetch_all(db.pool())
-    .await;
+    // Keyset pagination over the FULL sort key (created_at, id). A cursor
+    // that carried only `created_at` skipped every row sharing the boundary
+    // timestamp, because the page order breaks ties by id while the cursor
+    // did not. `before` alone stays supported (timestamp-only, documented as
+    // lossy at a tie) so existing clients keep working.
+    let cursor: Option<(DateTime<Utc>, Option<String>)> = match (&query.before, &query.before_id) {
+        (Some(ts), Some(id)) => Some((*ts, Some(id.clone()))),
+        (Some(ts), None) => Some((*ts, None)),
+        (None, Some(_)) => {
+            return validation_error("before_id requires before (RFC 3339 created_at)")
+        }
+        (None, None) => None,
+    };
+    let composite = matches!(&cursor, Some((_, Some(id))) if !id.is_empty());
+
+    let rows = fetch_page(db, ctx.organization.id.as_uuid(), status, cursor, limit).await;
 
     let rows = match rows {
         Ok(r) => r,
@@ -334,10 +376,15 @@ pub async fn list(
         })
         .collect();
 
-    let next_before = if orders.len() as i64 == limit {
-        orders.last().map(|o| o.created_at)
-    } else {
-        None
+    // A full page returns BOTH parts of the cursor so the next request can
+    // resume exactly at the boundary; `next_before` stays for older clients
+    // but `next_before_id` is what makes the page boundary lossless.
+    let (next_before, next_before_id) = match (
+        orders.len() as i64 == limit,
+        orders.last().map(|o| (o.created_at, o.id.clone())),
+    ) {
+        (true, Some((ts, id))) => (Some(ts), Some(id)),
+        _ => (None, None),
     };
 
     (
@@ -346,6 +393,8 @@ pub async fn list(
             "organization_id": ctx.organization.id.to_string(),
             "orders": orders,
             "next_before": next_before,
+            "next_before_id": next_before_id,
+            "cursor_is_lossless": composite || next_before_id.is_none(),
         })),
     )
         .into_response()
@@ -459,6 +508,49 @@ pub fn routes() -> Router<ApiState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The page predicate must be a strict total order: with `(created_at, id)`
+    /// no row can be both skipped and repeated at a boundary where several
+    /// rows share the same `created_at` (the defect this fixes).
+    #[test]
+    fn composite_cursor_leaves_no_row_between_pages() {
+        // Simulated page of equal timestamps, newest page first.
+        let ts = Utc::now();
+        let all: Vec<(DateTime<Utc>, String)> = vec![
+            (ts, "ord-c".into()),
+            (ts, "ord-b".into()),
+            (ts, "ord-a".into()),
+            (ts - Duration::seconds(1), "ord-z".into()),
+        ];
+        // Worst case for the OLD cursor: the whole page shares one timestamp.
+        let page1: Vec<_> = all.iter().take(2).cloned().collect();
+        let (last_ts, last_id) = page1.last().cloned().unwrap();
+        // Full keyset: strictly after (last_ts, last_id) in (created_at, id) DESC.
+        let page2: Vec<_> = all
+            .iter()
+            .filter(|(t, id)| *t < last_ts || (*t == last_ts && id < &last_id))
+            .cloned()
+            .collect();
+        assert_eq!(
+            page2,
+            vec![
+                (ts, "ord-a".into()),
+                (ts - Duration::seconds(1), "ord-z".into())
+            ],
+            "the tie-boundary row is neither skipped nor repeated"
+        );
+        // The OLD timestamp-only cursor would have dropped `ord-a` entirely.
+        let old_page2: Vec<_> = all.iter().filter(|(t, _)| *t < last_ts).cloned().collect();
+        assert_eq!(old_page2.len(), 1, "timestamp-only paging skips the tie");
+    }
+
+    #[test]
+    fn before_id_without_before_is_a_validation_error_worth_reporting() {
+        // Guards the contract asserted by the handler: a tie-breaker alone
+        // cannot form a cursor.
+        let q: ListQuery = serde_json::from_str(r#"{"before_id":"ord-1"}"#).unwrap();
+        assert!(q.before.is_none() && q.before_id.is_some());
+    }
 
     #[test]
     fn side_and_trigger_parse_strictly() {

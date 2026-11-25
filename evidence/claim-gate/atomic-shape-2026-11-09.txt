@@ -1,0 +1,11 @@
+Command: cargo test -p bot-core --lib atomic_shape --locked -j 2
+     Running unittests src/lib.rs (target/debug/deps/bot_core-91f5a164e5b4183e)
+
+running 3 tests
+test db::claims::atomic_shape_tests::expiry_semantics_are_documented ... ok
+test db::claims::atomic_shape_tests::claim_acquire_is_a_single_statement ... ok
+test db::claims::atomic_shape_tests::takeover_and_reacquisition_conditions_are_explicit ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 674 filtered out; finished in 0.00s
+
+EXIT=0

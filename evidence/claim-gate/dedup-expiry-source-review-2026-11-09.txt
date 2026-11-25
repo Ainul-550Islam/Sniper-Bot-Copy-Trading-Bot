@@ -1,0 +1,112 @@
+PostgreSQL dedup expiry source review, 2026-11-09.
+DedupRepo mark/exists ignore expires_at until cleanup deletes the row. Zero TTL yields NULL (no expiry). cleanup_expired uses database now() and is invoked by run_maintenance. The L1 bounded set has no TTL in mark, so a remembered key can outlast its L2 entry. This is source analysis, not a runtime scheduling guarantee.
+
+   659	    }
+   660
+   661	    /// Atomic first-arrival check. `Ok(true)` = this call is the FIRST for
+   662	    /// (namespace, key) — the caller may act. `Ok(false)` = already seen.
+   663	    pub async fn mark(&self, ns: &str, key: &str, ttl: std::time::Duration) -> RepoResult<bool> {
+   664	        let expires = if ttl.is_zero() {
+   665	            None
+   666	        } else {
+   667	            Some(Utc::now() + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::days(7)))
+   668	        };
+   669	        // 0027: dedup identity is (organization_id, namespace, key) —
+   670	        // the same namespace+key can be marked by another tenant
+   671	        // independently; this tenant's mark is invisible to theirs.
+   672	        let res = self
+   673	            .db
+   674	            .timed(
+   675	                "dedup_mark",
+   676	                sqlx::query(
+   677	                    r#"INSERT INTO dedup_keys (organization_id, namespace, key, expires_at)
+   678	                       VALUES ($1, $2, $3, $4)
+   679	                       ON CONFLICT (organization_id, namespace, key) DO NOTHING"#,
+   680	                )
+   681	                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+   682	                .bind(ns)
+   683	                .bind(key)
+   684	                .bind(expires)
+   685	                .execute(self.db.pool()),
+   686	            )
+   687	            .await?;
+   688	        Ok(res.rows_affected() == 1)
+   689	    }
+   690
+   691	    /// Remove a key (used when a transaction provably did not land and the
+   692	    /// operation may legitimately be retried).
+   693	    pub async fn forget(&self, ns: &str, key: &str) -> RepoResult<()> {
+   694	        self.db
+   695	            .timed(
+   696	                "dedup_forget",
+   697	                sqlx::query(
+   698	                    "DELETE FROM dedup_keys \
+   699	                     WHERE organization_id = $1 AND namespace = $2 AND key = $3",
+   700	                )
+   701	                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+   702	                .bind(ns)
+   703	                .bind(key)
+   704	                .execute(self.db.pool()),
+   705	            )
+   706	            .await?;
+   707	        Ok(())
+   708	    }
+   709
+   710	    pub async fn exists(&self, ns: &str, key: &str) -> RepoResult<bool> {
+   711	        let row = self
+   712	            .db
+   713	            .timed(
+   714	                "dedup_exists",
+   715	                sqlx::query(
+   716	                    "SELECT 1 AS one FROM dedup_keys \
+   717	                     WHERE organization_id = $1 AND namespace = $2 AND key = $3",
+   718	                )
+   719	                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+   720	                .bind(ns)
+   721	                .bind(key)
+   722	                .fetch_optional(self.db.pool()),
+   723	            )
+   724	            .await?;
+   725	        Ok(row.is_some())
+   726	    }
+   727
+   728	    /// Retention: drop expired keys. Returns rows deleted.
+   729	    pub async fn cleanup_expired(&self) -> RepoResult<u64> {
+   730	        let res = self
+   731	            .db
+   732	            .timed(
+   733	                "dedup_cleanup",
+   734	                sqlx::query(
+   735	                    "DELETE FROM dedup_keys \
+   736	                     WHERE organization_id = $1 \
+   737	                       AND expires_at IS NOT NULL AND expires_at < now()",
+   738	                )
+   739	                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+   105	    }
+   106
+   107	    /// First-arrival check. `true` = newly marked (act on it), `false` =
+   108	    /// duplicate. Matches `AppState::mark_signature_seen` semantics exactly.
+   109	    pub async fn mark(&self, ns: &str, key: &str) -> bool {
+   110	        // L1: definitive when it says "seen".
+   111	        let l1_new = {
+   112	            let mut map = self.l1.write().await;
+   113	            let set = map.entry(ns.to_string()).or_default();
+   114	            set.insert(key, self.cap)
+   115	        };
+   116	        if !l1_new {
+   117	            Self::meter(ns, "l1", "duplicate");
+   118	            return false;
+   119	        }
+   120	        match self.backend {
+   121	            DedupBackend::Memory => {
+   122	                Self::meter(ns, "l1", "new");
+   393	/// Periodic housekeeping: TTL-expired dedup keys, old idempotency keys,
+   394	/// aged system events. Cheap; run hourly.
+   395	pub async fn run_maintenance(db: &Arc<Database>, event_retention_days: i64) {
+   396	    use crate::db::repo::{DedupRepo, IdempotencyRepo, SystemEventRepo};
+   397	    match DedupRepo::new(db.clone()).cleanup_expired().await {
+   398	        Ok(n) if n > 0 => info!(removed = n, "expired dedup keys cleaned"),
+   399	        Ok(_) => {}
+   400	        Err(e) => warn!(error = %e, "dedup cleanup failed"),
+   401	    }
+   402	    match IdempotencyRepo::new(db.clone())

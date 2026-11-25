@@ -1,0 +1,30 @@
+=== GREEN: chain-side existence check for ambiguous reservations ===
+--- reservation_chain unit (decision matrix) ---
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 987 filtered out; finished in 0.01s
+
+chain_unit_exit=0
+--- probe against a mock JSON-RPC node (landed / absent / unknown / malformed) ---
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.23s
+
+chain_probe_exit=0
+--- server api (sweep + chain-check RBAC/shape) ---
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 956 filtered out; finished in 0.17s
+
+server_api_exit=0
+--- server recon (sweep service + production sink) ---
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 989 filtered out; finished in 0.00s
+
+server_recon_exit=0
+--- openapi artifact ---
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+openapi_exit=0
+--- clippy (all targets) / fmt / diff ---
+    Finished `dev` profile [unoptimized] target(s) in 0.48s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

@@ -33,8 +33,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bot_core::db::repo::{
-    IntentRecord, IntentRepo, OrderRepo, PositionRepo, ReconRepo, RiskEventRepo, TradeRepo,
-    TransactionRepo,
+    BroadcastAmbiguity, BroadcastReservationRepo, IntentRecord, IntentRepo, OrderRepo,
+    PositionRepo, ReconRepo, RiskEventRepo, TradeRepo, TransactionRepo,
 };
 use bot_core::db::Database;
 use bot_core::models::{ExecutionMode, PositionStatus};
@@ -203,16 +203,54 @@ impl SolanaTxTruth {
     }
 }
 
-/// Database-backed [`IntentSink`] (§I crash point C). Write failures are
-/// logged and metered but NEVER fail the trade: the journal is defence in
-/// depth — a failed journal write degrades to the pre-journal behaviour.
+/// Database-backed [`IntentSink`] (§I crash point C). The legacy `record`
+/// method stays best-effort (logged and metered), but `record_checked` makes a
+/// failed write-ahead reservation fail closed before the broadcast future is
+/// polled. Link/abandon remain best-effort after execution.
 pub struct DbIntentSink {
     db: Arc<Database>,
+    /// Fencing identity of this process/replica: written onto the durable
+    /// reservation so a takeover by another owner is provable.
+    owner_id: String,
+    /// Lease duration of one pre-broadcast reservation.
+    lease: std::time::Duration,
 }
 
 impl DbIntentSink {
+    /// Production constructor: the owner id is the replica identity, which is
+    /// unique per process, so a restart never resumes an old owner's lease.
     pub fn new(db: Arc<Database>) -> Self {
-        DbIntentSink { db }
+        DbIntentSink {
+            db,
+            owner_id: format!("replica-{}", uuid::Uuid::new_v4()),
+            lease: std::time::Duration::from_secs(120),
+        }
+    }
+
+    /// Explicit owner/lease (tests, and deployments that want a stable id).
+    pub fn with_owner(
+        db: Arc<Database>,
+        owner_id: impl Into<String>,
+        lease: std::time::Duration,
+    ) -> Self {
+        DbIntentSink {
+            db,
+            owner_id: owner_id.into(),
+            lease,
+        }
+    }
+
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    /// One write-ahead record attempt. Both the legacy best-effort `record`
+    /// and the fail-closed `record_checked` use the exact same durable path.
+    async fn try_record(&self, rec: &IntentRecord) -> Result<(), bot_core::db::TimedDbError> {
+        deployment_scoped(&self.db, async {
+            IntentRepo::new(self.db.clone()).record(rec).await
+        })
+        .await
     }
 
     fn meter_error(op: &str) {
@@ -229,17 +267,119 @@ impl DbIntentSink {
 #[async_trait]
 impl IntentSink for DbIntentSink {
     async fn record(&self, rec: IntentRecord) {
-        if let Err(e) = deployment_scoped(&self.db, async {
-            IntentRepo::new(self.db.clone()).record(&rec).await
-        })
-        .await
-        {
+        if let Err(e) = self.try_record(&rec).await {
             warn!(intent = %rec.intent_id, error = %e, "intent journal record failed");
             Self::meter_error("record");
         }
     }
 
+    /// Production durability gate: if the deployment-scoped write-ahead
+    /// record fails, `with_intent_disposition` aborts before a broadcast
+    /// future is polled. Link/abandon remain best-effort after execution.
+    async fn record_checked(&self, rec: IntentRecord) -> bot_core::BotResult<()> {
+        self.try_record(&rec).await.map_err(|e| {
+            warn!(intent = %rec.intent_id, error = %e, "intent journal reservation failed; refusing broadcast");
+            Self::meter_error("record");
+            bot_core::BotError::from(e)
+        })
+    }
+
+    /// Durable pre-broadcast reservation. Losing it (another attempt/replica
+    /// holds the trade, or an earlier attempt's outcome is still ambiguous)
+    /// returns `Err`, so `with_reserved_intent_disposition` never polls the
+    /// money-moving future. If the durable store is unreachable the call also
+    /// fails closed: an unverifiable trade is not an authorized trade.
+    async fn reserve(&self, reservation_key: &str, rec: &IntentRecord) -> bot_core::BotResult<()> {
+        let key = if reservation_key.trim().is_empty() {
+            rec.intent_id.clone()
+        } else {
+            reservation_key.to_string()
+        };
+        let lease_secs = self.lease.as_secs().max(1) as i64;
+        let claim = deployment_scoped(&self.db, async {
+            BroadcastReservationRepo::new(self.db.clone())
+                .reserve(&key, &self.owner_id, rec, lease_secs)
+                .await
+        })
+        .await
+        .map_err(|e| {
+            warn!(trade = %key, error = %e, "broadcast reservation unavailable; refusing broadcast");
+            Self::meter_error("reserve");
+            bot_core::BotError::from(e)
+        })?;
+        if claim.fresh {
+            metrics::global()
+                .counter(
+                    "bot_broadcast_reservations_total",
+                    "Durable pre-broadcast reservations by outcome.",
+                    &[("outcome", "granted")],
+                )
+                .inc();
+            return Ok(());
+        }
+        metrics::global()
+            .counter(
+                "bot_broadcast_reservations_total",
+                "Durable pre-broadcast reservations by outcome.",
+                &[("outcome", "refused")],
+            )
+            .inc();
+        warn!(
+            trade = %key,
+            holder = %claim.owner,
+            epoch = claim.epoch,
+            "trade already reserved by another attempt; refusing to broadcast"
+        );
+        Err(bot_core::BotError::invalid(format!(
+            "trade {key} is reserved by {} (epoch {}); refusing to broadcast a duplicate attempt",
+            claim.owner, claim.epoch
+        )))
+    }
+
+    /// Close the durable claim after the broadcast future returned. A known
+    /// signature keeps the claim `linked` (the outcome is recorded); a
+    /// proven non-send abandons it so the trade key is immediately retryable
+    /// instead of blocking on a lease that will never be renewed. Anything
+    /// else (error/ambiguous) deliberately leaves the claim `reserved` for
+    /// the lease and the operator sweep.
+    async fn release_reservation(
+        &self,
+        reservation_key: &str,
+        established_non_send: bool,
+    ) -> Option<bool> {
+        if !established_non_send {
+            return None;
+        }
+        let owner = self.owner_id.clone();
+        let key = reservation_key.to_string();
+        let out = deployment_scoped(&self.db, async {
+            BroadcastReservationRepo::new(self.db.clone())
+                .abandon(&key, &owner, self.current_epoch(&key).await?)
+                .await
+        })
+        .await;
+        match out {
+            Ok(freed) => {
+                metrics::global()
+                    .counter(
+                        "bot_broadcast_reservation_releases_total",
+                        "Pre-broadcast claims released after a proven non-send.",
+                        &[("outcome", if freed { "freed" } else { "held" })],
+                    )
+                    .inc();
+                Some(freed)
+            }
+            Err(error) => {
+                warn!(trade = %key, %error, "reservation release failed; claim stays reserved");
+                Some(false)
+            }
+        }
+    }
+
     async fn link(&self, intent_id: &str, signature: &str) {
+        // The journal row and the reservation are updated together: both are
+        // best-effort after a broadcast (the signature already left us), but
+        // the reservation carries the same signature for operators.
         if let Err(e) = deployment_scoped(&self.db, async {
             IntentRepo::new(self.db.clone())
                 .link(intent_id, signature)
@@ -249,6 +389,13 @@ impl IntentSink for DbIntentSink {
         {
             warn!(%intent_id, error = %e, "intent journal link failed");
             Self::meter_error("link");
+        }
+        // The durable reservation is completed with the same signature. A
+        // fenced-out owner (another replica took the lapsed lease over) is a
+        // CAS no-op, never an overwrite.
+        if let Err(e) = self.complete_reservation(intent_id, Some(signature)).await {
+            warn!(%intent_id, error = %e, "broadcast reservation completion failed");
+            Self::meter_error("reservation_complete");
         }
     }
 
@@ -261,6 +408,45 @@ impl IntentSink for DbIntentSink {
             warn!(%intent_id, error = %e, "intent journal abandon failed");
             Self::meter_error("abandon");
         }
+        // A provably-never-broadcast attempt frees the trade key for a retry.
+        if let Err(e) = self.complete_reservation(intent_id, None).await {
+            warn!(%intent_id, error = %e, "broadcast reservation abandon failed");
+            Self::meter_error("reservation_abandon");
+        }
+    }
+}
+
+impl DbIntentSink {
+    /// The epoch THIS owner holds for `trade_key` (`0` when the row is gone
+    /// or owned by someone else, which makes the release a CAS no-op).
+    async fn current_epoch(&self, trade_key: &str) -> Result<i64, bot_core::db::TimedDbError> {
+        let repo = BroadcastReservationRepo::new(self.db.clone());
+        let row = repo.get(trade_key).await?;
+        Ok(match row {
+            Some((owner, epoch, _)) if owner == self.owner_id => epoch,
+            _ => 0,
+        })
+    }
+
+    /// Close the durable reservation this sink created for `intent_id`:
+    /// `Some(signature)` = linked, `None` = abandoned (provably never sent).
+    /// A fenced-out owner is a CAS no-op, never an overwrite.
+    async fn complete_reservation(
+        &self,
+        intent_id: &str,
+        signature: Option<&str>,
+    ) -> bot_core::BotResult<()> {
+        let owner = self.owner_id.clone();
+        let sig = signature.map(str::to_string);
+        deployment_scoped(&self.db, async {
+            let repo = BroadcastReservationRepo::new(self.db.clone());
+            match sig.as_deref() {
+                Some(s) => repo.complete_by_intent(intent_id, &owner, s).await,
+                None => repo.abandon_by_intent(intent_id, &owner).await,
+            }
+        })
+        .await?;
+        Ok(())
     }
 }
 
@@ -1047,8 +1233,15 @@ impl TruthSource for SolanaPositionTruth {
 
             let outcome = compare_position(&snapshot, &external, QuantityTolerance::default());
             meter_outcome("position", &outcome);
-            settle_position_outcome(&self.state, &self.db, subject, &position, outcome, &fills)
-                .await
+            settle_position_outcome(
+                &self.state,
+                self.db.as_ref(),
+                subject,
+                &position,
+                outcome,
+                &fills,
+            )
+            .await
         })
         .await
     }
@@ -1095,16 +1288,13 @@ async fn fills_for_position(db: &Arc<Database>, position_id: &str) -> Vec<FillRe
 /// Operator-visible alert (risk event + event bus) for divergences.
 async fn flag_position(
     state: &Shared,
-    db: &Arc<Database>,
+    writer: &dyn PositionTruthWriter,
     action: &str,
     reason: &str,
     detail: serde_json::Value,
 ) {
     warn!(%reason, "POSITION RECONCILIATION");
-    if let Err(e) = RiskEventRepo::new(db.clone())
-        .append("system", action, None, reason, &detail)
-        .await
-    {
+    if let Err(e) = writer.flag(action, reason, detail).await {
         debug!(error = %e, "risk-event persistence failed");
     }
     state.events.publish(bot_core::events::AppEvent::Error {
@@ -1124,9 +1314,51 @@ async fn flag_position(
 /// fills; (2) the on-chain quantity is reproduced by the fill history within
 /// tolerance → the book adopts it. Anything authoritative data cannot explain
 /// is parked for operators (§Y).
+/// Where the correction policy records what it did.
+///
+/// Split from the database so the FAILURE path is testable: a correction that
+/// could not be made durable must not be reported as a settled position.
+#[async_trait::async_trait]
+pub trait PositionTruthWriter: Send + Sync {
+    /// Persist the corrected position.
+    async fn upsert_position(
+        &self,
+        position: &bot_core::models::Position,
+    ) -> bot_core::error::BotResult<()>;
+    /// Append the operator-visible risk event.
+    async fn flag(
+        &self,
+        action: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> bot_core::error::BotResult<()>;
+}
+
+#[async_trait::async_trait]
+impl PositionTruthWriter for Database {
+    async fn upsert_position(
+        &self,
+        position: &bot_core::models::Position,
+    ) -> bot_core::error::BotResult<()> {
+        Ok(PositionRepo::new(Arc::new(self.clone()))
+            .upsert(position)
+            .await?)
+    }
+    async fn flag(
+        &self,
+        action: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> bot_core::error::BotResult<()> {
+        Ok(RiskEventRepo::new(Arc::new(self.clone()))
+            .append("system", action, None, reason, &detail)
+            .await?)
+    }
+}
+
 async fn settle_position_outcome(
     state: &Shared,
-    db: &Arc<Database>,
+    writer: &dyn PositionTruthWriter,
     subject: &str,
     position: &bot_core::models::Position,
     outcome: ReconOutcome,
@@ -1162,8 +1394,29 @@ async fn settle_position_outcome(
                 )
                 .await;
             let final_pos = closed.unwrap_or(corrected);
-            if let Err(e) = PositionRepo::new(db.clone()).upsert(&final_pos).await {
-                debug!(error = %e, "corrected position persistence failed");
+            // The correction is only real once it is durable. A failed write used
+            // to be logged at `debug!` while the verdict still said
+            // `corrected-closed`, so the queue recorded a settled position whose
+            // correction had never been stored — and the next restart re-opens it
+            // from the unchanged row.
+            if let Err(error) = writer.upsert_position(&final_pos).await {
+                warn!(
+                    position = %subject,
+                    %error,
+                    "position correction could not be persisted — NOT reporting the position as settled"
+                );
+                let _ = writer
+                    .flag(
+                        "recon_correction_failed",
+                        &format!(
+                            "position {subject}: correction (close from fill history) could not be persisted: {error}"
+                        ),
+                        serde_json::json!({ "position_id": subject, "error": error.to_string() }),
+                    )
+                    .await;
+                return ReconVerdict::Retry {
+                    reason: format!("correction not persisted: {error}"),
+                };
             }
             let reason = format!(
                 "position {subject} corrected: on-chain balance zero, closed from fill history \
@@ -1173,7 +1426,7 @@ async fn settle_position_outcome(
             );
             flag_position(
                 state,
-                db,
+                writer,
                 "recon_correction",
                 &reason,
                 serde_json::json!({
@@ -1212,8 +1465,26 @@ async fn settle_position_outcome(
                 corrected.realized_quote = recon.sell_proceeds;
                 corrected.updated_at = chrono::Utc::now();
                 state.upsert_position(corrected.clone()).await;
-                if let Err(e) = PositionRepo::new(db.clone()).upsert(&corrected).await {
-                    debug!(error = %e, "corrected position persistence failed");
+                // Same rule as the close-from-fills correction: a correction that
+                // is not durable is NOT a settled position.
+                if let Err(error) = writer.upsert_position(&corrected).await {
+                    warn!(
+                        position = %subject,
+                        %error,
+                        "fill-justified correction could not be persisted — NOT reporting the position as settled"
+                    );
+                    let _ = writer
+                        .flag(
+                            "recon_correction_failed",
+                            &format!(
+                                "position {subject}: fill-justified correction (to {external}) could not be persisted: {error}"
+                            ),
+                            serde_json::json!({ "position_id": subject, "error": error.to_string() }),
+                        )
+                        .await;
+                    return ReconVerdict::Retry {
+                        reason: format!("correction not persisted: {error}"),
+                    };
                 }
                 let reason = format!(
                     "position {subject} corrected to on-chain {external} (book said {local}):                          fill history reproduces the observed balance ({} fills, open_qty {})",
@@ -1222,7 +1493,7 @@ async fn settle_position_outcome(
                 );
                 flag_position(
                     state,
-                    db,
+                    writer,
                     "recon_correction",
                     &reason,
                     serde_json::json!({
@@ -1247,7 +1518,7 @@ async fn settle_position_outcome(
                 );
                 flag_position(
                     state,
-                    db,
+                    writer,
                     "drift_flag",
                     &reason,
                     serde_json::json!({
@@ -1269,7 +1540,7 @@ async fn settle_position_outcome(
             );
             flag_position(
                 state,
-                db,
+                writer,
                 "unexpected_position",
                 &reason,
                 serde_json::json!({ "position_id": subject, "onchain_qty": external }),
@@ -1281,7 +1552,7 @@ async fn settle_position_outcome(
             let full = format!("position {subject}: {reason}");
             flag_position(
                 state,
-                db,
+                writer,
                 "recon_recovery_required",
                 &full,
                 serde_json::json!({ "position_id": subject }),
@@ -1416,8 +1687,15 @@ impl TruthSource for PolymarketPositionTruth {
 
             let outcome = compare_position(&snapshot, &external, QuantityTolerance::default());
             meter_outcome("polymarket_position", &outcome);
-            settle_position_outcome(&self.state, &self.db, subject, &position, outcome, &fills)
-                .await
+            settle_position_outcome(
+                &self.state,
+                self.db.as_ref(),
+                subject,
+                &position,
+                outcome,
+                &fills,
+            )
+            .await
         })
         .await
     }
@@ -1475,5 +1753,414 @@ mod tests {
         let r = reconstruct_pnl(&fills);
         assert!((r.realized - 1.9).abs() < 1e-12);
         assert_eq!(r.open_qty, 0.0);
+    }
+
+    /// A correction that could not be persisted must NOT be reported as a
+    /// settled position.
+    ///
+    /// The policy used to log the failed `upsert` at `debug!` and still return
+    /// `Resolved { "corrected-closed" }`, so the queue recorded a position whose
+    /// correction had never been stored — the next restart re-reads the unchanged
+    /// row and re-opens it.
+    #[tokio::test]
+    async fn an_unpersisted_correction_is_not_reported_as_settled() {
+        use std::sync::Mutex;
+
+        struct ScriptedWriter {
+            fails: bool,
+            upserts: Mutex<usize>,
+            flags: Mutex<Vec<String>>,
+        }
+
+        #[async_trait::async_trait]
+        impl PositionTruthWriter for ScriptedWriter {
+            async fn upsert_position(
+                &self,
+                _position: &bot_core::models::Position,
+            ) -> bot_core::error::BotResult<()> {
+                *self.upserts.lock().unwrap() += 1;
+                if self.fails {
+                    return Err(bot_core::error::BotError::Config("database is down".into()));
+                }
+                Ok(())
+            }
+            async fn flag(
+                &self,
+                action: &str,
+                _reason: &str,
+                _detail: serde_json::Value,
+            ) -> bot_core::error::BotResult<()> {
+                self.flags.lock().unwrap().push(action.to_string());
+                Ok(())
+            }
+        }
+
+        let state: Shared =
+            bot_core::state::AppState::new(bot_core::config::AppConfig::from_defaults());
+        let mut position = bot_core::models::Position::new(
+            "pos-correction".into(),
+            bot_core::models::TradeSource::Manual,
+            bot_core::models::Venue::PumpFun,
+            ExecutionMode::Paper,
+            "mint-1".into(),
+            "MINT".into(),
+            "SOL".into(),
+        );
+        position.qty = 10.0;
+        position.cost_basis = 10.0;
+        state.upsert_position(position.clone()).await;
+        let fills = vec![
+            FillRecord {
+                side: "buy".into(),
+                qty: 10.0,
+                quote: 10.0,
+            },
+            FillRecord {
+                side: "sell".into(),
+                qty: 10.0,
+                quote: 12.0,
+            },
+        ];
+
+        // 1. The write fails: the verdict must NOT claim the position is settled.
+        let failing = ScriptedWriter {
+            fails: true,
+            upserts: Mutex::new(0),
+            flags: Mutex::new(Vec::new()),
+        };
+        let verdict = settle_position_outcome(
+            &state,
+            &failing,
+            "pos-correction",
+            &position,
+            ReconOutcome::MissingPosition,
+            &fills,
+        )
+        .await;
+        match &verdict {
+            ReconVerdict::Retry { reason } => {
+                assert!(reason.contains("correction not persisted"), "{reason}");
+            }
+            other => panic!("an unpersisted correction must be retried, got {other:?}"),
+        }
+        assert_eq!(*failing.upserts.lock().unwrap(), 1);
+        assert_eq!(
+            failing.flags.lock().unwrap().as_slice(),
+            &["recon_correction_failed".to_string()],
+            "the operator must be told the correction did not stick"
+        );
+
+        // 2. The same correction against a working store IS settled.
+        state.upsert_position(position.clone()).await;
+        let accepting = ScriptedWriter {
+            fails: false,
+            upserts: Mutex::new(0),
+            flags: Mutex::new(Vec::new()),
+        };
+        let verdict = settle_position_outcome(
+            &state,
+            &accepting,
+            "pos-correction",
+            &position,
+            ReconOutcome::MissingPosition,
+            &fills,
+        )
+        .await;
+        assert!(
+            matches!(&verdict, ReconVerdict::Resolved { status } if status == "corrected-closed"),
+            "a persisted correction is settled, got {verdict:?}"
+        );
+        assert_eq!(*accepting.upserts.lock().unwrap(), 1);
+        assert_eq!(
+            accepting.flags.lock().unwrap().as_slice(),
+            &["recon_correction".to_string()]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Operator sweep of ambiguous pre-broadcast reservations (0079)
+// ---------------------------------------------------------------------------
+
+/// What the operator asked to do with one ambiguous claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SweepDecision {
+    /// The attempt provably never broadcast: free the trade key.
+    Abandon,
+    /// The transaction is on chain with this signature: record it.
+    Link(String),
+}
+
+/// One claim that needs a human decision (never auto-resolved: both outcomes
+/// move money or free money to move).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AmbiguousClaim {
+    pub trade_key: String,
+    pub intent_id: String,
+    pub module: String,
+    pub symbol: String,
+    pub side: String,
+    pub owner: String,
+    pub epoch: i64,
+    pub status: String,
+    pub signature: Option<String>,
+    pub lease_until: String,
+    pub lease_lapsed: bool,
+    pub lapsed_secs: i64,
+    pub takeover_count: i64,
+}
+
+/// Read-only operator view of the ambiguous pre-broadcast claims, plus the
+/// raw lease-held count so an operator can tell "in flight" from "stuck".
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReservationSweep {
+    pub available: bool,
+    /// True when the deployment holds MORE ambiguous claims than this page
+    /// returned. The counts below describe THIS page only — an operator must
+    /// walk (or raise `limit`) rather than assume the sweep is complete.
+    pub truncated: bool,
+    /// Ambiguous claims across the whole deployment (not just this page).
+    pub total_remaining: i64,
+    /// Keyset of the last row on this page; the caller's next `cursor`.
+    pub next_cursor: Option<serde_json::Value>,
+    pub reason: Option<String>,
+    pub lapsed: usize,
+    pub linked_without_signature: usize,
+    pub claims: Vec<AmbiguousClaim>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SweepResult {
+    pub resolved: bool,
+    pub available: bool,
+    pub reason: Option<String>,
+}
+
+/// The sweep itself. `scan` is read-only and safe on any replica; `resolve`
+/// names the exact owner + epoch that was read, so it is a CAS: if the claim
+/// changed hands (another replica took the lapsed lease over) the resolution
+/// is refused instead of overwriting a live attempt.
+pub struct ReservationSweepService {
+    db: Arc<Database>,
+    /// Chain reader used to answer "did the earlier attempt land?" before a
+    /// trade key is freed. `None` = no chain check available, in which case
+    /// `abandon` is refused rather than made blind.
+    chain: Option<Arc<crate::reservation_chain::ChainExistenceProbe>>,
+}
+
+impl ReservationSweepService {
+    pub fn new(db: Arc<Database>) -> Self {
+        ReservationSweepService { db, chain: None }
+    }
+
+    /// Attach the chain-side existence probe (production wiring).
+    #[must_use]
+    pub fn with_chain(
+        mut self,
+        chain: Option<Arc<crate::reservation_chain::ChainExistenceProbe>>,
+    ) -> Self {
+        self.chain = chain;
+        self
+    }
+
+    /// Chain-side existence report for one ambiguous claim, plus the
+    /// operator's explicit non-send assertion. Read-only.
+    pub async fn chain_report(
+        &self,
+        trade_key: &str,
+        signature: Option<&str>,
+        operator_asserts_never_sent: bool,
+    ) -> crate::reservation_chain::ChainExistenceReport {
+        match crate::reservation_chain::authorize_abandon(
+            self.chain.as_deref(),
+            trade_key,
+            signature,
+            operator_asserts_never_sent,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(_) => crate::reservation_chain::ChainExistenceReport {
+                trade_key: trade_key.to_string(),
+                signature: signature.unwrap_or_default().to_string(),
+                existence: crate::reservation_chain::ChainExistence::Unknown,
+                slot: None,
+                block_time: None,
+                error: None,
+                signer_balance_delta: None,
+                abandon_allowed: false,
+                link_allowed: false,
+                head_slot: None,
+                finality: crate::reservation_chain::ChainFinality::NotLanded,
+                confirmations: None,
+                settled_allowed: false,
+                reason: "chain evidence does not authorize freeing this trade key".into(),
+            },
+        }
+    }
+
+    /// Guard for an `abandon` decision: the claim must not be on chain.
+    /// `operator_asserts_never_sent` is the human's explicit claim and is the
+    /// only way an unknown signature becomes abandonable.
+    pub async fn authorize_abandon(
+        &self,
+        trade_key: &str,
+        signature: Option<&str>,
+        operator_asserts_never_sent: bool,
+    ) -> Result<(), String> {
+        crate::reservation_chain::authorize_abandon(
+            self.chain.as_deref(),
+            trade_key,
+            signature,
+            operator_asserts_never_sent,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn scan_page(
+        &self,
+        limit: i64,
+        cursor: Option<(chrono::DateTime<chrono::Utc>, String)>,
+    ) -> Result<bot_core::db::repo::AmbiguousReservationPage, String> {
+        deployment_scoped(&self.db, async {
+            BroadcastReservationRepo::new(self.db.clone())
+                .ambiguous_page(limit, cursor)
+                .await
+        })
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    /// Claims an operator must decide on. Fails closed (`available: false`)
+    /// when the durable store is unreachable — an unreadable sweep is never
+    /// reported as "nothing to do".
+    pub async fn scan(&self, limit: i64) -> ReservationSweep {
+        self.scan_from(limit, None).await
+    }
+
+    /// One page of the sweep, continuing from `cursor` (keyset `(lease_until,
+    /// trade_key)`). Newest lapse first, and `truncated` says whether more
+    /// claims exist — an operator acting on a silently-capped list was the
+    /// defect this replaces.
+    pub async fn scan_from(
+        &self,
+        limit: i64,
+        cursor: Option<(chrono::DateTime<chrono::Utc>, String)>,
+    ) -> ReservationSweep {
+        match self.scan_page(limit, cursor).await {
+            Ok(page) => {
+                let truncated = page.has_more;
+                let total_remaining = page.total_remaining;
+                let next_cursor = page.next_cursor.map(|(at, key)| {
+                    serde_json::json!({ "lease_until": at.to_rfc3339(), "trade_key": key })
+                });
+                let rows = page.items;
+                let lapsed = rows
+                    .iter()
+                    .filter(|r| r.status == "reserved" && r.lease_lapsed)
+                    .count();
+                let linked_without_signature = rows
+                    .iter()
+                    .filter(|r| r.status == "linked" && r.signature.is_none())
+                    .count();
+                let claims = rows
+                    .into_iter()
+                    .map(|r| AmbiguousClaim {
+                        trade_key: r.trade_key,
+                        intent_id: r.intent_id,
+                        module: r.module,
+                        symbol: r.symbol,
+                        side: r.side,
+                        owner: r.owner_id,
+                        epoch: r.claim_epoch,
+                        status: r.status,
+                        signature: r.signature,
+                        lease_until: r.lease_until.to_rfc3339(),
+                        lease_lapsed: r.lease_lapsed,
+                        lapsed_secs: r.lapsed_secs.max(0),
+                        takeover_count: r.takeover_count,
+                    })
+                    .collect();
+                ReservationSweep {
+                    available: true,
+                    truncated,
+                    total_remaining,
+                    next_cursor,
+                    reason: None,
+                    lapsed,
+                    linked_without_signature,
+                    claims,
+                }
+            }
+            Err(error) => {
+                warn!(%error, "broadcast reservation sweep unavailable");
+                ReservationSweep {
+                    available: false,
+                    truncated: false,
+                    total_remaining: 0,
+                    next_cursor: None,
+                    reason: Some(error),
+                    lapsed: 0,
+                    linked_without_signature: 0,
+                    claims: Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// Apply one operator decision. Returns `Ok(false)` when the CAS matched
+    /// nothing (claim moved on / already terminal) — the caller must re-read
+    /// rather than assume success.
+    pub async fn resolve(
+        &self,
+        trade_key: &str,
+        owner: &str,
+        epoch: i64,
+        decision: SweepDecision,
+    ) -> Result<bool, String> {
+        let signature = match &decision {
+            SweepDecision::Abandon => None,
+            SweepDecision::Link(sig) => {
+                let sig = sig.trim();
+                if sig.is_empty() {
+                    return Err("a link decision needs the on-chain signature".into());
+                }
+                // Reject a non-signature string before it reaches the journal.
+                if Signature::from_str(sig).is_err() {
+                    return Err(format!("{sig:?} is not a valid transaction signature"));
+                }
+                Some(sig.to_string())
+            }
+        };
+        let repo = BroadcastReservationRepo::new(self.db.clone());
+        let applied = deployment_scoped(&self.db, async {
+            let decision = match &signature {
+                Some(sig) => BroadcastAmbiguity::LinkUnder(sig.clone()),
+                None => BroadcastAmbiguity::Abandon,
+            };
+            repo.resolve_ambiguous(trade_key, owner, epoch, decision)
+                .await
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        metrics::global()
+            .counter(
+                "bot_broadcast_reservation_sweeps_total",
+                "Operator resolutions of ambiguous pre-broadcast reservations.",
+                &[
+                    (
+                        "decision",
+                        if signature.is_some() {
+                            "link"
+                        } else {
+                            "abandon"
+                        },
+                    ),
+                    ("outcome", if applied { "applied" } else { "stale" }),
+                ],
+            )
+            .inc();
+        Ok(applied)
     }
 }

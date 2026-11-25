@@ -599,6 +599,7 @@ impl Sniper {
         rule: Option<ExitRule>,
         permit: &mut bot_core::ownership::Permit,
     ) -> BotResult<()> {
+        self.guard_unbooked_exit().await?;
         let fraction = fraction.clamp(0.0, 1.0);
         if fraction <= 0.0 || position.qty <= 0.0 {
             permit.finish(false).await;
@@ -690,7 +691,7 @@ impl Sniper {
             }
         };
 
-        let (quote_sol, signature, venue, status) = match route {
+        let (quote_sol, signature, venue, status, attempt_mode) = match route {
             ExitVenue::Curve(ctx) => {
                 self.sell_on_curve(&ctx, sell_raw, slippage_pct, &cfg, &intent_id)
                     .await?
@@ -728,7 +729,31 @@ impl Sniper {
         // hand off to reconciliation — the grace window stops any replica
         // from re-selling while the first sell may still land; determinate
         // outcomes (including unfilled) release.
-        permit.finish(status.is_ambiguous()).await;
+        permit
+            .finish(attempt_mode == ExecutionMode::Live && status.is_ambiguous())
+            .await;
+
+        if attempt_mode == ExecutionMode::Live && status.is_ambiguous() {
+            self.unbooked_exit
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.state.inc_orders_sent(BotModule::Sniper).await;
+            self.state.record_error(BotModule::Sniper, "ambiguous live sniper exit requires fill reconciliation; position and accounting unchanged").await;
+            self.state.events.publish(AppEvent::Audit {
+                ts: Utc::now(),
+                actor: "sniper".into(),
+                action: "sniper.exit.ambiguous".into(),
+                target: Some(intent_id.clone()),
+                outcome: format!(
+                    "signature={} status={:?} position={}",
+                    signature.as_deref().unwrap_or(""),
+                    status,
+                    position.id
+                ),
+            });
+            return Err(BotError::solana(
+                "ambiguous sniper exit; no fill booked, reconciliation required",
+            ));
+        }
 
         let filled = matches!(
             status,
@@ -753,11 +778,11 @@ impl Sniper {
 
         // ---- Trade record -------------------------------------------------
         let trade = Trade {
-            id: self.state.next_id("t"),
+            id: self.state.next_persistent_id("t"),
             ts: Utc::now(),
             source: TradeSource::Sniper,
             venue,
-            mode: self.state.execution_mode().await,
+            mode: attempt_mode,
             side: PositionSide::Short, // a sell
             symbol: position.symbol.clone(),
             symbol_display: position.symbol_display.clone(),
@@ -811,7 +836,9 @@ impl Sniper {
         self.risk.book_pnl(BotModule::Sniper, realized).await;
         // The global ledger is the only mutator of global accounting state;
         // it books the realized slice from its own average cost.
-        self.state.ledger().submit(ledger_event).await;
+        self.state
+            .submit_ledger_event(BotModule::Sniper, ledger_event)
+            .await;
 
         // Close fully, or trim and keep managing the remainder.
         let remaining = position.qty - sell_qty_human;
@@ -982,7 +1009,7 @@ impl Sniper {
         slippage_pct: f64,
         cfg: &bot_core::config::Config,
         intent_id: &str,
-    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus, ExecutionMode)> {
         let (amount, min_sol_output) = pump::plan_sell(&ctx.curve, sell_raw, slippage_pct)?;
         let opts = BuildOptions {
             extra_accounts: cfg.sniper.pump_extra_accounts.clone(),
@@ -1016,6 +1043,7 @@ impl Sniper {
             signature_of(&result),
             Venue::PumpFun,
             result.status,
+            self.executor.policy().mode,
         ))
     }
 
@@ -1027,7 +1055,7 @@ impl Sniper {
         slippage_pct: f64,
         cfg: &bot_core::config::Config,
         intent_id: &str,
-    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus, ExecutionMode)> {
         let (amount, min_quote_out) = pumpswap::plan_sell(ctx, sell_raw, slippage_pct)?;
         let sell_ix = {
             let store = self.layouts.read().await;
@@ -1063,6 +1091,7 @@ impl Sniper {
             signature_of(&result),
             Venue::PumpSwap,
             result.status,
+            self.executor.policy().mode,
         ))
     }
 
@@ -1075,7 +1104,7 @@ impl Sniper {
         slippage_pct: f64,
         cfg: &bot_core::config::Config,
         intent_id: &str,
-    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus, ExecutionMode)> {
         let expected_out = pool.quote(mint, sell_raw)?;
         let min_out = maths::minus_pct_u64(expected_out, slippage_pct);
         let (wsol_ata, create_wsol) = self.wallet.ensure_ata(&self.rpc, &WSOL_MINT).await?;
@@ -1118,6 +1147,7 @@ impl Sniper {
             signature_of(&result),
             Venue::RaydiumAmmV4,
             result.status,
+            self.executor.policy().mode,
         ))
     }
 
@@ -1130,7 +1160,7 @@ impl Sniper {
         slippage_pct: f64,
         cfg: &bot_core::config::Config,
         intent_id: &str,
-    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus, ExecutionMode)> {
         let venue = RaydiumCpmm::new();
         let expected_out = venue.quote(pool, mint, sell_raw)?;
         let min_out = maths::minus_pct_u64(expected_out, slippage_pct);
@@ -1177,6 +1207,7 @@ impl Sniper {
             signature_of(&result),
             Venue::RaydiumCpmm,
             result.status,
+            self.executor.policy().mode,
         ))
     }
 
@@ -1191,7 +1222,7 @@ impl Sniper {
         slippage_pct: f64,
         cfg: &bot_core::config::Config,
         intent_id: &str,
-    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus, ExecutionMode)> {
         let venue = RaydiumLaunchLab::new();
         let expected_out = venue.quote_sell(
             &market.pool,
@@ -1243,7 +1274,27 @@ impl Sniper {
             signature_of(&result),
             Venue::RaydiumLaunchLab,
             result.status,
+            self.executor.policy().mode,
         ))
+    }
+
+    /// A kill switch changes the effective state mode to Simulate, while a
+    /// protective direct exit can still use a Live executor policy. Check
+    /// both the installed policy and the configured policy, not just the
+    /// kill-adjusted mode. This process-local latch is not a reservation.
+    async fn guard_unbooked_exit(&self) -> BotResult<()> {
+        if !self.unbooked_exit.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        let cfg = self.state.config_snapshot().await;
+        if self.executor.policy().mode == ExecutionMode::Live
+            || crate::exec_policy(&cfg).mode == ExecutionMode::Live
+        {
+            return Err(BotError::invalid(
+                "unbooked ambiguous sniper exit; reconcile before further live exits",
+            ));
+        }
+        Ok(())
     }
 
     /// Common tail for the direct exit routes: fees, deterministic intent
@@ -1267,14 +1318,20 @@ impl Sniper {
             req = req.jito_tip(cfg.execution.jito_tip_lamports);
         }
         self.refresh_policy().await;
+        // Route building and policy refresh can cross a paper-to-live change.
+        self.guard_unbooked_exit().await?;
         // Write-ahead intent (§I crash point C) — exits move money too.
         let intent = self.intent_rec(&mint.to_string(), "sell", &sell_raw.to_string());
         let req = self.tenant_stamp(req);
-        bot_core::recovery::with_intent(
+        // Durable pre-broadcast reservation keyed by the LOGICAL exit identity
+        // (intent_id), so the same exit decision cannot be broadcast twice after
+        // a restart or from a second replica.
+        bot_core::recovery::with_reserved_intent_disposition(
             self.intents.as_ref(),
+            intent_id,
             intent,
             self.executor.run(req),
-            |r| r.broadcast_signature(),
+            |r| r.intent_disposition(),
         )
         .await
     }
@@ -1286,7 +1343,7 @@ impl Sniper {
         sell_raw: u64,
         cfg: &bot_core::config::Config,
         intent_id: &str,
-    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+    ) -> BotResult<(f64, Option<String>, Venue, ExecStatus, ExecutionMode)> {
         let slippage_bps = (cfg.sniper.slippage_pct * 100.0).round() as u64;
         let jupiter = Jupiter::new();
         let quote = jupiter
@@ -1323,6 +1380,7 @@ impl Sniper {
             } else {
                 self.state.may_broadcast().await?;
                 self.refresh_policy().await;
+                self.guard_unbooked_exit().await?;
                 let built = solana_kit::tx::BuiltTx::from_signed(
                     format!("exit-jup-{mint}"),
                     tx,
@@ -1333,11 +1391,12 @@ impl Sniper {
                 .attributed("sniper", mint.to_string());
                 let intent = self.intent_rec(&mint.to_string(), "sell", &sell_raw.to_string());
                 let built = self.tenant_stamp_built(built);
-                let result = bot_core::recovery::with_intent(
+                let result = bot_core::recovery::with_reserved_intent_disposition(
                     self.intents.as_ref(),
+                    intent_id,
                     intent,
                     self.executor.send_prebuilt(&built),
-                    |r| r.broadcast_signature(),
+                    |r| r.intent_disposition(),
                 )
                 .await?;
                 Some(result)
@@ -1347,20 +1406,26 @@ impl Sniper {
         // Proof-of-landing decides the status (§I): the executor reports
         // Confirmed only when the signature was observed on chain; an
         // unproven broadcast stays `Sent` (ambiguous) for reconciliation.
-        let (signature, status) = match (&mode, outcome) {
-            (ExecutionMode::Paper, _) => (None, ExecStatus::PaperFilled),
+        let (signature, status, attempt_mode) = match (mode, outcome) {
+            (ExecutionMode::Paper, _) => (None, ExecStatus::PaperFilled, ExecutionMode::Paper),
             (_, Some(result)) => (
                 (!result.signature.is_empty()).then(|| result.signature.clone()),
                 result.status,
+                if result.paper {
+                    self.executor.policy().mode
+                } else {
+                    ExecutionMode::Live
+                },
             ),
             // Simulate-success: counts as filled for bookkeeping, as before.
-            (_, None) => (None, ExecStatus::Sent),
+            (_, None) => (None, ExecStatus::Sent, ExecutionMode::Simulate),
         };
         Ok((
             maths::lamports_to_sol(expected_out),
             signature,
             Venue::Jupiter,
             status,
+            attempt_mode,
         ))
     }
 }

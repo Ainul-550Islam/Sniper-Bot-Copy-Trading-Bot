@@ -1,0 +1,20 @@
+=== RED: releasing the tenant kill switch erased an individual module pause ===
+-- injection: engage overwrites provenance + release DELETEs every trading override --
+test trading_data_plane::module_control_store::tests::overrides_are_tenant_and_module_scoped ... ok
+test trading_data_plane::module_control_store::tests::memory_mode_round_trips_and_admits_it_is_not_durable ... ok
+test trading_data_plane::module_control_store::tests::the_kill_switch_release_is_tenant_scoped ... ok
+test trading_data_plane::module_control_store::tests::releasing_the_kill_switch_keeps_an_individual_pause ... FAILED
+
+failures:
+
+---- trading_data_plane::module_control_store::tests::releasing_the_kill_switch_keeps_an_individual_pause stdout ----
+--
+thread 'trading_data_plane::module_control_store::tests::releasing_the_kill_switch_keeps_an_individual_pause' (1530970) panicked at crates/server/src/trading_data_plane/module_control_store.rs:619:17:
+the operator's own pause keeps its provenance through the stop
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p sniper-suite --lib`

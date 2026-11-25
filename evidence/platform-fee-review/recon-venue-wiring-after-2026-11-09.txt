@@ -1,0 +1,29 @@
+=== GREEN: venue-state settlement wired into the reconciliation loop ===
+--- reconciliation suite (loop wiring) ---
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s
+
+reconciliation_exit=0
+--- settlement unit surface ---
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+settlement_exit=0
+--- decision table + probe + mock CLOB ---
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 173 filtered out; finished in 0.00s
+
+venue_lib_exit=0
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+mock_venue_exit=0
+--- whole module ---
+16
+module_targets_ok=0
+--- clippy / fmt / diff ---
+    Checking module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+    Finished `dev` profile [unoptimized] target(s) in 14.56s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

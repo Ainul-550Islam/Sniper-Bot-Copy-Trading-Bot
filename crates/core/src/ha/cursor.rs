@@ -106,6 +106,16 @@ pub struct FeedCursor {
     pub gap_count: i64,
     /// Worker that last advanced it.
     pub worker_id: String,
+    /// The advance above was recorded but the caller has not yet confirmed
+    /// that the work for it completed. A crash with `pending = true` means
+    /// "replay from the last acknowledged position", never "resume after
+    /// this one": the position may be ahead of the side effects.
+    pub pending: bool,
+    /// Fencing token of the writer: `<holder>@<generation>`, empty when the
+    /// process runs without cluster leases. A cursor write from an older
+    /// generation than the row already carries is refused
+    /// (see [`CursorWrite`]).
+    pub fence: String,
 }
 
 impl FeedCursor {
@@ -122,6 +132,8 @@ impl FeedCursor {
             duplicate_count: 0,
             gap_count: 0,
             worker_id: worker_id.into(),
+            pending: false,
+            fence: String::new(),
         }
     }
 
@@ -256,12 +268,33 @@ pub enum CursorAdvance {
     /// Ahead of the expected position: the cursor advanced AND a gap is
     /// reported. Process the item — but the gap must not be forgotten.
     Gap(FeedGap),
+    /// The durable advance was refused (a newer lease generation owns the
+    /// row, or an unacknowledged advance would have been overwritten). The
+    /// item must NOT be processed here: nothing was recorded, so dropping it
+    /// now would lose it silently. It is re-delivered after replay.
+    Refused {
+        /// `fenced` | `stale` | `error`.
+        reason: String,
+        /// Audit detail.
+        detail: String,
+    },
 }
 
 impl CursorAdvance {
     /// Should the caller process the item?
     pub fn should_process(&self) -> bool {
-        !matches!(self, CursorAdvance::Duplicate)
+        !matches!(
+            self,
+            CursorAdvance::Duplicate | CursorAdvance::Refused { .. }
+        )
+    }
+
+    /// Does this advance leave a side effect to confirm? An advanced or
+    /// gap-reported item has not been processed yet when `offer` returns, so
+    /// the durable cursor is written as `pending` until
+    /// `HaRuntime::acknowledge` says the work completed.
+    pub fn needs_ack(&self) -> bool {
+        self.should_process()
     }
 
     /// Stable label for metrics.
@@ -270,8 +303,183 @@ impl CursorAdvance {
             CursorAdvance::Advanced => "advanced",
             CursorAdvance::Duplicate => "duplicate",
             CursorAdvance::Gap(_) => "gap",
+            CursorAdvance::Refused { .. } => "refused",
         }
     }
+}
+
+/// What a durable cursor write was allowed to do — the answer to
+/// [`FeedCursor::admit_write`]. Every refusal is deterministic and named;
+/// nothing here is "last write wins".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorWrite {
+    /// The write is newer than the durable row (or the row is absent).
+    Accepted,
+    /// The presenting writer is stale: the durable row belongs to a newer
+    /// lease generation. The write is refused and the durable row is
+    /// untouched.
+    Fenced {
+        /// Fence the store already carries (`<holder>@<generation>`).
+        actual: String,
+        /// Fence the caller presented.
+        presented: String,
+    },
+    /// The write would move the durable position/token BACKWARDS while an
+    /// earlier advance for the same key is still unacknowledged. Refused:
+    /// the unacknowledged advance is the one that must be replayed or
+    /// acknowledged, not silently overwritten.
+    Stale {
+        /// Durable position/token description.
+        actual: String,
+        /// Presented position/token description.
+        presented: String,
+    },
+}
+
+impl CursorWrite {
+    /// Did the store accept it?
+    pub fn accepted(&self) -> bool {
+        matches!(self, CursorWrite::Accepted)
+    }
+
+    /// Stable label (metrics / audit).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CursorWrite::Accepted => "accepted",
+            CursorWrite::Fenced { .. } => "fenced",
+            CursorWrite::Stale { .. } => "stale",
+        }
+    }
+}
+
+impl std::fmt::Display for CursorWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CursorWrite::Accepted => f.write_str("accepted"),
+            CursorWrite::Fenced { actual, presented } => write!(
+                f,
+                "fenced: cursor belongs to {actual}, this writer presented {presented}"
+            ),
+            CursorWrite::Stale { actual, presented } => write!(
+                f,
+                "stale: an unacknowledged advance at {actual} would be overwritten by {presented}"
+            ),
+        }
+    }
+}
+
+/// Generation encoded in a fence (`<holder>@<generation>`). Unparseable or
+/// empty fences are generation 0 — a writer that never presented a token can
+/// only lose against one that did.
+pub fn fence_generation(fence: &str) -> i64 {
+    fence_parts(fence).1
+}
+
+/// Split a fence string into `(holder, generation)`. Unparseable fences sort
+/// as generation 0 (a writer that never presented a token can only lose).
+fn fence_parts(fence: &str) -> (&str, i64) {
+    match fence.rsplit_once('@') {
+        Some((holder, gen)) => (holder, gen.parse::<i64>().unwrap_or(0)),
+        None => (fence, 0),
+    }
+}
+
+impl FeedCursor {
+    /// Should this cursor write be admitted over `durable`? Pure, so the
+    /// database and the in-memory store cannot disagree.
+    ///
+    /// Rules, in order:
+    ///
+    /// 1. No durable row → accepted.
+    /// 2. Same fence → accepted (the holder is advancing its own row); a
+    ///    lower generation of the SAME holder is stale, a higher one wins.
+    /// 3. Different holder → the higher generation wins; equal generations
+    ///    are a genuine split brain and the write is refused as `Fenced`
+    ///    (the durable row keeps ownership) rather than letting two workers
+    ///    interleave positions.
+    /// 4. An unacknowledged advance (`durable.pending`) may not be replaced
+    ///    by an equal-or-older position/token: that is `Stale`.
+    pub fn admit_write(&self, durable: Option<&FeedCursor>) -> CursorWrite {
+        let Some(durable) = durable else {
+            return CursorWrite::Accepted;
+        };
+        let (mine_holder, mine_gen) = fence_parts(&self.fence);
+        let (their_holder, their_gen) = fence_parts(&durable.fence);
+        if !durable.fence.is_empty() {
+            if !self.fence.is_empty() && mine_gen < their_gen {
+                return CursorWrite::Fenced {
+                    actual: durable.fence.clone(),
+                    presented: self.fence.clone(),
+                };
+            }
+            if !self.fence.is_empty() && mine_gen == their_gen && mine_holder != their_holder {
+                return CursorWrite::Fenced {
+                    actual: durable.fence.clone(),
+                    presented: self.fence.clone(),
+                };
+            }
+            // An unfenced writer never displaces a fenced row.
+            if self.fence.is_empty() {
+                return CursorWrite::Fenced {
+                    actual: durable.fence.clone(),
+                    presented: "(unfenced)".into(),
+                };
+            }
+        }
+        // Only an ADVANCE collides with an unacknowledged advance. A rewind or
+        // an acknowledgement (`pending = false`) explicitly supersedes it:
+        // the earlier position will be re-delivered, so nothing is lost.
+        if durable.pending && self.pending {
+            let backwards = match (durable.position, self.position) {
+                (Some(d), Some(m)) => m < d,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            // Re-presenting the SAME unacknowledged advance as a fresh advance
+            // would double-count it; an acknowledgement (pending = false) of
+            // the same position is exactly what is wanted.
+            let duplicate_unacked =
+                durable.position == self.position && durable.token == self.token;
+            if backwards || duplicate_unacked {
+                return CursorWrite::Stale {
+                    actual: describe_position(durable),
+                    presented: describe_position(self),
+                };
+            }
+        }
+        CursorWrite::Accepted
+    }
+
+    /// Mark the advance as acknowledged once the caller's work for
+    /// `position`/`token` completed. Idempotent; a mismatched position is a
+    /// programming error, not a silent no-op.
+    pub fn acknowledge(&mut self, position: Option<u64>, token: Option<&str>) -> bool {
+        if !self.pending {
+            // Nothing outstanding: a second acknowledgement is not a new fact.
+            return false;
+        }
+        if self.position != position {
+            return false;
+        }
+        if let Some(t) = token {
+            if self.token.as_deref() != Some(t) {
+                return false;
+            }
+        }
+        self.pending = false;
+        true
+    }
+}
+
+/// `position=…/token=…` for audit text.
+fn describe_position(c: &FeedCursor) -> String {
+    format!(
+        "position={} token={}",
+        c.position
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into()),
+        c.token.as_deref().unwrap_or("-")
+    )
 }
 
 impl FeedCursor {
@@ -308,6 +516,9 @@ impl FeedCursor {
         self.updated_at = now;
         self.processed_count += 1;
         self.worker_id = worker_id.to_string();
+        // The caller has not done the work yet: persist as unacknowledged so
+        // a crash before the side effect replays instead of skipping.
+        self.pending = true;
         match gap {
             Some(g) => {
                 self.gap_count += 1;
@@ -337,6 +548,7 @@ impl FeedCursor {
         self.updated_at = now;
         self.processed_count += 1;
         self.worker_id = worker_id.to_string();
+        self.pending = true;
         CursorAdvance::Advanced
     }
 
@@ -345,6 +557,9 @@ impl FeedCursor {
     /// to audit the rewind.
     pub fn rewind_to(&mut self, position: Option<u64>, now: DateTime<Utc>) {
         self.position = position;
+        // A deliberate rewind is an acknowledged decision, not an unresolved
+        // advance.
+        self.pending = false;
         self.updated_at = now;
     }
 }
@@ -459,6 +674,114 @@ mod tests {
         assert_eq!(c.offer(3, Some(now), "w1", now), CursorAdvance::Advanced);
         c.rewind_to(None, now);
         assert_eq!(c.offer(100, Some(now), "w1", now), CursorAdvance::Advanced);
+    }
+
+    /// The admission matrix. Every row is a case that used to be a blind
+    /// "last write wins" upsert.
+    #[test]
+    fn cursor_writes_are_fenced_and_replay_safe() {
+        let now = Utc::now();
+        let base = |fence: &str, position: u64, pending: bool| {
+            let mut c = FeedCursor::new(FeedId::PolymarketUser, "", "w");
+            c.fence = fence.into();
+            c.offer(position, None, "w", now);
+            c.pending = pending;
+            c
+        };
+
+        // Absent durable row: accepted.
+        assert_eq!(
+            base("w-a@1", 1, true).admit_write(None),
+            CursorWrite::Accepted
+        );
+
+        // A stale generation of any holder loses, whatever its position.
+        let durable = base("w-b@2", 10, false);
+        match base("w-a@1", 99, true).admit_write(Some(&durable)) {
+            CursorWrite::Fenced {
+                actual, presented, ..
+            } => {
+                assert_eq!(actual, "w-b@2");
+                assert_eq!(presented, "w-a@1");
+            }
+            other => panic!("expected fenced, got {other:?}"),
+        }
+
+        // Two holders at the same generation: split brain, no winner.
+        assert!(matches!(
+            base("w-a@2", 11, true).admit_write(Some(&durable)),
+            CursorWrite::Fenced { .. }
+        ));
+
+        // An unfenced writer (no cluster leases) never displaces a fenced row.
+        assert!(matches!(
+            base("", 11, true).admit_write(Some(&durable)),
+            CursorWrite::Fenced { .. }
+        ));
+
+        // A newer generation of the same holder advances normally.
+        assert_eq!(
+            base("w-b@3", 11, true).admit_write(Some(&durable)),
+            CursorWrite::Accepted
+        );
+
+        // An unacknowledged advance is never overwritten backwards…
+        let pending = base("w-b@2", 10, true);
+        assert!(matches!(
+            base("w-b@2", 4, true).admit_write(Some(&pending)),
+            CursorWrite::Stale { .. }
+        ));
+        // …nor re-offered as if it were new (that would double-count)…
+        assert!(matches!(
+            base("w-b@2", 10, true).admit_write(Some(&pending)),
+            CursorWrite::Stale { .. }
+        ));
+        // …but acknowledging it, or a deliberate rewind, is exactly right.
+        assert_eq!(
+            base("w-b@2", 10, false).admit_write(Some(&pending)),
+            CursorWrite::Accepted
+        );
+        let mut rewind = base("w-b@2", 10, false);
+        rewind.rewind_to(Some(2), now);
+        assert_eq!(rewind.admit_write(Some(&pending)), CursorWrite::Accepted);
+
+        // Acknowledged rows take any forward position.
+        let acked = base("w-b@2", 10, false);
+        assert_eq!(
+            base("w-b@2", 40, true).admit_write(Some(&acked)),
+            CursorWrite::Accepted
+        );
+        // An unparseable (generation-less) fence sorts as generation 0, so any
+        // real generation may take the row — but it can never take one from a
+        // real fence, which is the case asserted above.
+        let odd = base("garbage", 1, false);
+        assert_eq!(
+            base("w-b@1", 2, true).admit_write(Some(&odd)),
+            CursorWrite::Accepted
+        );
+    }
+
+    #[test]
+    fn an_advance_is_pending_until_acknowledged() {
+        let now = Utc::now();
+        let mut c = cursor();
+        assert!(!c.pending);
+        assert_eq!(c.offer(1, None, "w1", now), CursorAdvance::Advanced);
+        assert!(c.pending, "the caller has not done the work yet");
+        assert!(CursorAdvance::Advanced.needs_ack());
+        assert!(!CursorAdvance::Duplicate.needs_ack());
+        assert!(!c.acknowledge(Some(2), None), "wrong position never acks");
+        assert!(c.acknowledge(Some(1), None));
+        assert!(!c.pending);
+        assert!(
+            !c.acknowledge(Some(1), None),
+            "acknowledging twice is not a new fact"
+        );
+        assert!(!CursorAdvance::Refused {
+            reason: "fenced".into(),
+            detail: String::new()
+        }
+        .should_process());
     }
 
     #[test]

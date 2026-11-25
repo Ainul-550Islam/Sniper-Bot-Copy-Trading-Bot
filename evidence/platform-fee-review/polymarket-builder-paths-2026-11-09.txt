@@ -1,0 +1,70 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 39.12s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test config::tests::polymarket_builder_env_overrides_the_configured_builder ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 686 filtered out; finished in 0.00s
+
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+    Finished `test` profile [unoptimized] target(s) in 45.78s
+     Running tests/copy_follow.rs (target/debug/deps/copy_follow-bdba7f26983a0754)
+
+running 9 tests
+test a_failed_feed_is_an_error_never_no_trades ... ok
+test a_followed_leader_buy_is_mirrored_through_the_staged_pipeline ... ok
+test a_leader_sell_is_an_explicit_skip_not_an_implicit_close ... ok
+test a_runaway_price_is_refused_by_the_slippage_gate ... ok
+test a_wallet_that_is_not_followed_is_never_mirrored ... ok
+test live_copy_poll_posts_the_configured_builder_code ... ok
+test malformed_rows_are_counted_not_turned_into_orders ... ok
+test no_followed_wallet_means_no_feed_request_at_all ... ok
+test re_polling_the_same_page_never_mirrors_twice ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/exchange_v3_signing.rs (target/debug/deps/exchange_v3_signing-98198286269fb37c)
+
+running 8 tests
+test a_neg_risk_market_flag_is_ignored_for_position_orders ... ok
+test a_position_limit_order_signs_against_exchange_v3 ... ok
+test exactly_one_identifier_is_enforced_at_runtime ... ok
+test gtd_expiry_travels_in_the_wire_body_not_the_signature ... ok
+test routing_table_is_exhaustive_over_asset_and_market_flags ... ok
+test the_mock_venue_is_available_for_the_async_suite ... ok
+test the_v3_domain_separator_is_stable_and_distinct_from_v2 ... ok
+test token_orders_keep_v2_routing_and_addresses_byte_for_byte ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/mock_clob_gamma.rs (target/debug/deps/mock_clob_gamma-db4433c2946d07f2)
+
+running 6 tests
+test attributed_buy_and_sell_reach_both_post_order_variants ... ok
+test authenticated_call_without_credentials_fails_locally ... ok
+test clob_public_endpoints_parse ... ok
+test derive_api_key_sends_l1_headers ... ok
+test gamma_markets_query_and_parse ... ok
+test post_order_sends_l2_headers_and_signed_bundle ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/order_pipeline.rs (target/debug/deps/order_pipeline-c1cebc518fb55b26)
+
+running 12 tests
+test exposure_gates_reject_second_entries_and_market_caps ... ok
+test live_funding_shortfall_rejects_before_signing ... ok
+test live_invalid_builder_is_rejected_without_post ... ok
+test live_mode_without_a_verified_collateral_read_rejects ... ok
+test live_sizing_uses_the_verified_balance_not_the_paper_seed ... ok
+test live_strategy_posts_configured_builder_on_every_order ... ok
+test market_and_quote_gates_reject_with_the_strategy_reason ... ok
+test missing_exchange_allowance_rejects_eoa_orders ... ok
+test paper_signal_runs_every_stage_and_books_a_fill ... ok
+test process_market_turns_strategy_verdicts_into_outcomes ... ok
+test the_shared_risk_engine_is_the_only_risk_decision ... ok
+test validation_rejects_before_any_side_effect ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s

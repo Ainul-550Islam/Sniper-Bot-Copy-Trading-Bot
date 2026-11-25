@@ -1,0 +1,8 @@
+Source reading batch 003 — 2026-11-09
+Complete file versions read, hashes below. Review is bounded and does not certify correctness.
+4b7f49f3dc9d13efd8688f9d9b1563e095fb6918232a22e7065be87d0edb9248  crates/core/src/trading_repository/positions/write.rs
+33892eb59b9df66c4628e3ec8b714d45a28dcc2c49d56de5657017c869941051  crates/core/src/trading_repository/positions/trades.rs
+b09a30bc1246b9bee29ddb30c0248851009dcd5b44366b69d2bf8222577cc496  crates/core/src/trading_repository/positions/read.rs
+0f0cda2f6321d90b42de573d8181c09dd7612492ca6db1cd28141ea3bf491652  crates/core/src/trading_repository/positions/model.rs
+
+Findings: trade append previously accepted foreign position references because FK is only positions(id); corrected in append, evidence tenant-trade-position-owner-2026-11-09.txt. Duplicate trade ids remain silent no-ops. Position read list_open/list_closed_between truncate at 5000; trade list_between at 10000 with no truncation signal. Whether callers need a complete result requires review. Row mapping substitutes defaults on decode failure; practical effect unverified. Full-row position upsert can mix fields for same-tenant colliding IDs (position-trade-id evidence). Guarded position close documents Result<(),...>, corrected stale Ok(false) comment. Reading does not establish correctness of dependencies or callers.

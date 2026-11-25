@@ -1,0 +1,44 @@
+Copy feed retry and duplicate-handling checks, 2026-11-09 in user timezone.
+Commands: cargo test -p module-copy --lib feeds::tests --locked -j 1 -- --nocapture; cargo test -p module-copy --test geyser_feed --locked -j 1 -- --test-threads=1
+Mock RPC verifies null fetch repeats for the same and another wallet and the poll cursor remains at the saved signature on retry. Mock Geyser sends duplicate notifications: both enter the channel and the event dedup rejects the second. Tests do not prove durable handoff, real provider delivery, multi-process retries or live-chain behavior.
+
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 32.68s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-84834e0020a68c4b)
+
+running 11 tests
+test feeds::tests::decoded_raydium_cpmm_and_launchlab_keep_their_precise_venues ... ok
+test feeds::tests::decoded_non_sol_quote_has_zero_sol_amount ... ok
+test feeds::tests::decoded_sol_quote_converts_lamports ... ok
+test feeds::tests::null_fetch_allows_retry_and_other_wallet ... ok
+test feeds::tests::poll_batch_paginates_to_saved_cursor_without_skipping_full_page ... ok
+test feeds::tests::poll_batch_repeated_provider_page_is_rejected ... ok
+test feeds::tests::poll_requests_newer_transactions_using_until_cursor ... ok
+test feeds::tests::poll_retries_null_fetch_without_advancing_cursor ... ok
+test feeds::tests::pumpportal_buy_maps_to_long_on_the_curve ... ok
+test feeds::tests::pumpportal_sell_on_amm_maps_to_short_pumpswap ... ok
+test feeds::tests::poll_batch_page_cap_reports_incomplete_without_returning_a_partial_batch ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.08s
+
+EXIT=0
+
+--- Geyser integration ---
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 24.78s
+     Running tests/geyser_feed.rs (target/debug/deps/geyser_feed-7913290820377c0f)
+
+running 2 tests
+test geyser_feed_falls_back_to_polling_without_a_geyser_url ... ok
+test geyser_feed_pushes_a_whale_buy_into_the_copy_channel ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+
+EXIT=0

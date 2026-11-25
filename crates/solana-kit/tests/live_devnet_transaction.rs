@@ -1,11 +1,12 @@
 //! LIVE **devnet** money path — a real airdrop, a real signed transaction, a
 //! real confirmation, on a real cluster.
 //!
-//! `#[ignore]`d by default (needs the public internet + a devnet faucet):
+//! It needs the public internet + a devnet faucet; without them each test prints
+//! SKIPPED and returns (no `#[ignore]` gate — gap #31):
 //!
 //! ```text
 //! SOLANA_LIVE_DEVNET_RPC=https://api.devnet.solana.com \
-//!   cargo test -p solana-kit --test live_devnet_transaction -- --ignored --nocapture --test-threads=1
+//!   cargo test -p solana-kit --test live_devnet_transaction -- --nocapture --test-threads=1
 //! ```
 //!
 //! Scope, stated honestly:
@@ -88,7 +89,6 @@ async fn airdrop(url: String, to: String, lamports: u64) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires the public internet + the devnet faucet (SOLANA_LIVE_DEVNET_RPC)"]
 async fn live_devnet_airdrop_sign_send_confirm() {
     let Some((url, rpc)) = devnet_rpc() else {
         return;
@@ -160,7 +160,6 @@ async fn live_devnet_airdrop_sign_send_confirm() {
 /// Negative control: an oversized transfer from a fresh, unfunded account must
 /// be rejected by the cluster — never silently "succeed".
 #[tokio::test]
-#[ignore = "requires the public internet (SOLANA_LIVE_DEVNET_RPC)"]
 async fn live_devnet_unfunded_transfer_is_refused() {
     let Some((_url, rpc)) = devnet_rpc() else {
         return;

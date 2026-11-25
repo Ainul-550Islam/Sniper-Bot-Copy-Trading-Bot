@@ -1,0 +1,6 @@
+=== RED: fence-only pre-work check and stale-guard cache eviction ===
+test ha::runtime::tests::a_stale_guard_does_not_remove_the_newer_cached_lease ... FAILED
+test ha::runtime::tests::an_expired_lease_is_refused_before_the_work_and_cancels_the_job ... FAILED
+thread 'ha::runtime::tests::a_stale_guard_does_not_remove_the_newer_cached_lease' (3923380) panicked at crates/core/src/ha/runtime.rs:1702:9:
+thread 'ha::runtime::tests::an_expired_lease_is_refused_before_the_work_and_cancels_the_job' (3923381) panicked at crates/core/src/ha/runtime.rs:1621:52:
+test result: FAILED. 10 passed; 2 failed; 0 ignored; 0 measured; 704 filtered out; finished in 1.01s

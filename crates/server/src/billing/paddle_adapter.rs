@@ -323,17 +323,65 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore]
-    fn paddle_live_checkout_ignored_without_live_billing() {
-        let live = std::env::var("LIVE_BILLING").unwrap_or_default() == "1"
-            && std::env::var("PADDLE_API_KEY")
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
-        assert!(
-            live,
-            "LIVE_BILLING=1 and PADDLE_API_KEY required for live test"
-        );
+    /// Real live billing runs only when someone supplies live credentials; it
+    /// is not parked behind `#[ignore]`, so the gate below is exercised by every
+    /// ordinary `cargo test` run. The point of the test is that a live adapter
+    /// can only exist when the operator asked for live AND provided a key —
+    /// a configured key alone must never silently arm live billing.
+    #[tokio::test]
+    async fn paddle_live_checkout_requires_live_billing_opt_in() {
+        let key = std::env::var("PADDLE_API_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let live_flag = std::env::var("LIVE_BILLING").unwrap_or_default() == "1";
+        match (live_flag, key) {
+            (true, Some(k)) => {
+                // Fully live run: the adapter must be constructible and must
+                // report itself as paddle, with no leak of the key material.
+                let adapter = PaddleAdapter::from_env()
+                    .expect("live paddle must be constructible with LIVE_BILLING=1 and a key");
+                let dbg = format!("{adapter:?}");
+                assert!(
+                    dbg.contains("has_key"),
+                    "debug must report key presence: {dbg}"
+                );
+                assert!(!dbg.contains(&k), "debug must not leak the key");
+            }
+            (false, Some(_)) => {
+                // A reachable key is NOT enough. Even with a key present, a
+                // checkout attempt must be refused while the explicit opt-in is
+                // absent — the gate lives at the call site, not in the env.
+                use bot_core::tenant::OrganizationId;
+                let adapter = PaddleAdapter::from_env().expect(
+                    "a key is enough to construct the adapter; checkout is separately gated",
+                );
+                let intent = PaddleCheckoutIntent {
+                    organization: OrganizationId::new(),
+                    plan: PlanCode::Starter,
+                    idempotency_key: format!("gate-{}", uuid::Uuid::new_v4()),
+                    success_url: None,
+                    cancel_url: None,
+                };
+                match adapter.create_checkout(&intent).await {
+                    Err(PaddleError::Transport(msg)) => assert!(
+                        msg.contains("LIVE_BILLING"),
+                        "the refusal must name the missing opt-in, got {msg}"
+                    ),
+                    other => {
+                        panic!("key without LIVE_BILLING=1 must refuse checkout, got {other:?}")
+                    }
+                }
+            }
+            (_, None) => {
+                assert!(
+                    matches!(
+                        PaddleAdapter::from_env(),
+                        Err(PaddleError::NotConfigured(_))
+                    ),
+                    "no key must yield NotConfigured, never a default adapter"
+                );
+            }
+        }
     }
 
     #[test]

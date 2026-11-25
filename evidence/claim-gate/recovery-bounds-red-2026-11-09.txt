@@ -1,0 +1,66 @@
+=== RED: recovery-input reads truncated silently and the lifecycle organization was fabricated (gap #78) ===
+=== RED run 1: the lifecycle reader truncated silently and the row's organization was not read ===
+-- injection: open_page ignores the cursor/page size and hard-reports has_more=false; record_from_row stamps a fabricated organization --
+test unsettled_lifecycle_reads_page_and_report_truncation ... FAILED
+
+failures:
+
+---- unsettled_lifecycle_reads_page_and_report_truncation stdout ----
+--
+thread 'unsettled_lifecycle_reads_page_and_report_truncation' (2314657) panicked at crates/core/tests/recovery_bounds_pg.rs:112:14:
+open_page: TenantMismatch
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+error: test failed, to rerun pass `-p bot-core --test recovery_bounds_pg`
+
+=== RED (truncation only, honest mapper): the cap is silent again ===
+test unsettled_lifecycle_reads_page_and_report_truncation ... FAILED
+
+failures:
+
+--
+thread 'unsettled_lifecycle_reads_page_and_report_truncation' (2314722) panicked at crates/core/tests/recovery_bounds_pg.rs:114:9:
+a page never exceeds the page size
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `-p bot-core --test recovery_bounds_pg`
+
+=== RED (copy links + poly open orders, silent cap): the recovery readers hide their bound ===
+test copy_and_polymarket_recovery_reads_page_without_silent_caps ... FAILED
+
+failures:
+
+--
+thread 'copy_and_polymarket_recovery_reads_page_without_silent_caps' (2316200) panicked at crates/core/tests/recovery_bounds_pg.rs:243:5:
+assertion `left == right` failed: the page size is honoured
+  left: 5
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.10s
+
+=== RED (lapsed operator view): oldest-first LIMIT starves the fresh attempt ===
+test lapsed_reservation_view_reaches_a_freshly_lapsed_attempt ... FAILED
+
+failures:
+
+--
+thread 'lapsed_reservation_view_reaches_a_freshly_lapsed_attempt' (2338638) panicked at crates/core/tests/db_integration.rs:2211:5:
+assertion `left == right` failed: the freshest lapse is what an operator sees first
+  left: Some("copy:wallet:retry-1549043-1795183925297761165")
+ right: Some("copy:wallet:fresh-2338637-1795257327168438622")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 2.30s

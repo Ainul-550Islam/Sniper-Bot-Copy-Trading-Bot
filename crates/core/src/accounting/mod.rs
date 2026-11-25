@@ -50,7 +50,9 @@ pub use event::{
     event_id_for, fill_event, fill_event_for_trade, AccountingEvent, EventKind, EventSide,
     EVENT_ID_PREFIX,
 };
-pub use ledger::{Applied, GlobalLedger, RealizedSeries, ReconRun};
+pub use ledger::{
+    Applied, ConflictHalt, GlobalLedger, JournalRepair, PayloadMismatch, RealizedSeries, ReconRun,
+};
 pub use posting::{expand, Account, Entry, EntrySide, Posting, PostingError};
 pub use reconcile::{reconcile, AccountingFinding, AccountingFindingKind, ReconInputs};
 pub use recovery::{AccountingRecoveryAction, AccountingRecoveryReport};

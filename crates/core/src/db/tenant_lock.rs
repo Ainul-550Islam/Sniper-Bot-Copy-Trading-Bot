@@ -1,9 +1,9 @@
 //! Tenant-scoped lock helpers (STEP 3 file 49).
 //!
 //! PostgreSQL advisory locks, namespaced by tenant: two tenants doing the
-//! same logical job (recovery sweep for wallet X, recon for venue Y)
-//! never contend, while two workers of the SAME tenant still serialize
-//! exactly as the existing global design requires.
+//! same logical job have different input strings. PostgreSQL hashes them
+//! into a 32-bit space, so unrelated tenants/purposes can still collide and
+//! contend; equal keys for the same tenant/purpose serialize.
 //!
 //! The transaction-scoped form (`pg_advisory_xact_lock`) releases
 //! automatically at commit/rollback — the same discipline the existing
@@ -18,9 +18,23 @@ use super::tenant_query::TenantQueryScope;
 
 /// Build the advisory-lock key for one (tenant, purpose) pair.
 ///
-/// The key is hashed by PostgreSQL (`hashtext`) into the 32-bit advisory
-/// space; the human-readable string keeps different purposes from
-/// colliding while the tenant prefix keeps tenants independent.
+/// The key string is CLUSTER-WIDE and equals the lock's meaning: it is passed
+/// through `hashtext`, never used as the lock number directly, so the 32-bit
+/// advisory space still has collisions. A collision only causes needless
+/// contention, never shared state — the bodies are still tenant-scoped.
+/// Prefix hashed into the FIRST advisory key: the tenant identity. The lock is
+/// then `(hashtext('sniper-tenant-lock:' || organization_id), hashtext(purpose))`
+/// — a 64-bit pair, so two unrelated tenants/purposes collide only if BOTH
+/// 32-bit hashes collide (~2⁻⁶⁴) instead of one (~2⁻³²).
+pub const TENANT_LOCK_KEY_PREFIX: &str = "sniper-tenant-lock:";
+
+/// The two advisory-lock keys of one (tenant, purpose) pair, as PostgreSQL's
+/// `hashtext` will compute them. Exposed for tests and operators; the lock
+/// itself is taken by [`tenant_advisory_xact_lock`].
+pub fn tenant_lock_keys_sql() -> &'static str {
+    "SELECT hashtext($1 || $2::text), hashtext($3)"
+}
+
 pub fn tenant_lock_key(scope: &TenantQueryScope, purpose: &str) -> String {
     format!(
         "tenant:{}:{}",
@@ -38,9 +52,15 @@ pub async fn tenant_advisory_xact_lock(
     scope: &TenantQueryScope,
     purpose: &str,
 ) -> BotResult<()> {
-    let key = tenant_lock_key(scope, purpose);
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-        .bind(&key)
+    // TWO-KEY form: (tenant identity, purpose) are hashed SEPARATELY, so
+    // PostgreSQL compares the full 64-bit pair. The previous single
+    // `pg_advisory_xact_lock(hashtext(tenant || purpose))` folded everything
+    // into 32 bits and, with enough tenants/purposes, two unrelated sweeps
+    // blocked each other (and `try_tenant_lock` reported a phantom holder).
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1 || $2::text), hashtext($3))")
+        .bind(TENANT_LOCK_KEY_PREFIX)
+        .bind(scope.organization_id().to_string())
+        .bind(purpose.trim().to_ascii_lowercase())
         .execute(&mut *tx)
         .await
         .map_err(|e| BotError::db(format!("tenant advisory lock failed: {e}")))?;
@@ -49,20 +69,21 @@ pub async fn tenant_advisory_xact_lock(
 
 /// Try to acquire the transaction-scoped advisory lock without blocking.
 ///
-/// `Ok(true)` = held; `Ok(false)` = another worker of the same tenant
-/// holds it (skip, don't wait — the HA design prefers one worker to
-/// proceed while others move on).
+/// `Ok(true)` = held; `Ok(false)` = a worker holds the hashed key.
+/// A different tenant or purpose can collide in the 32-bit hash space.
 pub async fn try_tenant_advisory_xact_lock(
     tx: &mut PgConnection,
     scope: &TenantQueryScope,
     purpose: &str,
 ) -> BotResult<bool> {
-    let key = tenant_lock_key(scope, purpose);
-    let row: Option<(bool,)> = sqlx::query_as("SELECT pg_try_advisory_xact_lock(hashtext($1))")
-        .bind(&key)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| BotError::db(format!("tenant advisory try-lock failed: {e}")))?;
+    let row: Option<(bool,)> =
+        sqlx::query_as("SELECT pg_try_advisory_xact_lock(hashtext($1 || $2::text), hashtext($3))")
+            .bind(TENANT_LOCK_KEY_PREFIX)
+            .bind(scope.organization_id().to_string())
+            .bind(purpose.trim().to_ascii_lowercase())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| BotError::db(format!("tenant advisory try-lock failed: {e}")))?;
     Ok(row.map(|(held,)| held).unwrap_or(false))
 }
 
@@ -92,6 +113,25 @@ mod tests {
         assert_eq!(
             tenant_lock_key(&a, "Recovery-Sweep"),
             tenant_lock_key(&a, " recovery-sweep ")
+        );
+    }
+
+    #[test]
+    fn the_first_key_is_derived_from_the_tenant_and_a_namespace_prefix() {
+        let scope = TenantQueryScope::new(OrganizationId::new());
+        let other = TenantQueryScope::new(OrganizationId::new());
+        let first = |s: &TenantQueryScope| {
+            format!("{}{}", super::TENANT_LOCK_KEY_PREFIX, s.organization_id())
+        };
+        // The pair's first component never repeats across tenants …
+        assert_ne!(first(&scope), first(&other));
+        // … and the prefix is present so these locks do not read as an
+        // unrelated advisory-lock family.
+        assert!(first(&scope).starts_with(super::TENANT_LOCK_KEY_PREFIX));
+        // The purpose is normalized, so case/whitespace cannot fork a lock.
+        assert_eq!(
+            tenant_lock_key(&scope, "Recovery-Sweep"),
+            tenant_lock_key(&scope, " recovery-sweep ")
         );
     }
 

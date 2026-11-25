@@ -26,6 +26,15 @@ impl TenantPolyWrite {
         TenantPolyWrite { db }
     }
 
+    /// Local states from which an order never moves back. A replay of an
+    /// EARLIER, non-terminal observation (the reconciliation poller re-seeing a
+    /// `resting` snapshot after the order already filled) must not drag the row
+    /// back to `resting`: the stored local state, the derived venue state and
+    /// the fill/close accounting would then disagree, and an operator reading
+    /// "resting" would re-chase a finished order.
+    const TERMINAL_LOCAL_STATES: [&'static str; 5] =
+        ["filled", "cancelled", "expired", "failed", "unknown"];
+
     fn check_mode(mode: &str) -> Result<(), RepositoryError> {
         if matches!(mode, "paper" | "simulate" | "live") {
             Ok(())
@@ -101,6 +110,15 @@ impl TenantPolyWrite {
     /// composite arbiter `(organization_id, venue_order_id)`: the SAME
     /// venue order id mirrored by another tenant is a different row;
     /// `size_matched` only moves forward; `closed_at` never un-sets.
+    ///
+    /// **A STALE replay cannot rewrite a terminal row.** `size_matched` was
+    /// already monotonic and `closed_at` already sticky, but `state` and
+    /// `venue_status` were overwritten with whatever the caller passed — so
+    /// replaying an old `resting` observation over a `filled` row silently
+    /// un-filled it while `size_matched`/`closed_at` still said otherwise.
+    /// The row is still upserted (non-state columns, `updated_at`), but once the
+    /// stored local state is terminal its `state`/`venue_status` are frozen;
+    /// the caller learns the truth by reading the row back.
     pub async fn upsert_order(
         &self,
         write: &TenantWriteScope,
@@ -130,8 +148,17 @@ impl TenantPolyWrite {
                        ON CONFLICT (organization_id, venue_order_id) DO UPDATE SET
                            order_id = EXCLUDED.order_id,
                            size_matched = GREATEST(poly_orders.size_matched, EXCLUDED.size_matched),
-                           state = EXCLUDED.state,
-                           venue_status = EXCLUDED.venue_status,
+                           -- terminal local states are frozen against replay
+                           state = CASE
+                               WHEN poly_orders.state = ANY($22::text[])
+                                   THEN poly_orders.state
+                               ELSE EXCLUDED.state
+                           END,
+                           venue_status = CASE
+                               WHEN poly_orders.state = ANY($22::text[])
+                                   THEN poly_orders.venue_status
+                               ELSE EXCLUDED.venue_status
+                           END,
                            position_id = COALESCE(EXCLUDED.position_id, poly_orders.position_id),
                            replica_id = EXCLUDED.replica_id,
                            updated_at = EXCLUDED.updated_at,
@@ -158,6 +185,7 @@ impl TenantPolyWrite {
                 .bind(ord.submitted_at)
                 .bind(ord.updated_at)
                 .bind(ord.closed_at)
+                .bind(&Self::TERMINAL_LOCAL_STATES[..])
                 .execute(self.db.pool()),
             )
             .await?;
@@ -223,8 +251,9 @@ impl TenantPolyWrite {
     }
 
     /// Record one of the acting tenant's fills on the 0030 composite
-    /// arbiter `(organization_id, fill_id)` — replay of the venue fill
-    /// stream is idempotent per tenant.
+    /// arbiter `(organization_id, fill_id)`. Identical economic facts replay
+    /// idempotently; changed economic facts return a conflict. Observation
+    /// time and source may differ across ingestion paths.
     pub async fn record_fill(
         &self,
         write: &TenantWriteScope,
@@ -239,7 +268,26 @@ impl TenantPolyWrite {
         if !matches!(fill.side.as_str(), "buy" | "sell") {
             return Err(RepositoryError::Validation("side"));
         }
-        self.db
+        if fill.venue_order_id.trim().is_empty()
+            || fill.order_id.trim().is_empty()
+            || fill.token_id.trim().is_empty()
+        {
+            return Err(RepositoryError::Validation("poly_fill_identity"));
+        }
+        if !fill.price.is_finite()
+            || !(0.0..=1.0).contains(&fill.price)
+            || !fill.size_tokens.is_finite()
+            || fill.size_tokens <= 0.0
+            || !fill.quote_usd.is_finite()
+            || fill.quote_usd < 0.0
+        {
+            return Err(RepositoryError::Validation("poly_fill_amount"));
+        }
+        // One atomic arbiter serializes concurrent duplicate inserts. Ignore
+        // observation time and source on replay; they describe ingestion,
+        // not the economic fact. Any changed identity/economics fail closed.
+        let result = self
+            .db
             .timed(
                 "tenant_poly_fill_upsert",
                 sqlx::query(
@@ -247,7 +295,16 @@ impl TenantPolyWrite {
                            (organization_id, fill_id, venue_order_id, order_id, token_id,
                             side, price, size_tokens, quote_usd, source, position_id, ts)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                       ON CONFLICT (organization_id, fill_id) DO NOTHING"#,
+                       ON CONFLICT (organization_id, fill_id) DO UPDATE
+                       SET fill_id = poly_fills.fill_id
+                       WHERE poly_fills.venue_order_id = EXCLUDED.venue_order_id
+                         AND poly_fills.order_id = EXCLUDED.order_id
+                         AND poly_fills.token_id = EXCLUDED.token_id
+                         AND poly_fills.side = EXCLUDED.side
+                         AND poly_fills.price = EXCLUDED.price
+                         AND poly_fills.size_tokens = EXCLUDED.size_tokens
+                         AND poly_fills.quote_usd = EXCLUDED.quote_usd
+                         AND poly_fills.position_id IS NOT DISTINCT FROM EXCLUDED.position_id"#,
                 )
                 .bind(fill.organization_id.as_uuid())
                 .bind(&fill.fill_id)
@@ -264,6 +321,9 @@ impl TenantPolyWrite {
                 .execute(self.db.pool()),
             )
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::Conflict("poly_fill"));
+        }
         Ok(())
     }
 }

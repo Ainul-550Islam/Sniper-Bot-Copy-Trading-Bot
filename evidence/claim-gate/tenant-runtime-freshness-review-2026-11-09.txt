@@ -1,0 +1,134 @@
+Tenant runtime freshness source review, 2026-11-09.
+TenantBroadcastGuard::authorize_meta compares metadata to its captured TenantSigningContext and checks active signer on that captured value; it does not query a live runtime or signer store. TenantCopyExecutor::verify_runtime accepts caller-provided values and no production caller is established by source search. This alone does not establish whether external fencing or revocation controls exist elsewhere; it does not demonstrate a live stale broadcast. Do not claim the final guard alone detects a runtime rotated after construction.
+
+   114
+   115	impl std::error::Error for TenantBroadcastDeny {}
+   116
+   117	/// The final tenant gate in front of signing and broadcast.
+   118	#[derive(Debug, Clone)]
+   119	pub struct TenantBroadcastGuard {
+   120	    context: TenantSigningContext,
+   121	    funding_wallet: Pubkey,
+   122	}
+   123
+   124	impl TenantBroadcastGuard {
+   125	    /// Build the guard for one tenant module instance: the signing context
+   126	    /// its executions were issued under, and the funding wallet the
+   127	    /// executor was constructed with (verified to be the bound wallet).
+   128	    pub fn new(
+   129	        context: TenantSigningContext,
+   130	        funding_wallet: Pubkey,
+   131	    ) -> Result<Self, TenantSigningDeny> {
+   132	        context.authorize_wallet(&funding_wallet)?;
+   133	        Ok(TenantBroadcastGuard {
+   134	            context,
+   135	            funding_wallet,
+   136	        })
+   137	    }
+   138
+   139	    /// The tenant signing context this guard enforces.
+   140	    pub fn context(&self) -> &TenantSigningContext {
+   141	        &self.context
+   142	    }
+   143
+   144	    /// The bound funding wallet.
+   145	    pub fn funding_wallet(&self) -> &Pubkey {
+   146	        &self.funding_wallet
+   147	    }
+   148
+   149	    /// The acting tenant.
+   150	    pub fn organization_id(&self) -> OrganizationId {
+   151	        self.context.organization_id()
+   152	    }
+   153
+   154	    /// The executing runtime.
+   155	    pub fn runtime_id(&self) -> RuntimeId {
+   156	        self.context.runtime_id()
+   157	    }
+   158
+   159	    /// The fencing generation.
+   160	    pub fn generation(&self) -> RuntimeGeneration {
+   161	        self.context.generation()
+   162	    }
+   163
+   164	    /// Verify tenant metadata against every guard rule. This is the check
+   165	    /// the executor runs immediately before signing/broadcast.
+   166	    pub fn authorize_meta(&self, meta: &TenantTransactionMeta) -> Result<(), TenantBroadcastDeny> {
+   167	        if !self.context.execution_context().signer().is_active() {
+   168	            return Err(TenantBroadcastDeny::SignerRevoked);
+   169	        }
+   170	        if self.context.wallet_address() != self.funding_wallet.to_string() {
+   171	            return Err(TenantBroadcastDeny::WalletMismatch);
+   172	        }
+   173	        if meta.organization_id() != self.context.organization_id() {
+   174	            return Err(TenantBroadcastDeny::OrganizationMismatch {
+   175	                expected: self.context.organization_id(),
+   176	                presented: meta.organization_id(),
+   177	            });
+   178	        }
+   179	        if meta.runtime_id() != self.context.runtime_id() {
+   180	            return Err(TenantBroadcastDeny::RuntimeMismatch);
+   181	        }
+   182	        if meta.generation() != self.context.generation() {
+   183	            return Err(TenantBroadcastDeny::GenerationMismatch);
+   184	        }
+   185	        if meta.module() != self.context.module() {
+   186	            return Err(TenantBroadcastDeny::ModuleMismatch {
+   187	                expected: self.context.module(),
+   188	                presented: meta.module(),
+   189	            });
+   190	        }
+   296	    /// bound identity. This is an explicit helper; `process_trade` uses
+   297	    /// the executor's already-bound context and does not call it.
+   298	    pub fn authorize(&self, presented: &TenantExecutionContext) -> Result<(), CopyTenantDeny> {
+   299	        if presented.organization_id() != self.context.organization_id() {
+   300	            return Err(CopyTenantDeny::OrganizationMismatch);
+   301	        }
+   302	        if presented.runtime_id() != self.context.runtime_id() {
+   303	            return Err(CopyTenantDeny::RuntimeMismatch);
+   304	        }
+   305	        if presented.generation() != self.context.generation() {
+   306	            return Err(CopyTenantDeny::GenerationMismatch);
+   307	        }
+   308	        if presented.scope().module() != bot_core::tenant::ModuleKind::Copy {
+   309	            return Err(CopyTenantDeny::WrongModule);
+   310	        }
+   311	        if presented.wallet().address() != self.context.wallet_address() {
+   312	            return Err(CopyTenantDeny::WalletMismatch);
+   313	        }
+   314	        Ok(())
+   315	    }
+   316
+   317	    /// Record one mirror outcome through the attached sink (the
+   318	    /// reconciliation paths use this for late-arriving outcomes; the
+   319	    /// sink itself enforces the tenant boundary).
+   320	    pub async fn record_outcome(
+   321	        &self,
+   322	        event: &LeaderTradeEvent,
+   323	        outcome: &CopyOutcome,
+   324	    ) -> BotResult<()> {
+   325	        self.sink
+   326	            .record_outcome(&self.context, event, outcome)
+   327	            .await
+   328	    }
+   329
+   330	    /// Re-verify against a runtime identity supplied by the caller. This
+   331	    /// helper does not fetch the current runtime or run automatically.
+   332	    pub fn verify_runtime(
+   333	        &self,
+   334	        organization_id: OrganizationId,
+   335	        runtime_id: RuntimeId,
+   336	        generation: RuntimeGeneration,
+   337	    ) -> Result<(), CopyTenantDeny> {
+   338	        self.context
+   339	            .verify_against(organization_id, runtime_id, generation)
+   340	            .map_err(|_| CopyTenantDeny::GenerationMismatch)
+   341	    }
+   342
+   343	    /// Process ONE leader trade for THIS tenant. The event is deduped
+   344	    /// tenant-locally FIRST (the same external leader trade reaching
+   345	    /// two tenants is two independent mirrors; the same trade reaching
+   346	    /// one tenant twice is ONE mirror), then handed to the existing
+   347	    /// pipeline. The tenant's OWN config snapshot drives leader
+   348	    /// resolution, policy and sizing.
+crates/module-copy/tests/tenant_execution.rs:159:        .verify_runtime(org, runtime, RuntimeGeneration::first().next().unwrap())

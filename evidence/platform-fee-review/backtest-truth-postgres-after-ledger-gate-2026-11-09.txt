@@ -1,0 +1,15 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-rpc-client v2.3.13
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 6m 07s
+     Running tests/backtest_truth_columns.rs (target/debug/deps/backtest_truth_columns-61e9b789c789c69b)
+
+running 1 test
+test shared_list_and_detail_serializer_returns_truth_columns ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.30s

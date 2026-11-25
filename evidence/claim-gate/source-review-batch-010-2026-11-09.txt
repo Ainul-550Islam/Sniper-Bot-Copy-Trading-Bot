@@ -1,0 +1,9 @@
+Source review batch 010, 2026-11-09: six complete file versions read. Hashes below. Findings source observations, not proved production behavior.
+758b1fb0337cbb4e123004473c2249b86fbeae8ce689c4692daac7e4b151e4d4  crates/server/src/trading_data_plane/config_store.rs
+f7c2d310da021f0c9f3d664b08b6ee31d54a7249acf18d0734b755886ace4d74  crates/server/src/trading_data_plane/module_control_store.rs
+fabadbeff11aa73ed661711ee847d18c363330e3e51b39a74c720c9801680e2a  crates/server/src/trading_data_plane/module_controls.rs
+376cc71d50ab5736a79f391977c0a05782b0e3e2ee835da786cfea8b281d4249  crates/server/src/trading_data_plane/sniper.rs
+e3ecc1d131bae46387a1083d5511c5939722c128df0c8eb2b322a540d49fbe22  crates/server/src/trading_data_plane/telegram.rs
+22dfbc6dadf3369d5eb986fae76b63f98f1361375d93ab694ae3d7d6f8c119c3  crates/server/src/trading_data_plane/limit_order_ports.rs
+
+Config first write uses SELECT FOR UPDATE on an absent row; simultaneous initial inserts can conflict and one returns storage error. Module kill switch activation overwrites individual module overrides and deactivation deletes all trading module overrides, potentially clearing pre-existing disables; also individual enable can clear a kill-switch disabled row. Need execution path, policy and concurrency test before remediation; no live event asserted. Control write errors may be commit-ambiguous despite responses asserting action not applied; enabling clears existing override with no actor audit in this store. Telegram revoke and cancel pending are separate calls, not an atomic transaction; downstream consent verification needed to assess race. Limit-order journal uses ON CONFLICT DO NOTHING without payload check; journal-only handoff does not itself broadcast. Current fixed version of order write differs from batch 007 hash; see order-history-upsert evidence.

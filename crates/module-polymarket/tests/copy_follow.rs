@@ -124,6 +124,31 @@ async fn a_followed_leader_buy_is_mirrored_through_the_staged_pipeline() {
 }
 
 #[tokio::test]
+async fn live_copy_poll_posts_the_configured_builder_code() {
+    let venue = mock_venue().await;
+    let mut cfg = config_with_copy(&venue);
+    cfg.execution.mode = bot_core::models::ExecutionMode::Live;
+    cfg.execution.allow_live_trading = true;
+    cfg.polymarket.builder_code = Some("operator".into());
+    let (state, _) = state_with_oms(cfg);
+    let bot = live_bot(&state, Arc::new(MemoryPolyStore::new())).await;
+    let poly = poly_cfg(&state).await;
+    venue.set_leader_trades(vec![leader_buy(0.39, 20.0, LEADER)]);
+    let feed = CopyFeedClient::with_base_url(venue.data_url());
+    let mut eng = engine(&state).await;
+    let report = bot.copy_poll_once(&mut eng, &feed, &poly).await;
+    assert_eq!(report.signals, 1, "{report:?}");
+    assert_eq!(venue.posted_orders(), 1, "{report:?}");
+    let body = venue.last_body("POST", "/clob/order").unwrap();
+    assert_eq!(
+        body["order"]["builder"],
+        module_polymarket::builder::BuilderCode::parse("operator")
+            .unwrap()
+            .to_hex()
+    );
+}
+
+#[tokio::test]
 async fn re_polling_the_same_page_never_mirrors_twice() {
     let venue = mock_venue().await;
     let (state, oms) = state_with_oms(config_with_copy(&venue));

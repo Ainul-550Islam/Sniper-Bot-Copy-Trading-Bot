@@ -78,7 +78,7 @@ pub fn compute_fee(notional_lamports: u64, cfg: &PlatformFeeConfig) -> PlatformF
         fee += 1; // HALF-UP
     }
     let fee = u64::try_from(fee).unwrap_or(u64::MAX);
-    if fee < cfg.min_fee_lamports {
+    if fee == 0 || fee < cfg.min_fee_lamports {
         return PlatformFeeDecision {
             lamports: 0,
             reason: FeeSkipReason::Dust,
@@ -121,6 +121,93 @@ pub fn build_fee_transfer_ix(
     Some((ix, decision))
 }
 
+/// Apply a Jupiter fee using an explicitly supplied SOL-denominated notional.
+/// This avoids treating a token sell's raw input units as lamports. The
+/// configured address must be an initialized SPL token account for the
+/// fee mint; the caller must validate that account before live trading.
+pub fn apply_jupiter_fee_for_sol_notional(
+    mut request: QuoteRequest,
+    cfg: &PlatformFeeConfig,
+    notional_lamports: u64,
+) -> bot_core::error::BotResult<(QuoteRequest, PlatformFeeDecision)> {
+    let decision = compute_fee(notional_lamports, cfg);
+    if decision.reason != FeeSkipReason::Charged {
+        // A reused request may contain fee fields from a prior assessment.
+        // Disabled and dust decisions must never retain an old charge.
+        request.platform_fee_bps = None;
+        request.platform_fee_account = None;
+        return Ok((request, decision));
+    }
+    // The validated fee account is denominated in WSOL. Jupiter Metis
+    // permits either pair mint on ExactIn but only the input on ExactOut.
+    // Reject incompatible requests before asking the provider for a quote.
+    let wsol = *crate::consts::WSOL_MINT;
+    let allowed = match request.swap_mode {
+        crate::jupiter::SwapMode::ExactIn => {
+            request.input_mint == wsol || request.output_mint == wsol
+        }
+        crate::jupiter::SwapMode::ExactOut => request.input_mint == wsol,
+    };
+    if !allowed {
+        return Err(bot_core::error::BotError::invalid(
+            "Jupiter WSOL fee account is incompatible with the requested swap pair or mode",
+        ));
+    }
+    let account = cfg
+        .jupiter_fee_account
+        .trim()
+        .parse::<Pubkey>()
+        .map_err(|_| {
+            bot_core::error::BotError::invalid(
+                "invalid or missing Jupiter platform fee token account",
+            )
+        })?;
+    Ok((request.platform_fee(cfg.bps, account), decision))
+}
+
+/// Validate a Jupiter fee destination as an initialized, unfrozen WSOL
+/// SPL-token account. This does not prove ownership or future settlement.
+pub fn validate_wsol_fee_account(
+    account: &solana_sdk::account::Account,
+) -> bot_core::error::BotResult<()> {
+    use bot_core::error::BotError;
+    if account.owner != *crate::consts::TOKEN_PROGRAM {
+        return Err(BotError::invalid(
+            "Jupiter WSOL fee account must be owned by the SPL Token program",
+        ));
+    }
+    let token = crate::tokens::TokenAccountInfo::parse(&account.data)?;
+    if token.mint != *crate::consts::WSOL_MINT || token.state != 1 {
+        return Err(BotError::invalid(
+            "Jupiter fee account must be initialized, unfrozen and denominated in WSOL",
+        ));
+    }
+    Ok(())
+}
+
+/// Prepare and validate a Jupiter request before an executable quote. The
+/// notional must be SOL lamports, not token raw units. Errors are fail-closed.
+pub async fn prepare_jupiter_fee_request(
+    rpc: &crate::rpc::Rpc,
+    request: QuoteRequest,
+    cfg: &PlatformFeeConfig,
+    notional_lamports: u64,
+) -> bot_core::error::BotResult<(QuoteRequest, PlatformFeeDecision)> {
+    use bot_core::error::BotError;
+    let (request, decision) = apply_jupiter_fee_for_sol_notional(request, cfg, notional_lamports)?;
+    if decision.reason == FeeSkipReason::Charged {
+        let key = request
+            .platform_fee_account
+            .ok_or_else(|| BotError::invalid("missing Jupiter fee account"))?;
+        let account = rpc
+            .get_account(&key)
+            .await?
+            .ok_or_else(|| BotError::invalid("Jupiter fee token account does not exist"))?;
+        validate_wsol_fee_account(&account)?;
+    }
+    Ok((request, decision))
+}
+
 /// Apply the platform fee to a Jupiter quote request (aggregator path).
 ///
 /// Jupiter deducts the fee inside its own swap program when
@@ -132,7 +219,7 @@ pub fn apply_jupiter_fee(mut request: QuoteRequest, cfg: &PlatformFeeConfig) -> 
     if decision.lamports == 0 {
         return request;
     }
-    let Some(vault) = vault_pubkey(cfg) else {
+    let Ok(vault) = cfg.jupiter_fee_account.trim().parse::<Pubkey>() else {
         return request;
     };
     // Jupiter takes the fee in bps of the INPUT amount; pass the same bps
@@ -150,12 +237,32 @@ mod tests {
     fn cfg(vault: &str, bps: u64, min: u64) -> PlatformFeeConfig {
         PlatformFeeConfig {
             vault: vault.to_string(),
+            jupiter_fee_account: vault.to_string(),
             bps,
             min_fee_lamports: min,
         }
     }
 
     const VAULT: &str = "11111111111111111111111111111111";
+
+    #[test]
+    fn jupiter_sell_fee_uses_sol_notional_not_token_raw_amount() {
+        let policy = cfg(VAULT, 100, 100);
+        let token = Pubkey::new_unique();
+        let request = QuoteRequest::new(token, *crate::consts::WSOL_MINT, 1);
+        let (request, decision) =
+            apply_jupiter_fee_for_sol_notional(request, &policy, 1_000_000).unwrap();
+        assert_eq!(decision.lamports, 10_000);
+        assert_eq!(request.platform_fee_bps, Some(100));
+        assert_eq!(request.amount, 1);
+        let invalid = cfg("not a pubkey", 100, 1);
+        assert!(apply_jupiter_fee_for_sol_notional(
+            QuoteRequest::new(token, *crate::consts::WSOL_MINT, 1),
+            &invalid,
+            1_000_000
+        )
+        .is_err());
+    }
 
     #[test]
     fn fee_is_half_up_bps_of_the_notional() {
@@ -173,6 +280,59 @@ mod tests {
         // Exact half rounds UP: 50 lamports at 100 bps = 0.5 → 1.
         let d = compute_fee(50, &cfg(VAULT, 100, 1));
         assert_eq!(d.lamports, 1);
+    }
+
+    #[test]
+    fn zero_rounded_fee_is_dust_even_with_zero_minimum() {
+        let policy = cfg(VAULT, 1, 0);
+        for notional in [0, 1, 100] {
+            let decision = compute_fee(notional, &policy);
+            assert_eq!(decision.lamports, 0);
+            assert_eq!(decision.reason, FeeSkipReason::Dust);
+            let req = QuoteRequest::new(*crate::consts::WSOL_MINT, Pubkey::new_unique(), notional);
+            let (req, decision) =
+                apply_jupiter_fee_for_sol_notional(req, &policy, notional).unwrap();
+            assert_eq!(decision.reason, FeeSkipReason::Dust);
+            assert!(req.platform_fee_bps.is_none());
+        }
+    }
+
+    #[test]
+    fn charged_jupiter_fee_requires_wsol_in_the_allowed_swap_leg() {
+        use crate::jupiter::SwapMode;
+        let policy = cfg(VAULT, 100, 1);
+        let token_a = Pubkey::new_unique();
+        let token_b = Pubkey::new_unique();
+        let wsol = *crate::consts::WSOL_MINT;
+        let plain = QuoteRequest::new(token_a, token_b, 1_000_000);
+        assert!(apply_jupiter_fee_for_sol_notional(plain, &policy, 1_000_000).is_err());
+        for (input, output) in [(wsol, token_a), (token_a, wsol)] {
+            let request = QuoteRequest::new(input, output, 1_000_000);
+            assert!(apply_jupiter_fee_for_sol_notional(request, &policy, 1_000_000).is_ok());
+        }
+        let mut out_input_wsol = QuoteRequest::new(wsol, token_a, 1_000_000);
+        out_input_wsol.swap_mode = SwapMode::ExactOut;
+        assert!(apply_jupiter_fee_for_sol_notional(out_input_wsol, &policy, 1_000_000).is_ok());
+        let mut out_output_wsol = QuoteRequest::new(token_a, wsol, 1_000_000);
+        out_output_wsol.swap_mode = SwapMode::ExactOut;
+        assert!(apply_jupiter_fee_for_sol_notional(out_output_wsol, &policy, 1_000_000).is_err());
+    }
+
+    #[test]
+    fn skipped_fee_clears_preexisting_jupiter_fields() {
+        let old_account = Pubkey::new_unique();
+        for policy in [cfg("", 0, 0), cfg(VAULT, 1, 1000)] {
+            let request = QuoteRequest::new(*crate::consts::WSOL_MINT, Pubkey::new_unique(), 100)
+                .platform_fee(200, old_account);
+            let (request, decision) =
+                apply_jupiter_fee_for_sol_notional(request, &policy, 100).unwrap();
+            assert!(matches!(
+                decision.reason,
+                FeeSkipReason::Disabled | FeeSkipReason::Dust
+            ));
+            assert_eq!(request.platform_fee_bps, None);
+            assert_eq!(request.platform_fee_account, None);
+        }
     }
 
     #[test]

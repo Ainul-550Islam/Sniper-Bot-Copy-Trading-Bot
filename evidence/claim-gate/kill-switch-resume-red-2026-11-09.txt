@@ -1,0 +1,20 @@
+=== RED: /resume cleared the kill switch but left the halt latch engaged ===
+-- injection: resume() skips clear_halt (the old /resume semantics) --
+test state::tests::resume_releases_both_latches_and_reports_the_modules_it_leaves_off ... FAILED
+test state::tests::resume_can_release_the_halt_without_opening_the_kill_switch ... FAILED
+
+failures:
+
+---- state::tests::resume_releases_both_latches_and_reports_the_modules_it_leaves_off stdout ----
+--
+thread 'state::tests::resume_releases_both_latches_and_reports_the_modules_it_leaves_off' (1526255) panicked at crates/core/src/state.rs:2069:9:
+the halt latch is released
+
+---- state::tests::resume_can_release_the_halt_without_opening_the_kill_switch stdout ----
+
+thread 'state::tests::resume_can_release_the_halt_without_opening_the_kill_switch' (1526254) panicked at crates/core/src/state.rs:2108:9:
+assertion failed: outcome.halted_cleared
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:

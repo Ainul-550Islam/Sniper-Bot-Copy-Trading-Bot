@@ -270,6 +270,15 @@ impl Sniper {
             }
             return Err(self.reject(lc, event, reason, detail));
         }
+        // An earlier unbooked live fill may already consume wallet funds.
+        // The latch is intentionally conservative, process-local and is not
+        // a durable substitute for fill reconciliation.
+        if self.unbooked_entry.load(Ordering::SeqCst)
+            && self.state.execution_mode().await == ExecutionMode::Live
+        {
+            return Err(self.reject(lc, event, RejectReason::ExposureLimit,
+                "an earlier ambiguous live entry is unbooked; reconcile before further live entries"));
+        }
         // 7. The one authoritative dedup: feeds race to report the same
         //    launch; only the first observation wins.
         if !self.state.mark_launch_seen(&event.dedup_key()).await {
@@ -458,12 +467,46 @@ impl Sniper {
                 format!("fenced before broadcast: {e}"),
             ));
         }
+        // The early latch check may have run in paper mode, before an
+        // asynchronous market/build operation and a subsequent live upgrade.
+        // Check again against both the installed policy and current state.
+        if self.unbooked_entry.load(Ordering::SeqCst)
+            && (self.executor.policy().mode == ExecutionMode::Live
+                || self.state.execution_mode().await == ExecutionMode::Live)
+        {
+            permit.finish(false).await;
+            return Err(self.reject(lc, event, RejectReason::ExposureLimit,
+                "an earlier ambiguous live entry is unbooked; reconcile before further live entries"));
+        }
+        // The fence and policy refresh above can await; an entry must not
+        // proceed if a kill switch or live gate changed during those awaits.
+        if self.state.kill_switch() {
+            permit.finish(false).await;
+            return Err(self.reject(
+                lc,
+                event,
+                RejectReason::KillSwitch,
+                "kill switch engaged before submission",
+            ));
+        }
+        if self.executor.policy().mode == ExecutionMode::Live {
+            if let Err(e) = self.state.may_broadcast().await {
+                permit.finish(false).await;
+                return Err(self.reject(
+                    lc,
+                    event,
+                    RejectReason::ExecutionUnavailable,
+                    format!("live broadcast gate: {e}"),
+                ));
+            }
+        }
         if let Err(r) = self.advance(lc, event, SniperStage::Submitted) {
             permit.finish(false).await;
             return Err(r);
         }
 
-        let (result, expected_out_raw, spend_lamports, base_decimals, mode_live) = match prepared {
+        let (result, expected_out_raw, spend_lamports, base_decimals, attempt_mode) = match prepared
+        {
             Prepared::Request {
                 req,
                 expected_out_raw,
@@ -474,15 +517,27 @@ impl Sniper {
                 // broadcast, linked to the signature (or abandoned) after.
                 let journal = self.intent_rec(&event.mint, "buy", &expected_out_raw.to_string());
                 let req = self.tenant_stamp(req);
-                let res = bot_core::recovery::with_intent(
+                // The reservation key is the LOGICAL snipe (launch + route), not
+                // the per-attempt journal id: a restarted process or a second
+                // replica cannot broadcast the same snipe twice.
+                let reserve_key = entry_intent_id(event, EntryRoute::PumpCurve)
+                    .unwrap_or_else(|| event.mint.clone());
+                let res = bot_core::recovery::with_reserved_intent_disposition(
                     self.intents.as_ref(),
+                    &reserve_key,
                     journal,
                     self.executor.run(req),
-                    |r| r.broadcast_signature(),
+                    |r| r.intent_disposition(),
                 )
                 .await;
                 match res {
-                    Ok(r) => (r, expected_out_raw, spend_lamports, base_decimals, true),
+                    Ok(r) => (
+                        r,
+                        expected_out_raw,
+                        spend_lamports,
+                        base_decimals,
+                        self.executor.policy().mode,
+                    ),
                     Err(e) => {
                         permit.finish(false).await;
                         self.state.note_failed_entry(&event.mint).await;
@@ -499,7 +554,11 @@ impl Sniper {
                 base_decimals,
             } => {
                 let mode = self.state.execution_mode().await;
+                let had_built = built.is_some();
                 let res: BotResult<ExecutionResult> = match (mode, built) {
+                    (ExecutionMode::Live, None) => Err(BotError::invalid(
+                        "live Jupiter attempt has no built transaction",
+                    )),
                     (ExecutionMode::Paper, _) | (_, None) => {
                         let mut r = ExecutionResult::empty(
                             &label,
@@ -524,24 +583,36 @@ impl Sniper {
                             let journal =
                                 self.intent_rec(&event.mint, "buy", &spend_lamports.to_string());
                             let built = self.tenant_stamp_built(built);
-                            bot_core::recovery::with_intent(
+                            bot_core::recovery::with_reserved_intent_disposition(
                                 self.intents.as_ref(),
+                                &intent_id,
                                 journal,
                                 self.executor.send_prebuilt(&built),
-                                |r| r.broadcast_signature(),
+                                |r| r.intent_disposition(),
                             )
                             .await
                         }
                     },
                 };
                 match res {
-                    Ok(r) => (
-                        r,
-                        expected_out_raw,
-                        spend_lamports,
-                        base_decimals,
-                        mode == ExecutionMode::Live,
-                    ),
+                    Ok(r) => {
+                        let attempt_mode = if had_built && mode != ExecutionMode::Paper {
+                            if r.paper {
+                                self.executor.policy().mode
+                            } else {
+                                ExecutionMode::Live
+                            }
+                        } else {
+                            mode
+                        };
+                        (
+                            r,
+                            expected_out_raw,
+                            spend_lamports,
+                            base_decimals,
+                            attempt_mode,
+                        )
+                    }
                     Err(e) => {
                         permit.finish(false).await;
                         self.state.note_failed_entry(&event.mint).await;
@@ -556,7 +627,11 @@ impl Sniper {
         // for the grace window so no replica resubmits; a determinate
         // outcome releases it. Paper/simulate never moved money → release.
         permit
-            .finish(mode_live && result.status.is_ambiguous())
+            .finish(
+                attempt_mode == ExecutionMode::Live
+                    && !result.paper
+                    && result.status.is_ambiguous(),
+            )
             .await;
 
         let latency_ms = event.held_ms(Utc::now());
@@ -590,9 +665,30 @@ impl Sniper {
         ) {
             self.advance(lc, event, SniperStage::Confirmed)?;
         }
-        // Ambiguous outcomes (Sent / SendUnknown) stay SUBMITTED: the
-        // position is booked (the transaction may land) and reconciliation
-        // settles the lifecycle record.
+        // A live submitted transaction may have landed, but a quote is not a
+        // fill. Do not invent a trade, position or cash movement while the
+        // outcome is unknown. The intent remains available for reconciliation.
+        if attempt_mode == ExecutionMode::Live && !result.paper && result.status.is_ambiguous() {
+            self.unbooked_entry.store(true, Ordering::SeqCst);
+            self.state.inc_orders_sent(BotModule::Sniper).await;
+            self.state
+                .record_error(
+                    BotModule::Sniper,
+                    "ambiguous live sniper entry requires fill reconciliation; no position booked",
+                )
+                .await;
+            self.state.events.publish(AppEvent::Audit {
+                ts: Utc::now(),
+                actor: "sniper".into(),
+                action: "sniper.entry.ambiguous".into(),
+                target: Some(result.intent_id.clone()),
+                outcome: format!(
+                    "signature={} status={:?} position=unbooked",
+                    result.signature, result.status
+                ),
+            });
+            return Ok(());
+        }
 
         let pos = self
             .record_execution(
@@ -606,6 +702,7 @@ impl Sniper {
                 mint,
                 approved.market.snapshot.pool.clone(),
                 approved.slippage.bps,
+                attempt_mode,
             )
             .await
             .map_err(|e| self.fail(lc, event, format!("bookkeeping: {e}")))?;
@@ -1117,8 +1214,17 @@ impl Sniper {
                     None
                 } else {
                     let jupiter = Jupiter::new();
-                    let request = QuoteRequest::new(*WSOL_MINT, *mint, lamports)
-                        .slippage_bps(approved.slippage.bps);
+                    // The market quote is not the executable quote: apply
+                    // and validate the fee again to the request actually
+                    // passed into build_swap, which requotes internally.
+                    let (request, _) = solana_kit::fee_transfer::prepare_jupiter_fee_request(
+                        &self.rpc,
+                        QuoteRequest::new(*WSOL_MINT, *mint, lamports)
+                            .slippage_bps(approved.slippage.bps),
+                        &cfg.platform_fee,
+                        lamports,
+                    )
+                    .await?;
                     let recent = self.rpc.latest_blockhash(true).await?;
                     let (_q, tx, last_valid) = jupiter
                         .build_swap(
@@ -1184,10 +1290,10 @@ impl Sniper {
         mint: Pubkey,
         pool: Option<String>,
         slippage_bps: u64,
+        mode: ExecutionMode,
     ) -> BotResult<String> {
         let cfg = self.state.config_snapshot().await;
         let sniper = cfg.sniper.clone();
-        let mode = self.state.execution_mode().await;
         let venue: Venue = route.venue();
         let launch = &event.launch;
 
@@ -1219,7 +1325,7 @@ impl Sniper {
 
         // ---- Trade record -------------------------------------------------
         let trade = Trade {
-            id: self.state.next_id("t"),
+            id: self.state.next_persistent_id("t"),
             ts: Utc::now(),
             source: TradeSource::Sniper,
             venue,
@@ -1261,7 +1367,7 @@ impl Sniper {
         });
 
         // ---- Position -----------------------------------------------------
-        let pos_id = self.state.next_id("p");
+        let pos_id = self.state.next_persistent_id("p");
         ledger_event.position_id = Some(pos_id.clone());
         let mut position = Position::new(
             pos_id.clone(),
@@ -1301,7 +1407,9 @@ impl Sniper {
         });
         // The global ledger is the only mutator of global accounting state;
         // the module hands over the typed event and keeps its own record.
-        self.state.ledger().submit(ledger_event).await;
+        self.state
+            .submit_ledger_event(BotModule::Sniper, ledger_event)
+            .await;
 
         // Persist the learned layout store if a live buy confirmed (the layout
         // that just worked is worth keeping). Best-effort, never fatal.

@@ -1,0 +1,6 @@
+[manifest] product_files=1949 rust_files=811 docs_files=168 migrations=78 (high water 0078)
+[manifest] updated /home/user/repo/release-manifest.json
+=== POST-DOCS MANIFEST UPDATE ===
+[manifest] product_files=1951 rust_files=811 docs_files=168 migrations=78 (high water 0078)
+[manifest] updated /home/user/repo/release-manifest.json
+manifest_update_exit=0

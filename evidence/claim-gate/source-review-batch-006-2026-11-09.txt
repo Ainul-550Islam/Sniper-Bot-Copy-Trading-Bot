@@ -1,0 +1,26 @@
+Source review batch 006, 2026-11-09.
+22 complete file versions read in this batch, SHA-256 of current post-edit versions below. Full-file reading does not prove correctness or constitute whole-repo review.
+5c43018947f541b9ca9432dad3f03e4ef0296f2215f01f12a04594494488fca8  crates/core/src/trading_repository/pagination.rs
+6a77c6baa4fe32f8918bf44ef66eed4dd2b62cfd561cbd592c353348b4c6a9d3  crates/core/src/trading_repository/query_scope.rs
+68036f40e382f1243ec38c6696aa7dfab26883db81be3e837465d0bc644809c7  crates/core/src/trading_repository/write_scope.rs
+0a917f9df1587caaf5fca9b2ed835dc510385350e7e5b3c2c20fae55a3d8bf90  crates/core/src/trading_repository/tenant_assert.rs
+381c3aeab0827135ea0524bd9bfc854cd9683e504398eb7ddef6966738a55bf9  crates/core/src/trading_repository/not_found.rs
+824ada7d5983908f822380aa6f05b85aa36221dbd2cc278a4a8fc1a6878a6e5b  crates/core/src/trading_repository/transaction.rs
+b34af335781385e65763a789413b113d838db610766542f6f0e3ae85089fd7d8  crates/core/src/trading_repository/orders/conflicts.rs
+d340cdb04828577f88ce19b1fa2586b4546d0bc537a3c0bba45d06eacdfcb480  crates/core/src/trading_repository/reporting/positions.rs
+3c9a15402e2a6835d649dd3fdf27ca3842c5cc161bffd6a6f16d16945abffc8f  crates/core/src/trading_repository/reporting/executions.rs
+276deb56519147eebbca3f7bf6013885d8ba40a10d1aad745084f549d2e235a8  crates/core/src/trading_repository/reporting/orders.rs
+cfbd17ab890268b52c33265380a0120bbd97c3c237f8957ed50bd02497bc9e23  crates/core/src/trading_repository/reporting/pnl.rs
+a8c6c11eecd2ae3c66674f19129caecd9dbbb0e2c82bb3103ad7db3f28142c0a  crates/core/src/trading_repository/positions/balances.rs
+43d8e1d2a7e11ebdea363346fc1ca14ed6fdb4c5823c85460bd071b7614398ae  crates/core/src/trading_repository/reporting/model.rs
+b87b7a59397893f4ef3104d74860073a571af6eec518b9107ba58f052ecb3798  crates/core/src/trading_repository/reporting/mod.rs
+097059d2b456b147d7502f659bf2cf97014936a90b31e070435641a4ae545405  crates/core/src/trading_repository/intent/model.rs
+d50071e4a564db17720eb39c6a755cc8aea1722910c21c13480196f571c47dd5  crates/core/src/trading_repository/intent/read.rs
+b763acea7ee2e00c55cd52f53e3717505f072ec4789c7e3463a3cea8e2761e3a  crates/core/src/trading_repository/intent/write.rs
+885531cc997e0b568361198d6bf2d522ae2636279dede503054d766d91c87e8d  crates/core/src/trading_repository/repository_error.rs
+dbc298db12c0359036e87fb228b06fe7820c506901e00d29f02f26868bbb01b9  crates/core/src/db/tenant_query.rs
+517643da678d39b1d6f61ee7204225cfd2865de4645df3b8b70011b169276f37  crates/core/src/db/tenant_pagination.rs
+9086f768400aa52eb66a889b01a00aa5f5b621d760c3f8632951bdbfd8f2805b  crates/core/src/db/tenant_lock.rs
+e1f4cadb6b9e0784763c4301150a152bdb7511064efb6fa0c308dd053b57573f  crates/core/src/db/tenant_tx.rs
+
+Changes and findings: balance, PnL snapshot and error-classification evidence files in this directory; advisory hashtext lock uses 32-bit space and can collide across tenants, comments corrected; cursor JSON is unsigned, tenant claim mutable, predicates must independently constrain tenant; scope structs accept caller-provided identities and raw connection access, not authorization enforcement. Composed dashboard sections use multiple concurrent snapshots; onboarding funded-wallet query selects latest timestamp per address, not per chain/asset, and timestamp ties may select multiple snapshots; no live impact or fix established. Intent record silently ignores same-tenant same-ID differing payload, inherited legacy collision risk remains despite UUID generation changes. Page and orphan-list caps, error-to-default model mapping require more review.

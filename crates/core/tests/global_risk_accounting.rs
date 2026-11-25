@@ -1823,3 +1823,33 @@ async fn config_reload_updates_limits_and_kill_lists_live() {
     assert!(state.module_status(BotModule::Polymarket).await.enabled);
     let _ = PositionStatus::Open;
 }
+
+#[tokio::test]
+async fn global_position_cap_counts_inflight_reservations() {
+    let state = state_with(|c| c.global_risk.max_open_positions = 1);
+    let request = |asset: &str| GlobalRiskRequest {
+        module: BotModule::Sniper,
+        venue: Venue::PumpFun,
+        wallet: "w".into(),
+        strategy: "sniper".into(),
+        asset: asset.into(),
+        quote_asset: "SOL".into(),
+        requested_quote: 1.0,
+        mode: ExecutionMode::Paper,
+    };
+    let risk = state.global_risk();
+    let (first, reservation) = risk
+        .decide_with_reservation(&request("A"), &DecisionContext::default())
+        .await;
+    assert!(first.accepted(), "first entry: {}", first.detail);
+    let _held = reservation.expect("first reservation must stay alive");
+    let (second, _) = risk
+        .decide_with_reservation(&request("B"), &DecisionContext::default())
+        .await;
+    assert_eq!(
+        second.reason,
+        Some(GlobalRejectReason::MaxOpenPositions),
+        "second entry must count the first in-flight reservation: {}",
+        second.detail
+    );
+}

@@ -1,0 +1,62 @@
+Execution rearm signature isolation, 2026-11-09.
+In-memory public ledger regression: old signature index survived rearm, allowing an old failed reconciliation verdict to mark the new submitted attempt Reconciled with failure and permit rearm. Test failed before and passes after. On rearm or signature replacement, remove the previous mapping; at mutation, check expected signature under the records write lock, preventing a previously looked-up stale result from changing a new attempt. Unit test deterministically stages the stale-lookup-before-rearm interleaving; 14 execution unit tests pass. This does not prove actual chain behavior, durable sink success, cross-process isolation, or fix historical lifecycle rows.
+--- before ---
+    Blocking waiting for file lock on build directory
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 39.96s
+     Running tests/execution_signature_rearm.rs (target/debug/deps/execution_signature_rearm-1390d4af7283fd83)
+
+running 1 test
+test stale_signature_does_not_reconcile_a_new_attempt ... FAILED
+
+failures:
+
+---- stale_signature_does_not_reconcile_a_new_attempt stdout ----
+
+thread 'stale_signature_does_not_reconcile_a_new_attempt' (1323831) panicked at crates/core/tests/execution_signature_rearm.rs:55:5:
+old verdict must not affect the replacement attempt
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    stale_signature_does_not_reconcile_a_new_attempt
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --test execution_signature_rearm`
+EXIT=101
+--- integration after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 6.37s
+     Running tests/execution_signature_rearm.rs (target/debug/deps/execution_signature_rearm-1390d4af7283fd83)
+
+running 1 test
+test stale_signature_does_not_reconcile_a_new_attempt ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0
+--- execution unit suite ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 31.90s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-91f5a164e5b4183e)
+
+running 14 tests
+test execution::tests::ambiguous_failures_park_in_pending_without_terminating ... ok
+test execution::tests::definite_failures_can_be_rearmed_and_count_attempts ... ok
+test execution::tests::duplicate_attempts_are_refused_while_live_or_landed ... ok
+test execution::tests::empty_intent_id_is_rejected ... ok
+test execution::tests::eviction_drops_only_settled_records ... ok
+test execution::tests::failure_classification_matrix ... ok
+test execution::tests::global_ledger_is_a_singleton ... ok
+test execution::tests::happy_path_transitions_reach_sinks_and_reconcile ... ok
+test execution::tests::illegal_transitions_are_rejected_loudly ... ok
+test execution::tests::intent_ids_are_deterministic_and_versioned ... ok
+test execution::tests::order_status_projection_is_consistent_with_oms ... ok
+test execution::tests::reconciliation_checks_signature_atomically_at_mutation ... ok
+test execution::tests::restart_resolution_fails_unsent_and_hands_off_ambiguous ... ok
+test execution::tests::state_machine_is_forward_only_and_reconcilable ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 668 filtered out; finished in 0.01s
+
+EXIT=0

@@ -1,0 +1,43 @@
+Deployment lifecycle retention tenant isolation, 2026-11-09.
+Disposable PostgreSQL database, privileged bot DB role. Before fix, deployment ExecutionRepo::delete_settled_older_than deleted BOTH deployment and unrelated tenant settled rows because SQL had no organization predicate. Regression failed with zero surviving rows. SQL now binds deployment organization explicitly. Final suite 6/6 passes, including retention and order regressions. Final test ages fixtures 101 years and uses a 100-year threshold; run only on disposable test DB because pruning may affect other deployment rows older than threshold. No app-role RLS or historical restore proven, and process-global deployment-org caching across DBs remains open.
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 3m 04s
+     Running tests/orders_cross_tenant_pg.rs (target/debug/deps/orders_cross_tenant_pg-bd6d4ac6d3d6dffb)
+
+running 1 test
+test deployment_lifecycle_prune_preserves_other_tenants ... FAILED
+
+failures:
+
+---- deployment_lifecycle_prune_preserves_other_tenants stdout ----
+
+thread 'deployment_lifecycle_prune_preserves_other_tenants' (1314742) panicked at crates/core/tests/orders_cross_tenant_pg.rs:392:5:
+assertion `left == right` failed: deployment cleanup must not delete another tenant's history
+  left: []
+ right: [(50ff6d55-0f7f-4e2a-b3e2-6beeb633ab8e, "prune-foreign-1314741-1794582794353935929")]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    deployment_lifecycle_prune_preserves_other_tenants
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.58s
+
+error: test failed, to rerun pass `-p bot-core --test orders_cross_tenant_pg`
+EXIT=101
+--- after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 1.96s
+     Running tests/orders_cross_tenant_pg.rs (target/debug/deps/orders_cross_tenant_pg-bd6d4ac6d3d6dffb)
+
+running 6 tests
+test deployment_lifecycle_prune_preserves_other_tenants ... ok
+test same_tenant_local_idempotency_key_both_tenants_allowed ... ok
+test signature_lookup_and_pagination_stay_tenant_scoped ... ok
+test status_history_rows_carry_the_order_tenant ... ok
+test tenant_a_crud_and_tenant_b_denied_everything ... ok
+test upsert_foreign_order_collision_must_not_report_success ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+EXIT=0

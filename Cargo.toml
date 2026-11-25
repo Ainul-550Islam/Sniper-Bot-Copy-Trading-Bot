@@ -53,6 +53,7 @@ url = "2"
 tonic = "0.14"
 yellowstone-grpc-proto = { version = "13", features = ["tonic"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # --- solana ----------------------------------------------------------------
 # NOTE: `default-features = false` hides signer/transaction/compute_budget

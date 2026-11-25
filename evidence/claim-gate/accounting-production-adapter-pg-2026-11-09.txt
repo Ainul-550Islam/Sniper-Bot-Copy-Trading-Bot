@@ -1,0 +1,7 @@
+    Finished `test` profile [unoptimized] target(s) in 3.56s
+     Running tests/accounting_production_retry_postgres.rs (target/debug/deps/accounting_production_retry_postgres-f507d65998c7f0c3)
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s

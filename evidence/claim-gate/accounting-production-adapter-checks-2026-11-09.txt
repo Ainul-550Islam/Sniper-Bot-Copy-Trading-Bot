@@ -1,0 +1,35 @@
+    Checking tokio v1.54.1
+    Checking tokio-util v0.7.20
+    Checking h2 v0.4.20
+    Checking hyper v1.12.0
+    Checking hyper-util v0.1.21
+    Checking tower v0.5.3
+    Checking tokio-rustls v0.26.6
+    Checking tokio-stream v0.1.19
+    Checking async-compression v0.4.51
+    Checking tower-http v0.6.11
+    Checking hyper-rustls v0.27.10
+    Checking sqlx-core v0.8.6
+    Checking reqwest v0.12.28
+    Checking sqlx-postgres v0.8.6
+    Checking axum v0.8.9
+    Checking hyper-timeout v0.5.2
+    Checking combine v4.6.9
+    Checking redis v0.27.6
+    Checking tonic v0.14.9
+    Checking sqlx v0.8.6
+    Checking tokio-tungstenite v0.24.0
+    Checking reqwest-middleware v0.4.2
+    Checking solana-rpc-client-api v2.3.13
+    Checking bot-core v0.1.0 (/home/user/repo/crates/core)
+    Checking tonic-prost v0.14.9
+    Checking yellowstone-grpc-proto v13.0.0
+    Checking solana-rpc-client v2.3.13
+    Checking solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Checking module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+    Checking module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Checking module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Checking axum v0.7.9
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 2m 34s

@@ -1,0 +1,75 @@
+JSONL torn-tail and same-second archive regression, 2026-11-09 user timezone.
+Controlled corrupt tail, not actual crash: append following record previously merged it with invalid bytes and loader skipped it. Before desired regression failed; after, same-Store clones serialize append/rotate/truncate and append checks final byte, inserts newline when needed. 4/4 integration tests pass including 64 concurrent clone appends. Reads now require read permission on journal. Separately, injected fixed clock showed two rotations overwrote same archive on local filesystem; before failed, after UUID suffix produced two archives (1/1 test). UUID collisions theoretically possible, rename can overwrite on collision; existing overwritten files not recovered. Lock is per Store instance and its clones, NOT independently opened instances/processes; independent writers/rotators, short writes, crashes, fsync, filesystem errors and archive overwrite race are not fully solved. No power-loss or OS-process crash simulation.
+--- torn before ---
+    Finished `test` profile [unoptimized] target(s) in 9.78s
+     Running tests/storage_lifecycle.rs (target/debug/deps/storage_lifecycle-a8d0150b6afa0f76)
+
+running 1 test
+test append_after_torn_line_keeps_the_next_complete_record ... FAILED
+
+failures:
+
+---- append_after_torn_line_keeps_the_next_complete_record stdout ----
+
+thread 'append_after_torn_line_keeps_the_next_complete_record' (1048952) panicked at crates/core/tests/storage_lifecycle.rs:212:5:
+assertion `left == right` failed: a torn line must not consume the following complete record
+  left: ["before"]
+ right: ["before", "after"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    append_after_torn_line_keeps_the_next_complete_record
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --test storage_lifecycle`
+EXIT=101
+--- torn after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 21.42s
+     Running tests/storage_lifecycle.rs (target/debug/deps/storage_lifecycle-a8d0150b6afa0f76)
+
+running 4 tests
+test append_after_torn_line_keeps_the_next_complete_record ... ok
+test appended_records_survive_a_restarted_store ... ok
+test cloned_store_concurrent_appends_preserve_whole_records ... ok
+test rotate_archives_and_truncate_clears ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+EXIT=0
+--- rotation before ---
+    Finished `test` profile [unoptimized] target(s) in 32.84s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test storage::rotation_tests::rotations_in_same_second_preserve_both_archives ... FAILED
+
+failures:
+
+---- storage::rotation_tests::rotations_in_same_second_preserve_both_archives stdout ----
+
+thread 'storage::rotation_tests::rotations_in_same_second_preserve_both_archives' (1049077) panicked at crates/core/src/storage.rs:253:9:
+assertion `left != right` failed: rotations at the same timestamp must not share an archive path
+  left: "/tmp/rotation-collision-ab534d70-ceca-43d3-bf79-76514826d040/trades.jsonl.2026-11-13T13-40-47Z"
+ right: "/tmp/rotation-collision-ab534d70-ceca-43d3-bf79-76514826d040/trades.jsonl.2026-11-13T13-40-47Z"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    storage::rotation_tests::rotations_in_same_second_preserve_both_archives
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 677 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --lib`
+EXIT=101
+--- rotation after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 32.74s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test storage::rotation_tests::rotations_in_same_second_preserve_both_archives ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 677 filtered out; finished in 0.00s

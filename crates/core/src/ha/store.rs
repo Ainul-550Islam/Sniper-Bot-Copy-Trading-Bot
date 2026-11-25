@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
-use super::cursor::{FeedCursor, FeedGap, GapStatus};
+use super::cursor::{self, CursorWrite, FeedCursor, FeedGap, GapStatus};
 use super::lease::{next_generation, Lease, LeaseDecision, LeaseRequest, LeaseRole};
 use super::recovery_plan::OrderRecoveryAction;
 use super::worker::{WorkerRegistration, WorkerState};
@@ -139,14 +139,39 @@ pub trait HaStore: Send + Sync {
     /// Every lease (operator view).
     async fn leases(&self) -> BotResult<Vec<Lease>>;
 
-    /// Persist one cursor (upsert by `feed:scope`).
-    async fn save_cursor(&self, cursor: &FeedCursor) -> BotResult<()>;
+    /// Persist one cursor (upsert by `feed:scope`), admitting it only if
+    /// [`FeedCursor::admit_write`] accepts it against the durable row.
+    ///
+    /// Returns what happened so the caller can refuse to process when its
+    /// write was fenced or stale instead of believing it advanced. An older
+    /// lease generation, a different holder at the same generation, an
+    /// unfenced writer against a fenced row, and a rewrite of an
+    /// unacknowledged advance are all refused.
+    async fn save_cursor(&self, cursor: &FeedCursor) -> BotResult<CursorWrite>;
+
+    /// Mark the advance at `position`/`token` as acknowledged (the work for
+    /// it completed). `false` = no such pending advance for this key (already
+    /// acknowledged, fenced by a newer generation, or never written).
+    /// `fence` is the acknowledging writer's `<holder>@<generation>`: the row
+    /// adopts it, so a stale generation can neither acknowledge nor keep the
+    /// row, and a takeover's acknowledgement records the new owner.
+    async fn acknowledge_cursor(
+        &self,
+        key: &str,
+        position: Option<u64>,
+        token: Option<&str>,
+        fence: &str,
+    ) -> BotResult<bool>;
 
     /// Load one cursor.
     async fn load_cursor(&self, key: &str) -> BotResult<Option<FeedCursor>>;
 
     /// Every cursor (operator view, lag gauges).
     async fn cursors(&self) -> BotResult<Vec<FeedCursor>>;
+
+    /// Cursors whose advance was written but never acknowledged: the replay
+    /// set after a crash or a takeover. Oldest first, bounded by `limit`.
+    async fn pending_cursors(&self, limit: usize) -> BotResult<Vec<FeedCursor>>;
 
     /// Record a detected gap (append-only).
     async fn record_gap(&self, gap: &FeedGap) -> BotResult<()>;
@@ -401,17 +426,66 @@ impl HaStore for MemoryHaStore {
         Ok(out)
     }
 
-    async fn save_cursor(&self, cursor: &FeedCursor) -> BotResult<()> {
+    async fn save_cursor(&self, cursor: &FeedCursor) -> BotResult<CursorWrite> {
         let mut inner = self.lock();
         Self::guard(&inner, "save_cursor")?;
-        inner.cursors.insert(cursor.key(), cursor.clone());
-        Ok(())
+        let key = cursor.key();
+        let decision = cursor.admit_write(inner.cursors.get(&key));
+        if decision.accepted() {
+            inner.cursors.insert(key, cursor.clone());
+        }
+        Ok(decision)
+    }
+
+    async fn acknowledge_cursor(
+        &self,
+        key: &str,
+        position: Option<u64>,
+        token: Option<&str>,
+        fence: &str,
+    ) -> BotResult<bool> {
+        let mut inner = self.lock();
+        Self::guard(&inner, "acknowledge_cursor")?;
+        let Some(c) = inner.cursors.get_mut(key) else {
+            return Ok(false);
+        };
+        if !c.pending {
+            return Ok(false);
+        }
+        // A stale generation cannot acknowledge a newer owner's advance.
+        if !c.fence.is_empty()
+            && !fence.is_empty()
+            && cursor::fence_generation(fence) < cursor::fence_generation(&c.fence)
+        {
+            return Ok(false);
+        }
+        if !c.acknowledge(position, token) {
+            return Ok(false);
+        }
+        if !fence.is_empty() {
+            c.fence = fence.to_string();
+        }
+        Ok(true)
     }
 
     async fn load_cursor(&self, key: &str) -> BotResult<Option<FeedCursor>> {
         let inner = self.lock();
         Self::guard(&inner, "load_cursor")?;
         Ok(inner.cursors.get(key).cloned())
+    }
+
+    async fn pending_cursors(&self, limit: usize) -> BotResult<Vec<FeedCursor>> {
+        let inner = self.lock();
+        Self::guard(&inner, "pending_cursors")?;
+        let mut out: Vec<FeedCursor> = inner
+            .cursors
+            .values()
+            .filter(|c| c.pending)
+            .cloned()
+            .collect();
+        out.sort_by_key(|c| c.updated_at);
+        out.truncate(limit);
+        Ok(out)
     }
 
     async fn cursors(&self) -> BotResult<Vec<FeedCursor>> {
@@ -478,6 +552,7 @@ impl HaStore for MemoryHaStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ha::cursor::CursorAdvance;
     use crate::ha::cursor::FeedId;
 
     fn req(role: LeaseRole, holder: &str, ttl: i64) -> LeaseRequest {
@@ -614,6 +689,69 @@ mod tests {
             .is_err());
         s.set_unavailable(false);
         assert!(s.acquire_lease(&req(role, "w1", 30)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cursor_store_refuses_fenced_and_stale_writes_and_acks() {
+        let s = MemoryHaStore::new();
+        let mut c = FeedCursor::new(FeedId::PolymarketUser, "", "w-a");
+        c.fence = "w-a@1".into();
+        c.offer(5, None, "w-a", Utc::now());
+        assert_eq!(
+            s.save_cursor(&c).await.unwrap(),
+            CursorWrite::Accepted,
+            "first write wins an absent row"
+        );
+        // Same generation, different holder: refused, durable row untouched.
+        let mut split = c.clone();
+        split.fence = "w-b@1".into();
+        assert!(matches!(
+            s.save_cursor(&split).await.unwrap(),
+            CursorWrite::Fenced { .. }
+        ));
+        assert_eq!(
+            s.load_cursor(&c.key()).await.unwrap().unwrap().fence,
+            "w-a@1"
+        );
+        // A second replica that had not seen our advance tries to write an
+        // older position over it: refused, so the unacknowledged advance is
+        // replayed rather than silently rolled back.
+        let mut behind = FeedCursor::new(FeedId::PolymarketUser, "", "w-a");
+        behind.fence = "w-a@1".into();
+        assert_eq!(
+            behind.offer(2, None, "w-a", Utc::now()),
+            CursorAdvance::Advanced
+        );
+        assert!(matches!(
+            s.save_cursor(&behind).await.unwrap(),
+            CursorWrite::Stale { .. }
+        ));
+        assert_eq!(
+            s.load_cursor(&c.key()).await.unwrap().unwrap().position,
+            Some(5),
+            "the durable advance is untouched"
+        );
+        // The advance is pending until acknowledged; then it is durable.
+        assert_eq!(s.pending_cursors(10).await.unwrap().len(), 1);
+        assert!(!s
+            .acknowledge_cursor(&c.key(), Some(4), None, "w-a@1")
+            .await
+            .unwrap());
+        assert!(s
+            .acknowledge_cursor(&c.key(), Some(5), None, "w-a@1")
+            .await
+            .unwrap());
+        assert!(!s
+            .acknowledge_cursor(&c.key(), Some(5), None, "w-a@1")
+            .await
+            .unwrap());
+        assert!(s.pending_cursors(10).await.unwrap().is_empty());
+        let mut acked = s.load_cursor(&c.key()).await.unwrap().unwrap();
+        assert!(!acked.pending);
+        // After acknowledgement a forward advance is accepted again.
+        acked.offer(6, None, "w-a", Utc::now());
+        acked.fence = "w-a@1".into();
+        assert_eq!(s.save_cursor(&acked).await.unwrap(), CursorWrite::Accepted);
     }
 
     #[tokio::test]

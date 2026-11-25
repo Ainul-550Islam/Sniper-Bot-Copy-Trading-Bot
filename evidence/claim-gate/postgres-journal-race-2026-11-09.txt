@@ -1,0 +1,14 @@
+Targeted PostgreSQL journal regression (2026-11-09, user timezone).
+Command: cargo test -p module-copy --test dedup_journal_postgres --locked -j 1 -- --nocapture
+Disposable PostgreSQL 17; credentials omitted. Two independent DB pools, one process, a test-only adapter uses the real CopyRepo event upsert and in-memory leader/link storage. A barrier releases the unavailable-dedup pipeline and winning record writer together; a later failure checks the winner after commit. A fresh failed event creates no row; mock sends remain zero. This is not a production-server adapter, cross-process race, live-chain, or RLS test.
+
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 10.58s
+     Running tests/dedup_journal_postgres.rs (target/debug/deps/dedup_journal_postgres-085ffd4e37459dea)
+
+running 1 test
+test unavailable_dedup_cannot_overwrite_concurrent_postgres_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+EXIT=0

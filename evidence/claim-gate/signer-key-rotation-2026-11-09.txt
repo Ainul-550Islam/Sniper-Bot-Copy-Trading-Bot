@@ -1,0 +1,96 @@
+# Signing key rotated under an unchanged reference (2026-11-09)
+
+Closes the residual recorded in `evidence/claim-gate/signer-revocation-at-broadcast-2026-11-09.txt`:
+"the binding's `public_address` is still not compared to the funding wallet at broadcast
+time (key rotated under the same `key_ref` would sneak through)".
+
+## What was still wrong
+
+The revocation check added earlier asks "is this binding still active?" — which is a
+different question from "is the key that will SIGN the one the tenant approved?".
+`tenant_bindings` stores `(organization_id, kind, label, reference, active)`: for signers
+the `reference` is the key REF, not the public address, so a custody rotation that keeps
+`provider/key_ref` and swaps the underlying key keeps the row active. Meanwhile the
+executor signs through its in-process `SignerRegistry`, which resolves an identity to a
+key at call time. Between "binding active" and "signature produced" nothing compared the
+two.
+
+Why the in-process registry is the right place to check: signing never fetches a key from
+the database. The bytes come from the registry (or the funding wallet). A check that
+cannot see the registry would be describing a signing path that does not exist.
+
+## The fix
+
+1. `TenantBroadcastGuard::with_expected_signer_key(key)` pins the key the executor can
+   actually sign with at construction; `has_signer_key_binding()` exposes the state.
+2. New deny `TenantBroadcastDeny::SignerKeyMismatch { detail, source }` → label
+   `signer_key_mismatch` (a third distinct label, alongside the captured
+   `signer_revoked` and the live `signer_inactive`).
+3. `authorize_signer_identity(resolved: Option<Pubkey>)` refuses, in order:
+   the identity is not registered at all; the resolved key is not the pinned key; the
+   resolved key does not control the bound wallet address. Every branch is a refusal —
+   there is no "assume fine" path when a registry is attached.
+4. `Executor::run` RE-RESOLVES the signer at broadcast time (`resolve_tenant_signer`)
+   and passes it to the guard; `send_prebuilt` does the same, so already-signed bytes are
+   also checked. A veto leaves the usual `Skipped` + `PolicyVeto` record and no signature.
+5. Both module executors pin the key at construction
+   (`TenantCopyExecutor`/`TenantSniperExecutor::new_with_fence`) when they were given a
+   signer registry. A wallet-only executor pins nothing — construction already proved the
+   funding wallet is the bound wallet.
+
+## Witnesses
+
+A. `solana-kit tenant_broadcast_guard::tests::a_key_rotated_under_the_same_reference_is_refused`
+   no registry ⇒ no pinning and `authorize_signer_identity(None)` passes; with a pin:
+   identity unregistered ⇒ `signer_key_mismatch` ("not registered"); different key ⇒
+   `signer_key_mismatch` naming both keys; a key that matches the pin but is NOT the bound
+   wallet ⇒ refused ("does not control the bound wallet").
+B. `solana-kit tests/tenant_signing_boundary.rs::a_key_rotated_under_the_same_reference_blocks_the_next_broadcast`
+   END TO END through `Executor::run` with a real `SignerRegistry` and a `SwitchSigner`
+   that keeps its identity and changes its key: the approved key passes (paper fill), the
+   identity is rotated, and the NEXT run is `Skipped`, not `paper`, no signature,
+   `failure = PolicyVeto`, detail contains `signer_key_mismatch` and `resolves to`.
+C. `server tenant_module_factory_pg::a_key_rotated_under_the_same_reference_blocks_the_next_broadcast`
+   REAL PostgreSQL, factory-built copy engine: binding row stays active, context
+   unchanged, the approved key passes the pinned check, the rotated key is refused with
+   `SignerKeyMismatch { source: "signer_registry" }` naming the rotated address, and an
+   engine constructed with the rotated wallet is REFUSED at build time (it does not
+   control the issued wallet).
+
+## RED evidence (observed, then reverted)
+
+Replacing the live re-resolution in `Executor::run` with the pinned key (i.e. checking
+only what was true at construction) makes witness B fail exactly as the gap predicts:
+  assertion `left == right` failed
+    left: PaperFilled
+   right: Skipped
+— the rotated key would have produced a filled order.
+
+A first attempt at RED was invalid and is recorded here so it is not repeated: deleting
+the `authorize_signer_identity` call from `authorize_live` does NOT fail the guard-level
+witness, because that witness calls the method directly. The end-to-end test is the one
+that can observe the broadcast path.
+
+## GREEN
+
+- `cargo test -p solana-kit --lib -- tenant_broadcast_guard` → 11 passed, 0 failed
+- `cargo test -p solana-kit --test tenant_signing_boundary` → 11 passed, 0 failed
+- `cargo test -p sniper-suite --lib` → 1008 passed, 0 failed
+- `cargo test -p sniper-suite --test tenant_module_factory_pg -- --test-threads=1`
+  → 6 passed, 0 failed
+- clippy `-D warnings` clean (solana-kit, module-copy, module-sniper, sniper-suite);
+  fmt 0; `git diff --check` 0
+
+## What this does not establish
+
+* Pinning happens at module construction, so a rotation detected here is a rotation
+  observed against the key the module was BUILT with — the intended semantics ("this
+  worker may not sign with anything other than what it was approved for"). A rotation that
+  happens before construction is caught by construction itself (witness C's last
+  assertion), not by this check.
+* Wallet-only executors (no signer registry) pin nothing beyond the funding wallet, which
+  `TenantBroadcastGuard::new` already validated. That is a shipped behaviour, not a gap
+  papered over: with no registry there is no second key that could be resolved.
+* `custody_signers.public_address` still is not consulted; the binding registry remains
+  the authority the gateway issues against.
+* Witnesses are paper-mode; no live chain, no funded wallet.

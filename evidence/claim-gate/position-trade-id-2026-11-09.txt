@@ -1,0 +1,45 @@
+Persisted position/trade identity regression, 2026-11-09 in user timezone.
+Before fix: real-PostgreSQL-gated test failed before inserts because two independent AppStates generated p-1. After fix: position/trade producers in copy, sniper and polymarket use AppState::next_persistent_id with UUID-v4. Seven PostgreSQL position tests passed; deliberate same-id witness shows MINT-A symbol persisted with MINT-B cost_basis, and separate states persist two distinct position and two linked trade rows through tenant repositories. One process, no live broadcasts or multi-process race. UUID collisions remain theoretically possible. Existing legacy rows are not repaired; old-version replicas can still use unsafe counter IDs during a rolling upgrade.
+
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 35.97s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-f14adad0c49ec3b9)
+
+running 1 test
+test independent_states_persist_distinct_position_ids ... FAILED
+
+failures:
+
+---- independent_states_persist_distinct_position_ids stdout ----
+
+thread 'independent_states_persist_distinct_position_ids' (361801) panicked at crates/core/tests/positions_cross_tenant_pg.rs:676:5:
+assertion `left != right` failed: independent states must not allocate the same persisted position id
+  left: "p-1"
+ right: "p-1"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    independent_states_persist_distinct_position_ids
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `-p bot-core --test positions_cross_tenant_pg`
+EXIT=101
+--- after, including trade persistence ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 5.29s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-f14adad0c49ec3b9)
+
+running 7 tests
+test colliding_legacy_position_ids_can_mix_distinct_positions ... ok
+test cross_tenant_position_id_collision_cannot_mutate ... ok
+test daily_risk_pnl_excludes_future_utc_days ... ok
+test independent_states_persist_distinct_position_ids ... ok
+test polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fills ... ok
+test positions_trades_balances_isolation_and_pnl_exclusion ... ok
+test risk_exposure_fails_closed_when_positions_use_an_unexpected_quote_unit ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+EXIT=0

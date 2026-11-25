@@ -1,0 +1,116 @@
+=== core accounting ledger ===
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 46.77s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 18 tests
+test accounting::ledger::tests::arithmetic_overflow_is_rejected_before_it_corrupts_the_book ... ok
+test accounting::ledger::tests::concurrent_identical_events_yield_one_mutation ... ok
+test accounting::ledger::tests::detected_pending_conflict_blocks_further_local_booking ... ok
+test accounting::ledger::tests::conflict_discovered_during_submission_refuses_that_submission ... ok
+test accounting::ledger::tests::hydrate_rejects_same_event_id_with_changed_economics ... ok
+test accounting::ledger::tests::hydrate_reports_rows_whose_durable_id_does_not_match_the_event ... ok
+test accounting::ledger::tests::journal_that_already_holds_the_fact_makes_it_a_duplicate ... ok
+test accounting::ledger::tests::direct_durable_payload_conflict_latches_the_local_fence ... ok
+test accounting::ledger::tests::local_retry_rejects_changed_economics_without_double_booking ... ok
+test accounting::ledger::tests::malformed_events_change_nothing ... ok
+test accounting::ledger::tests::pending_conflict_with_other_replica_stays_unresolved ... ok
+test accounting::ledger::tests::pending_journal_events_cannot_be_overtaken_by_new_submissions ... ok
+test accounting::ledger::tests::realized_series_overflow_is_rejected_before_journaling ... ok
+test accounting::ledger::tests::realized_series_tracks_day_totals_and_peak ... ok
+test accounting::ledger::tests::recovery_replays_append_order_not_out_of_order_fact_timestamps ... ok
+test accounting::ledger::tests::standalone_fee_quote_amount_counts_as_realized_loss ... ok
+test accounting::ledger::tests::the_same_fact_is_booked_exactly_once ... ok
+test accounting::ledger::tests::unavailable_journal_parks_the_event_and_flushes_later ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 676 filtered out; finished in 0.02s
+
+core_ledger_exit=0
+=== global risk conflict gate ===
+    Finished `test` profile [unoptimized] target(s) in 1.49s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 3 tests
+test global_risk::engine::ledger_conflict_tests::healthy_ledger_still_permits_entries_without_configured_limits ... ok
+test global_risk::engine::ledger_conflict_tests::an_unavailable_journal_alone_is_not_treated_as_a_proven_conflict ... ok
+test global_risk::engine::ledger_conflict_tests::proven_journal_conflict_fails_closed_on_all_entry_paths ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 691 filtered out; finished in 0.01s
+
+gate_exit=0
+=== state rejection ===
+    Finished `test` profile [unoptimized] target(s) in 0.41s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test state::tests::rejected_ledger_booking_is_surfaced_instead_of_ignored ... FAILED
+
+failures:
+
+---- state::tests::rejected_ledger_booking_is_surfaced_instead_of_ignored stdout ----
+
+thread 'state::tests::rejected_ledger_booking_is_surfaced_instead_of_ignored' (601868) panicked at crates/core/src/state.rs:1919:9:
+assertion failed: state.events.recent(10).await.iter().any(|event|
+        {
+            matches!(event, AppEvent::Error { message, .. } if
+                message.contains("ledger rejected event"))
+        })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    state::tests::rejected_ledger_booking_is_surfaced_instead_of_ignored
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 693 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --lib`
+state_exit=101
+=== risk engine ===
+    Finished `test` profile [unoptimized] target(s) in 0.45s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 37 tests
+test risk::tests::copy_emergency_disable_refuses_copy_entries_only ... ok
+test risk::tests::copy_daily_loss_limit_is_module_scoped ... ok
+test risk::tests::copy_leader_exposure_and_cooldown_are_coded ... ok
+test risk::tests::copy_pending_cap_and_failed_entry_cooldown_throttle_entries ... ok
+test risk::tests::disabled_module_is_rejected ... ok
+test risk::tests::copy_position_caps_are_module_scoped ... ok
+test risk::tests::forced_exit_decision_uses_the_stale_rule ... ok
+test risk::tests::duplicate_symbol_is_rejected ... ok
+test risk::tests::incomplete_durable_pnl_fails_closed_in_operator_mode ... ok
+test risk::tests::insufficient_balance_is_rejected ... ok
+test risk::tests::kill_switch_blocks_everything ... ok
+test risk::tests::max_hold_time_fires ... ok
+test risk::tests::global_oracle_tightens_never_loosens ... ok
+test risk::tests::operator_mode_engine_stays_deployment_wide ... ok
+test risk::tests::operator_mode_uses_local_pnl_only_when_the_store_is_unavailable ... ok
+test risk::tests::operator_module_daily_loss_combines_the_durable_module_total ... ok
+test risk::tests::poly_daily_loss_limit_is_module_scoped ... ok
+test risk::tests::poly_emergency_disable_refuses_polymarket_entries_only ... ok
+test risk::tests::poly_position_caps_and_order_book_controls_are_coded ... ok
+test risk::tests::polymarket_edge_gate_works ... ok
+test risk::tests::size_is_capped_by_max_position_quote ... ok
+test risk::tests::rejections_carry_machine_readable_codes_and_allows_do_not ... ok
+test risk::tests::slippage_above_cap_is_rejected ... ok
+test risk::tests::sniper_cooldowns_gate_by_mint_and_by_outcome ... ok
+test risk::tests::sniper_daily_loss_limit_is_module_scoped ... ok
+test risk::tests::sniper_emergency_disable_refuses_entries_but_not_other_modules ... ok
+test risk::tests::sniper_pending_execution_cap_reads_the_execution_ledger ... ok
+test risk::tests::sniper_position_and_exposure_caps_only_tighten ... ok
+test risk::tests::stop_loss_and_take_profit_fire ... ok
+test risk::tests::tenant_book_pnl_keeps_a_conservative_local_floor_without_global_trip ... ok
+test risk::tests::tenant_bound_engine_scopes_every_oracle_read ... ok
+test risk::tests::tenant_daily_loss_gate_conservatively_combines_local_and_scoped_values ... ok
+test risk::tests::tenant_entry_fails_closed_on_portfolio_cap_without_exposing_snapshot ... ok
+test risk::tests::tenant_entry_ignores_the_process_loss_latch_when_scoped_pnl_is_clean ... ok
+test risk::tests::tenant_oracle_without_scoped_methods_fails_closed ... ok
+test risk::tests::tenant_open_position_limits_conservatively_combine_local_and_scoped_state ... ok
+test risk::tests::trailing_stop_only_fires_in_profit ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 657 filtered out; finished in 0.02s
+
+risk_exit=0
+=== fmt ===
+fmt_exit=0
+NOTE: The state rejection assertion in this first after-run used the asynchronous event ring buffer and failed. The test was corrected to subscribe to the event bus; the corrected test and the full core library pass in ledger-conflict-entry-gate-build-2026-11-09.txt (694 passed, 0 failed). No production assertion was weakened.

@@ -100,43 +100,33 @@ impl TenantPnlReport {
         until: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<TenantSymbolPnl>, RepositoryError> {
-        let unknown = self
-            .db
-            .timed(
-                "tenant_report_pnl_projection_check",
-                sqlx::query(
-                    "SELECT EXISTS (SELECT 1 FROM positions p
-                     WHERE p.organization_id = $1 AND p.closed_at >= $2 AND p.closed_at < $3
-                       AND (p.realized_pnl_quote IS NULL OR p.opened_at < $2)) AS unknown",
-                )
-                .bind(scope.organization_id().as_uuid())
-                .bind(since)
-                .bind(until)
-                .fetch_one(self.db.pool()),
-            )
-            .await?;
-        if unknown.try_get::<bool, _>("unknown").unwrap_or(true) {
-            return Err(RepositoryError::Storage(
-                "realized PnL projection is unknown".into(),
-            ));
-        }
+        // A single statement gives the projection check and aggregate one
+        // PostgreSQL statement snapshot. Separate queries could observe an
+        // unknown or spanning position inserted between check and report.
         let rows = self
             .db
             .timed(
                 "tenant_report_pnl_by_symbol",
                 sqlx::query(
-                    r#"SELECT p.organization_id, p.symbol,
-                              COUNT(*)::bigint AS closed_trades,
-                              SUM(p.realized_pnl_quote)::double precision AS realized_quote,
-                              0::double precision AS fees
-                         FROM positions p
-                        WHERE p.organization_id = $1
-                          AND p.closed_at IS NOT NULL
-                          AND p.closed_at >= $2 AND p.closed_at < $3
-                          AND p.realized_pnl_quote IS NOT NULL
-                        GROUP BY p.organization_id, p.symbol
-                        ORDER BY realized_quote DESC, symbol ASC
-                        LIMIT $4"#,
+                    r#"WITH filtered AS MATERIALIZED (
+                         SELECT organization_id, symbol, opened_at, realized_pnl_quote
+                           FROM positions
+                          WHERE organization_id = $1 AND closed_at IS NOT NULL
+                            AND closed_at >= $2 AND closed_at < $3
+                       ), validity AS (
+                         SELECT EXISTS (SELECT 1 FROM filtered
+                           WHERE realized_pnl_quote IS NULL OR opened_at < $2) AS unknown
+                       ), grouped AS (
+                         SELECT organization_id, symbol, COUNT(*)::bigint AS closed_trades,
+                                SUM(realized_pnl_quote)::double precision AS realized_quote,
+                                0::double precision AS fees
+                           FROM filtered WHERE realized_pnl_quote IS NOT NULL
+                          GROUP BY organization_id, symbol
+                          ORDER BY realized_quote DESC, symbol ASC LIMIT $4
+                       )
+                       SELECT validity.unknown, grouped.* FROM validity
+                       LEFT JOIN grouped ON true
+                       ORDER BY grouped.realized_quote DESC, grouped.symbol ASC"#,
                 )
                 .bind(scope.organization_id().as_uuid())
                 .bind(since)
@@ -145,6 +135,21 @@ impl TenantPnlReport {
                 .fetch_all(self.db.pool()),
             )
             .await?;
-        Ok(rows.iter().map(symbol_pnl_from_row).collect())
+        if rows
+            .first()
+            .and_then(|row| row.try_get::<bool, _>("unknown").ok())
+            .unwrap_or(true)
+        {
+            return Err(RepositoryError::Storage(
+                "realized PnL projection is unknown".into(),
+            ));
+        }
+        let mut result = Vec::new();
+        for row in &rows {
+            if row.try_get::<Option<String>, _>("symbol")?.is_some() {
+                result.push(symbol_pnl_from_row(row));
+            }
+        }
+        Ok(result)
     }
 }

@@ -1,0 +1,94 @@
+# Dedup TTL was advisory, not enforced (2026-11-09)
+
+Previous state: OPEN — source review. `evidence/claim-gate/dedup-expiry-source-review-2026-11-09.txt`
+said "PostgreSQL marks and existence checks ignore expiry until periodic maintenance
+deletes the row; a zero TTL is indefinite. The bounded process-local L1 has no
+time-based eviction and can outlast L2 TTL. No cleanup schedule or exact TTL
+guarantee established."
+
+This file closes it: each clause was turned into a failing witness, then fixed.
+
+## Defect 1 — PostgreSQL: an expired key stayed "seen" until housekeeping ran
+
+`DedupRepo::mark` used `ON CONFLICT … DO NOTHING`, and `DedupRepo::exists` selected on
+(namespace, key) alone. `dedup_keys.expires_at` was consulted only by
+`cleanup_expired`, which runs from an HOURLY leased worker
+(`server/src/main.rs`: `LeaseRole::Recovery`, 3600 s, `run_maintenance`).
+So a dedup window of 60 seconds behaved like "until the next hourly cleanup" — up to
+an hour — and the exact window depended on when a lease holder happened to tick.
+A zero TTL maps to `expires_at IS NULL`, which is genuinely indefinite.
+
+Fix (`crates/core/src/db/repo.rs`):
+- `exists()` filters `AND (expires_at IS NULL OR expires_at > now())`.
+- `mark()` reclaims a lapsed row in the same statement:
+  `ON CONFLICT … DO UPDATE SET expires_at = EXCLUDED.expires_at, first_seen_at = now()
+   WHERE dedup_keys.expires_at IS NOT NULL AND dedup_keys.expires_at <= now()`.
+  A live row still matches nothing and the insert is a no-op, so first-arrival
+  semantics are unchanged.
+Cleanup is now pure garbage collection: deleting an expired row can no longer change
+any decision, because the reads already ignore it.
+
+## Defect 2 — Redis primitive clamped a zero window to 1 ms
+
+`RedisKv::set_nx_ttl` converted the TTL with `.as_millis().max(1)`, so `Duration::ZERO`
+became a 1-millisecond key. That is the opposite of "no window": the key vanishes
+immediately, so every call is a first arrival and dedup silently stops gating.
+`DedupStore::mark_shared` already refused zero for Redis; the primitive now refuses it
+too, BEFORE any command is sent (a caller that ignores the error leaves no key behind).
+
+## Defect 3 — the process-local L1 outlived the dedup window
+
+`DedupStore`'s L1 is a per-namespace `BoundedSet` whose only eviction was the size cap.
+It had no time notion, so a key remembered there stayed "seen" for the life of the
+process even after the backend's TTL expired it — a 60-second window behaving like
+the process lifetime, and inconsistent between replicas.
+
+Fix: `BoundedSet` records first-seen `Instant` per key (`remember`), and the dedup
+store prunes on each mark (`prune_older_than`) and checks the window on L1 hits
+(`is_current`). Zero TTL is still the one deliberately indefinite window (the local set
+IS the state then), still bounded by the cap.
+
+NOTE on a rejected first attempt: the first fix cleared the whole namespace map on
+every mark. The existing test `dedup::tests::first_arrival_wins_exactly_once` caught it
+immediately — that would have disabled process-local dedup entirely. Reverted; the
+timestamp approach is the fix.
+
+## Witnesses
+
+1. `crates/core/tests/db_integration.rs::an_expired_dedup_key_stops_gating_reads_and_marks`
+   live key is definitive → expire the row with SQL (no cleanup runs, so the row is
+   present AND expired) → `exists` must be false → `mark` must succeed and update in
+   place (one row, not two) → zero TTL still indefinite.
+2. `crates/core/src/redis_kv.rs::tests::set_nx_ttl_refuses_a_zero_window_and_honours_a_short_one`
+   against a REAL Redis: zero TTL is an error and writes nothing; a 150 ms window
+   creates, refuses a second, is gone after 400 ms, then is new again.
+3. `crates/core/src/dedup.rs::tests::l1_does_not_outlive_a_nonzero_ttl_window`
+   a 30 ms window re-marks after 60 ms; a zero TTL does not, and stays capped at 64.
+
+## RED evidence (each fix removed in turn)
+
+R1 exists() window filter removed:
+   `an expired key must not be reported as seen`  -> FAILED
+R2 mark() reverted to `ON CONFLICT … DO NOTHING`:
+   `an expired key must be reclaimable, not a permanent duplicate`  -> FAILED
+R3 zero-TTL guard deleted from set_nx_ttl (real Redis):
+   `a zero TTL must be refused, not clamped to 1 ms`  -> FAILED
+R4 L1 pruning removed:
+   `L1 must not remember a key past its dedup window`  -> FAILED
+(and the rejected whole-map-clear attempt: `first_arrival_wins_exactly_once` -> FAILED)
+
+## GREEN
+
+- `cargo test -p bot-core --test db_integration -- --test-threads=1` -> 31 passed, 0 failed
+- `cargo test -p bot-core --lib -- dedup:: redis_kv:: -- --test-threads=1` -> 11 passed, 0 failed
+- `cargo clippy -p bot-core --all-targets -- -D warnings` clean; fmt 0; `git diff --check` 0
+
+## What the window NOW guarantees (and what it does not)
+
+* The window is the window: a decision never depends on when the hourly cleanup ran.
+* `expires_at IS NULL` (zero TTL) is the only indefinite case, and it is explicit.
+* L1 and L2 agree within one mark: an L1 hit that is past the window is not treated
+  as "seen".
+* Not claimed: sub-millisecond accuracy (Postgres `now()` is transaction time, Redis
+  PX is millisecond), nor that a clock skew between replicas is detected. Cleanup still
+  runs hourly — it is just no longer load-bearing for correctness.

@@ -25,8 +25,11 @@ impl TenantTradeRepo {
 
     /// Append one of the acting tenant's fills. Idempotent on the
     /// app-assigned trade id (`trades.id` stays the GLOBAL primary
-    /// key); the insert attributes the acting tenant and the conflict
-    /// leg is tenant-constrained.
+    /// key). A retry succeeds only if all persisted fields match; a
+    /// different payload or tenant returns a generic conflict. Only a
+    /// position owned by the acting tenant may be linked. The conflict
+    /// branch locks and updates an identical row to resolve concurrent
+    /// attempts; a conflict can reveal that the global id is unavailable.
     #[allow(clippy::too_many_arguments)]
     pub async fn append(
         &self,
@@ -45,16 +48,35 @@ impl TenantTradeRepo {
                 return Err(RepositoryError::Validation("position_id"));
             }
         }
-        self.db
+        let (eligible, accepted): (bool, bool) = self
+            .db
             .timed(
                 "tenant_trade_append",
-                sqlx::query(
-                    r#"INSERT INTO trades
+                sqlx::query_as(
+                    r#"WITH eligible AS MATERIALIZED (
+                         SELECT 1 WHERE $17::text IS NULL OR EXISTS (
+                           SELECT 1 FROM positions WHERE organization_id = $1 AND id = $17
+                         )
+                       ), inserted AS (
+                       INSERT INTO trades
                         (organization_id, id, ts, source, venue, mode, side, symbol,
                          symbol_display, amount_in, amount_out, quote_symbol, price,
                          fee, slippage_bps, signature, position_id, note, latency_ms)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-                       ON CONFLICT (id) DO NOTHING"#,
+                       SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+                       FROM eligible ON CONFLICT (id) DO UPDATE SET id = trades.id
+                       WHERE ROW(trades.organization_id, trades.ts, trades.source, trades.venue,
+                                 trades.mode, trades.side, trades.symbol, trades.symbol_display,
+                                 trades.amount_in, trades.amount_out, trades.quote_symbol,
+                                 trades.price, trades.fee, trades.slippage_bps, trades.signature,
+                                 trades.position_id, trades.note, trades.latency_ms)
+                         IS NOT DISTINCT FROM
+                             ROW(EXCLUDED.organization_id, EXCLUDED.ts, EXCLUDED.source, EXCLUDED.venue,
+                                 EXCLUDED.mode, EXCLUDED.side, EXCLUDED.symbol, EXCLUDED.symbol_display,
+                                 EXCLUDED.amount_in, EXCLUDED.amount_out, EXCLUDED.quote_symbol,
+                                 EXCLUDED.price, EXCLUDED.fee, EXCLUDED.slippage_bps, EXCLUDED.signature,
+                                 EXCLUDED.position_id, EXCLUDED.note, EXCLUDED.latency_ms)
+                       RETURNING 1
+                       ) SELECT EXISTS (SELECT 1 FROM eligible), EXISTS (SELECT 1 FROM inserted)"#,
                 )
                 .bind(trade.organization_id.as_uuid())
                 .bind(&trade.id)
@@ -75,9 +97,15 @@ impl TenantTradeRepo {
                 .bind(&trade.position_id)
                 .bind(&trade.note)
                 .bind(trade.latency_ms)
-                .execute(self.db.pool()),
+                .fetch_one(self.db.pool()),
             )
             .await?;
+        if !eligible {
+            return Err(RepositoryError::NotFound("position"));
+        }
+        if !accepted {
+            return Err(RepositoryError::Conflict("trade_id"));
+        }
         Ok(())
     }
 

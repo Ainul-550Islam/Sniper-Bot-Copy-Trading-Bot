@@ -1,0 +1,46 @@
+Tenant trade duplicate-ID protection, 2026-11-09.
+Before: desired differing payload conflict test failed because append returned Ok; earlier explicit silent-drop witness trade-id-collision-witness-2026-11-09.txt. After: single Postgres statement requires all persisted fields, including tenant, to match on conflict; exact retry uses a no-op UPDATE, differing ID collision returns Conflict, owned-position check retained. 10/10 real-PG suite passes, including same-id identical and differing tokio::join operations using a connection pool (not verified separate connections, independent processes, or live trading). Generic conflict can reveal global trade-id unavailability, and RLS behavior and concurrent position owner change are not tested; no-op UPDATE can fire database triggers and require UPDATE privileges. Existing silently lost fills are not repaired. Legacy global TradeRepo still uses DO NOTHING; this fix applies only TenantTradeRepo.
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 5.97s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-2172416d723dc0d8)
+
+running 1 test
+test tenant_trade_id_collision_fails_closed ... FAILED
+
+failures:
+
+---- tenant_trade_id_collision_fails_closed stdout ----
+
+thread 'tenant_trade_id_collision_fails_closed' (681685) panicked at crates/core/tests/positions_cross_tenant_pg.rs:863:5:
+assertion failed: matches!(repo.append(&write_scope(a), &changed).await,
+    Err(RepositoryError::Conflict("trade_id")))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tenant_trade_id_collision_fails_closed
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `-p bot-core --test positions_cross_tenant_pg`
+EXIT=101
+--- after with concurrent attempts ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 1.47s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-2172416d723dc0d8)
+
+running 10 tests
+test colliding_legacy_position_ids_can_mix_distinct_positions ... ok
+test cross_tenant_position_id_collision_cannot_mutate ... ok
+test daily_risk_pnl_excludes_future_utc_days ... ok
+test deployment_open_position_read_includes_more_than_5000 ... ok
+test independent_states_persist_distinct_position_ids ... ok
+test polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fills ... ok
+test positions_trades_balances_isolation_and_pnl_exclusion ... ok
+test risk_exposure_fails_closed_when_positions_use_an_unexpected_quote_unit ... ok
+test tenant_trade_id_collision_fails_closed ... ok
+test tenant_trade_rejects_foreign_or_missing_position ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+EXIT=0

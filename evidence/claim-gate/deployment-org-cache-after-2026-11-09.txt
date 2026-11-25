@@ -1,0 +1,24 @@
+=== GREEN: deployment-org cache is per database (gap #17) ===
+
+-- deployment_org_cache_pg (new, real PostgreSQL: two databases in one process) --
+test two_databases_in_one_process_never_share_a_deployment_organization ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.78s
+
+-- deployment_org unit test --
+test db::deployment_org::tests::cache_entries_are_per_database_identity ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 715 filtered out; finished in 0.05s
+
+-- core lib (all 716) --
+test result: ok. 716 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.22s
+
+-- legacy-plane PG suites (they all call deployment_org_uuid) --
+db_integration: test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.11s
+accounting_retry_postgres: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+global_risk_accounting: test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+-- clippy -D warnings (bot-core, all targets) --
+    Finished `dev` profile [unoptimized] target(s) in 0.47s
+
+-- fmt --
+fmt_exit=0
+diff_check_exit=0

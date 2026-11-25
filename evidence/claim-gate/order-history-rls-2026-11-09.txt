@@ -1,0 +1,19 @@
+Order corrections under PostgreSQL bot_app RLS, 2026-11-09.
+With REQUIRE_POSTGRES=1, app/system/DDL pools and real PostgreSQL, app role A transitions its own order and sees a history row with A attribution; app role B sees no history and foreign-ID upsert errors. Privileged verification sees A submitted row. The paired trade RLS test also passes. 2/2; no live server, other role matrix, historical repair, or precise error/side-channel guarantee.
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 3m 43s
+     Running tests/rls_trade_conflict.rs (target/debug/deps/rls_trade_conflict-fbf8d84515d750b4)
+
+running 2 tests
+test app_role_order_transition_and_foreign_collision ... ok
+test app_role_trade_retry_and_foreign_id_collision ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+EXIT=0

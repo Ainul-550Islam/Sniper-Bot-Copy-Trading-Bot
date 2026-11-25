@@ -44,6 +44,7 @@ fn test_state() -> ApiState {
         trusted_proxies: Default::default(),
         db: None,
         journal: None,
+        chain_probe: None,
         serve_dashboard: false,
         health: Arc::new(HealthRegistry::new()),
         metrics_enabled: false,

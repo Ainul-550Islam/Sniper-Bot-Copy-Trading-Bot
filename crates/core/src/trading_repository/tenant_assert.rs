@@ -7,8 +7,8 @@
 //! loudly as [`RepositoryError::TenantMismatch`] instead of silently
 //! leaking another tenant's data to the caller.
 //!
-//! Every repository `get`/`list` funnels its rows through
-//! [`assert_row_org`] / [`assert_rows_org`].
+//! Callers that invoke these helpers check returned rows; the helpers do
+//! not enforce their use across all repository methods.
 
 use crate::tenant::OrganizationId;
 

@@ -1,0 +1,28 @@
+=== RED (before the Polymarket wiring): durable reservation attached, claim refused, venue POST must not run ===
+$ cargo test -p module-polymarket --test broadcast_reservation (wiring removed)
+failures:
+
+---- a_granted_reservation_lets_the_live_post_run_and_is_keyed_by_venue_identity stdout ----
+
+thread 'a_granted_reservation_lets_the_live_post_run_and_is_keyed_by_venue_identity' (3569114) panicked at crates/module-polymarket/tests/broadcast_reservation.rs:152:5:
+assertion `left == right` failed: the durable identity must be the venue entry, not the attempt
+  left: []
+ right: ["poly:entry:111"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_refused_reservation_stops_the_live_clob_post stdout ----
+
+thread 'a_refused_reservation_stops_the_live_clob_post' (3569115) panicked at crates/module-polymarket/tests/broadcast_reservation.rs:96:5:
+assertion `left == right` failed: a refused durable claim must fail the signal: SignalOutcome { signal_id: "psig_0f5b8c405c39a2215bb4c147bea25afc", stage: Resting, reject_reason: None, detail: "", order_id: Some("ord_1794908772601_0"), venue_order_id: Some("0x472b5504f80b0fc7e12cc203aac8b1a870ac0443dd73d103aefb34f950cccd12"), position_id: None, approved_stake: Some(10.0), size_tokens: Some(25.0), total_ms: 5 }
+  left: Resting
+ right: Failed
+
+
+failures:
+    a_granted_reservation_lets_the_live_post_run_and_is_keyed_by_venue_identity
+    a_refused_reservation_stops_the_live_clob_post
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p module-polymarket --test broadcast_reservation`
+red_exit=101

@@ -612,3 +612,638 @@ async fn polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fi
         None
     );
 }
+
+/// Today is a bounded UTC calendar day; future positions must not offset
+/// today's loss or turn its complete projection into an unknown value.
+#[tokio::test]
+async fn daily_risk_pnl_excludes_future_utc_days() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: daily_risk_pnl_excludes_future_utc_days — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let tenant = org(&db, &format!("utc-window-{run}")).await;
+    let writes = TenantPositionWrite::new(db.clone());
+    let day = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    let mut today = position(tenant, format!("today-{run}"), day);
+    today.status = "closed".into();
+    today.closed_at = Some(day + chrono::Duration::seconds(1));
+    today.realized_at = today.closed_at;
+    today.realized_pnl_quote = Some(-5.0);
+    writes.upsert(&write_scope(tenant), &today).await.unwrap();
+
+    let future_time = day + chrono::Duration::days(2);
+    let mut future = position(tenant, format!("future-{run}"), future_time);
+    future.status = "closed".into();
+    future.closed_at = Some(future_time + chrono::Duration::seconds(1));
+    future.realized_at = future.closed_at;
+    future.realized_pnl_quote = Some(100.0);
+    writes.upsert(&write_scope(tenant), &future).await.unwrap();
+    let oracle = PostgresRiskOracle::new(db);
+    let actual = oracle
+        .realized_today_status_for_module(Some(tenant), bot_core::models::BotModule::Sniper)
+        .await;
+    assert_eq!(actual, bot_core::risk::RealizedPnlRead::Known(-5.0));
+
+    future.realized_pnl_quote = None;
+    writes.upsert(&write_scope(tenant), &future).await.unwrap();
+    let actual = oracle
+        .realized_today_status_for_module(Some(tenant), bot_core::models::BotModule::Sniper)
+        .await;
+    assert_eq!(actual, bot_core::risk::RealizedPnlRead::Known(-5.0));
+}
+
+/// One process per replica gets a fresh AppState; ids persisted in a global
+/// primary key must not restart from the same short local counter.
+#[tokio::test]
+async fn independent_states_persist_distinct_position_ids() {
+    let Some(db) = setup().await else {
+        eprintln!(
+            "NOT_RUN: independent_states_persist_distinct_position_ids — POSTGRES_URL missing"
+        );
+        return;
+    };
+    let run = run_id();
+    let tenant = org(&db, &format!("position-id-{run}")).await;
+    let a = bot_core::state::AppState::new(bot_core::config::AppConfig::from_defaults());
+    let b = bot_core::state::AppState::new(bot_core::config::AppConfig::from_defaults());
+    let id_a = a.next_persistent_id("p");
+    let id_b = b.next_persistent_id("p");
+    let trade_a = a.next_persistent_id("t");
+    let trade_b = b.next_persistent_id("t");
+    assert_ne!(trade_a, trade_b);
+    assert_ne!(
+        id_a, id_b,
+        "independent states must not allocate the same persisted position id"
+    );
+    let writes = TenantPositionWrite::new(db.clone());
+    let reads = TenantPositionRead::new(db.clone());
+    let trades = TenantTradeRepo::new(db);
+    let mut first = position(tenant, id_a.clone(), chrono::Utc::now());
+    first.symbol = "MINT-A".into();
+    first.cost_basis = 1.0;
+    let mut second = position(tenant, id_b.clone(), chrono::Utc::now());
+    second.symbol = "MINT-B".into();
+    second.cost_basis = 2.0;
+    writes.upsert(&write_scope(tenant), &first).await.unwrap();
+    writes.upsert(&write_scope(tenant), &second).await.unwrap();
+    let row_a = reads.get(&read_scope(tenant), &id_a).await.unwrap();
+    let row_b = reads.get(&read_scope(tenant), &id_b).await.unwrap();
+    assert_eq!((row_a.symbol.as_str(), row_a.cost_basis), ("MINT-A", 1.0));
+    assert_eq!((row_b.symbol.as_str(), row_b.cost_basis), ("MINT-B", 2.0));
+    for (id, position_id, symbol) in [(&trade_a, &id_a, "MINT-A"), (&trade_b, &id_b, "MINT-B")] {
+        let trade = bot_core::trading_repository::positions::model::TenantTrade {
+            organization_id: tenant,
+            id: id.clone(),
+            ts: chrono::Utc::now(),
+            source: "sniper".into(),
+            venue: "paper".into(),
+            mode: "paper".into(),
+            side: "long".into(),
+            symbol: symbol.into(),
+            symbol_display: symbol.into(),
+            amount_in: 1.0,
+            amount_out: 1.0,
+            quote_symbol: "SOL".into(),
+            price: 1.0,
+            fee: 0.0,
+            slippage_bps: 0,
+            signature: None,
+            position_id: Some(position_id.clone()),
+            note: None,
+            latency_ms: None,
+        };
+        trades.append(&write_scope(tenant), &trade).await.unwrap();
+    }
+    let first_trades = trades
+        .list_for_position(&read_scope(tenant), &id_a)
+        .await
+        .unwrap();
+    let second_trades = trades
+        .list_for_position(&read_scope(tenant), &id_b)
+        .await
+        .unwrap();
+    assert_eq!(first_trades.len(), 1);
+    assert_eq!(first_trades[0].id, trade_a);
+    assert_eq!(second_trades.len(), 1);
+    assert_eq!(second_trades[0].id, trade_b);
+}
+
+/// This test deliberately uses a colliding id to demonstrate the legacy
+/// failure mode. It is a witness to unsafe behavior, not desired semantics.
+#[tokio::test]
+async fn colliding_legacy_position_ids_can_mix_distinct_positions() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: colliding_legacy_position_ids_can_mix_distinct_positions — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let tenant = org(&db, &format!("position-alias-{run}")).await;
+    let id = format!("legacy-position-{run}");
+    let writes = TenantPositionWrite::new(db.clone());
+    let reads = TenantPositionRead::new(db);
+    let mut first = position(tenant, id.clone(), chrono::Utc::now());
+    first.symbol = "MINT-A".into();
+    first.cost_basis = 1.0;
+    let mut second = position(tenant, id.clone(), chrono::Utc::now());
+    second.symbol = "MINT-B".into();
+    second.cost_basis = 2.0;
+    writes.upsert(&write_scope(tenant), &first).await.unwrap();
+    writes.upsert(&write_scope(tenant), &second).await.unwrap();
+    let row = reads.get(&read_scope(tenant), &id).await.unwrap();
+    assert_eq!(
+        (row.symbol.as_str(), row.cost_basis),
+        ("MINT-A", 2.0),
+        "old symbol combined with new cost demonstrates aliasing"
+    );
+}
+
+#[tokio::test]
+async fn tenant_trade_rejects_foreign_or_missing_position() {
+    let Some(db) = setup().await else {
+        eprintln!(
+            "NOT_RUN: tenant_trade_rejects_foreign_or_missing_position — POSTGRES_URL missing"
+        );
+        return;
+    };
+    let run = run_id();
+    let a = org(&db, &format!("trade-owner-a-{run}")).await;
+    let b = org(&db, &format!("trade-owner-b-{run}")).await;
+    let owner_position = format!("foreign-position-{run}");
+    TenantPositionWrite::new(db.clone())
+        .upsert(
+            &write_scope(a),
+            &position(a, owner_position.clone(), chrono::Utc::now()),
+        )
+        .await
+        .unwrap();
+    let trades = TenantTradeRepo::new(db.clone());
+    let mut trade = bot_core::trading_repository::positions::model::TenantTrade {
+        organization_id: b,
+        id: format!("trade-foreign-{run}"),
+        ts: chrono::Utc::now(),
+        source: "sniper".into(),
+        venue: "paper".into(),
+        mode: "paper".into(),
+        side: "long".into(),
+        symbol: "TOKEN/SOL".into(),
+        symbol_display: "TOKEN/SOL".into(),
+        amount_in: 1.0,
+        amount_out: 1.0,
+        quote_symbol: "SOL".into(),
+        price: 1.0,
+        fee: 0.0,
+        slippage_bps: 0,
+        signature: None,
+        position_id: Some(owner_position.clone()),
+        note: None,
+        latency_ms: None,
+    };
+    assert!(matches!(
+        trades.append(&write_scope(b), &trade).await,
+        Err(RepositoryError::NotFound("position"))
+    ));
+    assert!(trades
+        .list_for_position(&read_scope(b), &owner_position)
+        .await
+        .unwrap()
+        .is_empty());
+    trade.id = format!("trade-missing-{run}");
+    trade.position_id = Some(format!("missing-position-{run}"));
+    assert!(matches!(
+        trades.append(&write_scope(b), &trade).await,
+        Err(RepositoryError::NotFound("position"))
+    ));
+    trade.position_id = None;
+    trade.id = format!("trade-unlinked-{run}");
+    trades.append(&write_scope(b), &trade).await.unwrap();
+}
+
+/// Exact retries are idempotent; distinct trades must not be silently lost.
+#[tokio::test]
+async fn tenant_trade_id_collision_fails_closed() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: tenant_trade_id_collision_fails_closed — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let a = org(&db, &format!("trade-collision-a-{run}")).await;
+    let b = org(&db, &format!("trade-collision-b-{run}")).await;
+    let repo = TenantTradeRepo::new(db);
+    let trade = bot_core::trading_repository::positions::model::TenantTrade {
+        organization_id: a,
+        id: format!("colliding-trade-{run}"),
+        ts: chrono::Utc::now(),
+        source: "sniper".into(),
+        venue: "paper".into(),
+        mode: "paper".into(),
+        side: "long".into(),
+        symbol: "MINT-A".into(),
+        symbol_display: "MINT-A".into(),
+        amount_in: 1.0,
+        amount_out: 1.0,
+        quote_symbol: "SOL".into(),
+        price: 1.0,
+        fee: 0.0,
+        slippage_bps: 0,
+        signature: Some("signature-a".into()),
+        position_id: None,
+        note: None,
+        latency_ms: None,
+    };
+    repo.append(&write_scope(a), &trade).await.unwrap();
+    repo.append(&write_scope(a), &trade).await.unwrap(); // legitimate retry
+    let mut changed = trade.clone();
+    changed.signature = Some("signature-b".into());
+    changed.symbol = "MINT-B".into();
+    assert!(matches!(
+        repo.append(&write_scope(a), &changed).await,
+        Err(RepositoryError::Conflict("trade_id"))
+    ));
+    changed.organization_id = b;
+    assert!(matches!(
+        repo.append(&write_scope(b), &changed).await,
+        Err(RepositoryError::Conflict("trade_id"))
+    ));
+    let since = trade.ts - chrono::Duration::minutes(1);
+    let until = trade.ts + chrono::Duration::minutes(1);
+    let rows_a = repo
+        .list_between(&read_scope(a), since, until)
+        .await
+        .unwrap();
+    let rows_b = repo
+        .list_between(&read_scope(b), since, until)
+        .await
+        .unwrap();
+    assert_eq!(rows_a.len(), 1);
+    assert_eq!(rows_a[0].signature.as_deref(), Some("signature-a"));
+    assert!(rows_b.is_empty());
+
+    // Separate simultaneous pool operations with the same payload both
+    // succeed, while competing different payloads have exactly one winner.
+    let mut retry = trade.clone();
+    retry.id = format!("retry-race-{run}");
+    let scope_a = write_scope(a);
+    let (first, second) =
+        tokio::join!(repo.append(&scope_a, &retry), repo.append(&scope_a, &retry));
+    assert!(first.is_ok() && second.is_ok());
+    let mut competing_a = retry.clone();
+    competing_a.id = format!("collision-race-{run}");
+    let mut competing_b = competing_a.clone();
+    competing_b.signature = Some("other-signature".into());
+    let (first, second) = tokio::join!(
+        repo.append(&scope_a, &competing_a),
+        repo.append(&scope_a, &competing_b)
+    );
+    assert!(matches!(
+        (&first, &second),
+        (Ok(()), Err(RepositoryError::Conflict("trade_id")))
+            | (Err(RepositoryError::Conflict("trade_id")), Ok(()))
+    ));
+    let winner = if first.is_ok() {
+        &competing_a
+    } else {
+        &competing_b
+    };
+    repo.append(&scope_a, winner).await.unwrap();
+}
+
+/// A live position beyond the old 5,000-row cap must be available to
+/// deployment recovery and book sync.
+#[tokio::test]
+async fn deployment_open_position_read_includes_more_than_5000() {
+    let Some(db) = setup().await else {
+        eprintln!(
+            "NOT_RUN: deployment_open_position_read_includes_more_than_5000 — POSTGRES_URL missing"
+        );
+        return;
+    };
+    let org = bot_core::db::deployment_org::deployment_org_uuid(&db)
+        .await
+        .unwrap();
+    let prefix = format!("limit-witness-{}-", run_id());
+    sqlx::query(
+        r#"INSERT INTO positions
+        (organization_id,id,source,venue,mode,status,symbol,opened_at,updated_at)
+        SELECT $1,$2 || i::text,'sniper','paper','paper','open','LIMIT-WITNESS',
+               '2001-01-01 00:00:00+00'::timestamptz + i * interval '1 second', now()
+        FROM generate_series(1,5001) AS i"#,
+    )
+    .bind(org)
+    .bind(&prefix)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let rows = bot_core::db::repo::PositionRepo::new(db.clone())
+        .list_open()
+        .await
+        .unwrap();
+    let tenant_rows = TenantPositionRead::new(db.clone())
+        .list_open(&read_scope(bot_core::tenant::OrganizationId::from(org)))
+        .await
+        .unwrap();
+    let tenant_last_found = tenant_rows.iter().any(|p| p.id == format!("{prefix}5001"));
+    let first_found = rows.iter().any(|p| p.id == format!("{prefix}1"));
+    let last_found = rows.iter().any(|p| p.id == format!("{prefix}5001"));
+    let count = rows.len();
+    sqlx::query("DELETE FROM positions WHERE organization_id = $1 AND left(id, length($2)) = $2")
+        .bind(org)
+        .bind(&prefix)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(
+        count >= 5001,
+        "live position recovery must not silently truncate"
+    );
+    assert!(first_found);
+    assert!(last_found, "the 5001st open position must be recoverable");
+    assert!(
+        tenant_last_found,
+        "tenant recovery must not silently truncate"
+    );
+}
+
+#[tokio::test]
+async fn legacy_trade_repo_rejects_distinct_fill_with_same_id() {
+    let Some(db) = setup().await else {
+        eprintln!(
+            "NOT_RUN: legacy_trade_repo_rejects_distinct_fill_with_same_id — POSTGRES_URL missing"
+        );
+        return;
+    };
+    let run = run_id();
+    let repo = bot_core::db::repo::TradeRepo::new(db.clone());
+    let trade = bot_core::models::Trade {
+        id: format!("legacy-trade-{run}"),
+        ts: chrono::Utc::now(),
+        source: bot_core::models::TradeSource::Sniper,
+        venue: bot_core::models::Venue::Paper,
+        mode: bot_core::models::ExecutionMode::Paper,
+        side: bot_core::models::PositionSide::Long,
+        symbol: "MINT-A".into(),
+        symbol_display: "MINT-A".into(),
+        amount_in: 1.0,
+        amount_out: 1.0,
+        quote_symbol: "SOL".into(),
+        price: 1.0,
+        fee: 0.0,
+        slippage_bps: 0,
+        signature: Some("sig-a".into()),
+        position_id: None,
+        note: None,
+        latency_ms: None,
+    };
+    repo.append(&trade).await.unwrap();
+    repo.append(&trade).await.unwrap();
+    let mut changed = trade.clone();
+    changed.signature = Some("sig-b".into());
+    assert!(matches!(
+        repo.append(&changed).await,
+        Err(bot_core::db::TimedDbError::Conflict("trade_id"))
+    ));
+    let original = repo
+        .list_recent(1000)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == trade.id)
+        .unwrap();
+    assert_eq!(original.signature.as_deref(), Some("sig-a"));
+
+    let mut same = trade.clone();
+    same.id = format!("legacy-retry-race-{run}");
+    let (first, second) = tokio::join!(repo.append(&same), repo.append(&same));
+    assert!(first.is_ok() && second.is_ok());
+    let mut race_a = same.clone();
+    race_a.id = format!("legacy-collision-race-{run}");
+    let mut race_b = race_a.clone();
+    race_b.signature = Some("sig-other".into());
+    let (first, second) = tokio::join!(repo.append(&race_a), repo.append(&race_b));
+    assert!(matches!(
+        (&first, &second),
+        (
+            Ok(()),
+            Err(bot_core::db::TimedDbError::Conflict("trade_id"))
+        ) | (
+            Err(bot_core::db::TimedDbError::Conflict("trade_id")),
+            Ok(())
+        )
+    ));
+    let winner = if first.is_ok() { &race_a } else { &race_b };
+    repo.append(winner).await.unwrap();
+
+    let other_org = org(&db, &format!("legacy-collision-foreign-{run}")).await;
+    let foreign_id = format!("legacy-foreign-{run}");
+    sqlx::query(
+        r#"INSERT INTO trades (organization_id,id,ts,source,venue,mode,side,symbol)
+                  VALUES ($1,$2,now(),'sniper','paper','paper','long','FOREIGN')"#,
+    )
+    .bind(other_org.as_uuid())
+    .bind(&foreign_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let mut foreign_collision = trade.clone();
+    foreign_collision.id = foreign_id.clone();
+    assert!(matches!(
+        repo.append(&foreign_collision).await,
+        Err(bot_core::db::TimedDbError::Conflict("trade_id"))
+    ));
+    let stored: (uuid::Uuid, String) =
+        sqlx::query_as("SELECT organization_id, symbol FROM trades WHERE id = $1")
+            .bind(&foreign_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, (other_org.as_uuid(), "FOREIGN".into()));
+}
+
+#[tokio::test]
+async fn balance_latest_separates_chains_and_breaks_timestamp_ties() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: balance_latest_separates_chains_and_breaks_timestamp_ties — POSTGRES_URL missing");
+        return;
+    };
+    let tenant = org(&db, &format!("balance-chain-{}", run_id())).await;
+    let balances = TenantBalanceRepo::new(db.clone());
+    let at = chrono::Utc::now();
+    let write = write_scope(tenant);
+    balances
+        .record(
+            &write,
+            "chain-a",
+            "same-address",
+            "USD",
+            1.0,
+            Some(1.0),
+            "test",
+            at,
+        )
+        .await
+        .unwrap();
+    balances
+        .record(
+            &write,
+            "chain-b",
+            "same-address",
+            "USD",
+            2.0,
+            Some(2.0),
+            "test",
+            at,
+        )
+        .await
+        .unwrap();
+    balances
+        .record(
+            &write,
+            "chain-a",
+            "same-address",
+            "USD",
+            3.0,
+            Some(3.0),
+            "test",
+            at,
+        )
+        .await
+        .unwrap();
+    let mut rows = balances
+        .latest_per_asset(&read_scope(tenant))
+        .await
+        .unwrap();
+    rows.sort_by(|a, b| a.chain.cmp(&b.chain));
+    assert_eq!(
+        rows.len(),
+        2,
+        "same address and asset on distinct chains are different balances"
+    );
+    assert_eq!((rows[0].chain.as_str(), rows[0].amount), ("chain-a", 3.0));
+    assert_eq!((rows[1].chain.as_str(), rows[1].amount), ("chain-b", 2.0));
+    assert_eq!(
+        balances
+            .total_usd_latest(&read_scope(tenant))
+            .await
+            .unwrap(),
+        Some(5.0)
+    );
+    balances
+        .record(
+            &write,
+            "chain-c",
+            "same-address",
+            "OTHER",
+            7.0,
+            None,
+            "test",
+            at,
+        )
+        .await
+        .unwrap();
+    // The former SUM ignored the unknown asset and returned a partial value.
+    let old_total: Option<f64> = sqlx::query_scalar(r#"SELECT SUM(usd_value)::double precision FROM (
+       SELECT DISTINCT ON (address, asset) usd_value FROM balance_snapshots WHERE organization_id = $1
+       ORDER BY address, asset, ts DESC
+    ) latest"#).bind(tenant.as_uuid()).fetch_one(db.pool()).await.unwrap();
+    assert!(
+        old_total.is_some(),
+        "the prior SQL returned a misleading partial sum"
+    );
+    assert_eq!(
+        balances
+            .total_usd_latest(&read_scope(tenant))
+            .await
+            .unwrap(),
+        None,
+        "unvalued latest balance must not produce a misleading partial total"
+    );
+}
+
+/// Gap #6: a fill dated in the FUTURE must not block today's realized PnL.
+///
+/// `realized_pnl_read` sums only positions closed inside today's UTC window, but
+/// its completeness probe asked a strictly wider question: `poly_fills.ts >=
+/// midnight` with no upper bound. A single fill timestamped tomorrow therefore
+/// made the probe answer "incomplete", which `effective_realized` turns into
+/// `RiskCode::GlobalUnavailable` — every entry refused, today and every day,
+/// while the row sits there. The probe now asks about the same window the sum
+/// uses, so the answer describes the number it guards.
+#[tokio::test]
+async fn a_future_dated_poly_fill_does_not_block_todays_pnl() {
+    use bot_core::db::claims::PostgresRiskOracle;
+    use bot_core::risk::{GlobalRiskOracle, RealizedPnlRead};
+    use bot_core::tenant::OrganizationId;
+
+    let Some(db) = setup().await else { return };
+    let oracle = PostgresRiskOracle::new(db.clone());
+    let org_uuid = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
+        .bind(org_uuid)
+        .bind(format!("future-fill-{org_uuid}"))
+        .bind("Future Fill Witness")
+        .execute(db.pool())
+        .await
+        .expect("create isolated tenant");
+    let organization = OrganizationId::from(org_uuid);
+
+    // Clean tenant: the projection is complete and the day reads as zero.
+    assert_eq!(
+        oracle.realized_today_status_for(Some(organization)).await,
+        RealizedPnlRead::Known(0.0),
+        "an empty tenant must read a complete zero"
+    );
+
+    let fill_id = format!("future-fill-{}", uuid::Uuid::new_v4().simple());
+    let insert = |ts: &'static str| {
+        let id = fill_id.clone();
+        let db = db.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO poly_fills
+                   (fill_id, venue_order_id, order_id, token_id, side, price, size_tokens,
+                    quote_usd, source, position_id, ts, organization_id)
+                 VALUES ($1, $2, $3, 'token-future', 'buy', 0.5, 10.0, 5.0, 'witness', NULL,
+                         now() + $4::interval, $5)",
+            )
+            .bind(&id)
+            .bind(format!("venue-{id}"))
+            .bind(format!("order-{id}"))
+            .bind(ts)
+            .bind(org_uuid)
+            .execute(db.pool())
+            .await
+            .expect("fill insert");
+        }
+    };
+
+    // A fill that happened earlier today, unprojected, IS today's problem.
+    insert("-1 hour").await;
+    assert_eq!(
+        oracle.realized_today_status_for(Some(organization)).await,
+        RealizedPnlRead::Incomplete,
+        "an unprojected fill inside today's window must still refuse the read"
+    );
+    sqlx::query("DELETE FROM poly_fills WHERE fill_id = $1")
+        .bind(&fill_id)
+        .execute(db.pool())
+        .await
+        .expect("cleanup today's fill");
+
+    // A fill timestamped tomorrow is OUTSIDE the window the sum uses.
+    insert("1 day").await;
+    assert_eq!(
+        oracle.realized_today_status_for(Some(organization)).await,
+        RealizedPnlRead::Known(0.0),
+        "a fill dated in the future must not block today's PnL"
+    );
+
+    sqlx::query("DELETE FROM poly_fills WHERE fill_id = $1")
+        .bind(&fill_id)
+        .execute(db.pool())
+        .await
+        .expect("cleanup future fill");
+}

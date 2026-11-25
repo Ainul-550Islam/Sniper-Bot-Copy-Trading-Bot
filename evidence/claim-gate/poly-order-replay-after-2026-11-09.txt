@@ -1,0 +1,22 @@
+=== GREEN: stale Polymarket order replay cannot un-fill a terminal row (gap #16 order half) ===
+
+-- polymarket_cross_tenant_pg (3, real PostgreSQL) --
+test a_stale_order_replay_cannot_unfill_a_terminal_row ... ok
+test reconciliation_drift_and_findings_are_tenant_scoped ... ok
+test signals_orders_fills_same_ids_are_independent_rows ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+-- fill replay + position projection suites --
+poly_fill_replay_pg: test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+positions_cross_tenant_pg: test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s
+
+-- module-polymarket lib (backfill/order state machine) --
+test result: ok. 185 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+-- clippy -D warnings --
+    Checking module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+    Finished `dev` profile [unoptimized] target(s) in 2m 11s
+
+-- fmt --
+fmt_exit=0
+diff_check_exit=0

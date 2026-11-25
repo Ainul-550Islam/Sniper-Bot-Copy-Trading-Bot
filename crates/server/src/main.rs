@@ -34,6 +34,7 @@ pub mod ops;
 mod persist;
 pub mod provisioning;
 mod recon;
+mod reservation_chain;
 pub mod runtime_registry;
 pub mod saas;
 pub mod telegram_trade_port;
@@ -1368,6 +1369,12 @@ async fn spawn_modules(
                 if let Some(store) = poly_store {
                     poly = poly.with_store(Arc::clone(store));
                 }
+                // Durable PRE-BROADCAST reservation: with the journal attached
+                // a LIVE CLOB POST needs a durably granted claim, exactly like
+                // copy/sniper/Telegram.
+                if let Some(sink) = intents {
+                    poly = poly.with_intent_sink(Arc::clone(sink));
+                }
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = poly.run().await {
                         error!(error = %e, "module 3 (polymarket) stopped");
@@ -1712,6 +1719,7 @@ fn serve_api(
         audit,
         db,
         journal,
+        chain_probe: crate::reservation_chain::ChainExistenceProbe::from_config(&cfg.network),
         serve_dashboard: cfg.api.serve_dashboard,
         health: Arc::clone(health),
         metrics_enabled: cfg.observability.metrics_enabled,

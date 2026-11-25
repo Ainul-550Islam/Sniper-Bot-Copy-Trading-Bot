@@ -15,13 +15,15 @@
 //! Degradation rule: if L2 errors or times out, the decision falls back to
 //! the L1 verdict and a `bot_dedup_l2_degraded_total` counter is raised —
 //! trading continues (availability), operators see the degradation (health).
+//! [`DedupStore::mark_shared`] is a separate fail-closed API for consumers
+//! that require a shared verdict; it never substitutes an L1 decision.
 //!
 //! This module never stores financial state; keys are opaque strings
 //! (signatures, mints, webhook ids) and values are constant "1"s.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
@@ -105,11 +107,19 @@ impl DedupStore {
     /// First-arrival check. `true` = newly marked (act on it), `false` =
     /// duplicate. Matches `AppState::mark_signature_seen` semantics exactly.
     pub async fn mark(&self, ns: &str, key: &str) -> bool {
-        // L1: definitive when it says "seen".
+        // L1 remembers WHEN each key was first seen, so a key can never outlive
+        // the dedup window it was recorded under. Without the stamp the local
+        // set was a second, longer-lived dedup window: a key stayed "seen" for
+        // the process lifetime even after the backend's TTL had expired it.
+        // Pruning is lazy (on each mark) and bounded by the same cap.
+        let now = Instant::now();
         let l1_new = {
             let mut map = self.l1.write().await;
             let set = map.entry(ns.to_string()).or_default();
-            set.insert(key, self.cap)
+            set.prune_older_than(now, self.ttl);
+            let newly_added = set.insert(key, self.cap);
+            set.remember(key, now);
+            newly_added
         };
         if !l1_new {
             Self::meter(ns, "l1", "duplicate");
@@ -169,13 +179,76 @@ impl DedupStore {
         }
     }
 
+    /// Atomic first-arrival check that requires a shared backend and never
+    /// falls back to process-local memory. Used by clustered copy execution.
+    ///
+    /// L1 is deliberately bypassed: inserting there before a failed or
+    /// ambiguous L2 write would poison a retry. An error may still mean the
+    /// remote write committed; callers must fail closed, not execute.
+    pub async fn mark_shared(&self, ns: &str, key: &str) -> crate::error::BotResult<bool> {
+        let result = match self.backend {
+            DedupBackend::Memory => {
+                return Err(crate::error::BotError::config(
+                    "clustered copy execution requires shared event dedup",
+                ));
+            }
+            // The Redis primitive maps zero to one millisecond; that is
+            // unsafe for a shared execution dedup window, not "forever".
+            DedupBackend::Redis if self.ttl.is_zero() => {
+                return Err(crate::error::BotError::config(
+                    "shared Redis event dedup requires a nonzero TTL",
+                ));
+            }
+            DedupBackend::Redis => match &self.redis {
+                Some(redis) => redis
+                    .set_nx_ttl(&Self::redis_key(ns, key), "1", self.ttl)
+                    .await
+                    .map_err(|_| ()),
+                None => Err(()),
+            },
+            DedupBackend::Postgres => match &self.db {
+                Some(db) => DedupRepo::new(db.clone())
+                    .mark(ns, key, self.ttl)
+                    .await
+                    .map_err(|_| ()),
+                None => Err(()),
+            },
+        };
+        match result {
+            Ok(fresh) => {
+                Self::meter(
+                    ns,
+                    self.backend.as_str(),
+                    if fresh { "new" } else { "duplicate" },
+                );
+                Ok(fresh)
+            }
+            Err(()) => {
+                Self::meter(ns, self.backend.as_str(), "unavailable");
+                metrics::global()
+                    .counter(
+                        "bot_dedup_shared_unavailable_total",
+                        "Shared dedup checks failed closed because the backend was unavailable.",
+                        &[("backend", self.backend.as_str())],
+                    )
+                    .inc();
+                warn!(
+                    ns,
+                    backend = self.backend.as_str(),
+                    "shared dedup unavailable — failing closed"
+                );
+                Err(crate::error::BotError::db("shared event dedup unavailable"))
+            }
+        }
+    }
+
     /// Read-only membership check (no marking). Checks L1, then L2 when the
     /// key is not in L1.
     pub async fn contains(&self, ns: &str, key: &str) -> bool {
         {
             let map = self.l1.read().await;
             if let Some(set) = map.get(ns) {
-                if set.contains(key) {
+                if set.contains(key) && set.is_current(key, Instant::now(), self.ttl) {
                     return true;
                 }
             }
@@ -333,6 +406,41 @@ mod tests {
         // The most recent key survives; the oldest was evicted.
         assert!(d.contains("sig", "k199").await);
         assert!(!d.contains("sig", "k0").await);
+    }
+
+    /// L1 must not become a longer-lived dedup window than the backend's TTL,
+    /// and a zero TTL must still behave as a bounded, process-lifetime set.
+    #[tokio::test]
+    async fn l1_does_not_outlive_a_nonzero_ttl_window() {
+        // Windowed store: after the window rolls over, the key can be marked
+        // again from this process's own point of view too.
+        let windowed = DedupStore::new(
+            DedupBackend::Memory,
+            None,
+            None,
+            Duration::from_millis(30),
+            64,
+        );
+        assert!(windowed.mark("sig", "k").await, "first arrival");
+        assert!(!windowed.mark("sig", "k").await, "inside the window");
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            windowed.mark("sig", "k").await,
+            "L1 must not remember a key past its dedup window"
+        );
+
+        // Zero TTL: indefinite by design, still bounded by the cap.
+        let forever = DedupStore::new(DedupBackend::Memory, None, None, Duration::ZERO, 64);
+        assert!(forever.mark("sig", "k").await);
+        assert!(
+            !forever.mark("sig", "k").await,
+            "a zero TTL is the one deliberately indefinite window"
+        );
+        for i in 0..500 {
+            forever.mark("sig", &format!("z{i}")).await;
+        }
+        assert!(forever.len("sig").await <= 64, "still bounded by the cap");
+        assert_eq!(forever.backend(), DedupBackend::Memory);
     }
 
     #[test]

@@ -1,0 +1,17 @@
+Copy polling pagination targeted mock-RPC tests, 2026-11-09 in user timezone.
+Command: cargo test -p module-copy --lib feeds::tests::poll_ --locked -j 1 -- --nocapture
+Checks saved until, advancing before page endpoints, exact-full final page followed by empty page, repeated page rejection and 100-full-page cap. No live RPC provider, transaction decoding, queue acknowledgement, crash or overall delivery guarantee is established.
+
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 5.70s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-84834e0020a68c4b)
+
+running 4 tests
+test feeds::tests::poll_batch_paginates_to_saved_cursor_without_skipping_full_page ... ok
+test feeds::tests::poll_batch_repeated_provider_page_is_rejected ... ok
+test feeds::tests::poll_requests_newer_transactions_using_until_cursor ... ok
+test feeds::tests::poll_batch_page_cap_reports_incomplete_without_returning_a_partial_batch ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.08s
+
+EXIT=0

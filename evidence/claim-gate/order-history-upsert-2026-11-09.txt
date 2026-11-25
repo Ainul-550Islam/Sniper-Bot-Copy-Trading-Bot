@@ -1,0 +1,52 @@
+Tenant order history attribution and foreign upsert conflicts, 2026-11-09.
+Real PostgreSQL two regressions failed before fix: a tenant status transition inserted history with deployment organization (verified direct DB row); foreign ID conflict upsert returned Ok even though it changed zero rows. Fixed set_status to insert selected organization_id and upsert to return generic Conflict on zero rows. Five PostgreSQL order tests pass afterward. Historical misattributed history rows are not migrated; history read joins order and can mask mismatched child attribution. Test uses privileged PostgreSQL pool, not app-role RLS; same-tenant immutable mismatch remains unguarded, live operational effects not assessed.
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 30.35s
+     Running tests/orders_cross_tenant_pg.rs (target/debug/deps/orders_cross_tenant_pg-bd6d4ac6d3d6dffb)
+
+running 5 tests
+test same_tenant_local_idempotency_key_both_tenants_allowed ... ok
+test signature_lookup_and_pagination_stay_tenant_scoped ... ok
+test status_history_rows_carry_the_order_tenant ... FAILED
+test tenant_a_crud_and_tenant_b_denied_everything ... ok
+test upsert_foreign_order_collision_must_not_report_success ... FAILED
+
+failures:
+
+---- status_history_rows_carry_the_order_tenant stdout ----
+
+thread 'status_history_rows_carry_the_order_tenant' (1304234) panicked at crates/core/tests/orders_cross_tenant_pg.rs:333:5:
+assertion `left == right` failed: history row must carry the same tenant as its order
+  left: [6a09677e-fd90-4a2a-b08d-ea1c0492b63f]
+ right: [886f5fc7-b214-4565-bcfa-03ecd3291e93]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- upsert_foreign_order_collision_must_not_report_success stdout ----
+
+thread 'upsert_foreign_order_collision_must_not_report_success' (1304243) panicked at crates/core/tests/orders_cross_tenant_pg.rs:356:5:
+foreign id collision must not be silent success
+
+
+failures:
+    status_history_rows_carry_the_order_tenant
+    upsert_foreign_order_collision_must_not_report_success
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+
+error: test failed, to rerun pass `-p bot-core --test orders_cross_tenant_pg`
+EXIT=101
+--- after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 18.33s
+     Running tests/orders_cross_tenant_pg.rs (target/debug/deps/orders_cross_tenant_pg-bd6d4ac6d3d6dffb)
+
+running 5 tests
+test same_tenant_local_idempotency_key_both_tenants_allowed ... ok
+test signature_lookup_and_pagination_stay_tenant_scoped ... ok
+test status_history_rows_carry_the_order_tenant ... ok
+test tenant_a_crud_and_tenant_b_denied_everything ... ok
+test upsert_foreign_order_collision_must_not_report_success ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+EXIT=0

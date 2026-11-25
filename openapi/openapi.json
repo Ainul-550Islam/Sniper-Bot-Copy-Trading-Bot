@@ -151,6 +151,73 @@
         ],
         "type": "object"
       },
+      "AmbiguousBroadcastClaim": {
+        "properties": {
+          "epoch": {
+            "type": "integer"
+          },
+          "intent_id": {
+            "type": "string"
+          },
+          "lapsed_secs": {
+            "type": "integer"
+          },
+          "lease_lapsed": {
+            "type": "boolean"
+          },
+          "lease_until": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "module": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "signature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "reserved",
+              "linked",
+              "abandoned"
+            ],
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "takeover_count": {
+            "type": "integer"
+          },
+          "trade_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "trade_key",
+          "intent_id",
+          "module",
+          "symbol",
+          "side",
+          "owner",
+          "epoch",
+          "status",
+          "lease_until",
+          "lease_lapsed",
+          "lapsed_secs",
+          "takeover_count"
+        ],
+        "type": "object"
+      },
       "ApiKeyMetadata": {
         "description": "Metadata view. The secret material exists only in the create response, once.",
         "properties": {
@@ -1240,6 +1307,52 @@
           "status",
           "amount_cents",
           "currency"
+        ],
+        "type": "object"
+      },
+      "JournalRepair": {
+        "properties": {
+          "claimed_conflict": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "conflict_cleared": {
+            "type": "boolean"
+          },
+          "discarded_pending_events": {
+            "type": "integer"
+          },
+          "dropped_events": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "repaired": {
+            "type": "boolean"
+          },
+          "replayed_events": {
+            "type": "integer"
+          },
+          "seen_findings": {
+            "type": "integer"
+          },
+          "unbacked_events": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repaired",
+          "claimed_conflict",
+          "conflict_cleared",
+          "replayed_events",
+          "unbacked_events",
+          "dropped_events",
+          "discarded_pending_events",
+          "seen_findings",
+          "reason"
         ],
         "type": "object"
       },
@@ -2523,6 +2636,164 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/accounting/conflict": {
+      "get": {
+        "operationId": "operator.ledgerConflictStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "conflict": {
+                      "nullable": true,
+                      "type": "string"
+                    },
+                    "events": {
+                      "type": "integer"
+                    },
+                    "payload_mismatches": {
+                      "description": "For a latched same-ID conflict: the contested event id, the local event, every durable row and the diverging field names. Empty when nothing is latched. Read-only.",
+                      "items": {
+                        "properties": {
+                          "differences": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "durable": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "event_id": {
+                            "type": "string"
+                          },
+                          "local": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "event_id",
+                          "local",
+                          "durable",
+                          "differences"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "pending": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "conflict",
+                    "pending",
+                    "events",
+                    "payload_mismatches"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Ledger conflict status."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Whether a journal-vs-book accounting conflict is latched, how many events/pending rows the local book holds, and — for a same-ID conflict — both sides of the contested event with the diverging field names.",
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/accounting/conflict/repair": {
+      "post": {
+        "operationId": "operator.repairLedgerConflict",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "report": {
+                      "$ref": "#/components/schemas/JournalRepair"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "report"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Book repaired from the durable journal."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "report": {
+                      "$ref": "#/components/schemas/JournalRepair"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "report"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Repair refused; the conflict fence stays set."
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Rebuild the local book from the durable journal, clearing a latched conflict. The journal wins; local rows it does not back are dropped. Returns 409 when the repair is refused (unreadable journal or an unadjudicable pending booking) and the fail-closed fence stays set.",
+        "tags": [
+          "operator"
+        ]
+      }
+    },
     "/api/accounting/events": {
       "get": {
         "operationId": "operator.listAccountingEvents",
@@ -2805,6 +3076,480 @@
             "$ref": "#/components/responses/Unauthorized"
           }
         },
+        "tags": [
+          "operator"
+        ]
+      }
+    },
+    "/api/accounting/reservations/chain-check": {
+      "get": {
+        "operationId": "operator.reservationChainCheck",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "abandon_allowed": {
+                      "type": "boolean"
+                    },
+                    "block_time": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "confirmations": {
+                      "description": "Slot distance between the transaction and the head, when both are known.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "existence": {
+                      "enum": [
+                        "landed",
+                        "absent",
+                        "unknown"
+                      ],
+                      "type": "string"
+                    },
+                    "finality": {
+                      "description": "Depth bucket by slot distance — a reorganisation-risk statement, not a finality proof.",
+                      "enum": [
+                        "unfinalized",
+                        "deeply_confirmed",
+                        "not_landed"
+                      ],
+                      "type": "string"
+                    },
+                    "head_slot": {
+                      "description": "The node's slot at probe time.",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "link_allowed": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "settled_allowed": {
+                      "description": "True only for a deeply confirmed landing; economics may be booked only then.",
+                      "type": "boolean"
+                    },
+                    "signature": {
+                      "type": "string"
+                    },
+                    "signer_balance_delta": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "slot": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "trade_key": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "trade_key",
+                    "signature",
+                    "existence",
+                    "abandon_allowed",
+                    "link_allowed",
+                    "head_slot",
+                    "finality",
+                    "confirmations",
+                    "settled_allowed",
+                    "reason"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Chain existence report."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Chain-side existence of an ambiguous pre-broadcast attempt: `landed` (the node returned the transaction), `absent` (the node does not know it — NOT proof that nothing was sent) or `unknown` (the lookup failed). Reports which operator decision the evidence allows.",
+        "tags": [
+          "operator"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "query",
+          "name": "trade_key",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "signature",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "operator_asserts_never_sent",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        }
+      ]
+    },
+    "/api/accounting/reservations/signature-scan": {
+      "get": {
+        "operationId": "operator.reservationSignatureScan",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "abandon_allowed": {
+                      "type": "boolean"
+                    },
+                    "duplicate_detected": {
+                      "type": "boolean"
+                    },
+                    "existence": {
+                      "enum": [
+                        "landed",
+                        "absent",
+                        "unknown"
+                      ],
+                      "type": "string"
+                    },
+                    "landed_signatures": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "link_allowed": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "reports": {
+                      "description": "Per-signature chain existence reports, recorded signature first.",
+                      "items": {
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "settled_allowed": {
+                      "type": "boolean"
+                    },
+                    "trade_key": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "trade_key",
+                    "reports",
+                    "landed_signatures",
+                    "duplicate_detected",
+                    "existence",
+                    "link_allowed",
+                    "abandon_allowed",
+                    "settled_allowed",
+                    "reason"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Signature scan report."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Chain existence across EVERY signature an ambiguous attempt could have landed under. `duplicate_detected` means more than one of them is on chain: a duplicate send already happened, so nothing is freed and nothing is booked. No chain reader reports `unknown`, never `absent`.",
+        "tags": [
+          "operator"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "query",
+          "name": "trade_key",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "signature",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Comma-separated alternate signatures the same attempt could have landed under (re-signed or fee-payer-swapped transactions land under a different signature).",
+          "in": "query",
+          "name": "alternates",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "operator_asserts_never_sent",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        }
+      ]
+    },
+    "/api/accounting/reservations/sweep": {
+      "get": {
+        "operationId": "operator.reservationSweep",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "available": {
+                      "type": "boolean"
+                    },
+                    "claims": {
+                      "items": {
+                        "$ref": "#/components/schemas/AmbiguousBroadcastClaim"
+                      },
+                      "type": "array"
+                    },
+                    "lapsed": {
+                      "type": "integer"
+                    },
+                    "linked_without_signature": {
+                      "type": "integer"
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "available",
+                    "lapsed",
+                    "linked_without_signature",
+                    "claims"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Ambiguous pre-broadcast reservations."
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "503": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Ambiguous durable pre-broadcast reservations: lapsed reserved claims whose owner never linked or abandoned them, and linked rows with no signature. Fails closed with 503 when the durable store cannot be read.",
+        "tags": [
+          "operator"
+        ]
+      },
+      "parameters": [
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "operator.resolveReservation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "decision": {
+                    "enum": [
+                      "abandon",
+                      "link"
+                    ],
+                    "type": "string"
+                  },
+                  "epoch": {
+                    "type": "integer"
+                  },
+                  "operator_asserts_never_sent": {
+                    "description": "Explicit human claim that the attempt never left the process; required for an `abandon` whose signature the chain does not know.",
+                    "type": "boolean"
+                  },
+                  "owner": {
+                    "type": "string"
+                  },
+                  "signature": {
+                    "type": "string"
+                  },
+                  "trade_key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "trade_key",
+                  "owner",
+                  "epoch",
+                  "decision"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolved": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "resolved"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Decision applied."
+          },
+          "400": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "401": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "403": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "resolved": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "resolved"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The claim no longer matches the owner/epoch read (already terminal or taken over)."
+          },
+          "429": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "503": {
+            "$ref": "#/components/schemas/Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Resolve ONE ambiguous pre-broadcast reservation with an explicit operator decision (`abandon` frees the trade key for a retry, `link` records the on-chain signature). The owner and epoch read from the sweep are a fencing token; a claim that changed hands is refused with 409 and never overwritten.",
         "tags": [
           "operator"
         ]
@@ -9568,6 +10313,25 @@
               "minimum": 1,
               "type": "integer"
             }
+          },
+          {
+            "description": "Exclusive `created_at` bound (RFC 3339).",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Tie-breaker of the `(created_at, id)` keyset cursor; requires `before`.",
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -10724,8 +11488,48 @@
     },
     "/api/tenant/recovery/sweep": {
       "get": {
-        "description": "Dust/sweep recovery status for tenant wallets.",
+        "description": "One page of the caller's crash-recovery work: orphaned pending intents older than the cutoff, each with the non-terminal orders attributed to it. Bounded by `limit` and continued with the returned `next_before`/`next_before_id`; `has_more`/`total_remaining` state what the page is not returning.",
         "operationId": "tenant.recoverySweep",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "older_than_minutes",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -10735,10 +11539,13 @@
                 }
               }
             },
-            "description": "Sweep status."
+            "description": "One page of recovery work plus the truncation signal."
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "description": "A malformed or half-supplied keyset cursor."
           }
         },
         "tags": [

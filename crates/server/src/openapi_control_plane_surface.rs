@@ -813,6 +813,25 @@ pub fn control_plane_surface_paths() -> Value {
                                                 "minimum": 1,
                                                 "maximum": 200
                                         }
+                                },
+                                {
+                                        "name": "before",
+                                        "in": "query",
+                                        "required": false,
+                                        "description": "Exclusive `created_at` bound (RFC 3339).",
+                                        "schema": {
+                                                "type": "string",
+                                                "format": "date-time"
+                                        }
+                                },
+                                {
+                                        "name": "before_id",
+                                        "in": "query",
+                                        "required": false,
+                                        "description": "Tie-breaker of the `(created_at, id)` keyset cursor; requires `before`.",
+                                        "schema": {
+                                                "type": "string"
+                                        }
                                 }
                         ]
                 },
@@ -1256,10 +1275,17 @@ pub fn control_plane_surface_paths() -> Value {
             "get": {
                 "tags": ["tenant"],
                 "operationId": "tenant.recoverySweep",
-                "description": "Dust/sweep recovery status for tenant wallets.",
+                "description": "One page of the caller's crash-recovery work: orphaned pending intents older than the cutoff, each with the non-terminal orders attributed to it. Bounded by `limit` and continued with the returned `next_before`/`next_before_id`; `has_more`/`total_remaining` state what the page is not returning.",
+                "parameters": [
+                    { "name": "older_than_minutes", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "default": 10 } },
+                    { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 500 } },
+                    { "name": "before", "in": "query", "required": false, "schema": { "type": "string", "format": "date-time" } },
+                    { "name": "before_id", "in": "query", "required": false, "schema": { "type": "string" } }
+                ],
                 "responses": {
-                    "200": { "description": "Sweep status.", "content": { "application/json": { "schema": { "type": "object" } } } },
-                    "401": { "$ref": "#/components/responses/Unauthorized" }
+                    "200": { "description": "One page of recovery work plus the truncation signal.", "content": { "application/json": { "schema": { "type": "object" } } } },
+                    "401": { "$ref": "#/components/responses/Unauthorized" },
+                    "422": { "description": "A malformed or half-supplied keyset cursor." }
                 }
             }
         },

@@ -1,13 +1,15 @@
 //! Live Vault/KMS/HSM contract test (Batch 7).
-//! Default #[ignore]. Requires explicit provider configuration. No local fallback.
-//! Verify remote signing behavior where safely possible. No private key extraction.
-//! LIVE_EXTERNAL — must not run during ordinary cargo test --workspace.
+//!
+//! Runs on every ordinary `cargo test` run (gap #31 removed the blanket
+//! `#[ignore]`): what is asserted here is the refusal contract — no local
+//! fallback, no private-key extraction, EXTERNAL_REQUIRED without credentials.
+//! The legs that need a reachable Vault stay operator-gated by configuration.
+//! No private key extraction, ever.
 
 use sniper_suite::custody::live_provider_contract::{LiveCustodyConfig, LiveCustodyContract};
 use sniper_suite::ops::provider_contract::ProviderStatus;
 
 #[test]
-#[ignore]
 fn live_custody_requires_explicit_opt_in() {
     // LIVE_EXTERNAL — #[ignore] so ordinary cargo test skips
     if std::env::var("LIVE_CUSTODY").unwrap_or_default() != "1" {
@@ -28,7 +30,6 @@ fn live_custody_requires_explicit_opt_in() {
 }
 
 #[test]
-#[ignore]
 fn live_custody_no_local_fallback() {
     // LIVE_EXTERNAL — even if LIVE_CUSTODY=1 but creds missing, must not fallback to local
     let cfg = LiveCustodyConfig::stub("vault", false, true, true);
@@ -38,7 +39,6 @@ fn live_custody_no_local_fallback() {
 }
 
 #[test]
-#[ignore]
 fn live_custody_never_extracts_private_key() {
     // LIVE_EXTERNAL
     let cfg = LiveCustodyConfig::stub("vault", true, true, true);

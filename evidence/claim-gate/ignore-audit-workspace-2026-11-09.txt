@@ -1,0 +1,52 @@
+# Whole-workspace #[ignore] audit (2026-11-09)
+
+Question asked: after the crates/server work, what is still parked behind #[ignore]?
+
+## Inventory: 15 attributes outside crates/server, all in crates/*/tests
+  4 crates/solana-kit/tests/live_mainnet_readonly.rs
+  4 crates/module-polymarket/tests/live_venue.rs
+  3 crates/module-telegram/tests/live_telegram_api.rs
+  2 crates/solana-kit/tests/live_devnet_transaction.rs
+  1 crates/core/tests/broadcast_reservation_sweep_pg.rs
+  1 crates/core/tests/accounting_replica_order.rs
+
+## Result: 14 were redundant, 1 was real
+Every 'live_*' file already gated itself (live_enabled(), SOLANA_LIVE_RPC,
+TELEGRAM_LIVE_TOKEN, route resolution), and the sweep test already skipped on a
+missing POSTGRES_URL. So #[ignore] added nothing except invisibility.
+Removed those 14 attributes and re-ran WITHOUT --ignored:
+  module-polymarket live_venue ............ 4 passed; 0 failed  (each prints SKIPPED)
+  solana-kit live_mainnet_readonly ........ 4 passed; 0 failed  (SKIPPED)
+  module-telegram live_telegram_api ....... 3 passed; 0 failed  (SKIPPED)
+  solana-kit live_devnet_transaction ...... 2 passed; 0 failed  (SKIPPED)
+  bot-core broadcast_reservation_sweep_pg . 1 passed; 0 failed  (real PostgreSQL 17)
+  => 14 passed; 0 failed; 0 ignored
+
+## The one that stayed, and why
+crates/core/tests/accounting_replica_order.rs
+  #[ignore = "open multi-replica accounting defect; run explicitly while designing a fix"]
+  stale_replica_sell_posting_uses_committed_inventory_cost  ->  FAILED in 0.00s
+  panicked at accounting_replica_order.rs:42:5
+    a shared-journal sell must credit the committed 0.5 SOL cost, got -0
+
+This test needs NO database and NO network: two GlobalLedger replicas share one
+MemoryLedgerStore, A books a 10.0 SOL buy, B books a sell of half. The sell must be
+posted against the cost basis committed to the shared journal by A; it is posted
+against nothing (-0), because each replica calculates the posting from its own local
+book before writing to the shared journal.
+
+It is deliberately left ignored. The three options and why they are wrong:
+  (a) leave the assertion, remove #[ignore]  -> the whole workspace sweep goes red for
+      a defect nobody has fixed yet, and a red sweep stops being an alarm.
+  (b) leave it ignored and say nothing       -> what the gap table did before today;
+      this file is the correction.
+  (c) weaken the assertion so it passes      -> destroys the only witness of the bug.
+So: witness kept, defect kept OPEN, and the row in GAP-MISSING-FILES.md upgraded from
+'source observation' to 'defect REPRODUCED by a real witness; fix pending'.
+
+## What is actually required to close it (not done here)
+The posting must be derived from committed journal state, not from replica-local book
+state: either the shared insert must compute cost from the journal (a single SQL
+statement that reads committed inventory) or a replica's sell must be refused/re-priced
+when its local book disagrees with the journal. That is a design change in the ledger
+write path, not a one-line fix, and it needs its own RED/GREEN cycle.

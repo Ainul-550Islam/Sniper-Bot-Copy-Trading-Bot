@@ -1,0 +1,53 @@
+=== batch6 manifest contract ===
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+batch6_exit=0
+=== openapi artifact in lockstep ===
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+openapi_artifact_exit=0
+=== server api module (all routes) ===
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 950 filtered out; finished in 0.11s
+
+server_api_module_exit=0
+=== core accounting + global risk ===
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 647 filtered out; finished in 0.01s
+
+core_accounting_exit=0
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 691 filtered out; finished in 0.00s
+
+core_global_risk_exit=0
+=== workspace clippy (all targets, -D warnings) ===
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 2m 43s
+workspace_clippy_exit=0
+fmt_exit=0
+diff_check_exit=0
+=== make gates ===
+  note: tests/release/stats_current.sh and manifest_current.sh are the
+        release step's job (they recheck docs/STATS.md and
+        release-manifest.json after scripts/generate-stats.sh /
+        update-release-manifest.sh run); tests/release/buyer_*.sh need the
+        generated buyer-release/ tree, which is not in this repository.
+  note: container_assets_live.sh uses hadolint + docker compose + the live
+        registry when they are installed and prints SKIP (not a failure)
+        for each section it cannot run. It never builds an image.
+make_gates_exit=0
+=== verify-delivery ===
+tree: 53144 files (excluding .git), 10827333282 bytes
+verify-delivery: 14 PASS / 0 FAIL
+verify_delivery_exit=0
+
+=== post-docs/manifest recheck ===
+batch6_exit=0
+make_gates_exit=0
+verify-delivery: 14 PASS / 0 FAIL
+verify_delivery_exit=0
+diff_check_exit=0
+snapshot_manifest=2045 files
+repo_recovery_patch=16566710 bytes (410 changed files, 0 untracked)

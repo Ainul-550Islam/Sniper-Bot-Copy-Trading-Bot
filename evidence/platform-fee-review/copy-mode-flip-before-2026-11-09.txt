@@ -1,0 +1,33 @@
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 7.24s
+     Running tests/intent_execution.rs (target/debug/deps/intent_execution-f28d5b50750b0de8)
+
+running 2 tests
+test kill_switch_after_live_buy_broadcast_does_not_book_ambiguous_fill ... FAILED
+test kill_switch_after_live_exit_broadcast_does_not_book_ambiguous_sale ... FAILED
+
+failures:
+
+---- kill_switch_after_live_buy_broadcast_does_not_book_ambiguous_fill stdout ----
+
+thread 'kill_switch_after_live_buy_broadcast_does_not_book_ambiguous_fill' (3428590) panicked at crates/module-copy/tests/intent_execution.rs:221:5:
+assertion `left == right` failed: None
+  left: Filled
+ right: Ambiguous
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- kill_switch_after_live_exit_broadcast_does_not_book_ambiguous_sale stdout ----
+
+thread 'kill_switch_after_live_exit_broadcast_does_not_book_ambiguous_sale' (3429064) panicked at crates/module-copy/tests/intent_execution.rs:254:5:
+assertion `left == right` failed: None
+  left: ExitMirrored
+ right: Ambiguous
+
+
+failures:
+    kill_switch_after_live_buy_broadcast_does_not_book_ambiguous_fill
+    kill_switch_after_live_exit_broadcast_does_not_book_ambiguous_sale
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.24s
+
+error: test failed, to rerun pass `-p module-copy --test intent_execution`

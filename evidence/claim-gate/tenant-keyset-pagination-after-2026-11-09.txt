@@ -1,0 +1,35 @@
+=== GREEN: composite (created_at, id) keyset cursor on both tenant list endpoints ===
+--- unit: limit_orders page predicate + cursor contract ---
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 993 filtered out; finished in 0.00s
+
+unit_exit=0
+--- unit: dca module ---
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 993 filtered out; finished in 0.00s
+
+dca_unit_exit=0
+--- real Postgres: tie-heavy boundary through the PRODUCTION fetch_page ---
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+pg_exit=0
+--- openapi artifact + router conformance ---
+
+openapi_exit=0
+
+router_exit=0
+--- clippy / fmt / diff ---
+
+error: could not compile `sniper-suite` (lib) due to 4 previous errors
+clippy_exit=101
+fmt_exit=0
+diff_check_exit=2
+--- re-run after the clippy-driven cleanups ---
+
+unit_exit=0
+
+pg_exit=0
+
+openapi_exit=0
+    Finished `dev` profile [unoptimized] target(s) in 0.82s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

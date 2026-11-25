@@ -1,0 +1,28 @@
+Command: bash scripts/verify-script-modes.sh
+Before: 23 tracked shell scripts in index mode 100644. After staging only executable-bit changes:
+verify-script-modes: OK — every tracked *.sh has index mode 100755.
+
+Paths changed:
+scripts/apply-batch01-deletes.sh
+scripts/bootstrap-config.sh
+scripts/check-batch02-ownership.sh
+scripts/check-batch03-ownership.sh
+scripts/check-batch04-ownership.sh
+scripts/check-batch07-ownership.sh
+scripts/check-cleanup-ownership.sh
+scripts/check-rls-coverage.sh
+scripts/cleanup-junk-v2.sh
+scripts/cleanup-tracked-junk.sh
+scripts/fix-script-modes.sh
+scripts/regen-snapshot-manifest.sh
+scripts/run-dataset-capture.sh
+scripts/telegram-trade-smoke.sh
+scripts/test-with-services.sh
+scripts/untrack-batch01-junk.sh
+scripts/verify-batch-complete.sh
+scripts/verify-batch07-complete.sh
+scripts/verify-raydium-idl.sh
+tests/release/container_assets_live.sh
+tests/release/evidence_truth.sh
+tests/release/forensic_sql_extractor.sh
+tests/release/secrets_third_party.sh

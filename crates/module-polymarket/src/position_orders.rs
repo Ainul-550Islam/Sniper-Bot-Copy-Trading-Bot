@@ -294,6 +294,38 @@ mod tests {
     }
 
     #[test]
+    fn position_buy_and_sell_sign_the_builder_field() {
+        for is_buy in [true, false] {
+            let mut req = PositionLimitOrder {
+                position_id: "456".into(),
+                is_buy,
+                size: 10.0,
+                price: 0.4,
+                tick_size: "0.01".into(),
+                market_neg_risk: false,
+                expiration: None,
+                builder_code: Some("operator".into()),
+            };
+            let bundle =
+                sign_position_limit_order(&key(), &req, 137, 0, None, &addresses(), 1).unwrap();
+            assert_eq!(
+                bundle.order.builder,
+                crate::builder::BuilderCode::parse("operator")
+                    .unwrap()
+                    .to_hex()
+            );
+            let attributed = bundle.order.struct_hash().unwrap();
+            let mut modified = bundle.order.clone();
+            modified.builder.clear();
+            assert_ne!(attributed, modified.struct_hash().unwrap());
+            req.builder_code = Some("0x1234".into());
+            assert!(
+                sign_position_limit_order(&key(), &req, 137, 0, None, &addresses(), 1).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn derived_order_id_differs_between_signings_at_different_times() {
         let req = PositionLimitOrder {
             position_id: "456".into(),

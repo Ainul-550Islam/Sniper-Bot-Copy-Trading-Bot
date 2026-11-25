@@ -176,6 +176,18 @@ pub struct Database {
     migration_pool: Option<PgPool>,
     rls_enabled: bool,
     query_timeout: Duration,
+    /// Identity of the DATABASE this handle talks to, derived from the resolved
+    /// connection target (host/port/database/user — never the password or the
+    /// query string). Per-database caches are keyed by it so two handles to two
+    /// different databases can never share one database's answer.
+    identity: String,
+}
+
+fn pool_connection_target(pool: &PgPool) -> String {
+    let options = pool.connect_options();
+    let db = options.get_database().unwrap_or("default");
+    let role = options.get_username();
+    format!("{role}@{}:{}/{db}", options.get_host(), options.get_port())
 }
 
 impl Database {
@@ -275,12 +287,14 @@ impl Database {
             (None, None, pool)
         };
 
+        let identity = pool_connection_target(&pool);
         let db = Database {
             pool,
             system_pool,
             migration_pool,
             rls_enabled: cfg.rls_enabled,
             query_timeout: Duration::from_millis(cfg.query_timeout_ms.max(100)),
+            identity,
         };
         db.ping().await?;
         info!(
@@ -365,6 +379,12 @@ impl Database {
         info!("postgres pools closed");
     }
 
+    /// Identity of the connected database (`role@host:port/db`): a stable key
+    /// for per-database caches, never containing the password.
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
     /// The non-bypass request/data pool. In RLS mode this role defaults to
     /// an empty tenant context and is bound to the authenticated request
     /// context on every connection checkout.
@@ -440,6 +460,8 @@ impl Database {
 pub enum TimedDbError {
     Error(sqlx::Error),
     Timeout,
+    /// A write was refused because its identity already names different data.
+    Conflict(&'static str),
 }
 
 impl std::fmt::Display for TimedDbError {
@@ -447,6 +469,7 @@ impl std::fmt::Display for TimedDbError {
         match self {
             TimedDbError::Error(e) => write!(f, "{e}"),
             TimedDbError::Timeout => write!(f, "query timeout"),
+            TimedDbError::Conflict(kind) => write!(f, "{kind} conflict"),
         }
     }
 }
@@ -456,6 +479,7 @@ impl From<TimedDbError> for BotError {
         match e {
             TimedDbError::Error(e) => BotError::db(e.to_string()),
             TimedDbError::Timeout => BotError::Timeout("database query timeout".into()),
+            TimedDbError::Conflict(kind) => BotError::db(format!("{kind} conflict")),
         }
     }
 }
@@ -518,13 +542,15 @@ mod tests {
     #[tokio::test]
     async fn optional_database_without_primary_url_degrades_before_auxiliary_urls() {
         let unique = uuid::Uuid::new_v4().simple().to_string();
-        let mut config = DatabaseConfig::default();
-        config.enabled = true;
-        config.rls_enabled = true;
-        config.required = false;
-        config.url_env = format!("SNIPER_TEST_DB_URL_{unique}");
-        config.system_url_env = format!("SNIPER_TEST_DB_SYSTEM_URL_{unique}");
-        config.migration_url_env = format!("SNIPER_TEST_DB_MIGRATION_URL_{unique}");
+        let config = DatabaseConfig {
+            enabled: true,
+            rls_enabled: true,
+            required: false,
+            url_env: format!("SNIPER_TEST_DB_URL_{unique}"),
+            system_url_env: format!("SNIPER_TEST_DB_SYSTEM_URL_{unique}"),
+            migration_url_env: format!("SNIPER_TEST_DB_MIGRATION_URL_{unique}"),
+            ..DatabaseConfig::default()
+        };
 
         assert!(open(&config).await.unwrap().is_none());
     }

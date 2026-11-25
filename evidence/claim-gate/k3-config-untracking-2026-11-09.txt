@@ -1,0 +1,58 @@
+# K3 — local configuration untracking (2026-11-09)
+
+## Starting state
+- `git ls-files --error-unmatch config.toml` -> config.toml (TRACKED)
+- `git check-ignore -v config.toml` -> no output (a tracked path is never ignored)
+- `.gitignore:25` already says `/config.toml`, `:26` `!config.toml.example`
+- `scripts/cleanup-tracked-junk.sh` (reviewed, --apply capable) already planned exactly
+  this: `git rm --cached -- config.toml` with the note "the local file stays on disk"
+- the tracked file was NOT an operator file: it is a 19,817-byte EXAMPLE config
+  (header: "sniper-suite — example configuration / Copy to config.toml"), and it had
+  fallen 119 keys behind the tracked config.toml.example (37,483 bytes, 318 keys).
+  So it was a stale duplicate of a tracked file, sitting at an ignored path where
+  `.gitignore` says the local instance belongs.
+
+## Actions
+1. `git rm --cached -- config.toml`  -> index entry removed, file kept on disk
+   `git ls-files | grep -c "^config.toml$"` -> 0
+   `git check-ignore -v config.toml`      -> .gitignore:25:/config.toml
+2. refreshed the local copy from the current example (cp config.toml.example config.toml)
+   because the leftover copy was 119 keys stale; nothing operator-specific was lost —
+   the grep for sniper:sniper|127.0.0.1|/home/|BOT_WALLET|SECRET_*= in it returned
+   nothing, and the only literal URL is the documented Solana mainnet RPC.
+3. verified the documented fresh-checkout path still works:
+   ./scripts/bootstrap-config.sh --check -> "config.toml: already present — left untouched"
+   ./scripts/bootstrap-config.sh         -> ".env: created from .env.template (mode 0600)",
+                                            ".env: ignored by git (ok)"
+   mode 0600 on the created .env confirmed; config.toml and .env are both ignored.
+4. `make up` already refuses to start without both files ("run 'make init' first"), and
+   `scripts/bootstrap-config.sh` never overwrites an existing file — checked, not assumed.
+
+## Defect found while verifying the untracking
+`docker-compose.yml` gives TWO services `CONFIG_PATH: /app/config.toml` — `bot` and the
+one-shot `db-migrate` — but only `bot` mounted `./config.toml`. Because config.toml is
+local and gitignored, the migration container pointed CONFIG_PATH at a path that does
+not exist inside the image, so `docker compose up` reached db-migrate with no config.
+Fix: db-migrate now mounts `./config.toml:/app/config.toml:ro` (read-only, same as bot).
+
+## Witness (permanent, source-level, no Docker required)
+tests/release/test_compose_config_mounts.py — 3 tests:
+  test_every_config_path_service_mounts_a_config ... ok
+  test_the_config_mount_is_read_only ............. ok
+  test_config_toml_is_ignored_and_the_example_is_not ... ok
+RED (mount deleted again):
+  FAIL: test_every_config_path_service_mounts_a_config
+  AssertionError: ['db-migrate sets CONFIG_PATH=/app/config.toml but mounts no config'] != []
+then restored -> OK (3/3).
+
+## Residual / honest limits
+- `docker compose config` could not be executed here (no docker binary in this
+  environment), so validation is YAML parsing + shape assertions + the invariant test,
+  not a real compose render or `docker compose up`.
+- This untracking does not rewrite history: config.toml remains in the three historical
+  commits that touched it. Removing it from history needs `git filter-repo` plus a
+  force-push, which is an explicit approval item (see the open approvals list) and was
+  NOT performed.
+- Untracking does not itself make a leaked secret safe: if a real credential ever lived
+  in that path, rotating it is the fix; history rewriting only stops the diff from
+  shipping it forward.

@@ -434,6 +434,58 @@ async fn post_order_sends_l2_headers_and_signed_bundle() {
 }
 
 #[tokio::test]
+async fn attributed_buy_and_sell_reach_both_post_order_variants() {
+    use module_polymarket::builder::BuilderCode;
+    let (addr, captures) = mock_server().await;
+    let key = test_key();
+    let client = ClobClient::new(format!("http://{addr}/clob"), 137)
+        .unwrap()
+        .with_auth(
+            address_from_signing_key(&key),
+            ApiKey {
+                key: "mock-key".into(),
+                secret: "c2VjcmV0LWtleS1mb3ItbW9jay10ZXN0".into(),
+                passphrase: "mock-pass".into(),
+            },
+        );
+    let expected = BuilderCode::parse("operator").unwrap().to_hex();
+    for is_buy in [true, false] {
+        let params = OrderParams {
+            token_id: "111",
+            is_buy,
+            size: 5.0,
+            price: 0.5,
+            tick_size: "0.01",
+            neg_risk: false,
+            chain_id: 137,
+            domain_version: "2",
+            exchange_address: "0xE111180000d2663C0091e4f400237545B87B996B",
+            neg_risk_exchange_address: "0xe2222d279d744050d28e00520010520000310F59",
+            signature_type: 0,
+            funder: None,
+            expiration_timestamp: 0,
+            created_at_ms: 1,
+            builder_code: Some("operator"),
+        };
+        let bundle = build_signed_order(&key, &params).unwrap();
+        if is_buy {
+            client.post_order(&bundle, "GTC").await.unwrap();
+        } else {
+            client
+                .post_order_with_defer(&bundle, "GTC", true)
+                .await
+                .unwrap();
+        }
+        let last = captures.lock().unwrap().last().unwrap().clone();
+        let body: Value = serde_json::from_str(&last.body).unwrap();
+        assert_eq!(body["order"]["builder"], expected);
+        assert_eq!(body["order"]["signature"], bundle.signature);
+        assert_eq!(body["order"]["side"], if is_buy { "BUY" } else { "SELL" });
+        assert_eq!(body["deferExec"], !is_buy);
+    }
+}
+
+#[tokio::test]
 async fn authenticated_call_without_credentials_fails_locally() {
     let (addr, captures) = mock_server().await;
     let client = ClobClient::new(format!("http://{addr}/clob"), 137).unwrap(); // no with_auth

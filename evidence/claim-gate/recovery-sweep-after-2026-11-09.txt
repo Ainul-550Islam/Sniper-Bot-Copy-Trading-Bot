@@ -1,0 +1,28 @@
+=== GREEN: the recovery sweep pages, pairs and stops holding the lock for the caller (gap #74) ===
+
+-- recovery_sweep_pg (real PostgreSQL: 1,205 orphans, 3-page keyset walk) --
+test the_recovery_sweep_pages_pairs_and_never_holds_the_lock_for_the_caller ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+
+-- intents_cross_tenant_pg (per-intent pairing keeps the tenant contract) --
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+-- bot-core --lib --
+test result: ok. 719 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.54s
+
+-- server contract suites --
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.30s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+-- intents/recovery handler routes --
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+-- clippy -D warnings (workspace, all targets) --
+(first pass rejected the new witness: unused `Row` import, an unused `visited` counter, a dead
+ `seed_intent` helper and a redundant slice; all four fixed, then re-run clean:)
+    Finished `dev` profile [unoptimized] target(s) in ... (no warnings)
+
+-- fmt/diff --
+fmt_exit=0
+diff_check_exit=0

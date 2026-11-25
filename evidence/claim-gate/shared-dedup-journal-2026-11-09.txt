@@ -1,0 +1,24 @@
+Targeted local run after journal-protection change, 2026-11-09; PostgreSQL 17 and Redis 8, credentials omitted.
+Command: cargo test -p module-copy --test claim_stress --locked -j 1 -- --test-threads=1
+The degraded-backend regression additionally checks that an existing filled MemoryCopyStore row is unchanged, and an unclaimed event gets no journal row, for absent/memory/closed-PostgreSQL dedup in simulate and live modes. This is not a cross-process journal race test.
+
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 5.83s
+     Running tests/claim_stress.rs (target/debug/deps/claim_stress-92135b3ff838fa13)
+
+running 11 tests
+test actual_process_exit_and_restart_recovers_expired_lease ... ok
+test claim_crash_worker ... ok
+test clustered_copy_fails_closed_without_shared_dedup ... ok
+test crashed_owner_leaks_nothing_and_expiry_allows_exactly_one_takeover ... ok
+test expired_owner_can_release_only_before_a_takeover ... ok
+test independent_processes_send_one_mock_transaction_per_event ... ok
+test n_replicas_same_event_exactly_one_winner ... ok
+test postgres_replicas_send_exactly_one_mock_transaction_per_event ... ok
+test released_claim_is_reacquirable_and_fenced_for_the_old_owner ... ok
+test shared_redis_dedup_refuses_zero_ttl_and_serializes_first_arrival ... ok
+test subprocess_broadcast_worker ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.77s
+
+EXIT=0

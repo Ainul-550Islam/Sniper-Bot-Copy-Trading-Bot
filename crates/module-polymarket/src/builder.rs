@@ -8,9 +8,8 @@
 //! identifier from the operator's Builder Profile:
 //!
 //! ```text
-//! Order(salt, maker, signer, taker, tokenId, makerAmount, takerAmount,
-//!       expiration, nonce, feeRateBps, side, signatureType,
-//!       timestamp, metadata, builder)          // <- bytes32 builder
+//! Order(salt, maker, signer, tokenId, makerAmount, takerAmount,
+//!       side, signatureType, timestamp, metadata, builder) // bytes32 builder
 //! ```
 //!
 //! Consequences encoded here:
@@ -24,12 +23,9 @@
 //! * `0x00…00` (32 zero bytes) is the "no builder" sentinel; an order
 //!   without attribution sends zeros.
 //!
-//! This module is pure and dependency-free: validation + encoding only.
-//! The venue client ([`crate::venue`]) attaches the returned bytes32 when
-//! building V2 orders; wiring the field through `eip712.rs`/`venue.rs` is
-//! a deliberate follow-up (the V2 order struct migration touches those
-//! files as a unit, see the migration checklist in
-//! `docs/archive/GAP-MISSING-FILES-2026-10-06.md` (historical snapshot).
+//! This module validates and encodes the code. `orders::sign_order_bundle`
+//! includes it in the EIP-712 order, and the CLOB client serializes that
+//! signed field. This does not itself prove venue attribution or payout.
 //!
 //! Sources (fetched 2026-10-08):
 //! * docs.polymarket.com/v2-migration — "A single builderCode field on the

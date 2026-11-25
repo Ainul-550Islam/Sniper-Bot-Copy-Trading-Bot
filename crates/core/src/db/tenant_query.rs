@@ -12,7 +12,8 @@
 //! This is deliberately NOT a query builder: the existing repositories
 //! (`db::repo`, `db::claims`, …) keep their hand-written SQL — these
 //! helpers make the tenant constraint uniform, cheap to review and
-//! impossible to forget in the new tenant paths.
+//! easier to review. The helper only checks for a text substring and is not
+//! an SQL parser or enforcement of tenant isolation.
 
 use crate::error::{BotError, BotResult};
 use crate::tenant::OrganizationId;

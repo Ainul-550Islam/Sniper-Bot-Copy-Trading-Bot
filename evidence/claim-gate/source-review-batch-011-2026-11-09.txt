@@ -1,0 +1,9 @@
+Source review batch 011, 2026-11-09: six complete file versions read. Hashes below; source observations unless backed by separate evidence.
+780d0f6ae216991a82ee2f23f2ae0ca3fe9c95be252407510ffa959ee020828f  crates/core/src/db/execution.rs
+2c262272ca0398e1152495bddb383c6ac26de3f9f34ca81b8d51fcafed426047  crates/core/src/db/accounting.rs
+ce78cf382fe26066c277910dc3f287b899d834b9f6c4d5ea3d297b7e8a7b46a1  crates/server/src/trading_data_plane/limit_order_worker.rs
+b35e27f189e22999235e2f419a0cd2ade3221972bda515d294f9a91db85a21e3  crates/server/src/trading_data_plane/dca_worker.rs
+ec2072fadc17547dbfbb340bea88625e92d80f48f9b4dc75732f1a2d17efe0e7  crates/server/src/trading_data_plane/limit_orders.rs
+98d1fdfab3130e74b2cad14c42f74f3559384a7a00315842429d19be8d639f0b  crates/server/src/trading_data_plane/dca.rs
+
+ExecutionRepo::delete_settled_older_than omits org predicate and uses db.pool; privileged role can delete other tenants settled lifecycle rows. Dedicated PG regression pending. Legacy lifecycle open read capped 5000, lifecycle upsert can regress state on stale write; accounting journal duplicate event payload not compared, and postings insert does not validate entry/event IDs or balance inside repo (callers may validate). Limit worker checks lease owner on terminal update but not expiry and calls sink before any fresh lease check; cancellation can succeed after lease expiry while stale worker still hands off. DCA record_slot checks owner but not expiry/status; stale worker may record after pause/cancel when owner remains from expired lease; dedicated concurrency tests needed. Limit orders keyset uses timestamp alone despite tie ordering by id, so same timestamp page boundary may omit rows. These are source-derived; no production impact asserted.

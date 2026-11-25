@@ -1,0 +1,23 @@
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 16.48s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 1 test
+test rpc::tests::confirmation_rejects_unrelated_or_tampered_rpc_transaction ... FAILED
+
+failures:
+
+---- rpc::tests::confirmation_rejects_unrelated_or_tampered_rpc_transaction stdout ----
+
+thread 'rpc::tests::confirmation_rejects_unrelated_or_tampered_rpc_transaction' (2835433) panicked at crates/solana-kit/src/rpc.rs:1688:9:
+Confirmed { slot: 55, logs: [], fee: 5000 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    rpc::tests::confirmation_rejects_unrelated_or_tampered_rpc_transaction
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 491 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p solana-kit --lib`
+EXIT=101

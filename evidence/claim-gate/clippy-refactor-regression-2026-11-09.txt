@@ -1,0 +1,101 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 3m 30s
+     Running unittests src/lib.rs (target/debug/deps/sniper_suite-8473bfd8875fa7ab)
+
+running 8 tests
+test telegram_trade_port::tests::deterministic_ids_are_stable ... ok
+test telegram_trade_port::tests::limits_intersect_with_generic_risk_cap ... ok
+test telegram_trade_port::tests::limits_require_both_telegram_caps ... ok
+test telegram_trade_port::tests::percent_math_is_exact_and_bounded ... ok
+test telegram_trade_port::tests::receipt_reconstruction_uses_signature_or_paper_reference ... ok
+test telegram_trade_port::tests::open_position_lookup_prefers_manual_and_skips_terminal ... ok
+test telegram_trade_port::tests::validate_request_shape ... ok
+test telegram_trade_port::tests::receipt_replay_never_bypasses_organization_check ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 972 filtered out; finished in 0.00s
+
+   Compiling tokio v1.54.1
+   Compiling tokio-util v0.7.20
+   Compiling h2 v0.4.20
+   Compiling hyper v1.12.0
+   Compiling hyper-util v0.1.21
+   Compiling tower v0.5.3
+   Compiling tokio-stream v0.1.19
+   Compiling tokio-rustls v0.26.6
+   Compiling async-compression v0.4.51
+   Compiling tower-http v0.6.11
+   Compiling hyper-rustls v0.27.10
+   Compiling axum v0.8.9
+   Compiling sqlx-core v0.8.6
+   Compiling reqwest v0.12.28
+   Compiling hyper-timeout v0.5.2
+   Compiling sqlx-postgres v0.8.6
+   Compiling tonic v0.14.9
+   Compiling reqwest-middleware v0.4.2
+   Compiling combine v4.6.9
+   Compiling redis v0.27.6
+   Compiling solana-rpc-client-api v2.3.13
+   Compiling sqlx v0.8.6
+   Compiling tonic-prost v0.14.9
+   Compiling yellowstone-grpc-proto v13.0.0
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-rpc-client v2.3.13
+   Compiling tokio-tungstenite v0.24.0
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 2m 03s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 22 tests
+test rpc::tests::commitment_parsing_defaults_safely ... ok
+test rpc::tests::confirm_outcome_summary_is_human_readable ... ok
+test rpc::tests::blockhash_cache_expires ... ok
+test rpc::tests::confirm_tracked_reports_expiry_instead_of_burning_the_timeout ... ok
+test rpc::tests::confirmation_retries_when_metadata_is_initially_missing ... ok
+test rpc::tests::contradictory_transaction_status_is_not_success ... ok
+test rpc::tests::das_social_count_ignores_empty_links ... ok
+test rpc::tests::confirmation_rejects_unrelated_or_tampered_rpc_transaction ... ok
+test rpc::tests::failing_primary_fails_over_to_the_fallback_within_one_call ... ok
+test rpc::tests::failover_chain_advances ... ok
+test rpc::tests::fresh_blockhash_refreshes_when_the_cached_one_is_too_old ... ok
+test rpc::tests::missing_transaction_metadata_is_never_a_confirmed_fill ... ok
+test rpc::tests::permanent_errors_are_not_retried ... ok
+test rpc::tests::rate_limited_primary_is_cooled_down_and_skipped ... ok
+test rpc::tests::send_accepts_matching_response_signature ... ok
+test rpc::tests::send_http_rate_limit_is_uncertain_not_definite_rejection ... ok
+test rpc::tests::send_rejects_mismatched_response_signature_as_ambiguous ... ok
+test rpc::tests::send_retry_preserves_ambiguous_first_provider_after_blockhash_rejection ... ok
+test rpc::tests::failed_expiry_double_check_remains_ambiguous ... ok
+test rpc::tests::transient_node_error_is_retried_on_the_same_provider_and_recovers ... ok
+test rpc::tests::ws_url_is_derived_from_the_http_url ... ok
+test rpc::tests::timeout_is_classified_and_retried_then_exhausted ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 484 filtered out; finished in 0.99s
+
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 1m 15s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-c09a4392293a7fa9)
+
+running 12 tests
+test feeds::tests::decoded_non_sol_quote_has_zero_sol_amount ... ok
+test feeds::tests::decoded_raydium_cpmm_and_launchlab_keep_their_precise_venues ... ok
+test feeds::tests::decoded_sol_quote_converts_lamports ... ok
+test feeds::tests::null_fetch_allows_retry_and_other_wallet ... ok
+test feeds::tests::poll_batch_paginates_to_saved_cursor_without_skipping_full_page ... ok
+test feeds::tests::poll_batch_rejects_malformed_signature_in_full_page ... ok
+test feeds::tests::poll_batch_repeated_provider_page_is_rejected ... ok
+test feeds::tests::poll_requests_newer_transactions_using_until_cursor ... ok
+test feeds::tests::poll_retries_null_fetch_without_advancing_cursor ... ok
+test feeds::tests::pumpportal_buy_maps_to_long_on_the_curve ... ok
+test feeds::tests::pumpportal_sell_on_amm_maps_to_short_pumpswap ... ok
+test feeds::tests::poll_batch_page_cap_reports_incomplete_without_returning_a_partial_batch ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 0.12s

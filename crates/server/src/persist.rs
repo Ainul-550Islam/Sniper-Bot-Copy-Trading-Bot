@@ -2,15 +2,11 @@
 //!
 //! ONE event-bus consumer materialises durable state into PostgreSQL:
 //! OMS orders, on-chain transactions, trades, positions, risk events and
-//! system events. Centralising this here means the trading modules keep
-//! their publish-and-forget event contract while every financial row still
-//! lands in the database exactly once:
-//!
-//! * idempotency keys are deterministic hashes of the event identity, so a
-//!   replayed journal or a restarted pump cannot duplicate orders;
-//! * every write is an upsert/guarded insert (see `bot_core::db::repo`);
-//! * failures are metered + logged, never fatal — the pump keeps draining
-//!   the bus so one bad row cannot wedge persistence.
+//! system events. Modules publish without waiting for this consumer. Writes
+//! are best effort: database failures and broadcast lag can leave gaps, and
+//! this pump does not guarantee exactly-once delivery or durable retries.
+//! Some writes use deterministic idempotency keys or guarded inserts; errors
+//! are logged and the consumer continues.
 //!
 //! The pump also owns the restart-restore path: [`restore`] loads open
 //! positions and unfinished orders back into memory before trading resumes.
@@ -83,7 +79,7 @@ impl PersistencePump {
                     match res {
                         Ok(ev) => self.handle(&ev).await,
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(skipped = n, "persistence pump lagged — durable state may miss events; reconciliation will catch up");
+                            warn!(skipped = n, "persistence pump lagged — durable state may miss events; recovery is not guaranteed");
                             bot_core::obs::metrics::global()
                                 .counter(
                                     "bot_persist_lagged_total",
@@ -592,8 +588,8 @@ const LEDGER_RESTORE_RECENT: i64 = 2_000;
 /// and apply the restart policy:
 ///
 /// * `Created`/`Validated` rows never produced a broadcast → closed as
-///   `Failed(Internal)` (safe: the `Submitted` row is written BEFORE the
-///   send, so its absence proves nothing left the process);
+///   `Failed(Internal)` (the sink is awaited, but its write failures are
+///   swallowed, so an absent Submitted row does not prove no send occurred);
 /// * `Submitted`/`Pending` rows may have reached the network → kept live
 ///   (blocking duplicates) and their signatures enqueued for the
 ///   reconciliation worker, which resolves them against chain truth.
@@ -648,8 +644,8 @@ pub async fn restore_execution_ledger(db: &Arc<Database>) {
 ///
 /// * With a database: every transition upserts the intent's row in
 ///   `execution_lifecycle` and appends to `execution_events`. The ledger
-///   awaits sinks inline, so the `Submitted` row is on disk before the
-///   transaction is broadcast (crash point C of the recovery design).
+///   awaits sinks inline; a successful write precedes later transitions,
+///   but write failures are swallowed and do not guarantee durability.
 /// * Always: `Submitted`, `Confirmed`, `Failed`, `Expired` and `Reconciled`
 ///   become hash-chained audit records (`executor` actor), which the audit
 ///   trail also publishes on the event bus for the dashboard / Telegram.
@@ -746,8 +742,9 @@ const ROTATE_AT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The JSONL journal consumer: every event is appended to `events.jsonl`,
 /// fills to `trades.jsonl` and position changes to `positions.jsonl`.
-/// Crash-safe by design (append + flush per line); oversized journals are
-/// rotated (archived with a timestamp suffix) instead of growing forever.
+/// Appends and flushes per line but does not establish fsync or crash-safe
+/// durability; consumer lag or write failures can leave gaps. Oversized
+/// journals are rotated (archived with a timestamp suffix).
 pub struct JournalPump {
     store: bot_core::storage::Store,
     state: Shared,

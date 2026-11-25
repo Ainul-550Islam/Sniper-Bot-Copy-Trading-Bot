@@ -1,0 +1,48 @@
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 20.24s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 4 tests
+test confirmed_balances::tests::exact_transaction_wide_deltas_sum_multiple_accounts ... ok
+test confirmed_balances::tests::observes_negative_delta_and_refuses_account_identity_changes ... ok
+test confirmed_balances::tests::refuses_identity_failures_and_unsuccessful_transaction ... ok
+test confirmed_balances::tests::refuses_incomplete_ambiguous_and_inconsistent_metadata ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 501 filtered out; finished in 0.01s
+
+    Finished `test` profile [unoptimized] target(s) in 1.22s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 3 tests
+test confirmed_fee::tests::refuses_missing_or_failed_execution_metadata ... ok
+test confirmed_fee::tests::rejects_tampered_transaction_even_when_primary_signature_is_unchanged ... ok
+test confirmed_fee::tests::verifies_exact_direct_transfer_and_rejects_mismatch ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 502 filtered out; finished in 0.01s
+
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 30.58s
+     Running tests/intent_execution.rs (target/debug/deps/intent_execution-f28d5b50750b0de8)
+
+running 17 tests
+test ambiguous_broadcast_parks_without_booking_a_fill ... ok
+test ambiguous_exit_keeps_position_and_does_not_book_a_sell ... ok
+test failed_ambiguous_exit_journal_write_disables_reconciliation_auto_exit ... ok
+test failed_ambiguous_journal_write_latches_live_buy_after_confirmation ... ok
+test leader_fee_is_never_booked_as_follower_fee ... ok
+test live_buy_refuses_to_broadcast_if_copy_journal_is_unavailable ... ok
+test live_buy_refuses_to_broadcast_when_journal_scan_is_saturated ... ok
+test live_mirror_confirms_through_the_executor_with_a_deterministic_intent ... ok
+test mirrored_exit_and_sweeper_fail_closed_on_journal_outage_and_saturation ... ok
+test mirrored_exit_refuses_unbooked_ambiguous_exit_after_confirmation ... ok
+test node_rejection_is_a_definite_failure_with_nothing_booked ... ok
+test pending_execution_cap_throttles_new_mirrors ... ok
+test simulation_failure_never_broadcasts_and_abandons_the_journal_entry ... ok
+test standalone_live_sweeper_without_journal_refuses_exit ... ok
+test sweeper_ambiguous_exit_sets_shared_latch_and_blocks_retry ... ok
+test sweeper_blocks_journaled_ambiguous_mirror_exit_after_confirmation ... ok
+test the_ledger_refuses_a_second_attempt_at_the_same_logical_trade ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.73s

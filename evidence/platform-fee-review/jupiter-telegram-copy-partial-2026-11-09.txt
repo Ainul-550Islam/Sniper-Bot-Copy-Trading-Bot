@@ -1,0 +1,98 @@
+2026-11-09: intermediate targeted fee test results. Scope: tests exercise request math and serialization / account parsing, not live venue or durable ledger.
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 23.78s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 15 tests
+test jupiter::tests::decode_rejects_garbage ... ok
+test jupiter::tests::decode_transaction_refuses_a_foreign_fee_payer ... ok
+test jupiter::tests::default_client_uses_the_current_endpoints ... ok
+test jupiter::tests::fee_destination_is_required_only_for_nonzero_quote_fee ... ok
+test jupiter::tests::prioritization_fee_serialises_either_way ... ok
+test jupiter::tests::quote_parses_and_derives_values ... ok
+test jupiter::tests::quote_rejects_a_malformed_amount ... ok
+test jupiter::tests::quote_request_builds_the_expected_query ... ok
+test jupiter::tests::quote_tolerates_missing_optional_fields ... ok
+test jupiter::tests::resigning_swaps_the_blockhash_without_touching_the_message ... ok
+test jupiter::tests::set_blockhash_handles_legacy_messages_too ... ok
+test jupiter::tests::sign_produces_a_verifiable_signature ... ok
+test jupiter::tests::summary_price_normalises_decimals ... ok
+test jupiter::tests::swap_request_omits_unset_prioritization ... ok
+test jupiter::tests::truncate_is_char_safe ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 465 filtered out; finished in 0.07s
+
+    Finished `test` profile [unoptimized] target(s) in 0.37s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 9 tests
+test fee_transfer::tests::build_ix_is_none_when_there_is_nothing_to_collect ... ok
+test fee_transfer::tests::build_ix_transfers_the_exact_fee_to_the_vault ... ok
+test fee_transfer::tests::disabled_collection_yields_zero_without_a_vault_or_bps ... ok
+test fee_transfer::tests::dust_fees_are_skipped_entirely ... ok
+test fee_transfer::tests::fee_is_half_up_bps_of_the_notional ... ok
+test fee_transfer::tests::fee_never_overflows_on_extreme_notional ... ok
+test fee_transfer::tests::jupiter_fee_is_applied_only_when_chargeable ... ok
+test fee_transfer::tests::jupiter_sell_fee_uses_sol_notional_not_token_raw_amount ... ok
+test fee_transfer::tests::zero_notional_is_dust ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 471 filtered out; finished in 0.00s
+
+EXIT=0
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 24.40s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 16 tests
+test jupiter::tests::decode_rejects_garbage ... ok
+test jupiter::tests::decode_transaction_refuses_a_foreign_fee_payer ... ok
+test jupiter::tests::default_client_uses_the_current_endpoints ... ok
+test jupiter::tests::fee_destination_is_required_only_for_nonzero_quote_fee ... ok
+test jupiter::tests::prioritization_fee_serialises_either_way ... ok
+test jupiter::tests::quote_parses_and_derives_values ... ok
+test jupiter::tests::quote_rejects_a_malformed_amount ... ok
+test jupiter::tests::quote_request_builds_the_expected_query ... ok
+test jupiter::tests::quote_tolerates_missing_optional_fields ... ok
+test jupiter::tests::requested_jupiter_fee_cannot_silently_disappear_or_change ... ok
+test jupiter::tests::resigning_swaps_the_blockhash_without_touching_the_message ... ok
+test jupiter::tests::set_blockhash_handles_legacy_messages_too ... ok
+test jupiter::tests::sign_produces_a_verifiable_signature ... ok
+test jupiter::tests::summary_price_normalises_decimals ... ok
+test jupiter::tests::swap_request_omits_unset_prioritization ... ok
+test jupiter::tests::truncate_is_char_safe ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 465 filtered out; finished in 0.02s
+
+EXIT=0
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 26.97s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-85ff6589a8b0fe0c)
+
+running 4 tests
+test buy_and_sell_prepare_atomic_sol_transfer_and_audit ... ok
+test dust_and_disabled_are_audited_without_instruction ... ok
+test invalid_vault_cannot_silently_drop_a_due_fee ... ok
+test jupiter_fee_account_must_be_initialized_wsol_token_account ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 4m 25s
+     Running tests/telegram_fee_wiring.rs (target/debug/deps/telegram_fee_wiring-0c7c55b0b740113d)
+
+running 2 tests
+test buy_and_sell_fee_requests_use_sol_notional ... ok
+test disabled_or_dust_fee_does_not_attach_a_fee_account ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0

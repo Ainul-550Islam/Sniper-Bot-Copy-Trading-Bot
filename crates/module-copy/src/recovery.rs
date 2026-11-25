@@ -424,6 +424,21 @@ pub enum RecoveryAction {
         /// Mint.
         mint: String,
     },
+    /// A previously ambiguous intent became confirmed/reconciled but its
+    /// journal still has no booked fill. Reconciliation requires independent
+    /// venue economics; this action must not synthesize a trade or a fee.
+    ReviewUnbookedFill {
+        /// Deterministic execution identity.
+        intent_id: String,
+        /// Execution transaction signature, when available.
+        signature: Option<String>,
+        /// Original leader event side, `buy` or `sell`.
+        side: String,
+        /// Existing tracked position for a sell, if known.
+        position_id: Option<String>,
+        /// Mint requiring review.
+        mint: String,
+    },
     /// A position whose entry provably never landed: close it without
     /// selling.
     CleanupFailedEntry {
@@ -455,6 +470,7 @@ impl RecoveryAction {
             RecoveryAction::SeedDedup { .. } => "seed_dedup",
             RecoveryAction::SeedCursor { .. } => "seed_cursor",
             RecoveryAction::HoldAmbiguous { .. } => "hold_ambiguous",
+            RecoveryAction::ReviewUnbookedFill { .. } => "review_unbooked_fill",
             RecoveryAction::CleanupFailedEntry { .. } => "cleanup_failed_entry",
             RecoveryAction::RestoreLink { .. } => "restore_link",
             RecoveryAction::CloseLink { .. } => "close_link",
@@ -557,6 +573,50 @@ pub fn plan_recovery(inputs: &RecoveryInputs) -> RecoveryPlan {
             intent_id: rec.intent_id.clone(),
             position_id,
             mint: rec.symbol.clone(),
+        });
+    }
+    // The execution reconciler can settle an originally ambiguous intent
+    // without creating the corresponding trade/position. Surface this gap
+    // explicitly rather than assuming confirmation is a booked fill.
+    let records_by_id: HashMap<&str, &ExecutionRecord> = inputs
+        .ledger
+        .iter()
+        .filter(|record| record.module == "copy")
+        .map(|record| (record.intent_id.as_str(), record))
+        .collect();
+    for event in inputs
+        .journal
+        .iter()
+        .filter(|event| event.stage == "AMBIGUOUS")
+    {
+        let Some(intent_id) = event.intent_id.as_deref() else {
+            continue;
+        };
+        let Some(record) = records_by_id.get(intent_id) else {
+            continue;
+        };
+        if !matches!(
+            record.state,
+            ExecutionState::Confirmed | ExecutionState::Reconciled
+        ) {
+            continue;
+        }
+        let position_already_booked = event.side == "buy"
+            && record.signature.as_deref().is_some_and(|signature| {
+                inputs
+                    .positions
+                    .iter()
+                    .any(|position| position.entry_signature.as_deref() == Some(signature))
+            });
+        if position_already_booked {
+            continue;
+        }
+        actions.push(RecoveryAction::ReviewUnbookedFill {
+            intent_id: intent_id.to_string(),
+            signature: record.signature.clone(),
+            side: event.side.clone(),
+            position_id: event.position_id.clone(),
+            mint: event.mint.clone(),
         });
     }
     for p in &open_positions {
@@ -728,6 +788,55 @@ mod tests {
     #[test]
     fn empty_inputs_make_an_empty_plan() {
         assert!(plan_recovery(&RecoveryInputs::default()).is_empty());
+    }
+
+    #[test]
+    fn settled_ambiguous_events_without_booked_fills_need_review() {
+        let mut buy = journal("buy", "A", "leader-1", "mint-1", 1, None);
+        buy.stage = "AMBIGUOUS".into();
+        buy.intent_id = Some("buy-intent".into());
+        let mut sell = journal("sell", "A", "leader-2", "mint-2", 2, Some("position-2"));
+        sell.stage = "AMBIGUOUS".into();
+        sell.intent_id = Some("sell-intent".into());
+        sell.side = "sell".into();
+        let mut failed = journal("failed", "A", "leader-3", "mint-3", 3, None);
+        failed.stage = "AMBIGUOUS".into();
+        failed.intent_id = Some("failed-intent".into());
+        let mut inputs = RecoveryInputs {
+            journal: vec![buy, sell, failed],
+            ledger: vec![
+                ledger(
+                    "buy-intent",
+                    "copy-mint",
+                    "tx-buy",
+                    "mint-1",
+                    ExecutionState::Confirmed,
+                ),
+                ledger(
+                    "sell-intent",
+                    "copy-exit-p",
+                    "tx-sell",
+                    "mint-2",
+                    ExecutionState::Reconciled,
+                ),
+                ledger(
+                    "failed-intent",
+                    "copy-mint",
+                    "tx-failed",
+                    "mint-3",
+                    ExecutionState::Failed,
+                ),
+            ],
+            ..Default::default()
+        };
+        let plan = plan_recovery(&inputs);
+        assert_eq!(plan.count("review_unbooked_fill"), 2);
+        assert!(plan.actions.iter().any(|action| matches!(action, RecoveryAction::ReviewUnbookedFill { intent_id, side, .. } if intent_id == "buy-intent" && side == "buy")));
+        assert!(plan.actions.iter().any(|action| matches!(action, RecoveryAction::ReviewUnbookedFill { intent_id, side, position_id, .. } if intent_id == "sell-intent" && side == "sell" && position_id.as_deref() == Some("position-2"))));
+        inputs
+            .positions
+            .push(position("booked", "mint-1", Some("tx-buy"), Some("A")));
+        assert_eq!(plan_recovery(&inputs).count("review_unbooked_fill"), 1);
     }
 
     #[test]

@@ -21,7 +21,7 @@ position **without selling** because there is nothing to sell.
 | leader status + counters | `copy_leaders` (Postgres) / `MemoryCopyStore` | yes with Postgres; config re-seeds membership either way |
 | processed events (stage, reason, intent, position) | `copy_events` | yes with Postgres |
 | leader ↔ position links | `copy_links` | yes with Postgres |
-| dedup keys | dedup facade (Redis / Postgres) or in-memory | yes with a durable facade; otherwise **re-seeded from `copy_events`** |
+| dedup keys | dedup facade (Redis / Postgres) or in-memory | Subject to backend retention, eviction, persistence and errors; recovery attempts reseeding from `copy_events`. Clustered simulate/live requires shared marks and ignores L1-only reseeding. |
 | ordering cursors | in memory | re-seeded from `copy_events` |
 | execution intents | execution ledger (hydrated from `execution_lifecycle`) + intent journal | yes (generic recovery) |
 | positions | position book (`positions` table) | yes (generic recovery) |
@@ -50,8 +50,9 @@ Plus, always:
 
 * **`SeedDedup`** — every event journaled inside
   `copy.recovery_lookback_hours` has its dedup key re-marked, so a feed
-  backlog replayed after the restart is refused as `DUPLICATE_EVENT` even
-  when the dedup facade is in-memory.
+  backlog can be refused as `DUPLICATE_EVENT` when the relevant mark is
+  retained. Reseeding uses the ordinary facade and may fall back to L1; that
+  fallback does not establish a shared mark for clustered simulate/live.
 * **`SeedCursor`** — each leader's ordering cursor is raised to the newest
   journaled slot, so `strict_ordering` treats the replayed backlog as late,
   not as new.
@@ -162,21 +163,28 @@ select event_id, stage, reject_reason, detail, intent_id, position_id, created_a
 
 **Re-seed dedup after restoring a database backup**
 
-Nothing to do: the next restart re-seeds from `copy_events` within the
-lookback window. To widen the window once, raise
-`copy.recovery_lookback_hours` (or `COPY_RECOVERY_LOOKBACK_HOURS`) before
-the restart.
+Recovery attempts to re-seed from available `copy_events` within the
+lookback window. This is not a guarantee: the backup may omit events, reads or
+shared writes may fail, and ordinary reseeding may fall back to L1, which
+clustered simulate/live does not use as its authoritative decision. Inspect
+recovery logs and reconcile the event journal, ledger and venue before
+resuming. Raising `copy.recovery_lookback_hours` (or
+`COPY_RECOVERY_LOOKBACK_HOURS`) widens the attempted window, not the set of
+records actually present in the backup.
 
 **A leader trade was mirrored twice**
 
-That requires two different `event_id`s for the same swap — i.e. the
-decoder produced different (leader, signature, mint, side) tuples — or two
-replicas without a shared dedup facade and without shared ownership. Check
-`copy_events` for the two rows; check `execution_lifecycle` for the two
-intents (their ids differ only if the mint or side differed). Both
-positions are legitimate book entries; sell one manually if desired. The
-cross-replica guard is the ownership claim `copy:{leader}:{mint}`, which
-requires the shared claim store (DISTRIBUTED.md).
+Different event identities are one possible cause, not a necessary condition.
+The same event can be reconsidered after dedup retention, eviction or data
+loss; ownership is a lease and released claims are reacquirable. Single-mode
+misconfiguration and ambiguous broadcasts also require investigation. The
+processed-event journal upserts by event id, so a single row does not rule out
+multiple attempts. Pause execution and compare `copy_events`, the execution
+ledger, venue/chain signatures and positions; reconcile any ambiguous outcome
+before deciding on manual action. Do not assume that all book entries are
+valid or that selling is automatically safe. See [DISTRIBUTED.md](DISTRIBUTED.md)
+for ownership configuration and [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md)
+for the remaining replay limits.
 
 ---
 

@@ -1,0 +1,38 @@
+Event module attribution unit regression, 2026-11-09 user timezone.
+Prior AppEvent::module returned Sniper for every fill and position; test failed on Copy. Now fill/position use TradeSource: Sniper, Copy, Polymarket map to respective modules; Manual and Risk return None. Test covers fill/update/close for all sources. Search did not establish a production caller of AppEvent::module; no operational/live effect claimed.
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 29.39s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test events::source_attribution_tests::fill_and_position_module_follow_their_actual_source ... FAILED
+
+failures:
+
+---- events::source_attribution_tests::fill_and_position_module_follow_their_actual_source stdout ----
+
+thread 'events::source_attribution_tests::fill_and_position_module_follow_their_actual_source' (1049256) panicked at crates/core/src/events.rs:492:13:
+assertion `left == right` failed: fill source Copy
+  left: Some(Sniper)
+ right: Some(Copy)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    events::source_attribution_tests::fill_and_position_module_follow_their_actual_source
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 678 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --lib`
+EXIT=101
+--- after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 29.86s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test events::source_attribution_tests::fill_and_position_module_follow_their_actual_source ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 678 filtered out; finished in 0.00s
+
+EXIT=0

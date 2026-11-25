@@ -85,6 +85,10 @@ pub struct MockNode {
     methods: Mutex<Vec<String>>,
     last_sent_b64: Mutex<Option<String>>,
     last_sent_sig: Mutex<Option<String>>,
+    transaction_meta_override: Mutex<Option<Value>>,
+    pub pause_multiple_accounts: AtomicBool,
+    pub multiple_accounts_paused: AtomicBool,
+    resume_multiple_accounts: tokio::sync::Notify,
 }
 
 impl Default for MockNode {
@@ -108,6 +112,10 @@ impl Default for MockNode {
             methods: Mutex::new(Vec::new()),
             last_sent_b64: Mutex::new(None),
             last_sent_sig: Mutex::new(None),
+            transaction_meta_override: Mutex::new(None),
+            pause_multiple_accounts: AtomicBool::new(false),
+            multiple_accounts_paused: AtomicBool::new(false),
+            resume_multiple_accounts: tokio::sync::Notify::new(),
         }
     }
 }
@@ -162,6 +170,21 @@ impl MockNode {
 
     pub fn last_sent_signature(&self) -> Option<String> {
         self.last_sent_sig.lock().unwrap().clone()
+    }
+
+    /// Override getTransaction metadata for offline reconciliation fixtures.
+    pub fn set_transaction_meta(&self, metadata: Option<Value>) {
+        *self.transaction_meta_override.lock().unwrap() = metadata;
+    }
+
+    pub fn resume_accounts(&self) {
+        self.pause_multiple_accounts.store(false, Ordering::SeqCst);
+        self.resume_multiple_accounts.notify_one();
+    }
+
+    /// Raw mock-RPC submission, available for offline transaction assertions.
+    pub fn last_sent_transaction_b64(&self) -> Option<String> {
+        self.last_sent_b64.lock().unwrap().clone()
     }
 
     fn account_json(&self, key: &str) -> Value {
@@ -285,14 +308,14 @@ impl MockNode {
                                 "slot": self.slot.load(Ordering::SeqCst),
                                 "blockTime": null,
                                 "transaction": [b64, "base64"],
-                                "meta": {
+                                "meta": self.transaction_meta_override.lock().unwrap().clone().unwrap_or_else(|| json!({
                                     "err": if failed { json!({"InstructionError": [0, {"Custom": 1}]}) } else { Value::Null },
                                     "status": if failed { json!({"Err": {"InstructionError": [0, {"Custom": 1}]}}) } else { json!({"Ok": null}) },
                                     "fee": 5000,
                                     "preBalances": [], "postBalances": [],
                                     "innerInstructions": [], "logMessages": ["Program log: landed"],
                                     "preTokenBalances": [], "postTokenBalances": [], "rewards": []
-                                }
+                                }))
                             })
                         }
                         None => Value::Null,
@@ -334,6 +357,12 @@ pub async fn spawn_mock_node(node: Arc<MockNode>) -> String {
                             Ok(v) => v,
                             Err(_) => return,
                         };
+                        if req["method"] == "getMultipleAccounts"
+                            && node.pause_multiple_accounts.load(Ordering::SeqCst)
+                        {
+                            node.multiple_accounts_paused.store(true, Ordering::SeqCst);
+                            node.resume_multiple_accounts.notified().await;
+                        }
                         let latency = node.latency_ms.load(Ordering::SeqCst);
                         if latency > 0 {
                             tokio::time::sleep(Duration::from_millis(latency)).await;

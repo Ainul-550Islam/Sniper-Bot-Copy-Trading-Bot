@@ -112,7 +112,8 @@ impl TenantPositionWrite {
     /// Guarded close: transition the acting tenant's position from a
     /// live status to `closed` with the terminal fields. The tenant
     /// condition and the live-status guard live INSIDE the UPDATE.
-    /// `Ok(false)` = the position is absent, foreign, or not live.
+    /// Returns tenant-safe `NotFound` for absent/foreign rows and
+    /// `StaleWrite` for an owned row that is no longer live.
     #[allow(clippy::too_many_arguments)]
     pub async fn close(
         &self,

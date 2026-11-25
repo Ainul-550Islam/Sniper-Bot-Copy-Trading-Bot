@@ -1,0 +1,31 @@
+Platform fee surface attribution and arithmetic, 2026-11-09
+Added optional FeeSurface on charge (old JSON remains unattributed), builder method and integration tests of in-memory entry/revenue projections; no durable ledger or execution wiring claimed. Changed HALF-UP arithmetic to i128 before division, correcting overstated fees on huge valid notionals.
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 28.41s
+     Running tests/platform_fee_surfaces.rs (target/debug/deps/platform_fee_surfaces-9893cb523690cb57)
+
+running 3 tests
+test old_serialized_charges_remain_unattributed_instead_of_guessing ... ok
+test surface_posting_projections_reconcile_with_assessed_amounts ... ok
+test valid_policies_never_produce_negative_fees_or_exceed_cap ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 23.69s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 8 tests
+test billing::platform_fee::tests::basis_points_math_is_exact_and_half_up ... ok
+test billing::platform_fee::tests::cap_and_minimum_apply_in_order ... ok
+test billing::platform_fee::tests::charge_entry_is_balanced_and_zero_fee_posts_nothing ... ok
+test billing::platform_fee::tests::default_policies_cover_every_plan_and_are_sane ... ok
+test billing::platform_fee::tests::micros_to_units_is_exact_below_the_fp_boundary ... ok
+test billing::platform_fee::tests::overflow_saturates_instead_of_wrapping ... ok
+test billing::platform_fee::tests::policy_validation_rejects_bad_configs ... ok
+test billing::platform_fee::tests::zero_notional_and_zero_rate_charge_nothing_even_with_minimum ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 674 filtered out; finished in 0.00s
+
+EXIT=0

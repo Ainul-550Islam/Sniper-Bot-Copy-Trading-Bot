@@ -1,0 +1,16 @@
+=== RED: tenant advisory locks collided in the 32-bit hashtext space ===
+-- injection: back to pg_advisory_xact_lock(hashtext(tenant||purpose)) --
+test the_two_key_lock_uses_the_full_64_bit_pair ... FAILED
+
+failures:
+
+--
+thread 'the_two_key_lock_uses_the_full_64_bit_pair' (1496715) panicked at crates/core/tests/tenant_advisory_lock_pg.rs:98:5:
+the colliding tenant is NOT blocked by the two-key form
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+error: test failed, to rerun pass `-p bot-core --test tenant_advisory_lock_pg`

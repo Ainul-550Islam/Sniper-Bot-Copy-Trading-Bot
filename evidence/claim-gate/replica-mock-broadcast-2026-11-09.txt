@@ -1,0 +1,11 @@
+Command: POSTGRES_URL=<local PostgreSQL URL> cargo test -p module-copy --test claim_stress --locked -j 1 postgres_replicas_send_exactly_one_mock_transaction_per_event -- --nocapture
+PostgreSQL 17, eight separate in-process replica states, shared PostgreSQL dedup and claim store, mock JSON-RPC venue, five event rounds. Same-process execution ledger remains shared; no live chain.
+
+     Running tests/claim_stress.rs (target/debug/deps/claim_stress-92135b3ff838fa13)
+
+running 1 test
+test postgres_replicas_send_exactly_one_mock_transaction_per_event ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.63s
+
+EXIT=0

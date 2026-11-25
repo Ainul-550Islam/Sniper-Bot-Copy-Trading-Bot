@@ -1,0 +1,72 @@
+Repository error classification, 2026-11-09.
+Two hermetic regressions: TimedDbError::Conflict converted to retryable Storage, and an intent miss probe timeout was converted to NotFound. Both tests failed before and passed after corrections. Intent probe test injects Timeout into classification helper, not live SQL failure; classification of raw errors remains broad. First compile without swap SIGKILL; this was a resource failure, not test evidence.
+--- conflict before ---
+    Finished `test` profile [unoptimized] target(s) in 24.98s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test trading_repository::repository_error::tests::timed_db_conflict_is_not_retryable_storage ... FAILED
+
+failures:
+
+---- trading_repository::repository_error::tests::timed_db_conflict_is_not_retryable_storage stdout ----
+
+thread 'trading_repository::repository_error::tests::timed_db_conflict_is_not_retryable_storage' (1194805) panicked at crates/core/src/trading_repository/repository_error.rs:139:9:
+assertion failed: matches!(err, RepositoryError::Conflict("trade_id"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    trading_repository::repository_error::tests::timed_db_conflict_is_not_retryable_storage
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 679 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --lib`
+EXIT=101
+--- conflict after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 25.48s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 4 tests
+test trading_repository::repository_error::tests::labels_are_stable_and_closed ... ok
+test trading_repository::repository_error::tests::only_storage_is_retryable ... ok
+test trading_repository::repository_error::tests::timed_db_conflict_is_not_retryable_storage ... ok
+test trading_repository::repository_error::tests::timed_db_errors_become_storage ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 676 filtered out; finished in 0.00s
+
+--- intent before ---
+    Finished `test` profile [unoptimized] target(s) in 25.27s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test trading_repository::intent::write::tests::miss_probe_timeout_is_storage_error_not_not_found ... FAILED
+
+failures:
+
+---- trading_repository::intent::write::tests::miss_probe_timeout_is_storage_error_not_not_found stdout ----
+
+thread 'trading_repository::intent::write::tests::miss_probe_timeout_is_storage_error_not_not_found' (1195099) panicked at crates/core/src/trading_repository/intent/write.rs:156:9:
+assertion failed: matches!(err, RepositoryError::Storage(_))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    trading_repository::intent::write::tests::miss_probe_timeout_is_storage_error_not_not_found
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 680 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --lib`
+EXIT=101
+--- intent after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 25.35s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test trading_repository::intent::write::tests::miss_probe_timeout_is_storage_error_not_not_found ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 680 filtered out; finished in 0.00s
+
+EXIT=0

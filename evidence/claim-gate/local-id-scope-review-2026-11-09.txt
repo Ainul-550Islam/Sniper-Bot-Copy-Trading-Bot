@@ -1,0 +1,55 @@
+Other process-local identifiers source observation, 2026-11-09.
+AppState::next_id uses an in-memory counter initialized at one. Copy record_buy uses it for trade and position ids. Independent AppStates can produce identical ids. Whether specific persistence paths and deployment wiring create consequential overwrite/aliasing requires separate end-to-end review; this evidence does not prove a production collision. The journal-attempt fix deliberately changes only intent ids.
+
+   345	            daily_module_pnl: RwLock::new((today(), HashMap::new())),
+   346	            balances: RwLock::new(Balances::default()),
+   347	            recon_unresolved: RwLock::new(Vec::new()),
+   348	            blocked_symbols: RwLock::new(std::collections::HashSet::new()),
+   349	            replica_id,
+   350	            flags_touched: RwLock::new(HashMap::new()),
+   351	            flags_writer: std::sync::OnceLock::new(),
+   352	            risk_oracle: std::sync::OnceLock::new(),
+   353	            counter: AtomicU64::new(1),
+   354	            dedup: std::sync::OnceLock::new(),
+   355	            orders: std::sync::OnceLock::new(),
+   356	            shutdown: std::sync::OnceLock::new(),
+   357	            ledger,
+   454	            .sum()
+   455	    }
+   456
+   457	    /// `p-1`, `p-2`, … — short, unique, sortable.
+   458	    pub fn next_id(&self, prefix: &str) -> String {
+   459	        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+   460	        format!("{prefix}-{n}")
+   461	    }
+   462
+   463	    // ---------------------------------------------------------- kill switch --
+   464
+   465	    pub fn kill_switch(&self) -> bool {
+   414	            mode: mode.as_str().to_string(),
+   415	            quote_amount: cost_sol,
+   416	            signature: signature.clone(),
+   417	            signer: Some(self.wallet.pubkey.to_string()),
+   418	            attempts: Some(result.attempts),
+   419	            latency_ms: Some(latency_ms),
+   420	        });
+   421
+   460	            ts: Utc::now(),
+   461	            trade: Box::new(trade_rec),
+   462	        });
+   463
+   464	        // ---- Position -----------------------------------------------------
+   465	        let pos_id = self.state.next_id("p");
+   466	        ledger_event.position_id = Some(pos_id.clone());
+   467	        let mut position = Position::new(
+   468	            pos_id.clone(),
+   469	            TradeSource::Copy,
+   470	            venue,
+   471	            mode,
+   472	            event.mint.clone(),
+   473	            display,
+   474	            "SOL".into(),
+   475	        );
+   476	        position.apply_buy(qty, price, cost_sol);
+   477	        position.entry_signature = signature.clone();
+   478	        position.entry_latency_ms = Some(latency_ms);

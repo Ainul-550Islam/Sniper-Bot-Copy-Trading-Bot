@@ -1,0 +1,23 @@
+=== GREEN: analytics + integration-evidence labels measure what they say ===
+--- server api (units contract + router) ---
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 957 filtered out; finished in 0.11s
+
+api_exit=0
+--- trading data plane (analytics + integrations) ---
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 941 filtered out; finished in 0.01s
+
+tdp_exit=0
+--- openapi artifacts + router conformance ---
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+openapi_exit=0
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+
+router_exit=0
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 3m 21s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

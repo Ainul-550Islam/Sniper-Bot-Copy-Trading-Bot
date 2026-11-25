@@ -8,11 +8,8 @@
 //! through the same pipeline as polling, and emits a [`WalletTrade`].
 //! Offline and deterministic.
 //!
-//! TASK 3 regression guard: the feed's `mark_signature_seen` is fetch
-//! suppression only. The emitted trade must still be *fresh* for the
-//! pipeline's one authoritative dedup (`AppState::mark_copy_event_seen`,
-//! `copy_event` namespace) — before TASK 3 the run loop re-marked the `sig`
-//! namespace and every Geyser / polled event was dropped as a duplicate.
+//! Duplicate Geyser notifications can reach the channel, but must be
+//! deduplicated at the separate event-level pipeline boundary.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -227,7 +224,7 @@ async fn geyser_feed_pushes_a_whale_buy_into_the_copy_channel() {
         json!("5failed5failed5failed5failed5failed5failed5failed5failed5failed5fa");
     failed["meta"]["err"] = json!({"InstructionError": [0, {"Custom": 1}]});
 
-    let (addr, received) = spawn_mock_geyser(vec![failed, note]).await;
+    let (addr, received) = spawn_mock_geyser(vec![failed, note.clone(), note]).await;
 
     let mut cfg = Config::default();
     cfg.copy.feed = "transaction_subscribe".into();
@@ -278,14 +275,18 @@ async fn geyser_feed_pushes_a_whale_buy_into_the_copy_channel() {
     assert!((t.sol_amount - 1.5).abs() < 1e-9, "1.5 SOL spent");
     assert!(t.block_time.is_some());
 
-    // The feed marked the signature for fetch suppression (`sig` namespace)…
+    // Repeated notifications are allowed to reach the channel; the event
+    // pipeline, not an early signature mark, determines whether to act.
+    let duplicate = tokio::time::timeout(Duration::from_secs(15), trades.recv())
+        .await
+        .expect("duplicate notification arrived")
+        .expect("channel open");
+    assert_eq!(duplicate.signature, t.signature);
     assert!(
-        !state.mark_signature_seen(sig).await,
-        "the geyser feed marks each decoded signature once"
+        state.mark_signature_seen(sig).await,
+        "copy feed must not consume the shared sig mark"
     );
-    // …which must NOT make the pipeline drop the event: the authoritative
-    // dedup lives in the `copy_event` namespace and sees the event as fresh
-    // exactly once, then as a duplicate.
+    // The separate event namespace sees the first delivery as fresh.
     let event = LeaderTradeEvent::from_wallet_trade(&t, EventSource::TransactionSubscribe, 1);
     assert!(!state.copy_event_seen(&event.dedup_key()).await);
     assert_eq!(
@@ -293,10 +294,12 @@ async fn geyser_feed_pushes_a_whale_buy_into_the_copy_channel() {
         DedupOutcome::Fresh,
         "a geyser-delivered trade is not a duplicate on first processing"
     );
+    let duplicate_event =
+        LeaderTradeEvent::from_wallet_trade(&duplicate, EventSource::TransactionSubscribe, 2);
     assert_eq!(
-        event_dedup::claim(&state, &event).await,
+        event_dedup::claim(&state, &duplicate_event).await,
         DedupOutcome::Duplicate,
-        "…and is decided exactly once"
+        "the event-level pipeline filters the repeat"
     );
     assert_eq!(state.seen_copy_event_count().await, 1);
 
@@ -305,7 +308,7 @@ async fn geyser_feed_pushes_a_whale_buy_into_the_copy_channel() {
         tokio::time::timeout(Duration::from_millis(400), trades.recv())
             .await
             .is_err(),
-        "failed transactions and duplicates must not reach the channel"
+        "the failed transaction must not reach the channel"
     );
 
     // The subscription named the tracked wallet in accountInclude.

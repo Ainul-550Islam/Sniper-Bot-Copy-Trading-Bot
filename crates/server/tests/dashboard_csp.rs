@@ -28,6 +28,7 @@ fn app() -> axum::Router {
         trusted_proxies: Default::default(),
         db: None,
         journal: None,
+        chain_probe: None,
         serve_dashboard: true,
         health: Arc::new(HealthRegistry::new()),
         metrics_enabled: false,

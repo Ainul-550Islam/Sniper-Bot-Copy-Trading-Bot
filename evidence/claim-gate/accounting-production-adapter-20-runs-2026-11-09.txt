@@ -1,0 +1,140 @@
+20 consecutive runs; actual DbLedgerStore, 8 concurrent independent GlobalLedger instances each
+RUN 1
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+RUN 2
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+RUN 3
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+RUN 4
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+RUN 5
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+RUN 6
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+RUN 7
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+RUN 8
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+RUN 9
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+RUN 10
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+RUN 11
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+RUN 12
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+RUN 13
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+RUN 14
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+RUN 15
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+RUN 16
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+RUN 17
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+RUN 18
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+RUN 19
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+RUN 20
+
+running 1 test
+test production_adapter_concurrent_replicas_compare_committed_payload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s

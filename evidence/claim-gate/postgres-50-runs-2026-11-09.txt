@@ -1,0 +1,352 @@
+50 consecutive runs: 8 replicas × 25 events, real PostgreSQL, current workspace-built binary
+RUN 1
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.81s
+
+RUN 2
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.79s
+
+RUN 3
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.72s
+
+RUN 4
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.91s
+
+RUN 5
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.65s
+
+RUN 6
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.72s
+
+RUN 7
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.73s
+
+RUN 8
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.92s
+
+RUN 9
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.71s
+
+RUN 10
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.93s
+
+RUN 11
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.16s
+
+RUN 12
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.93s
+
+RUN 13
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.83s
+
+RUN 14
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.15s
+
+RUN 15
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.85s
+
+RUN 16
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.94s
+
+RUN 17
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.77s
+
+RUN 18
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.81s
+
+RUN 19
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.99s
+
+RUN 20
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.92s
+
+RUN 21
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.74s
+
+RUN 22
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.27s
+
+RUN 23
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.01s
+
+RUN 24
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.91s
+
+RUN 25
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.70s
+
+RUN 26
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.93s
+
+RUN 27
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.89s
+
+RUN 28
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.04s
+
+RUN 29
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.20s
+
+RUN 30
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.98s
+
+RUN 31
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.15s
+
+RUN 32
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.91s
+
+RUN 33
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.93s
+
+RUN 34
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.15s
+
+RUN 35
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.89s
+
+RUN 36
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.72s
+
+RUN 37
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.81s
+
+RUN 38
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.75s
+
+RUN 39
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.10s
+
+RUN 40
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.92s
+
+RUN 41
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.75s
+
+RUN 42
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.67s
+
+RUN 43
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.04s
+
+RUN 44
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.96s
+
+RUN 45
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.13s
+
+RUN 46
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.10s
+
+RUN 47
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.00s
+
+RUN 48
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 1.12s
+
+RUN 49
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.98s
+
+RUN 50
+
+running 1 test
+test n_replicas_same_event_exactly_one_winner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.81s
+
+EXIT=0

@@ -1,0 +1,14 @@
+=== RED: tenant intent reused id silently aliased a different payload ===
+-- injection: record() back to ON CONFLICT DO NOTHING (payload never compared) --
+test a_reused_intent_id_with_a_different_payload_is_refused ... FAILED
+
+failures:
+--
+thread 'a_reused_intent_id_with_a_different_payload_is_refused' (791586) panicked at crates/core/tests/intents_cross_tenant_pg.rs:258:14:
+a different payload under the same id must be refused: ()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `-p bot-core --test intents_cross_tenant_pg`

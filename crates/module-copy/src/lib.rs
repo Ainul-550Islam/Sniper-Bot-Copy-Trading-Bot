@@ -35,6 +35,7 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod balance_observation;
 pub mod event;
 pub mod event_dedup;
 pub mod event_ordering;
@@ -44,6 +45,7 @@ pub mod intent;
 pub mod leader;
 pub mod metrics;
 pub mod mirror;
+pub mod platform_fee;
 pub mod policy;
 pub mod reconcile;
 pub mod recovery;
@@ -176,6 +178,11 @@ pub struct CopyBot {
     /// Durable journal (TASK 3 §09): leaders, processed events, links. The
     /// server injects the Postgres store; the in-memory store is the default.
     store: Arc<dyn CopyStore>,
+    /// The copy journal missed a live ambiguous outcome, or the sweeper had
+    /// an ambiguous exit (which it cannot journal as a copy event). Restart
+    /// loses this process-local latch; it is not shared across replicas and
+    /// does not replace reconciliation.
+    unjournaled_ambiguity: Arc<std::sync::atomic::AtomicBool>,
     /// Monotonic delivery counter handed to events as `source_sequence`.
     sequence: u64,
     /// Tenant execution context (PROMPT 4/10 §C). When present, every
@@ -239,6 +246,7 @@ impl CopyBot {
             leaders: Arc::new(RwLock::new(leaders)),
             ordering: OrderingTracker::new(cfg.copy.strict_ordering),
             store: Arc::new(MemoryCopyStore::new()),
+            unjournaled_ambiguity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sequence: 0,
             tenant: None,
             tenant_guard: None,
@@ -292,6 +300,17 @@ impl CopyBot {
         self.tenant = Some(guard.context().clone());
         self.tenant_guard = Some(guard);
         Ok(self)
+    }
+
+    /// The tenant broadcast guard this bot submits through.
+    ///
+    /// Exposed so callers (and tests) can see WHICH gate their orders pass:
+    /// with a live runtime fence attached, a rotation is caught at broadcast
+    /// time; without one, only the captured signing context is checked.
+    pub fn tenant_guard(
+        &self,
+    ) -> Option<&Arc<solana_kit::tenant_broadcast_guard::TenantBroadcastGuard>> {
+        self.tenant_guard.as_ref()
     }
 
     /// The bound tenant context, when tenant-scoped.
@@ -517,6 +536,20 @@ impl CopyBot {
                         ),
                     );
                 }
+                RecoveryAction::ReviewUnbookedFill {
+                    intent_id,
+                    signature,
+                    side,
+                    position_id,
+                    mint,
+                } => {
+                    let detail = format!(
+                        "settled intent {intent_id}, side {side}, signature {signature:?}, position {position_id:?}; actual fill and fee need independent reconciliation"
+                    );
+                    warn!(%intent_id, %side, %mint, ?signature, ?position_id, "copy settled intent has unresolved bookkeeping");
+                    self.state.record_error(BotModule::Copy, &detail).await;
+                    audit::publish_recovery(&self.state, action.as_str(), mint, &detail);
+                }
                 RecoveryAction::CleanupFailedEntry {
                     position_id,
                     signature,
@@ -589,11 +622,27 @@ impl CopyBot {
     pub async fn reconcile_once(&mut self, cfg: &Config) -> ReconReport {
         let links = self.store.open_links().await.unwrap_or_default();
         let lookback = cfg.copy.recovery_lookback_hours.max(1);
-        let activity = self
+        let activity_result = self
             .store
             .events_since(Utc::now() - Duration::hours(lookback), 10_000)
-            .await
-            .unwrap_or_default();
+            .await;
+        // A full page may omit an ambiguous exit. Do not treat a truncated
+        // scan as proof that auto-exit is safe, even when the store responded.
+        let journal_complete = activity_result
+            .as_ref()
+            .is_some_and(|events| events.len() < 10_000);
+        if !journal_complete {
+            warn!(
+                "copy event journal unavailable or scan limit reached: reconciliation auto-exit disabled for this pass"
+            );
+            self.state
+                .record_error(
+                    BotModule::Copy,
+                    "copy reconciliation journal unavailable or scan limit reached; auto-exit disabled",
+                )
+                .await;
+        }
+        let activity = activity_result.unwrap_or_default();
         let positions = self.copy_positions().await;
         let leader_status: HashMap<String, leader::LeaderStatus> = self
             .leaders
@@ -615,7 +664,12 @@ impl CopyBot {
             activity,
             leader_status,
             ledger,
-            auto_exit: cfg.copy.reconcile_auto_exit && cfg.copy.mirror_exits,
+            auto_exit: cfg.copy.reconcile_auto_exit
+                && cfg.copy.mirror_exits
+                && journal_complete
+                && !self
+                    .unjournaled_ambiguity
+                    .load(std::sync::atomic::Ordering::SeqCst),
         });
         for finding in &report.findings {
             metrics::count_recon_finding(finding.kind.as_str());
@@ -699,7 +753,7 @@ impl CopyBot {
         };
         let mut permit = match bot_core::ownership::Permit::acquire(
             self.ownership.as_deref(),
-            format!("exit:{}:recon_exit", position.id),
+            crate::intent::exit_claim_id(&position.id),
             "exit",
             "copy",
             "recon_exit",
@@ -733,7 +787,22 @@ impl CopyBot {
         )
         .await;
         match res {
-            Ok(()) => {
+            Ok(exit::ExitOutcome::Ambiguous {
+                intent_id,
+                signature,
+            }) => {
+                audit::publish_recon(
+                    &self.state,
+                    "mirror_exit_ambiguous",
+                    &finding.leader,
+                    &finding.mint,
+                    &format!("exit {intent_id} may have landed; signature {signature:?}; reconciliation required"),
+                );
+            }
+            Ok(exit::ExitOutcome::Noop) => {
+                warn!(position = %position.id, "reconciliation exit had no sellable quantity");
+            }
+            Ok(exit::ExitOutcome::Filled) => {
                 if self
                     .state
                     .find_open(BotModule::Copy, &position.symbol)
@@ -804,7 +873,8 @@ impl CopyBot {
             self.intents.clone(),
             self.ownership.clone(),
         )
-        .await;
+        .await
+        .with_journal_guard(self.store.clone(), self.unjournaled_ambiguity.clone());
         // Tenant mode (PROMPT 4/10 §C): the sweeper builds its OWN
         // executor, so the tenant broadcast guard must be attached here
         // too — an unguarded sweeper would be a tenant-boundary hole.

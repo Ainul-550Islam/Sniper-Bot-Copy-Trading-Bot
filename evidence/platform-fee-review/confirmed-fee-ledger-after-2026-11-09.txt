@@ -1,0 +1,18 @@
+   Compiling solana-account-decoder-client-types v2.3.13 (/home/user/repo/vendor/solana-account-decoder-client-types)
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-transaction-status-client-types v2.3.13
+   Compiling solana-rpc-client-types v2.3.13
+   Compiling solana-rpc-client-api v2.3.13
+   Compiling solana-account-decoder v2.3.13 (/home/user/repo/vendor/solana-account-decoder)
+   Compiling solana-transaction-status v2.3.13
+   Compiling solana-rpc-client v2.3.13
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 44.36s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-570a5bc57b5a34ad)
+
+running 1 test
+test confirmed_curve_buy_and_sell_audit_verified_fee_leg ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.03s

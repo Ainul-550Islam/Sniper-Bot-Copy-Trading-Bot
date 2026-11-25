@@ -1,0 +1,44 @@
+=== GREEN: HA cursor fencing + advance-then-acknowledge ===
+--- core HA unit suite ---
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 672 filtered out; finished in 0.01s
+
+core_ha_exit=0
+--- distributed HA suite ---
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+ha_distributed_exit=0
+--- real-Postgres cursor fencing ---
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+ha_cursor_pg_exit=0
+--- module-polymarket + module-copy unit suites ---
+test result: ok. 79 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+test result: ok. 185 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+modules_exit=0
+--- clippy / fmt / diff ---
+   = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `bot-core` (lib) due to 1 previous error
+clippy_exit=101
+fmt_exit=1
+diff_check_exit=0
+--- clippy re-run after the two code fixes ---
+
+error: could not compile `bot-core` (lib test) due to 1 previous error
+clippy_exit=101
+fmt_exit=0
+diff_check_exit=0
+--- re-run of every gate after the two code fixes ---
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 672 filtered out; finished in 0.01s
+
+core_ha_exit=0
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+ha_distributed_exit=0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+ha_cursor_pg_exit=0
+    Finished `dev` profile [unoptimized] target(s) in 1.19s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

@@ -7,7 +7,7 @@
 mod trading_isolation_common;
 
 use bot_core::trading_repository::worker_claim::{ClaimDecision, TenantWorkerClaimRepo};
-use chrono::Duration;
+use chrono::{DateTime, Duration};
 
 use trading_isolation_common::{org, read_scope, run_id, setup, write_scope};
 
@@ -206,7 +206,7 @@ async fn lapsed_lane_sweep_never_crosses_tenants() {
 
     // B cannot force-release A's A-only lane (0 rows, no error leak).
     assert!(!lanes
-        .force_release_lapsed(&write_scope(b), &a_only, as_of)
+        .force_release_lapsed(&write_scope(b), &a_only)
         .await
         .unwrap());
 
@@ -253,6 +253,136 @@ async fn lapsed_lane_sweep_never_crosses_tenants() {
     assert_eq!(cb.previous_leader.as_deref(), Some("rep-1"));
     assert!(!lanes
         .verify(&write_scope(b), &short, "rep-1", 1, chrono::Utc::now())
+        .await
+        .unwrap());
+}
+
+/// The lane clock is the DATABASE's. A replica whose local clock is fast can
+/// neither extend its own lease past its real expiry, verify a lane it does
+/// not hold, force-release (or sweep) a peer lane that is still live.
+///
+/// This is the regression the source review flagged: acquisition used `now()`
+/// while renewal/verification/force-release accepted a caller instant.
+#[tokio::test]
+async fn a_skewed_caller_clock_cannot_extend_verify_or_sweep_a_lane() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: workers_cross_tenant_pg — POSTGRES_URL missing");
+        return;
+    };
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    let run = run_id();
+    let a = org(&db, &format!("skew-a-{run}")).await;
+    let lanes = TenantWorkerClaimRepo::new(db.clone());
+    let purpose = format!("skew-{run}");
+    let live = lanes
+        .acquire(&write_scope(a), &purpose, "rep-a1", Duration::seconds(30))
+        .await
+        .unwrap();
+    let ClaimDecision::Acquired(claim) = live else {
+        panic!("the lane must be acquired");
+    };
+
+    // A wildly FUTURE local clock (one hour ahead) is clamped to the DB clock.
+    let far_future = Utc::now() + ChronoDuration::hours(1);
+    assert!(
+        lanes
+            .verify(
+                &write_scope(a),
+                &purpose,
+                "rep-a1",
+                claim.generation,
+                far_future
+            )
+            .await
+            .unwrap(),
+        "the live holder still verifies"
+    );
+    assert!(
+        !lanes
+            .verify(
+                &write_scope(a),
+                &purpose,
+                "impostor",
+                claim.generation,
+                far_future
+            )
+            .await
+            .unwrap(),
+        "a different leader name never verifies, however new the caller's clock"
+    );
+    // The clamp means "expired at far_future" is NOT accepted as truth: the
+    // lane is live at the database clock, so a lapsed query at +1h must not
+    // treat it as lapsed… unless the database itself says so. Assert the
+    // database agrees the lane is live right now.
+    let db_now = lanes.db_now().await.unwrap();
+    let lapsed = lanes.lapsed_lanes(&read_scope(a), db_now).await.unwrap();
+    assert!(
+        !lapsed.iter().any(|l| l.purpose == purpose),
+        "a live lane is not lapsed at the database clock"
+    );
+    // An operator asking "what will have lapsed in an hour" still gets the
+    // lane (the caller's later instant is honoured)…
+    let lapsed_later = lanes
+        .lapsed_lanes(&read_scope(a), far_future)
+        .await
+        .unwrap();
+    assert!(
+        lapsed_later.iter().any(|l| l.purpose == purpose),
+        "a later as_of is honoured for operator planning"
+    );
+    // …but a sweep cannot use that to release a lane the database says is live.
+    let released = lanes.sweep_lapsed(&write_scope(a)).await.unwrap();
+    assert!(
+        !released.contains(&purpose),
+        "sweep uses the database clock, not the caller's: {released:?}"
+    );
+    assert!(
+        !lanes
+            .force_release_lapsed(&write_scope(a), &purpose)
+            .await
+            .unwrap(),
+        "force-release judges lapsedness at the database clock, which says live"
+    );
+    let cur = lanes
+        .current(&write_scope(a), &purpose)
+        .await
+        .unwrap()
+        .expect("lane row");
+    assert!(!cur.released, "the live lane survived every skewed call");
+
+    // A renewal with a stale (far past) instant is still a REAL renewal: the
+    // database clock decides, so the lease stays alive.
+    assert!(
+        lanes
+            .renew(
+                &write_scope(a),
+                &purpose,
+                "rep-a1",
+                claim.generation,
+                Duration::seconds(5),
+                DateTime::<Utc>::MIN_UTC,
+            )
+            .await
+            .unwrap(),
+        "a past instant is replaced by the database clock, not rejected"
+    );
+    let again = lanes
+        .current(&write_scope(a), &purpose)
+        .await
+        .unwrap()
+        .expect("lane row");
+    assert!(again.lease_until > db_now, "the renewal moved the expiry");
+
+    // A stale generation still cannot renew, whatever the clock says.
+    assert!(!lanes
+        .renew_now(
+            &write_scope(a),
+            &purpose,
+            "rep-a1",
+            claim.generation - 1,
+            Duration::seconds(5),
+        )
         .await
         .unwrap());
 }

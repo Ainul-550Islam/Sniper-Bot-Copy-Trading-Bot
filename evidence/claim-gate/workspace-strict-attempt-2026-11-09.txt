@@ -1,0 +1,12 @@
+Local rerun after strict shared-dedup change, 2026-11-09.
+Command: cargo test --workspace --locked -j 1 -- --test-threads=1
+Disposable PostgreSQL and Redis, CI-like environment; credentials omitted.
+INCOMPLETE: manually stopped during server compilation after the sandbox became unresponsive under memory pressure (no swap); no workspace test result is claimed.
+
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)

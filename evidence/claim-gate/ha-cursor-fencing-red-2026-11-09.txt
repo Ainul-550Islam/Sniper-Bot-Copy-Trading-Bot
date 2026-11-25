@@ -1,0 +1,17 @@
+=== RED: HA cursor writes were a blind upsert (no fencing, no acknowledgement) ===
+-- injection 1: save_cursor upserts unconditionally (the pre-fix write)
+-- injection 2: offer() records the advance as already acknowledged
+test ha::cursor::tests::an_advance_is_pending_until_acknowledged ... FAILED
+test ha::runtime::tests::a_stale_generation_cannot_advance_a_cursor_and_a_takeover_replays ... FAILED
+test ha::runtime::tests::cursors_persist_suppress_duplicates_and_report_gaps ... FAILED
+test ha::store::tests::cursor_store_refuses_fenced_and_stale_writes_and_acks ... FAILED
+thread 'ha::cursor::tests::an_advance_is_pending_until_acknowledged' (3812092) panicked at crates/core/src/ha/cursor.rs:768:9:
+thread 'ha::runtime::tests::a_stale_generation_cannot_advance_a_cursor_and_a_takeover_replays' (3812112) panicked at crates/core/src/ha/runtime.rs:1394:9:
+thread 'ha::runtime::tests::cursors_persist_suppress_duplicates_and_report_gaps' (3812113) panicked at crates/core/src/ha/runtime.rs:1334:9:
+thread 'ha::store::tests::cursor_store_refuses_fenced_and_stale_writes_and_acks' (3812121) panicked at crates/core/src/ha/store.rs:723:9:
+test result: FAILED. 37 passed; 4 failed; 0 ignored; 0 measured; 672 filtered out; finished in 0.01s
+---
+-- real Postgres witness against the blind upsert --
+test cursor_rows_are_fenced_monotonic_and_replayable ... FAILED
+thread 'cursor_rows_are_fenced_monotonic_and_replayable' (3812182) panicked at crates/core/tests/ha_cursor_fencing_pg.rs:58:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s

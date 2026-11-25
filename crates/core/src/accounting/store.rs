@@ -44,12 +44,34 @@ pub trait LedgerStore: Send + Sync {
     async fn record_event(&self, stored: &StoredEvent, entry: &Entry) -> Option<bool>;
     /// Every journaled event in append order (`None` = unavailable).
     async fn load_events(&self) -> Option<Vec<StoredEvent>>;
+    /// Look up one event. Outer `None` means unavailable; `Some(None)` means
+    /// absent. Stores can override the fallback with an indexed lookup.
+    async fn load_event(&self, event_id: &str) -> Option<Option<StoredEvent>> {
+        let rows = self.load_events().await?;
+        let mut matching = rows.into_iter().filter(|row| row.event_id == event_id);
+        let first = matching.next();
+        if matching.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
     /// Upsert one aggregated-position snapshot (derived, informational).
     async fn upsert_position(&self, position: &BookPosition) -> bool;
     /// Append one accounting reconciliation finding.
     async fn append_finding(&self, finding: &AccountingFinding) -> bool;
     /// Recent findings, newest first (`None` = unavailable).
     async fn recent_findings(&self, limit: usize) -> Option<Vec<AccountingFinding>>;
+    /// The POSTINGS recorded for one event, in `seq` order.
+    ///
+    /// `None` = unavailable (the caller must not treat that as "no postings"),
+    /// `Some(None)` = the event has no journaled entry.
+    ///
+    /// This is what lets a replica price a slice from what the journal
+    /// COMMITTED instead of from its own possibly-stale book. Stores that cannot
+    /// answer keep a conservative default.
+    async fn load_entry(&self, _event_id: &str) -> Option<Option<Entry>> {
+        None
+    }
 }
 
 /// In-memory journal (tests, no-DB runs). Same semantics as the Postgres
@@ -139,6 +161,13 @@ impl LedgerStore for MemoryLedgerStore {
             .await
             .insert(stored.event_id.clone(), entry.clone());
         Some(true)
+    }
+
+    async fn load_entry(&self, event_id: &str) -> Option<Option<Entry>> {
+        if self.is_unavailable() {
+            return None;
+        }
+        Some(self.entries.read().await.get(event_id).cloned())
     }
 
     async fn load_events(&self) -> Option<Vec<StoredEvent>> {

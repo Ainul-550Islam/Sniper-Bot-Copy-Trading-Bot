@@ -1,0 +1,21 @@
+Silent duplicate trade id PostgreSQL witness, 2026-11-09.
+Repository append returns Ok for same payload retry, distinct same-tenant payload with same id, and another tenant with same id. DB retains original A row only; distinct changed fills do not appear, with no error. This test deliberately asserts existing defective behavior; 10/10 passing does NOT mean this defect is fixed. Deployment wiring and live funded execution not demonstrated. Existing global TradeRepo uses same DO NOTHING pattern, not independently exercised here. Designing conflict handling must preserve retry semantics, avoid tenant-existence leaks, account for concurrent transactions and historical data.
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 19.66s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-2172416d723dc0d8)
+
+running 10 tests
+test colliding_legacy_position_ids_can_mix_distinct_positions ... ok
+test cross_tenant_position_id_collision_cannot_mutate ... ok
+test daily_risk_pnl_excludes_future_utc_days ... ok
+test deployment_open_position_read_includes_more_than_5000 ... ok
+test independent_states_persist_distinct_position_ids ... ok
+test legacy_trade_id_collision_silently_drops_distinct_fill ... ok
+test polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fills ... ok
+test positions_trades_balances_isolation_and_pnl_exclusion ... ok
+test risk_exposure_fails_closed_when_positions_use_an_unexpected_quote_unit ... ok
+test tenant_trade_rejects_foreign_or_missing_position ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s
+
+EXIT=0

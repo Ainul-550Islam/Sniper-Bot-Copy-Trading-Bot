@@ -78,8 +78,9 @@ pub(crate) fn finding(bus: &EventBus, f: &AccountingFinding) {
     );
 }
 
-/// One recovery action.
-pub(crate) fn recovery(bus: &EventBus, action: &str, detail: &str) {
+/// One recovery action. Public so the maintenance worker can record a
+/// journal-conflict repair in the same audit stream.
+pub fn recovery(bus: &EventBus, action: &str, detail: &str) {
     publish(
         bus,
         format!("global.recovery.{action}"),

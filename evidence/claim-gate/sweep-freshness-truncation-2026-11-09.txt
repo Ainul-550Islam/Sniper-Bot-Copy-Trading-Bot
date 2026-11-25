@@ -1,0 +1,53 @@
+# Gap #78 follow-up — the operator sweep hid fresh lapses and never said it truncated (2026-11-09)
+
+## How it was found
+Not by a targeted run. The gap #31 change un-ignored
+crates/core/tests/broadcast_reservation_sweep_pg.rs, so it began running inside the full
+workspace sweep — where the shared database is NOT empty — and it failed:
+  the lapsed claim must be visible to the sweep: ["copy:wallet:retry-…", "copy:wallet:lapsed-…", …]
+Ten older lapsed rows filled the 10-row page; the claim that had just lapsed was not in it.
+The test had been 'passing' for as long as it ran only on a fresh database.
+
+## Defect
+BroadcastReservationRepo::ambiguous — the read behind GET /api/accounting/reservation-sweep —
+still had the exact shape gap #78 removed everywhere else:
+  ORDER BY lease_until ASC, trade_key ASC   -- oldest lapse first
+  LIMIT $2                                  -- bare cap
+The API default is limit=100, so an operator on a deployment with >100 ambiguous claims saw
+only its oldest, already-reviewed history and never the fresh lapse that actually needed a
+decision, with no indication that anything was missing. lapsed_page had been fixed to
+newest-first with has_more/total_remaining/next_cursor; the operator-facing read had not.
+
+## Fix
+crates/core/src/db/repo.rs
+  + AmbiguousReservationPage { items, has_more, total_remaining, next_cursor }
+  + ambiguous_page(limit, cursor)  -> ORDER BY lease_until DESC, trade_key DESC,
+                                      keyset cursor, page_size + 1 probe, total count
+  + ambiguous(limit)               -> first page of the above, TRUNCATED warn on has_more
+crates/server/src/recon.rs
+  + ReservationSweep { truncated, total_remaining, next_cursor } — the operator response now
+    states that more claims exist and carries the cursor to walk them
+  + ReservationSweepService::scan_from(limit, cursor); scan(limit) = scan_from(limit, None)
+
+## Witness
+crates/core/tests/broadcast_reservation_sweep_pg.rs::the_sweep_shows_the_freshest_lapse_first_and_admits_truncation
+  three long-lapsed claims, then one that lapses now; a ONE-row page must return the fresh one,
+  report has_more + a deployment-wide total, and the cursor must move to a non-overlapping row.
+
+RED (old ordering re-injected):
+  assertion `left == right` failed: the freshest lapse is what an operator sees first
+    left: "copy:wallet:live-2416530-1795312903465004014"      <- an old row
+   right: "copy:wallet:fresh-2439606-1795315551229228178"     <- the fresh lapse
+  test result: FAILED. 1 passed; 1 failed
+
+GREEN: 2 passed; 0 failed (both tests in the target); clippy -D warnings clean; fmt/diff 0.
+
+## Also resolved by this cycle
+The pre-existing test in the same file now runs in the shared sweep too, and passes on a
+database full of stale rows — the property it was meant to assert.
+
+## Residual
+-  keeps its old signature for existing callers; it logs a TRUNCATED warning but
+  a caller that needs completeness must walk ambiguous_page (the API does expose the cursor).
+- The sweep is still one page per request by design; no server-side auto-walk was added.
+- No change to the resolve/CAS path: fencing identity is unchanged.

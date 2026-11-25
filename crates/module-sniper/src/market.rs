@@ -1408,10 +1408,14 @@ async fn load_jupiter(
     }
     // Atomic platform fee, aggregator path (GAP-MAP P1): Jupiter deducts
     // the fee inside its own program when the quote carries it.
-    let quote_request = solana_kit::fee_transfer::apply_jupiter_fee(
+    let (quote_request, _) = solana_kit::fee_transfer::prepare_jupiter_fee_request(
+        rpc,
         QuoteRequest::new(*WSOL_MINT, *mint, trade_lamports),
         platform_fee,
-    );
+        trade_lamports,
+    )
+    .await
+    .map_err(|e| MarketError::unavailable(format!("jupiter platform fee: {e}")))?;
     let _ = cfg; // reserved for future venue-specific quote policy
     let quote = Jupiter::new()
         .quote(&quote_request)

@@ -1,0 +1,24 @@
+   Compiling solana-rpc-client v2.3.13
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 42.69s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-85ff6589a8b0fe0c)
+
+running 1 test
+
+thread 'confirmed_curve_buy_and_sell_audit_verified_fee_leg' (3069823) panicked at crates/module-copy/tests/copy_platform_fee.rs:474:9:
+assertion `left == right` failed: a verified direct fee must produce exactly one ledger fee event per confirmed transaction
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test confirmed_curve_buy_and_sell_audit_verified_fee_leg ... FAILED
+
+failures:
+
+failures:
+    confirmed_curve_buy_and_sell_audit_verified_fee_leg
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p module-copy --test copy_platform_fee`

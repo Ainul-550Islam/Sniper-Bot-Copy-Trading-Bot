@@ -1,0 +1,40 @@
+=== GREEN: operator sweep for ambiguous pre-broadcast reservations ===
+--- core db repo (reservation unit/DB integration) ---
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 697 filtered out; finished in 0.00s
+
+core_db_repo_exit=0
+--- core recovery (IntentSink contract) ---
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 687 filtered out; finished in 0.00s
+
+core_recovery_exit=0
+--- server recon module (sweep service) ---
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 982 filtered out; finished in 0.00s
+
+server_recon_exit=0
+--- server api module (routes + RBAC) ---
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 950 filtered out; finished in 0.10s
+
+server_api_exit=0
+--- openapi artifact ---
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+openapi_exit=0
+--- real PostgreSQL sweep (fenced CAS) ---
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.21s
+
+pg_sweep_exit=0
+--- existing reservation DB integration ---
+test broadcast_reservation_takeover_bumps_the_epoch_and_fences_the_old_owner ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 1.43s
+
+db_integration_reservation_exit=0
+--- fmt / diff ---
+fmt_exit=0
+diff_check_exit=0

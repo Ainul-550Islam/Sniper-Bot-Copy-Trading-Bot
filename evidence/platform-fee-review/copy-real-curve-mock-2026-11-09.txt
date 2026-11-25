@@ -1,0 +1,18 @@
+COMMAND: cargo test -p module-copy --test copy_platform_fee --locked -j 1 -- --test-threads=1 --nocapture
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 4.82s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-85ff6589a8b0fe0c)
+
+running 8 tests
+test built_signed_transaction_contains_fee_transfer_for_buy_and_sell ... ok
+test buy_and_sell_prepare_atomic_sol_transfer_and_audit ... ok
+test curve_pipeline_skips_disabled_and_dust_fees_without_fee_transfer ... ok
+test dust_and_disabled_are_audited_without_instruction ... ok
+test invalid_jupiter_account_is_audited_as_rejected_for_each_actor ... ok
+test invalid_vault_cannot_silently_drop_a_due_fee ... ok
+test jupiter_fee_account_must_be_initialized_wsol_token_account ... ok
+test real_copy_curve_pipeline_builds_fee_leg_for_buy_and_sell_on_mock_rpc ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+EXIT=0

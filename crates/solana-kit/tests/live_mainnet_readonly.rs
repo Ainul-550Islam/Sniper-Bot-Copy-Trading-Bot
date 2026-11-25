@@ -1,12 +1,12 @@
 //! LIVE read-only Solana **mainnet-beta** integration through this crate's own
 //! RPC client — not a mock, not a recorded fixture.
 //!
-//! `#[ignore]`d by default because it needs the public internet and a
-//! mainnet-beta RPC endpoint. Run it explicitly:
+//! It needs the public internet and a mainnet-beta RPC endpoint. Without them it
+//! prints SKIPPED and returns (no `#[ignore]` gate — gap #31). Run it for real:
 //!
 //! ```text
 //! SOLANA_LIVE_RPC=https://api.mainnet-beta.solana.com \
-//!   cargo test -p solana-kit --test live_mainnet_readonly -- --ignored --nocapture --test-threads=1
+//!   cargo test -p solana-kit --test live_mainnet_readonly -- --nocapture --test-threads=1
 //! ```
 //!
 //! Everything asserted here is read-only: `getVersion`, `getSlot`,
@@ -101,7 +101,6 @@ async fn settle() {
 }
 
 #[tokio::test]
-#[ignore = "requires the public internet + a mainnet-beta RPC endpoint (SOLANA_LIVE_RPC)"]
 async fn live_mainnet_health_version_and_slot() {
     let Some(rpc) = live_rpc() else { return };
 
@@ -137,7 +136,6 @@ async fn live_mainnet_health_version_and_slot() {
 }
 
 #[tokio::test]
-#[ignore = "requires the public internet + a mainnet-beta RPC endpoint (SOLANA_LIVE_RPC)"]
 async fn live_mainnet_blockhash_is_real_and_valid() {
     let Some(rpc) = live_rpc() else { return };
     let cached = retrying("getLatestBlockhash", || rpc.latest_blockhash(false)).await;
@@ -156,7 +154,6 @@ async fn live_mainnet_blockhash_is_real_and_valid() {
 }
 
 #[tokio::test]
-#[ignore = "requires the public internet + a mainnet-beta RPC endpoint (SOLANA_LIVE_RPC)"]
 async fn live_mainnet_reads_the_real_usdc_mint() {
     let Some(rpc) = live_rpc() else { return };
     let mint: Pubkey = USDC_MINT.parse().expect("USDC mint address");
@@ -194,7 +191,6 @@ async fn live_mainnet_reads_the_real_usdc_mint() {
 }
 
 #[tokio::test]
-#[ignore = "requires the public internet + a mainnet-beta RPC endpoint (SOLANA_LIVE_RPC)"]
 async fn live_mainnet_balances_and_fees_are_real_numbers() {
     let Some(rpc) = live_rpc() else { return };
     let mint: Pubkey = USDC_MINT.parse().expect("mint");

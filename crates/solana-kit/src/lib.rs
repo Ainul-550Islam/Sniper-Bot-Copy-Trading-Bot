@@ -23,6 +23,8 @@
 //! repaired from a *known-good* transaction instead of by editing code.
 
 pub mod cache;
+pub mod confirmed_balances;
+pub mod confirmed_fee;
 pub mod consts;
 pub mod decode;
 pub mod events;

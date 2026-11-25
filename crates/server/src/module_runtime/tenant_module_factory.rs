@@ -109,13 +109,97 @@ impl ModuleEngine {
 /// Build tenant-bound module engines over the tenant repositories.
 pub struct TenantModuleFactory {
     db: Arc<Database>,
+    /// Replacement fence, for callers that hold a different registry (tests
+    /// over an in-memory store, or a shared service instance). `None` is the
+    /// NORMAL case: the factory builds the fence itself over `db`.
+    fence_override: Option<Arc<crate::runtime_registry::service::RuntimeRegistryFence>>,
+    /// The implicitly built fence, memoised so every engine of one factory
+    /// shares a single registry handle.
+    fence_built: std::sync::OnceLock<Arc<crate::runtime_registry::service::RuntimeRegistryFence>>,
+    /// Replacement signer-binding source (tests). `None` = built over `db`.
+    signer_override: Option<Arc<crate::tenant::registry::RegistrySignerProbe>>,
+    /// The implicitly built signer source, memoised like the fence.
+    signer_built: std::sync::OnceLock<Arc<crate::tenant::registry::RegistrySignerProbe>>,
 }
 
 impl TenantModuleFactory {
     /// A factory over an ATTACHED database (the same handle the
     /// trading data plane serves reads from).
+    ///
+    /// Engines built here get a LIVE runtime fence automatically: the fence is
+    /// built over this same database's runtime registry. A worker that is no
+    /// longer the tenant's current live runtime is refused at broadcast time
+    /// (`runtime_fenced`), so correctness does not depend on a boot step
+    /// remembering to opt in.
     pub fn new(db: Arc<Database>) -> Self {
-        TenantModuleFactory { db }
+        TenantModuleFactory {
+            db,
+            fence_override: None,
+            fence_built: std::sync::OnceLock::new(),
+            signer_override: None,
+            signer_built: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Use a DIFFERENT registry than the one over [`Self::db`] (tests over an
+    /// in-memory store, or a service instance shared with the caller).
+    #[must_use]
+    pub fn with_runtime_fence(
+        mut self,
+        fence: Arc<crate::runtime_registry::service::RuntimeRegistryFence>,
+    ) -> Self {
+        self.fence_override = Some(fence);
+        self
+    }
+
+    /// The live fence engines should carry.
+    pub fn runtime_fence(&self) -> &Arc<crate::runtime_registry::service::RuntimeRegistryFence> {
+        if let Some(fence) = &self.fence_override {
+            return fence;
+        }
+        self.fence_built.get_or_init(|| {
+            use crate::runtime_registry::{
+                service::RuntimeRegistryFence, PgRuntimeStore, RuntimeRegistryService,
+            };
+            Arc::new(RuntimeRegistryFence::new(Arc::new(
+                RuntimeRegistryService::new(Arc::new(PgRuntimeStore::new(self.db.clone()))),
+            )))
+        })
+    }
+
+    /// Use a DIFFERENT signer-binding source (tests).
+    #[must_use]
+    pub fn with_signer_probe(
+        mut self,
+        probe: Arc<crate::tenant::registry::RegistrySignerProbe>,
+    ) -> Self {
+        self.signer_override = Some(probe);
+        self
+    }
+
+    /// The live signer-binding source engines should carry: the durable
+    /// `tenant_bindings` registry, so a binding revoked after issuance is caught
+    /// at the next broadcast instead of at the next restart.
+    pub fn signer_probe(&self) -> &Arc<crate::tenant::registry::RegistrySignerProbe> {
+        if let Some(probe) = &self.signer_override {
+            return probe;
+        }
+        self.signer_built.get_or_init(|| {
+            Arc::new(crate::tenant::registry::RegistrySignerProbe::new(Arc::new(
+                crate::tenant::registry::PgTenantBindingRegistry::new(self.db.clone()),
+            )))
+        })
+    }
+
+    /// Every live source an engine should carry, as the guard's interfaces.
+    fn liveness(&self) -> solana_kit::tenant_broadcast_guard::LivenessProbes {
+        let fence: Arc<dyn solana_kit::tenant_broadcast_guard::RuntimeFenceProbe> =
+            self.runtime_fence().clone();
+        let signer: Arc<dyn solana_kit::tenant_broadcast_guard::SignerBindingProbe> =
+            self.signer_probe().clone();
+        solana_kit::tenant_broadcast_guard::LivenessProbes::default()
+            .with_fence(fence)
+            .with_signer(signer)
     }
 
     /// The database this factory writes through.
@@ -182,8 +266,13 @@ impl TenantModuleFactory {
         context: TenantExecutionContext,
     ) -> BotResult<module_sniper::tenant_executor::TenantSniperExecutor> {
         let write = self.write_scope(context.organization_id())?;
-        let executor = module_sniper::tenant_executor::TenantSniperExecutor::new(
-            state, rpc, wallet, signers, context,
+        let executor = module_sniper::tenant_executor::TenantSniperExecutor::new_with_fence(
+            state,
+            rpc,
+            wallet,
+            signers,
+            context,
+            self.liveness(),
         )
         .await?;
         Ok(
@@ -207,8 +296,13 @@ impl TenantModuleFactory {
         context: TenantExecutionContext,
     ) -> BotResult<module_copy::tenant_executor::TenantCopyExecutor> {
         let write = self.write_scope(context.organization_id())?;
-        let executor = module_copy::tenant_executor::TenantCopyExecutor::new(
-            state, rpc, wallet, signers, context,
+        let executor = module_copy::tenant_executor::TenantCopyExecutor::new_with_fence(
+            state,
+            rpc,
+            wallet,
+            signers,
+            context,
+            self.liveness(),
         )
         .await?;
         Ok(executor.with_copy_sink(Arc::new(RepoCopySink::new(
@@ -551,6 +645,30 @@ impl RepoPolySink {
     }
 }
 
+/// Validate the venue fact against the tenant's own mirrored order before
+/// allowing backfill to enter the durable fill journal.
+fn validate_poly_backfill(
+    fill: &module_polymarket::backfill::BackfilledFill,
+    order: &TenantPolyOrder,
+) -> BotResult<()> {
+    if fill.trade_id.trim().is_empty()
+        || fill.transaction_hash.trim().is_empty()
+        || fill.order_id != order.venue_order_id
+        || fill.asset_id != order.token_id
+        || !matches!(fill.side.to_ascii_lowercase().as_str(), "buy" | "sell")
+        || !fill.side.eq_ignore_ascii_case(&order.side)
+        || !fill.price.is_finite()
+        || !(0.0..=1.0).contains(&fill.price)
+        || !fill.size.is_finite()
+        || fill.size <= 0.0
+    {
+        return Err(BotError::invalid(
+            "backfilled fill does not match tenant order or has invalid settlement data",
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl module_polymarket::tenant_executor::TenantPolySink for RepoPolySink {
     async fn record_signal(
@@ -654,6 +772,7 @@ impl module_polymarket::tenant_executor::TenantPolySink for RepoPolySink {
                     id = fill.order_id
                 ))
             })?;
+        validate_poly_backfill(fill, &order)?;
         let fill_id = match fill.bucket_index {
             Some(bucket) => format!("{}:{}", fill.trade_id, bucket),
             None => fill.trade_id.clone(),
@@ -700,6 +819,64 @@ impl module_polymarket::tenant_executor::TenantPolySink for RepoPolySink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backfill_rejects_unconfirmed_and_wrong_order_facts() {
+        use module_polymarket::backfill::BackfilledFill;
+        let now = Utc::now();
+        let order = TenantPolyOrder {
+            organization_id: OrganizationId::new(),
+            venue_order_id: "venue".into(),
+            order_id: "oms".into(),
+            signal_id: "signal".into(),
+            condition_id: "condition".into(),
+            token_id: "token".into(),
+            outcome: "yes".into(),
+            side: "buy".into(),
+            order_type: "GTC".into(),
+            limit_price: 0.5,
+            size_tokens: 10.0,
+            size_matched: 1.0,
+            mode: "live".into(),
+            state: "live".into(),
+            venue_status: "matched".into(),
+            expiration: 0,
+            position_id: None,
+            replica_id: "r".into(),
+            submitted_at: now,
+            updated_at: now,
+            closed_at: None,
+        };
+        let fill = BackfilledFill {
+            order_id: "venue".into(),
+            trade_id: "trade".into(),
+            size: 1.0,
+            price: 0.5,
+            side: "BUY".into(),
+            asset_id: "token".into(),
+            transaction_hash: "0xsettlement".into(),
+            bucket_index: None,
+        };
+        assert!(validate_poly_backfill(&fill, &order).is_ok());
+        let mut wrong = fill.clone();
+        wrong.transaction_hash.clear();
+        assert!(validate_poly_backfill(&wrong, &order).is_err());
+        let mut wrong = fill.clone();
+        wrong.asset_id = "other".into();
+        assert!(validate_poly_backfill(&wrong, &order).is_err());
+        let mut wrong = fill.clone();
+        wrong.order_id = "other".into();
+        assert!(validate_poly_backfill(&wrong, &order).is_err());
+        let mut wrong = fill.clone();
+        wrong.side = "unknown".into();
+        assert!(validate_poly_backfill(&wrong, &order).is_err());
+        let mut wrong = fill.clone();
+        wrong.side = "SELL".into();
+        assert!(validate_poly_backfill(&wrong, &order).is_err());
+        let mut wrong = fill.clone();
+        wrong.price = f64::NAN;
+        assert!(validate_poly_backfill(&wrong, &order).is_err());
+    }
 
     /// The fail-closed scope check refuses a foreign tenant BEFORE any
     /// repository access (no database is constructed at all).

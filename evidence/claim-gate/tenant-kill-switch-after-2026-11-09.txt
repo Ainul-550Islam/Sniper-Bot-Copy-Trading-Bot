@@ -1,0 +1,33 @@
+=== GREEN: tenant kill switch keeps individual pauses; /resume is the inverse of /kill (gap #83) ===
+
+-- module_control_store unit tests (4, incl. 2 new, async-serialized) --
+test trading_data_plane::module_control_store::tests::overrides_are_tenant_and_module_scoped ... ok
+test trading_data_plane::module_control_store::tests::memory_mode_round_trips_and_admits_it_is_not_durable ... ok
+test trading_data_plane::module_control_store::tests::releasing_the_kill_switch_keeps_an_individual_pause ... ok
+test trading_data_plane::module_control_store::tests::the_kill_switch_release_is_tenant_scoped ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 0.00s
+
+-- tenant_kill_switch_pause_pg (real PostgreSQL) --
+test a_durable_individual_pause_survives_the_kill_switch_release ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+-- kill-switch HTTP flow --
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+-- core state resume witnesses (2 new) --
+test state::tests::resume_can_release_the_halt_without_opening_the_kill_switch ... ok
+test state::tests::resume_releases_both_latches_and_reports_the_modules_it_leaves_off ... ok
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 680 filtered out; finished in 0.06s
+
+-- core lib --
+test result: ok. 719 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.50s
+
+-- server lib (all, serial) --
+test result: ok. 1002 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 119.94s
+
+-- clippy -D warnings --
+    Finished `dev` profile [unoptimized] target(s) in 0.69s
+
+-- fmt/diff --
+fmt_exit=0
+diff_check_exit=0

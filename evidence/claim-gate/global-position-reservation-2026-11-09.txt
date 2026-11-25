@@ -1,0 +1,67 @@
+Global max-open-position reservation regression, 2026-11-09.
+In-memory global-risk engine: max_open_positions=1; first accepted entry is held in-flight; second different asset was incorrectly accepted. Before fix 0/1, after using snapshot including in-flight reservations 29/29 global-risk/accounting integration tests pass. No claim about Postgres-distributed reservations, long-held leases, live trade, or concurrent same-position handling; expiry at 300 seconds is still a limitation.
+--- before ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 26.21s
+     Running tests/global_risk_accounting.rs (target/debug/deps/global_risk_accounting-87644eb45b943bbc)
+
+running 1 test
+test global_position_cap_counts_inflight_reservations ... FAILED
+
+failures:
+
+---- global_position_cap_counts_inflight_reservations stdout ----
+
+thread 'global_position_cap_counts_inflight_reservations' (1324920) panicked at crates/core/tests/global_risk_accounting.rs:1849:5:
+assertion `left == right` failed: second entry must count the first in-flight reservation: ok
+  left: None
+ right: Some(MaxOpenPositions)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    global_position_cap_counts_inflight_reservations
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --test global_risk_accounting`
+EXIT=101
+--- after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 19.61s
+     Running tests/global_risk_accounting.rs (target/debug/deps/global_risk_accounting-87644eb45b943bbc)
+
+running 29 tests
+test aggregate_global_limits_fail_closed_when_recovery_is_not_trustworthy ... ok
+test aggregate_global_limits_fail_closed_while_journal_writes_are_pending ... ok
+test asset_open_position_and_order_notional_caps ... ok
+test concurrent_entry_checks_reserve_global_exposure_until_the_entry_finishes ... ok
+test concurrent_entry_checks_reserve_module_position_slots ... ok
+test concurrent_identical_events_from_many_tasks_book_once ... ok
+test config_reload_updates_limits_and_kill_lists_live ... ok
+test daily_loss_limit_reads_the_ledger_not_the_module ... ok
+test drawdown_limit_uses_peak_realized_and_current_unrealized ... ok
+test duplicate_fee_and_settlement_events_never_double_book ... ok
+test entry_request_attribution_reaches_the_global_decision ... ok
+test global_position_cap_counts_inflight_reservations ... ok
+test global_risk_refreshes_shared_journal_events_before_evaluating_caps ... ok
+test global_venue_and_strategy_kill_switches_refuse_new_entries ... ok
+test ledger_and_positions_reconcile_and_mismatches_are_reported_not_repaired ... ok
+test ledger_replay_of_the_whole_journal_is_idempotent ... ok
+test malformed_global_risk_attribution_is_rejected ... ok
+test malformed_runtime_global_risk_config_fails_closed ... ok
+test missing_rate_for_closed_realized_loss_fails_closed ... ok
+test non_finite_portfolio_conversion_fails_closed ... ok
+test orphan_events_are_reported ... ok
+test per_wallet_venue_and_strategy_limits_are_scoped ... ok
+test portfolio_exposure_limit_is_enforced_across_modules ... ok
+test positions_aggregate_across_modules_with_pnl_and_fees ... ok
+test reference_rate_missing_fails_closed_only_when_a_limit_needs_it ... ok
+test restart_rebuilds_risk_state_from_the_journal_and_refuses_replays ... ok
+test runtime_kill_switches_survive_a_restart_through_the_journal ... ok
+test same_financial_event_twice_yields_one_ledger_one_position_one_pnl_effect ... ok
+test the_order_layer_is_reconciled_against_the_ledger ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+EXIT=0

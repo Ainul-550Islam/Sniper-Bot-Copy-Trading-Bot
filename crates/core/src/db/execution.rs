@@ -218,9 +218,11 @@ impl ExecutionRepo {
                 "execution_prune",
                 sqlx::query(
                     r#"DELETE FROM execution_lifecycle
-                        WHERE state IN ('confirmed', 'failed', 'expired', 'reconciled')
-                          AND updated_at < $1"#,
+                        WHERE organization_id = $1
+                          AND state IN ('confirmed', 'failed', 'expired', 'reconciled')
+                          AND updated_at < $2"#,
                 )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(cutoff)
                 .execute(self.db.pool()),
             )

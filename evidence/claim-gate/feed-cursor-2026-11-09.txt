@@ -1,0 +1,17 @@
+Copy polling cursor regression, 2026-11-09 in user timezone.
+Command: cargo test -p module-copy --lib feeds::tests::poll_requests_newer_transactions_using_until_cursor --locked -j 1 -- --nocapture
+Mock JSON-RPC supplies a warm-up signature and captures the next poll. It checks the actual request uses until=<saved newest>, not before. No real provider, transaction decoding, backlogged pagination or recovery guarantee is tested.
+RPC parameter reference, accessed 2026-11-09: https://solana.com/docs/tools/surfpool/rpc/transactions — before starts searching backwards from that signature; until is the stopping signature.
+
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 37.79s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-84834e0020a68c4b)
+
+running 1 test
+test feeds::tests::poll_requests_newer_transactions_using_until_cursor ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.01s
+
+EXIT=0

@@ -45,10 +45,12 @@
 
 pub mod copy;
 pub mod executions;
+pub mod fee_policy_snapshot;
 pub mod intent;
 pub mod not_found;
 pub mod orders;
 pub mod pagination;
+pub mod platform_fee;
 pub mod polymarket;
 pub mod positions;
 pub mod query_scope;

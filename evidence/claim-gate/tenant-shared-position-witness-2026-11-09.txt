@@ -1,0 +1,107 @@
+Tenant copy shared-position projection witness, 2026-11-09 in user timezone.
+Command: cargo test -p module-copy --test tenant_execution --locked -j 1 -- --test-threads=1
+The witness deliberately asserts current unsafe behavior, not desired isolation. One pre-existing copy Position in a shared in-memory AppState is sent by two tenant executors startup pumps to two in-memory test sinks with two distinct organization contexts. An oneshot acknowledges each projection; the timeout is only a deadlock guard, not the ordering mechanism. Position has no organization identity. Production DB writes, production wiring and live funds are not exercised.
+
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 8.63s
+     Running tests/tenant_execution.rs (target/debug/deps/tenant_execution-eec7c191619e41fd)
+
+running 11 tests
+test a_tenant_copy_executor_denies_foreign_contexts ... ok
+test a_wallet_bound_to_another_tenant_cannot_drive_the_copy_executor ... ok
+test an_unbound_copy_bot_preserves_the_operator_behaviour ... ok
+test shared_app_state_currently_causes_cross_tenant_dedup_collision ... ok
+test shared_app_state_currently_projects_one_position_into_two_tenant_sinks ... ok
+test tenant_dedup_distinguishes_same_signature_mint_and_side ... ok
+test tenant_duplicate_does_not_overwrite_first_sink_outcome ... ok
+test tenant_unavailable_shared_dedup_retries_without_journaling ... ok
+test the_context_adapter_scopes_leader_and_event_keys_per_tenant ... ok
+test the_same_leader_trade_is_deduplicated_tenant_locally ... ok
+test two_tenants_seeing_the_same_leader_trade_both_process_it ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+EXIT=0
+
+Source observation: RepoCopySink checks its own write scope against the context, then creates tenant position using that context organization; that check does not establish the original position ownership.
+   505	    }
+   506
+   507	    async fn record_position(
+   508	        &self,
+   509	        context: &module_copy::tenant_context::CopyTenantContext,
+   510	        position: &Position,
+   511	    ) -> BotResult<()> {
+   512	        assert_tenant_scope(
+   513	            "tenant copy position sink",
+   514	            &self.write,
+   515	            context.organization_id(),
+   516	        )?;
+   517	        let position = tenant_position_from_core(context.organization_id(), position)?;
+   518	        self.positions
+   519	            .upsert(&self.write, &position)
+   520	            .await
+   521	            .map_err(|e| BotError::db(e.to_string()))
+   522	    }
+   523	}
+   144	fn spawn_position_projection(
+   145	    state: Shared,
+   146	    context: CopyTenantContext,
+   147	    sink: Arc<dyn TenantCopySink>,
+   148	) -> tokio::task::JoinHandle<()> {
+   149	    let mut events = state.events.subscribe();
+   150	    tokio::spawn(async move {
+   151	        persist_copy_positions(&state, &context, &sink).await;
+   152	        loop {
+   153	            match events.recv().await {
+   154	                Ok(event) => {
+   155	                    let position = match event.as_ref() {
+   156	                        bot_core::events::AppEvent::PositionUpdate { position, .. }
+   157	                        | bot_core::events::AppEvent::PositionClosed { position, .. }
+   158	                            if position.source == bot_core::models::TradeSource::Copy =>
+   159	                        {
+   160	                            Some(position)
+   161	                        }
+   162	                        _ => None,
+   163	                    };
+   164	                    if let Some(position) = position {
+   165	                        if let Err(error) = sink.record_position(&context, position).await {
+   166	                            tracing::error!(position = %position.id, %error, "tenant copy position projection failed");
+   167	                            state
+   168	                                .record_error(
+   169	                                    bot_core::models::BotModule::Copy,
+   170	                                    &format!("tenant position projection: {error}"),
+   171	                                )
+   172	                                .await;
+   173	                            state
+   174	                                .set_running(bot_core::models::BotModule::Copy, false, true)
+   175	                                .await;
+   176	                        }
+   177	                    }
+   178	                }
+   179	                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+   180	                    persist_copy_positions(&state, &context, &sink).await;
+   181	                }
+   182	                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+   183	            }
+   184	        }
+   185	    })
+   186	}
+   187
+   188	async fn persist_copy_positions(
+   189	    state: &Shared,
+   190	    context: &CopyTenantContext,
+   191	    sink: &Arc<dyn TenantCopySink>,
+   192	) {
+   193	    for position in state.all_positions().await {
+   194	        if position.source == bot_core::models::TradeSource::Copy {
+   195	            if let Err(error) = sink.record_position(context, &position).await {
+   196	                tracing::error!(position = %position.id, %error, "tenant copy position projection failed during reconciliation");
+   197	                state
+   198	                    .record_error(
+   199	                        bot_core::models::BotModule::Copy,
+   200	                        &format!("tenant position projection: {error}"),
+   201	                    )
+   202	                    .await;
+   203	                state
+   204	                    .set_running(bot_core::models::BotModule::Copy, false, true)
+   205	                    .await;

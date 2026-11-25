@@ -87,10 +87,14 @@ pub mod reconcile_async;
 pub mod tenant_context;
 pub mod tenant_executor;
 pub mod trade_resolution;
+pub mod venue_probe;
+pub mod venue_settle;
+pub mod venue_state;
 
 // GAP-MAP v2 P2: copy trading (follow selected wallets), leader
 // discovery/stats, and CLOB V2 builder-code attribution.
 pub mod builder;
+pub mod builder_revenue;
 pub mod copy;
 pub mod copy_feed;
 pub mod copy_run;
@@ -98,7 +102,9 @@ pub mod leaders;
 
 pub use audit::AUDIT_ACTOR;
 pub use funding::CollateralSnapshot;
-pub use reconcile::{ReconFinding, ReconKind};
+pub use reconcile::{
+    compare_builder_fill_fees, BuilderFeeFill, BuilderFeeFillComparison, ReconFinding, ReconKind,
+};
 pub use recovery::{RecoveryAction, RecoveryReport};
 
 use std::collections::{HashMap, HashSet};
@@ -182,6 +188,11 @@ pub struct PolyBot {
     /// / reconciliation. Shared so the tenant executor and the
     /// reconciliation loop see the same pending set.
     async_pending: Arc<backfill::AsyncPendingRegistry>,
+    /// Durable PRE-BROADCAST reservation sink (intent journal + leased claim,
+    /// migration 0079). `None` = legacy behaviour (no reservation store
+    /// attached). When present, the LIVE CLOB POST never runs unless the
+    /// claim for `poly:entry:{token_id}` was durably granted to this process.
+    intents: Option<Arc<dyn bot_core::recovery::IntentSink>>,
 }
 
 impl PolyBot {
@@ -268,6 +279,7 @@ impl PolyBot {
             user_tx,
             user_rx: Some(user_rx),
             async_pending: Arc::new(backfill::AsyncPendingRegistry::new()),
+            intents: None,
         })
     }
 
@@ -278,6 +290,17 @@ impl PolyBot {
     #[must_use]
     pub fn with_ownership(mut self, reg: Arc<bot_core::ownership::OwnershipRegistry>) -> Self {
         self.ownership = Some(reg);
+        self
+    }
+
+    /// Attach the durable pre-broadcast reservation sink (the server passes
+    /// the same journal-backed sink copy/sniper/Telegram use). With it
+    /// attached, a LIVE CLOB POST requires a durably granted claim; losing
+    /// the claim (or an unreachable store) refuses the POST instead of
+    /// risking a duplicate order.
+    #[must_use]
+    pub fn with_intent_sink(mut self, sink: Arc<dyn bot_core::recovery::IntentSink>) -> Self {
+        self.intents = Some(sink);
         self
     }
 

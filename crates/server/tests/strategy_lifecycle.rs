@@ -56,6 +56,7 @@ fn state_with(
         trusted_proxies: Default::default(),
         db,
         journal: None,
+        chain_probe: None,
         serve_dashboard: false,
         health: Arc::new(HealthRegistry::new()),
         metrics_enabled: false,

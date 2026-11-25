@@ -1,0 +1,17 @@
+PASS  required files present (70 checked)
+PASS  migrations contiguous 0001..0075 present
+PASS  version identity: VERSION == release-manifest.json == Cargo.toml (0.1.0)
+PASS  manifest docs_count (168) == actual docs/*.md (168)
+PASS  hygiene: no .env / logs / dumps / keypairs / pem files (build output present but correctly excluded: target/(generated, .gitignore'd, excluded from package))
+PASS  junk path absent: .cargo/env
+PASS  junk path absent: .config/solana/install/config.yml
+PASS  junk path absent: run-part2.sh
+PASS  junk path absent: run-tests.out
+PASS  STATS control-plane page count matches 74
+PASS  all relative markdown links resolve (README.md + docs/*.md)
+PASS  no zero-width / bidi-override characters in markdown
+PASS  no tracked junk (toolchain, agent dumps, sandbox state, duplicate audits)
+PASS  single canonical SBOM: sbom.json is CycloneDX with components, no duplicate
+----------------------------------------
+tree: 41598 files (excluding .git), 16114321915 bytes
+verify-delivery: 14 PASS / 0 FAIL

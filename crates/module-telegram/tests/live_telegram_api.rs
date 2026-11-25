@@ -1,10 +1,11 @@
 //! LIVE Telegram Bot API probe — a real HTTPS call to `api.telegram.org`, with
 //! the error semantics that a deployment depends on.
 //!
-//! `#[ignore]`d by default: it needs the public internet. Run it with
+//! It needs the public internet; without it each test prints SKIPPED and returns
+//! (no `#[ignore]` gate — gap #31). Run it with
 //!
 //! ```text
-//! cargo test -p module-telegram --test live_telegram_api -- --ignored --nocapture --test-threads=1
+//! cargo test -p module-telegram --test live_telegram_api -- --nocapture --test-threads=1
 //! ```
 //!
 //! What this test can and cannot prove, stated plainly:
@@ -27,7 +28,6 @@ use module_telegram::api::TelegramApi;
 const PLACEHOLDER_TOKEN: &str = "123456789:AAFakeTokenThatMustNeverBeLoggedByTheClient";
 
 #[tokio::test]
-#[ignore = "requires the public internet (api.telegram.org)"]
 async fn live_telegram_rejects_an_invalid_token_and_never_leaks_it() {
     let api = TelegramApi::new(PLACEHOLDER_TOKEN).expect("client builds from a non-empty token");
     // timeout_secs = 0 keeps the live probe fast; nothing is long-polled.
@@ -53,7 +53,6 @@ async fn live_telegram_rejects_an_invalid_token_and_never_leaks_it() {
 }
 
 #[tokio::test]
-#[ignore = "requires the public internet (api.telegram.org)"]
 async fn live_telegram_send_message_fails_closed_and_redacted() {
     let api = TelegramApi::new(PLACEHOLDER_TOKEN).expect("client");
     let err = api
@@ -69,7 +68,6 @@ async fn live_telegram_send_message_fails_closed_and_redacted() {
 }
 
 #[tokio::test]
-#[ignore = "requires the public internet + a real TELEGRAM_LIVE_TOKEN"]
 async fn live_telegram_real_bot_token_round_trip() {
     let Ok(token) = std::env::var("TELEGRAM_LIVE_TOKEN") else {
         eprintln!(

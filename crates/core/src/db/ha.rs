@@ -21,7 +21,7 @@ use sqlx::postgres::PgRow;
 use sqlx::Row;
 
 use crate::db::{Database, TimedDbError};
-use crate::ha::cursor::{FeedCursor, FeedGap, FeedId, GapStatus};
+use crate::ha::cursor::{CursorWrite, FeedCursor, FeedGap, FeedId, GapStatus};
 use crate::ha::lease::{Lease, LeaseDecision, LeaseRequest, LeaseRole};
 use crate::ha::recovery_plan::OrderRecoveryAction;
 use crate::ha::store::RecoveryRecord;
@@ -400,16 +400,66 @@ impl HaRepo {
 
     // ------------------------------------------------------------ cursors --
 
-    /// Upsert one cursor.
-    pub async fn save_cursor(&self, c: &FeedCursor) -> RepoResult<()> {
-        self.db
+    /// Persist one cursor, admitting it only if it beats the durable row.
+    ///
+    /// The whole decision is ONE statement so two replicas cannot interleave
+    /// between the read and the write: the upsert carries the same
+    /// conditions [`FeedCursor::admit_write`] enforces, so the in-memory
+    /// store and PostgreSQL answer identically. Rows are located by
+    /// `cursor_key`, which is exactly what the three branches below decide
+    /// among — accepted, fenced, stale.
+    pub async fn save_cursor(&self, c: &FeedCursor) -> RepoResult<CursorWrite> {
+        let key = c.key();
+        let position = c.position.map(|p| p.min(i64::MAX as u64) as i64);
+        let generation: Option<i64> = c
+            .fence
+            .rsplit_once('@')
+            .and_then(|(_, g)| g.parse::<i64>().ok());
+        let row = self
+            .db
             .timed(
                 "ha_cursor_save",
                 sqlx::query(
-                    r#"INSERT INTO ha_cursors
+                    // `durable_gen` is parsed from the stored fence; an
+                    // unparseable/empty fence is generation -1 so any real
+                    // generation can take the row.
+                    r#"WITH durable AS (
+                           SELECT cursor_key, fence, pending, position, token,
+                                  COALESCE(NULLIF(split_part(fence, '@', 2), '')::bigint, -1) AS durable_gen
+                             FROM ha_cursors WHERE cursor_key = $1
+                       ), verdict AS (
+                           SELECT CASE
+                               -- absent row: always accepted
+                               WHEN NOT EXISTS (SELECT 1 FROM durable) THEN 'accepted'
+                               -- an unfenced writer never displaces a fenced row
+                               WHEN $13 = '' AND (SELECT fence FROM durable) <> '' THEN 'fenced'
+                               -- older generation, or a different holder at the
+                               -- same generation (split brain), loses
+                               WHEN $13 <> '' AND $14::bigint IS NOT NULL
+                                    AND $14::bigint < (SELECT durable_gen FROM durable) THEN 'fenced'
+                               WHEN $13 <> '' AND $14::bigint IS NOT NULL
+                                    AND $14::bigint = (SELECT durable_gen FROM durable)
+                                    AND split_part($13, '@', 1) <> split_part((SELECT fence FROM durable), '@', 1)
+                                    THEN 'fenced'
+                               -- an unacknowledged advance is never overwritten
+                               -- by a backwards or repeated write
+                               WHEN (SELECT pending FROM durable) AND $12::boolean
+                                    AND (($4::bigint IS NOT NULL AND (SELECT position FROM durable) IS NOT NULL
+                                          AND $4::bigint < (SELECT position FROM durable))
+                                         OR ((SELECT position FROM durable) IS NOT NULL AND $4::bigint IS NULL)
+                                         OR ($12::boolean AND $4::bigint IS NOT DISTINCT FROM (SELECT position FROM durable)
+                                             AND $5::text IS NOT DISTINCT FROM (SELECT token FROM durable)))
+                                    THEN 'stale'
+                               ELSE 'accepted'
+                           END AS verdict, (SELECT fence FROM durable) AS actual
+                       )
+                       INSERT INTO ha_cursors
                            (cursor_key, feed, scope, position, token, last_event_at,
-                            processed_count, duplicate_count, gap_count, worker_id, updated_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                            processed_count, duplicate_count, gap_count, worker_id, updated_at,
+                            pending, fence)
+                       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                              $11, $12, $13
+                       FROM verdict WHERE verdict.verdict = 'accepted'
                        ON CONFLICT (cursor_key) DO UPDATE SET
                            position = EXCLUDED.position,
                            token = EXCLUDED.token,
@@ -418,12 +468,15 @@ impl HaRepo {
                            duplicate_count = EXCLUDED.duplicate_count,
                            gap_count = EXCLUDED.gap_count,
                            worker_id = EXCLUDED.worker_id,
-                           updated_at = EXCLUDED.updated_at"#,
+                           updated_at = EXCLUDED.updated_at,
+                           pending = EXCLUDED.pending,
+                           fence = EXCLUDED.fence
+                       RETURNING cursor_key"#,
                 )
-                .bind(c.key())
+                .bind(&key)
                 .bind(c.feed.as_str())
                 .bind(&c.scope)
-                .bind(c.position.map(|p| p.min(i64::MAX as u64) as i64))
+                .bind(position)
                 .bind(&c.token)
                 .bind(c.last_event_at)
                 .bind(c.processed_count)
@@ -431,10 +484,78 @@ impl HaRepo {
                 .bind(c.gap_count)
                 .bind(&c.worker_id)
                 .bind(c.updated_at)
-                .execute(self.db.pool()),
+                .bind(c.pending)
+                .bind(&c.fence)
+                .bind(generation)
+                .fetch_optional(self.db.pool()),
             )
             .await?;
-        Ok(())
+        if row.is_some() {
+            return Ok(CursorWrite::Accepted);
+        }
+        // Refused: read the durable row to name the reason deterministically.
+        let durable = self.load_cursor(&key).await?;
+        Ok(durable
+            .as_ref()
+            .map(|d| c.admit_write(Some(d)))
+            .unwrap_or(CursorWrite::Accepted))
+    }
+
+    /// Acknowledge the pending advance at `position`/`token`.
+    pub async fn acknowledge_cursor(
+        &self,
+        key: &str,
+        position: Option<u64>,
+        token: Option<&str>,
+        fence: &str,
+    ) -> RepoResult<bool> {
+        let row = self
+            .db
+            .timed(
+                "ha_cursor_ack",
+                sqlx::query(
+                    // The acknowledging generation takes over the row's fence
+                    // (a takeover acknowledges what the old holder advanced);
+                    // a stale generation cannot acknowledge a newer advance.
+                    r#"UPDATE ha_cursors SET pending = false,
+                                              fence = CASE WHEN $4 = '' THEN fence ELSE $4 END
+                        WHERE cursor_key = $1 AND pending
+                          AND position IS NOT DISTINCT FROM $2::bigint
+                          AND ($3::text IS NULL OR token IS NOT DISTINCT FROM $3::text)
+                          AND (fence = '' OR $4 = ''
+                               OR COALESCE(NULLIF(split_part($4, '@', 2), '')::bigint, 0)
+                                  >= COALESCE(NULLIF(split_part(fence, '@', 2), '')::bigint, 0))
+                        RETURNING cursor_key"#,
+                )
+                .bind(key)
+                .bind(position.map(|p| p.min(i64::MAX as u64) as i64))
+                .bind(token)
+                .bind(fence)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Cursors whose advance was never acknowledged — the replay set after a
+    /// crash or a takeover.
+    pub async fn pending_cursors(&self, limit: usize) -> RepoResult<Vec<FeedCursor>> {
+        let rows = self
+            .db
+            .timed(
+                "ha_cursors_pending",
+                sqlx::query(
+                    r#"SELECT cursor_key, feed, scope, position, token, last_event_at,
+                              processed_count, duplicate_count, gap_count, worker_id, updated_at,
+                              pending, fence
+                         FROM ha_cursors WHERE pending
+                         ORDER BY updated_at ASC LIMIT $1"#,
+                )
+                .bind(limit as i64)
+                .fetch_all(self.db.pool()),
+            )
+            .await?;
+        Ok(rows.iter().filter_map(cursor_from_row).collect())
     }
 
     /// Load one cursor.
@@ -445,7 +566,8 @@ impl HaRepo {
                 "ha_cursor_load",
                 sqlx::query(
                     r#"SELECT cursor_key, feed, scope, position, token, last_event_at,
-                              processed_count, duplicate_count, gap_count, worker_id, updated_at
+                              processed_count, duplicate_count, gap_count, worker_id, updated_at,
+                              pending, fence
                          FROM ha_cursors WHERE cursor_key = $1"#,
                 )
                 .bind(key)
@@ -463,7 +585,8 @@ impl HaRepo {
                 "ha_cursors_list",
                 sqlx::query(
                     r#"SELECT cursor_key, feed, scope, position, token, last_event_at,
-                              processed_count, duplicate_count, gap_count, worker_id, updated_at
+                              processed_count, duplicate_count, gap_count, worker_id, updated_at,
+                              pending, fence
                          FROM ha_cursors ORDER BY cursor_key"#,
                 )
                 .fetch_all(self.db.pool()),
@@ -648,6 +771,8 @@ fn cursor_from_row(r: &PgRow) -> Option<FeedCursor> {
         duplicate_count: r.try_get("duplicate_count").unwrap_or(0),
         gap_count: r.try_get("gap_count").unwrap_or(0),
         worker_id: r.try_get("worker_id").unwrap_or_default(),
+        pending: r.try_get("pending").unwrap_or(false),
+        fence: r.try_get("fence").unwrap_or_default(),
     })
 }
 

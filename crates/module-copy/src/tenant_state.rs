@@ -1,10 +1,9 @@
 //! Tenant-scoped copy state (PROMPT 4/10 file 13).
 //!
-//! All in-memory leader/event bookkeeping in `module-copy` is keyed by
-//! [`CopyTenantContext`] — so the same external leader address can be
-//! tracked by many tenants at once, and no per-tenant map ever leaks
-//! into another tenant's view. The dedup structure is FIFO-bounded: a
-//! tenant cannot grow memory without bound by streaming events.
+//! Each [`TenantCopyState`] contains a bounded local dedup set and counters.
+//! Separate instances do not share these fields. This is not an isolation
+//! guarantee for the underlying `CopyBot` state, shared dedup backend or
+//! position projections. The local dedup structure is FIFO-bounded.
 
 use std::collections::VecDeque;
 use std::sync::RwLock;
@@ -35,6 +34,12 @@ impl EventDedup {
         }
         self.seen.push_back(event_id.to_string());
         true
+    }
+
+    fn forget(&mut self, event_id: &str) {
+        if let Some(index) = self.seen.iter().position(|id| id == event_id) {
+            self.seen.remove(index);
+        }
     }
 
     fn len(&self) -> usize {
@@ -75,8 +80,8 @@ impl TenantCopyCounters {
     }
 }
 
-/// The per-tenant copy bookkeeping: leader links, event dedup and
-/// counters. Safe to share across tasks; every method is tenant-local
+/// The per-tenant copy bookkeeping: event dedup and counters. Safe to
+/// share across tasks; every method is tenant-local
 /// by construction (the state belongs to exactly one tenant).
 pub struct TenantCopyState {
     dedup: RwLock<EventDedup>,
@@ -98,6 +103,15 @@ impl TenantCopyState {
             .write()
             .expect("dedup lock poisoned")
             .record(event_id)
+    }
+
+    /// Remove an inconclusive local sighting so a later shared decision can
+    /// be attempted. This is not a release of a shared dedup mark.
+    pub fn forget_sighting(&self, event_id: &str) {
+        self.dedup
+            .write()
+            .expect("dedup lock poisoned")
+            .forget(event_id);
     }
 
     /// Current dedup window length (diagnostics).

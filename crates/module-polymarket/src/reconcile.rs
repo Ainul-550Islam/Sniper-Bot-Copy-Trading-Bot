@@ -27,6 +27,63 @@ use crate::orders::{FillSource, LocalOrderState, TrackedOrder, VenueObservation}
 use crate::store::PolyReconFindingRecord;
 use crate::PolyBot;
 
+/// One explicitly attributed fill supplied for builder-fee comparison.
+/// The caller must independently establish the fill, maker/taker role,
+/// profile rates, builder attribution and matched notional. No provider or
+/// chain verification happens here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderFeeFill {
+    /// Stable per-tenant, per-fill id.
+    pub fill_id: String,
+    /// Matched notional in pUSD micros.
+    pub notional_micros: u64,
+    /// Liquidity side, not buy/sell direction.
+    pub role: crate::builder_revenue::BuilderLiquidityRole,
+    /// Profile rates effective for this specific fill.
+    pub rates: crate::builder_revenue::BuilderFeeRates,
+    /// Independent per-fill reported fee, if available.
+    pub observed_fee_micros: Option<u64>,
+}
+
+/// A per-fill comparison. This is not a payout or accounting entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderFeeFillComparison {
+    /// Original fill identifier.
+    pub fill_id: String,
+    /// Exact rational estimate and floor/ceiling bounds.
+    pub estimate: crate::builder_revenue::BuilderFeeEstimate,
+    /// Result of comparing the optional observed amount.
+    pub comparison: crate::builder_revenue::BuilderFeeComparison,
+}
+
+/// Compare explicitly supplied matched-fill fees. Duplicate ids fail closed
+/// rather than inflating a total. Missing observations remain unresolved;
+/// these comparisons must not be represented as posted or collected cash.
+pub fn compare_builder_fill_fees(
+    fills: &[BuilderFeeFill],
+) -> PolyResult<Vec<BuilderFeeFillComparison>> {
+    let mut seen = HashSet::with_capacity(fills.len());
+    let mut result = Vec::with_capacity(fills.len());
+    for fill in fills {
+        if fill.fill_id.trim().is_empty() || !seen.insert(fill.fill_id.as_str()) {
+            return Err(crate::error::PolyError::invalid(
+                "empty or duplicate builder fill id",
+            ));
+        }
+        let estimate = crate::builder_revenue::estimate_builder_fee(
+            fill.notional_micros,
+            fill.role,
+            fill.rates,
+        )?;
+        result.push(BuilderFeeFillComparison {
+            fill_id: fill.fill_id.clone(),
+            estimate,
+            comparison: estimate.compare(fill.observed_fee_micros),
+        });
+    }
+    Ok(result)
+}
+
 /// Kinds of local-vs-venue divergence the reconciler reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReconKind {
@@ -90,6 +147,89 @@ impl PolyBot {
         } else {
             None
         };
+
+        // 2b. Ambiguous submits the venue can settle: ask the VENUE (not the
+        // open-order list) whether it holds the order at all.
+        //
+        // The tracker lock is NOT held across the probe or the settlement:
+        // `finish_locally` writes through `insert_tracked`, so holding it here
+        // deadlocks the pass. Each order is snapshotted under a brief read
+        // lock, the venue is asked, and the decision is re-validated against
+        // the CURRENT state before anything is written — a concurrent poll or
+        // an earlier pass that already resolved the order wins, and the claim
+        // release is itself a fenced CAS, so nothing can be settled twice.
+        //
+        // Only runs when a durable claim sink is attached: with no sink there
+        // is no claim to settle, and the older `LocalOrderMissingOnVenue`
+        // handling owns the order exactly as before.
+        if self.intents.is_some() {
+            if let Some(client) = &live_client {
+                let ambiguous: Vec<TrackedOrder> = self
+                    .tracked
+                    .read()
+                    .await
+                    .values()
+                    .filter(|t| {
+                        t.mode == ExecutionMode::Live
+                            && matches!(
+                                t.state,
+                                LocalOrderState::Submitted | LocalOrderState::Unknown
+                            )
+                    })
+                    .cloned()
+                    .collect();
+                for snapshot in ambiguous {
+                    let check = crate::venue_probe::probe_order(
+                        client,
+                        &snapshot.venue_order_id,
+                        &snapshot.token_id,
+                    )
+                    .await;
+                    if check.presence.is_unknown() {
+                        // No usable answer: say so, change nothing.
+                        debug!(
+                            order = %snapshot.venue_order_id,
+                            reason = %check.reason,
+                            "venue state check inconclusive"
+                        );
+                        continue;
+                    }
+                    // Re-validate against the live tracker: if a poll or another
+                    // pass moved this order meanwhile, this pass does not act.
+                    let mut current = match self.tracked.read().await.get(&snapshot.venue_order_id)
+                    {
+                        Some(t)
+                            if matches!(
+                                t.state,
+                                LocalOrderState::Submitted | LocalOrderState::Unknown
+                            ) =>
+                        {
+                            t.clone()
+                        }
+                        _ => continue,
+                    };
+                    let settlement = match self.settle_claim_with_venue(&mut current, &check).await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!(order = %snapshot.venue_order_id, error = %e, "claim settlement refused");
+                            continue;
+                        }
+                    };
+                    if settlement.order_closed || settlement.claim_released {
+                        self.journal_order(&current).await;
+                    }
+                    findings.push(ReconFinding {
+                        kind: ReconKind::AmbiguousSubmitResolved,
+                        venue_order_id: Some(current.venue_order_id.clone()),
+                        order_id: Some(current.order_id.clone()),
+                        token_id: Some(current.token_id.clone()),
+                        detail: settlement.detail.clone(),
+                        action: settlement.action(),
+                    });
+                }
+            }
+        }
 
         if let Some(client) = &live_client {
             let venue_open = client.open_orders(None, None).await?;
@@ -383,5 +523,43 @@ impl PolyBot {
             info!(count = findings.len(), "polymarket reconciliation findings");
         }
         Ok(findings)
+    }
+}
+
+#[cfg(test)]
+mod builder_fee_tests {
+    use super::*;
+    use crate::builder_revenue::{BuilderFeeComparison, BuilderFeeRates, BuilderLiquidityRole};
+
+    #[test]
+    fn compare_fill_fee_observations_without_assuming_payout_or_dedup() {
+        let rates = BuilderFeeRates::new(50, 100).unwrap();
+        let a = BuilderFeeFill {
+            fill_id: "a".into(),
+            notional_micros: 1_000_000,
+            role: BuilderLiquidityRole::Maker,
+            rates,
+            observed_fee_micros: Some(5_000),
+        };
+        let b = BuilderFeeFill {
+            fill_id: "b".into(),
+            notional_micros: 1_000_000,
+            role: BuilderLiquidityRole::Taker,
+            rates,
+            observed_fee_micros: None,
+        };
+        let result = compare_builder_fill_fees(&[a.clone(), b.clone()]).unwrap();
+        assert_eq!(result[0].comparison, BuilderFeeComparison::Exact);
+        assert_eq!(
+            result[1].comparison,
+            BuilderFeeComparison::MissingObservation
+        );
+        assert!(compare_builder_fill_fees(&[a.clone(), a]).is_err());
+        let mut changed = b;
+        changed.observed_fee_micros = Some(20_000);
+        assert_eq!(
+            compare_builder_fill_fees(&[changed]).unwrap()[0].comparison,
+            BuilderFeeComparison::Mismatch
+        );
     }
 }

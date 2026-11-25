@@ -1,0 +1,120 @@
+# Tenant runtime freshness at broadcast — the guard now asks the live registry (2026-11-09)
+
+Previous state: OPEN — source review. The recorded finding was exact:
+"TenantBroadcastGuard::authorize_meta compares metadata to its captured
+TenantSigningContext … it does not query a live runtime or signer store.
+TenantCopyExecutor::verify_runtime accepts caller-provided values and no production
+caller is established by source search. Do not claim the final guard alone detects a
+runtime rotated after construction."
+
+That is now fixed at the source, and the claim is made only as far as the witnesses go.
+
+## What was actually wrong
+
+`TenantBroadcastGuard` (crates/solana-kit) held a captured `TenantSigningContext` and
+compared the transaction's metadata to it. Its own doc comment was honest about the
+hole: "this comparison alone does not fetch the current runtime fence". So:
+
+  build module → runtime rotated / superseded / drained → capture still matches its
+  own metadata → guard authorizes → the stale worker broadcasts one more order.
+
+`RuntimeRegistryService::verify` (crates/server) already answers the right question —
+`FenceVerdict::{Current, Superseded, StaleGeneration, NoLiveRuntime, NotLeaseLive}` —
+but nothing on the broadcast path asked it. `verify_runtime(...)` on the tenant
+executors took caller-supplied ids and had no production caller.
+
+## The fix
+
+1. `RuntimeFenceProbe` trait (solana-kit, async): `fence_is_current(org, runtime,
+   generation) -> Result<(), String>`. `Err` is never a pass.
+2. `TenantBroadcastGuard::with_fence_probe(...)` + `authorize_live(meta)` — metadata
+   rules first (a wiring mismatch is reported as such, with no I/O), THEN the live
+   fence. New deny `RuntimeFenced { detail, source }` → label `runtime_fenced`.
+3. The executor's two money paths call it: `Executor::run` → `authorize_tx`,
+   `Executor::send_prebuilt` → `authorize_prebuilt_live`. (Metadata-only `authorize` /
+   `authorize_prebuilt` remain for callers that want the captured-context check alone.)
+4. Server bridge `RuntimeRegistryFence` wraps `RuntimeRegistryService::verify` and maps
+   every non-`Current` verdict (and any store error) to `Err`.
+5. Production wiring: `TenantModuleFactory::with_runtime_fence(...)` passes the probe
+   into `TenantSniperExecutor::new_with_fence` / `TenantCopyExecutor::new_with_fence`,
+   which attach it to the broadcast guard at construction. `new(...)` keeps the old
+   signature and attaches none (documented degraded behaviour).
+
+## Witnesses
+
+A. `solana-kit tenant_broadcast_guard::tests::a_rotated_runtime_is_refused_at_broadcast_time`
+   no probe → captured-context rules only; current probe → allowed AND the probe really
+   ran (call count 1); rotated → `runtime_fenced` with the registry's reason, while
+   `authorize_meta` still passes (proving the captured context cannot see it);
+   unreadable fence → refusal; foreign tenant → `organization_mismatch` with ZERO
+   probe calls (no I/O for a wiring bug).
+B. `solana-kit tests/tenant_signing_boundary.rs::a_rotation_after_build_blocks_the_next_broadcast`
+   END-TO-END on a paper executor: while current, a paper run is not vetoed; after the
+   toggle flips to rotated, the very next `executor.run(...)` returns
+   `FailureClass::PolicyVeto` with `runtime_fenced` in the detail, no signature, and is
+   not a paper result.
+C. `server runtime_registry::service::fence_probe_tests::the_bridge_refuses_a_runtime_that_is_no_longer_current`
+   real `RuntimeRegistryService` + in-memory store: current verifies; foreign runtime id
+   refused; stale generation refused; after `rotate(...)` the pre-rotation identity is
+   refused and the successor verifies.
+D. `…::an_unknown_tenant_has_no_fence_and_is_refused` — no live runtime never authorizes.
+
+## RED evidence
+
+Deleting the live check from `authorize_live` (early `return Ok(())` after the probe
+lookup) fails witness A immediately:
+  assertion `left == right` failed: the live fence must be consulted
+    left: 0
+Witnesses B/C/D are new coverage: before this change no test anywhere exercised a
+rotation between construction and broadcast, so the hole was invisible to the suite.
+
+## GREEN
+
+- `cargo test -p solana-kit --lib -- tenant_broadcast_guard` → 9 passed, 0 failed
+- `cargo test -p solana-kit --test tenant_signing_boundary` → all passed (incl. B)
+- `cargo test -p sniper-suite --lib -- fence_probe_tests` → 2 passed, 0 failed
+- clippy `-D warnings` clean on solana-kit / module-copy / module-sniper / sniper-suite;
+  fmt 0; `git diff --check` 0
+
+## Residual CLOSED the same day: the fence is no longer opt-in
+
+The first cut left the honesty problem "the factory CAN fence, but boot must remember
+to ask". Source search showed why that was wrong to leave hanging: `TenantModuleFactory`
+had no `src/` caller at all — only integration tests construct it — so there was no boot
+site to "fix", and an opt-in fence would silently stay off everywhere.
+
+Changed: `TenantModuleFactory::new(db)` now builds the live fence ITSELF over the same
+database (`PgRuntimeStore` + `RuntimeRegistryService`, memoised in a `OnceLock` so all
+engines of one factory share one handle) and hands it to every engine it builds.
+`with_runtime_fence(...)` remains, now meaning "use a DIFFERENT registry than the one
+over my db" (tests, or a service instance shared with the caller).
+
+Witness E — `crates/server/tests/tenant_module_factory_pg.rs::a_factory_built_engine_is_runtime_fenced_by_default`
+(real PostgreSQL, real factory, nobody opts in):
+  1. a live runtime row is registered for a real org;
+  2. a real copy engine is built by the factory (`build_copy`) — no `with_runtime_fence`;
+  3. the engine's own guard reports `has_fence_probe() == true`;
+  4. while current, `guard.authorize_live(&meta)` authorizes;
+  5. the tenant's runtime is ROTATED in the registry;
+  6. `guard.authorize_meta(&meta)` STILL passes (the captured context sees nothing),
+     while `guard.authorize_live(&meta)` returns `RuntimeFenced { source: "runtime_registry" }`;
+  7. the registry itself still reports a current runtime for the tenant — so the refusal
+     is this engine's staleness, not a broken registry.
+
+RED for E: making the factory opt-in again (returning `None` from `fence_probe`) fails it
+immediately —
+  "every factory-built engine must carry a live runtime fence by default"
+Then restored; the whole file is 4 passed / 0 failed.
+
+## What this does and does not establish
+
+* DOES: with a probe attached, a runtime that is superseded, stale-generation, drained,
+  lease-lapsed or unknown is refused at the last gate before signing, with a
+  machine-readable `runtime_fenced` veto that leaves no signature.
+* DOES: an unreadable registry refuses the broadcast (fail-closed, not fail-open).
+* DOES: attach itself without human memory — a factory-built engine carries a live
+  fence by default, proven over real PostgreSQL (witness E).
+* DOES NOT: refresh the signer binding (`signer.is_active()` is still the captured
+  value); live revocation lookup remains a separate item.
+* DOES NOT: exercise a live chain or a funded wallet — the end-to-end witness is a
+  paper-mode executor.

@@ -15,6 +15,22 @@ use super::model::{
     TenantPolySignal,
 };
 
+/// Largest page of open Polymarket mirror orders a read will return.
+pub const POLY_ORDER_PAGE_MAX: i64 = 500;
+
+/// One page of the acting tenant's open mirror orders (gap #78).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolyOrderPage {
+    /// The page, oldest `submitted_at` first.
+    pub items: Vec<TenantPolyOrder>,
+    /// True when a further page exists.
+    pub has_more: bool,
+    /// Open mirror orders in this cursor window, INCLUDING this page.
+    pub total_remaining: i64,
+    /// Continuation `(submitted_at, venue_order_id)` of the last row.
+    pub next_cursor: Option<(DateTime<Utc>, String)>,
+}
+
 /// Read-side tenant polymarket repository (`poly_signals`,
 /// `poly_orders`, `poly_fills`).
 pub struct TenantPolyRead {
@@ -104,28 +120,92 @@ impl TenantPolyRead {
         Ok(found)
     }
 
-    /// The acting tenant's OPEN mirror orders (`closed_at IS NULL` —
-    /// restart recovery re-adopts these and asks the venue for truth).
+    /// One PAGE of the acting tenant's OPEN mirror orders (`closed_at IS NULL`
+    /// — restart recovery re-adopts these and asks the venue for truth).
+    ///
+    /// `cursor` is the `(submitted_at, venue_order_id)` of the previous page's
+    /// last row: the full sort key, so ties are neither skipped nor repeated,
+    /// and `has_more`/`total_remaining` state what the page is not returning
+    /// (gap #78).
+    pub async fn open_orders_page(
+        &self,
+        scope: &TradingQueryScope,
+        cursor: Option<(DateTime<Utc>, String)>,
+        limit: i64,
+    ) -> Result<PolyOrderPage, RepositoryError> {
+        let page_size = limit.clamp(1, POLY_ORDER_PAGE_MAX);
+        let (cursor_at, cursor_id) = match cursor {
+            Some((at, id)) => (Some(at), Some(id)),
+            None => (None, None),
+        };
+        let organization_id = scope.organization_id().as_uuid();
+        let rows = self
+            .db
+            .timed(
+                "tenant_poly_open_orders_page",
+                sqlx::query(
+                    r#"SELECT * FROM poly_orders
+                        WHERE organization_id = $1 AND closed_at IS NULL
+                          AND ($2::timestamptz IS NULL
+                               OR submitted_at > $2
+                               OR (submitted_at = $2 AND venue_order_id > $3))
+                        ORDER BY submitted_at ASC, venue_order_id ASC LIMIT $4"#,
+                )
+                .bind(organization_id)
+                .bind(cursor_at)
+                .bind(cursor_id.clone())
+                .bind(page_size + 1)
+                .fetch_all(self.db.pool()),
+            )
+            .await?;
+        let has_more = rows.len() as i64 > page_size;
+        let items: Vec<TenantPolyOrder> = rows
+            .iter()
+            .take(page_size as usize)
+            .map(order_from_row)
+            .collect();
+        assert_rows_org(scope.organization_id(), &items)?;
+        let total_remaining: i64 = sqlx::query_scalar(
+            r#"SELECT count(*) FROM poly_orders
+                WHERE organization_id = $1 AND closed_at IS NULL
+                  AND ($2::timestamptz IS NULL
+                       OR submitted_at > $2
+                       OR (submitted_at = $2 AND venue_order_id > $3))"#,
+        )
+        .bind(organization_id)
+        .bind(cursor_at)
+        .bind(cursor_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        let next_cursor = items
+            .last()
+            .map(|o| (o.submitted_at, o.venue_order_id.clone()));
+        Ok(PolyOrderPage {
+            items,
+            has_more,
+            total_remaining,
+            next_cursor,
+        })
+    }
+
+    /// The acting tenant's OPEN mirror orders — the FIRST PAGE of
+    /// [`Self::open_orders_page`]. A truncated page is logged, never silent.
     pub async fn open_orders(
         &self,
         scope: &TradingQueryScope,
     ) -> Result<Vec<TenantPolyOrder>, RepositoryError> {
-        let rows = self
-            .db
-            .timed(
-                "tenant_poly_open_orders",
-                sqlx::query(
-                    r#"SELECT * FROM poly_orders
-                        WHERE organization_id = $1 AND closed_at IS NULL
-                        ORDER BY submitted_at ASC, venue_order_id ASC LIMIT 5000"#,
-                )
-                .bind(scope.organization_id().as_uuid())
-                .fetch_all(self.db.pool()),
-            )
+        let page = self
+            .open_orders_page(scope, None, POLY_ORDER_PAGE_MAX)
             .await?;
-        let rows: Vec<TenantPolyOrder> = rows.iter().map(order_from_row).collect();
-        assert_rows_org(scope.organization_id(), &rows)?;
-        Ok(rows)
+        if page.has_more {
+            tracing::warn!(
+                organization_id = %scope.organization_id(),
+                returned = page.items.len(),
+                remaining = page.total_remaining,
+                "open polymarket mirror orders TRUNCATED: walk open_orders_page"
+            );
+        }
+        Ok(page.items)
     }
 
     /// Keyset-paginated mirror orders of the acting tenant.

@@ -1,0 +1,137 @@
+Tenant copy scoping migration analysis, 2026-11-09.
+The existing unscoped copy event marks do not encode a tenant. A direct switch to tenant-qualified event keys would not match old marks. During rolling deploy, old and new code would not arbitrate on the same key; treating old marks as applying to every tenant avoids some replay but retains suppression. Additional ownership and intent identifiers also derive from unscoped source trade data; position models have no tenant identifier. Recovery seed ownership and durable tenant-scoped history must be validated before changing identity or claiming tenant isolation. Source inspection only; no migration implemented.
+
+--- event key and shared claim ---
+   284	    /// The one authoritative dedup key (`copy:{signature}:{leader}:{mint}:{side}`).
+   285	    /// Human-readable on purpose: it appears in logs and the durable journal.
+   286	    pub fn dedup_key(&self) -> String {
+   287	        format!(
+   288	            "copy:{}:{}:{}:{}",
+   289	            self.signature.trim(),
+   290	            self.leader.trim(),
+   291	            self.mint.trim(),
+   292	            self.side_str()
+   293	        )
+   294	    }
+   835	        // ---- 3. the one authoritative dedup --------------------------------
+   836	        // A lease prevents overlapping holders, not sequential replay after
+   837	        // release. For configured clustered simulate/live execution, require
+   838	        // an authoritative shared dedup decision and never use L1 fallback.
+   839	        let dedup = if cfg.ha.ha_mode().is_clustered()
+   840	            && cfg.execution.mode != bot_core::models::ExecutionMode::Paper
+   841	        {
+   842	            match event_dedup::claim_shared(&self.state, event).await {
+   843	                Ok(outcome) => outcome,
+   844	                Err(error) => {
+   845	                    return self
+   846	                        .finish_rejected(
+   847	                            event,
+   848	                            Some(&rule),
+   849	                            Rejection::new(
+   850	                                RejectReason::DedupUnavailable,
+   851	                                CopyStage::LeaderResolved,
+   852	                                error.to_string(),
+   853	                            ),
+   854	                            &mut tl,
+   855	                        )
+   856	                        .await;
+   857	                }
+   858	            }
+   859	        } else {
+   860	            event_dedup::claim(&self.state, event).await
+   861	        };
+   862	        if dedup == DedupOutcome::Duplicate {
+   863	            debug!(event = %event.event_id, source = event.source.as_str(), "duplicate leader event");
+  1118	        // ---- 9. ownership --------------------------------------------------
+  1119	        // Distributed ownership (Prompt 3 §F/§H): the whale trade arrives on
+  1120	        // EVERY replica's feed connection — the claim on the logical identity
+  1121	        // `copy:{wallet}:{mint}` elects exactly one executor. Losers skip
+  1122	        // deterministically (§G); store failures fail closed (§K). The
+  1123	        // process-local cooldown (mark_copied) stays as a rate guard, but the
+  1124	        // claim is authoritative cross-replica.
+  1125	        let mut permit = match bot_core::ownership::Permit::acquire(
+  1126	            self.ownership.as_deref(),
+  1127	            format!("copy:{}:{}", event.leader, event.mint),
+  1128	            "entry",
+  1129	            "copy",
+  1130	            "mirror",
+  1131	            &event.mint,
+  1132	        )
+  1133	        .await
+    62	pub async fn claim(state: &Shared, event: &LeaderTradeEvent) -> DedupOutcome {
+    63	    let key = event.dedup_key();
+    64	    let outcome = if state.mark_copy_event_seen(&key).await {
+    65	        DedupOutcome::Fresh
+    66	    } else {
+    67	        DedupOutcome::Duplicate
+    68	    };
+    69	    metrics::count_dedup(outcome.as_str());
+    70	    outcome
+    71	}
+    72
+    73	/// Require a shared first-arrival decision. Unlike [`claim`], this fails
+    74	/// closed when the facade is missing, memory-only, or the shared backend
+    75	/// cannot be reached. A failed or ambiguous write never authorizes execution.
+    76	pub async fn claim_shared(
+    77	    state: &Shared,
+    78	    event: &LeaderTradeEvent,
+    79	) -> bot_core::error::BotResult<DedupOutcome> {
+    80	    let store = state.dedup().ok_or_else(|| {
+    81	        bot_core::error::BotError::config("clustered copy execution requires shared event dedup")
+    82	    })?;
+    83	    let fresh = store.mark_shared("copy_event", &event.dedup_key()).await?;
+    84	    let outcome = if fresh {
+    85	        DedupOutcome::Fresh
+    98	/// Pre-mark `keys` (restart recovery from the durable journal). Returns how
+    99	/// many were newly marked.
+   100	pub async fn seed<I, S>(state: &Shared, keys: I) -> usize
+   101	where
+   102	    I: IntoIterator<Item = S>,
+   103	    S: AsRef<str>,
+   104	{
+   105	    let mut added = 0;
+   106	    for key in keys {
+   107	        if state.mark_copy_event_seen(key.as_ref()).await {
+   108	            added += 1;
+   109	            metrics::count_dedup("seeded");
+   110	        }
+   111	    }
+   112	    added
+   113	}
+   114
+   115	/// Rebuild a dedup key from journaled parts (the journal stores the
+   116	/// components, not the key).
+   117	pub fn key_from_parts(signature: &str, leader: &str, mint: &str, side: &str) -> String {
+   118	    format!(
+   119	        "copy:{}:{}:{}:{}",
+   120	        signature.trim(),
+--- recovery applies journal keys ---
+   471	            links,
+   472	            positions,
+   473	            ledger,
+   474	        });
+   475	        for action in &plan.actions {
+   476	            metrics::count_recovery_action(action.as_str());
+   477	            match action {
+   478	                RecoveryAction::SeedDedup { keys } => {
+   479	                    let n = event_dedup::seed(&self.state, keys.iter()).await;
+   480	                    info!(
+   481	                        seeded = n,
+   482	                        journaled = keys.len(),
+   483	                        "copy dedup re-seeded from journal"
+   484	                    );
+   485	                    audit::publish_recovery(
+   486	                        &self.state,
+--- execution intent identity ---
+    56
+    57	/// Deterministic intent id of a mirrored entry (same parts as the pre-TASK-3
+    58	/// `mirror::copy_intent_id`).
+    59	pub fn entry_intent_id(leader: &str, signature: &str, mint: &str, route: EntryRoute) -> String {
+    60	    bot_core::execution::intent_id(&["copy", signature, leader, "buy", route.as_str(), mint])
+    61	}
+    62
+    63	/// [`entry_intent_id`] for an event.
+    64	pub fn entry_intent_id_for(event: &LeaderTradeEvent, route: EntryRoute) -> String {
+    65	    entry_intent_id(&event.leader, &event.signature, &event.mint, route)
+    66	}
+    67

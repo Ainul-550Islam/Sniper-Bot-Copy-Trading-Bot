@@ -366,17 +366,59 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore]
-    fn stripe_live_checkout_ignored_without_live_billing() {
-        let live = std::env::var("LIVE_BILLING").unwrap_or_default() == "1"
-            && std::env::var("STRIPE_API_KEY")
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
-        assert!(
-            live,
-            "LIVE_BILLING=1 and STRIPE_API_KEY required for live test; skipping"
-        );
+    /// See the paddle twin: runs on every ordinary test run and asserts the gate
+    /// itself — live requires the opt-in, a bare key fails closed, no key fails
+    /// closed. `#[ignore]` used to hide whether any of that was true.
+    #[tokio::test]
+    async fn stripe_live_checkout_requires_live_billing_opt_in() {
+        let key = std::env::var("STRIPE_API_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let live_flag = std::env::var("LIVE_BILLING").unwrap_or_default() == "1";
+        match (live_flag, key) {
+            (true, Some(k)) => {
+                let adapter = StripeAdapter::from_env().expect("live stripe must be constructible");
+                let dbg = format!("{adapter:?}");
+                assert!(
+                    dbg.contains("has_key"),
+                    "debug must report key presence: {dbg}"
+                );
+                assert!(!dbg.contains(&k), "debug must not leak the key");
+            }
+            (false, Some(_)) => {
+                // A reachable key is NOT enough: checkout is refused until the
+                // explicit opt-in is present.
+                use bot_core::tenant::OrganizationId;
+                let adapter = StripeAdapter::from_env().expect(
+                    "a key is enough to construct the adapter; checkout is separately gated",
+                );
+                let intent = StripeCheckoutIntent {
+                    organization: OrganizationId::new(),
+                    plan: PlanCode::Starter,
+                    idempotency_key: format!("gate-{}", uuid::Uuid::new_v4()),
+                    success_url: None,
+                    cancel_url: None,
+                };
+                match adapter.create_checkout(&intent).await {
+                    Err(StripeError::Transport(msg)) => assert!(
+                        msg.contains("LIVE_BILLING"),
+                        "the refusal must name the missing opt-in, got {msg}"
+                    ),
+                    other => {
+                        panic!("key without LIVE_BILLING=1 must refuse checkout, got {other:?}")
+                    }
+                }
+            }
+            (_, None) => {
+                assert!(
+                    matches!(
+                        StripeAdapter::from_env(),
+                        Err(StripeError::NotConfigured(_))
+                    ),
+                    "no key must yield NotConfigured, never a default adapter"
+                );
+            }
+        }
     }
 
     #[test]

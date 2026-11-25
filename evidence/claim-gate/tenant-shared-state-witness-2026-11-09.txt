@@ -1,0 +1,22 @@
+Tenant shared-state collision witness (2026-11-09 in user timezone).
+Command: cargo test -p module-copy --test tenant_execution --locked -j 1 -- --test-threads=1
+The witness test deliberately asserts current defective behavior, not desired isolation: two tenant executors in paper mode share one in-memory AppState, follow the same leader, and process one trade sequentially. The second outcome is DUPLICATE_EVENT from the CopyBot pipeline while both local tenant prefilters saw the event. The test uses a null sink; no shared Redis/PostgreSQL tenant backend, production server wiring, live transaction or real tenant journal is exercised.
+
+    Finished `test` profile [unoptimized] target(s) in 1.55s
+     Running tests/tenant_execution.rs (target/debug/deps/tenant_execution-eec7c191619e41fd)
+
+running 10 tests
+test a_tenant_copy_executor_denies_foreign_contexts ... ok
+test a_wallet_bound_to_another_tenant_cannot_drive_the_copy_executor ... ok
+test an_unbound_copy_bot_preserves_the_operator_behaviour ... ok
+test shared_app_state_currently_causes_cross_tenant_dedup_collision ... ok
+test tenant_dedup_distinguishes_same_signature_mint_and_side ... ok
+test tenant_duplicate_does_not_overwrite_first_sink_outcome ... ok
+test tenant_unavailable_shared_dedup_retries_without_journaling ... ok
+test the_context_adapter_scopes_leader_and_event_keys_per_tenant ... ok
+test the_same_leader_trade_is_deduplicated_tenant_locally ... ok
+test two_tenants_seeing_the_same_leader_trade_both_process_it ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+EXIT=0

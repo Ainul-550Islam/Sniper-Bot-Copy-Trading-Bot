@@ -29,9 +29,10 @@ use bot_core::db::ha::HaRepo;
 use bot_core::db::Database;
 use bot_core::error::BotResult;
 use bot_core::ha::{
-    audit as ha_audit, metrics as ha_metrics, plan_order_recovery, FeedCursor, FeedGap, GapStatus,
-    HaStore, Lease, LeaseDecision, LeaseGuard, LeaseRequest, LeaseRole, LocalOrderEvidence,
-    OrderRecoveryAction, RecoveryRecord, VenueOrderEvidence, WorkerRegistration, WorkerState,
+    audit as ha_audit, metrics as ha_metrics, plan_order_recovery, CursorWrite, FeedCursor,
+    FeedGap, GapStatus, HaStore, Lease, LeaseDecision, LeaseGuard, LeaseRequest, LeaseRole,
+    LocalOrderEvidence, OrderRecoveryAction, RecoveryRecord, VenueOrderEvidence,
+    WorkerRegistration, WorkerState,
 };
 use bot_core::lifecycle::Shutdown;
 use bot_core::oms::OrderStatus;
@@ -158,9 +159,22 @@ impl HaStore for DbHaStore {
             .map_err(|e| bot_core::error::BotError::db(e.to_string()))
     }
 
-    async fn save_cursor(&self, cursor: &FeedCursor) -> BotResult<()> {
+    async fn save_cursor(&self, cursor: &FeedCursor) -> BotResult<CursorWrite> {
         self.repo()
             .save_cursor(cursor)
+            .await
+            .map_err(|e| bot_core::error::BotError::db(e.to_string()))
+    }
+
+    async fn acknowledge_cursor(
+        &self,
+        key: &str,
+        position: Option<u64>,
+        token: Option<&str>,
+        fence: &str,
+    ) -> BotResult<bool> {
+        self.repo()
+            .acknowledge_cursor(key, position, token, fence)
             .await
             .map_err(|e| bot_core::error::BotError::db(e.to_string()))
     }
@@ -168,6 +182,13 @@ impl HaStore for DbHaStore {
     async fn load_cursor(&self, key: &str) -> BotResult<Option<FeedCursor>> {
         self.repo()
             .load_cursor(key)
+            .await
+            .map_err(|e| bot_core::error::BotError::db(e.to_string()))
+    }
+
+    async fn pending_cursors(&self, limit: usize) -> BotResult<Vec<FeedCursor>> {
+        self.repo()
+            .pending_cursors(limit)
             .await
             .map_err(|e| bot_core::error::BotError::db(e.to_string()))
     }
@@ -422,6 +443,17 @@ impl LeasedWorker {
     }
 
     /// Spawn the loop. `job` runs only while the lease is verifiably held.
+    ///
+    /// Two things this loop guarantees that a "fence then await" loop does not:
+    ///
+    /// * renewal keeps happening WHILE the job runs — a separate supervisor
+    ///   task renews on schedule and trips the guard's cancellation token the
+    ///   moment ownership is lost, so a job that outlives the TTL is aborted
+    ///   instead of running with a stale generation;
+    /// * the job is re-verified against the store clock immediately before it
+    ///   starts ([`bot_core::ha::HaRuntime::refresh_before_work`]), so an
+    ///   EXPIRED lease is refused even when this worker is still the recorded
+    ///   holder.
     pub fn spawn<F, Fut>(self, shutdown: Arc<Shutdown>, job: F) -> tokio::task::JoinHandle<()>
     where
         F: Fn(Shared, LeaseGuard) -> Fut + Send + Sync + 'static,
@@ -432,18 +464,20 @@ impl LeasedWorker {
             let mut ticker = tokio::time::interval(self.interval.max(Duration::from_secs(1)));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut guard: Option<LeaseGuard> = None;
-            let mut renew_at = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     _ = shutdown.wait() => break,
                     _ = ticker.tick() => {
+                        // A guard whose token fired is dead: drop it and try to
+                        // re-acquire on the next tick.
+                        if matches!(&guard, Some(g) if g.is_cancelled()) {
+                            guard = None;
+                        }
                         // 1. Make sure we own the role.
                         if guard.is_none() {
                             match ha.acquire(self.role.clone()).await {
                                 Ok(Some(g)) => {
                                     info!(role = %self.role, generation = g.generation(), "leased worker active");
-                                    renew_at = tokio::time::Instant::now()
-                                        + renew_period(&ha).await;
                                     guard = Some(g);
                                 }
                                 Ok(None) => continue, // another worker owns it
@@ -452,25 +486,47 @@ impl LeasedWorker {
                         }
                         let Some(g) = guard.clone() else { continue };
 
-                        // 2. Renew on schedule.
-                        if tokio::time::Instant::now() >= renew_at {
-                            if ha.renew(&g).await {
-                                renew_at = tokio::time::Instant::now() + renew_period(&ha).await;
-                            } else {
-                                warn!(role = %self.role, "lease lost; stepping down");
-                                guard = None;
-                                continue;
-                            }
-                        }
+                        // 2. Renewal runs concurrently with the job and
+                        //    cancels it the moment ownership is lost.
+                        let period = renew_period(&ha).await;
+                        let supervisor = {
+                            let ha = ha.clone();
+                            let g = g.clone();
+                            let shutdown = shutdown.clone();
+                            let period = chrono::Duration::from_std(period)
+                                .unwrap_or_else(|_| chrono::Duration::seconds(10));
+                            tokio::spawn(async move {
+                                // Cancel renewal when shutdown starts; the
+                                // guard token is tripped by `renew` on loss.
+                                let stop = async move { shutdown.wait().await };
+                                tokio::select! {
+                                    _ = ha.supervise_guard(&g, period, None) => {},
+                                    _ = stop => {},
+                                }
+                            })
+                        };
 
-                        // 3. Fence immediately before the work.
-                        match ha.fence(&g).await {
-                            Ok(()) => job(self.state.clone(), g).await,
+                        // 3. Re-verify against the store clock, then fence on
+                        //    the freshly renewed lease before the work.
+                        let proceed = match ha.refresh_before_work(&g).await {
+                            Ok(()) => ha.fence(&g).await.is_ok(),
                             Err(e) => {
-                                warn!(role = %self.role, error = %e, "fenced: skipping this tick");
-                                guard = None;
+                                warn!(role = %self.role, error = %e, "refused before work: lease not fresh");
+                                false
                             }
+                        };
+                        if proceed {
+                            let cancelled = g.cancellation();
+                            tokio::select! {
+                                _ = job(self.state.clone(), g.clone()) => {},
+                                _ = cancelled.cancelled() => {
+                                    warn!(role = %self.role, "job cancelled: lease lost mid-work");
+                                }
+                            }
+                        } else {
+                            guard = None;
                         }
+                        supervisor.abort();
                     }
                 }
             }

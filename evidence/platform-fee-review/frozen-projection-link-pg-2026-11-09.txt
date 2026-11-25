@@ -1,0 +1,25 @@
+COMMAND: cargo test -p bot-core --test platform_fee_intent_policy_pg --test platform_fee_projection_pg --test platform_fee_frozen_projection_pg --locked -j 1 -- --test-threads=1 --nocapture
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 2.30s
+     Running tests/platform_fee_frozen_projection_pg.rs (target/debug/deps/platform_fee_frozen_projection_pg-1d9324eecc17f7f2)
+
+running 1 test
+test projections_require_matching_frozen_policy_and_replay_identically ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests/platform_fee_intent_policy_pg.rs (target/debug/deps/platform_fee_intent_policy_pg-647ce3ede35d7976)
+
+running 1 test
+test policy_is_immutable_idempotent_and_tenant_isolated ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests/platform_fee_projection_pg.rs (target/debug/deps/platform_fee_projection_pg-8321cb61ba55366e)
+
+running 1 test
+test projection_is_tenant_scoped_atomic_and_replay_safe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+EXIT=0

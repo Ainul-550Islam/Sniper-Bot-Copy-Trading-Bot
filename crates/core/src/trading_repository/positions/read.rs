@@ -50,7 +50,8 @@ impl TenantPositionRead {
         tenant_not_found(ResourceKind::Position, found)
     }
 
-    /// The acting tenant's live positions (restart-recovery input).
+    /// All the acting tenant's live positions (restart-recovery input).
+    /// Loads the complete book into memory; large books can be expensive.
     pub async fn list_open(
         &self,
         scope: &TradingQueryScope,
@@ -62,7 +63,7 @@ impl TenantPositionRead {
                 sqlx::query(
                     r#"SELECT * FROM positions
                         WHERE organization_id = $1 AND status IN ('open','closing')
-                        ORDER BY opened_at ASC LIMIT 5000"#,
+                        ORDER BY opened_at ASC, id ASC"#,
                 )
                 .bind(scope.organization_id().as_uuid())
                 .fetch_all(self.db.pool()),
@@ -145,7 +146,7 @@ impl TenantPositionRead {
                         WHERE organization_id = $1
                           AND closed_at IS NOT NULL
                           AND closed_at >= $2 AND closed_at < $3
-                        ORDER BY closed_at ASC LIMIT 5000"#,
+                        ORDER BY closed_at ASC, id ASC LIMIT 5000"#,
                 )
                 .bind(scope.organization_id().as_uuid())
                 .bind(since)

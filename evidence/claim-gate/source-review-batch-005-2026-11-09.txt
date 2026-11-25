@@ -1,0 +1,6 @@
+Source reading batch 005, 2026-11-09
+Full versions read; modified events and storage versions shown after fixes; reading does not establish correctness.
+caafac07918cd12fc5c1066bcc5b15ff1a7f71589a18694143993c691f7b56d8  crates/core/src/events.rs
+bce1d9b2933fa42b09ad9b324730a17cffbae0694c9a02e86a9990596d619ddc  crates/core/src/storage.rs
+5ad030119cd8944efbf1c0455e56f5f423a8cfdece3ac803292dc84df360feb6  crates/core/src/lifecycle.rs
+Found torn tail following record loss and same-second archive replacement; bounded fixes and remaining risks evidence jsonl-torn-rotation-2026-11-09.txt. Found AppEvent::module wrong for non-sniper fills/positions, corrected event-module-attribution-2026-11-09.txt. EventBus recent buffer uses independently spawned tasks, so ordering and completeness are not proven; publish_now bypasses it. Shutdown signalled flag is set before reason and watch notification, so simultaneous observation may precede reason storage; operational impact not established. No claim of exhaustive caller review.

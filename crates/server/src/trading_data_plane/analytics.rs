@@ -221,8 +221,8 @@ pub async fn summary(
     let module_rows = sqlx::query(
         "SELECT source AS module,
                 COUNT(*)::bigint AS trades_count,
-                COALESCE(SUM(ABS(amount_in) + ABS(amount_out)), 0.0) AS volume_usd,
-                COALESCE(SUM(fee), 0.0) AS fees_usd
+                COALESCE(SUM(ABS(amount_in) + ABS(amount_out)), 0.0) AS volume,
+                COALESCE(SUM(fee), 0.0) AS fees
            FROM trades
           WHERE organization_id = $1 AND ts >= $2
           GROUP BY source
@@ -243,16 +243,25 @@ pub async fn summary(
             );
         }
     };
+    // The raw `trades` book is quoted in whatever the venue charged (SOL, USDC,
+    // outcome tokens) — it carries no currency. Those sums are therefore
+    // reported as unlabelled amounts with an explicit unit, never as `_usd`.
+    // Only `tenant_daily_accounting` (fed from the global ledger) may be
+    // labelled `_usd`, and even that is flagged through `units` below.
     let module_breakdown: Vec<_> = module_rows
         .into_iter()
         .map(|row| {
             json!({
                 "module": row.get::<String, _>("module"),
                 "trades_count": row.get::<i64, _>("trades_count"),
-                "volume_usd": row.get::<f64, _>("volume_usd"),
-                "pnl_usd": Value::Null,
+                "volume": row.get::<f64, _>("volume"),
+                "volume_unit": "raw_trade_amount_unlabelled",
+                "pnl": Value::Null,
+                "pnl_unit": Value::Null,
+                "pnl_unavailable_reason": "the raw trade book has no realized PnL column",
                 "win_rate_pct": Value::Null,
-                "fees_usd": row.get::<f64, _>("fees_usd"),
+                "fees": row.get::<f64, _>("fees"),
+                "fees_unit": "raw_trade_amount_unlabelled",
             })
         })
         .collect();
@@ -283,13 +292,45 @@ pub async fn summary(
             "total_fees_usd": total_fees,
             "sharpe_ratio": Value::Null,
             "max_drawdown_pct": max_drawdown_pct,
+            // Every figure above that ends in `_usd` comes from
+            // `tenant_daily_accounting` (fed by the global ledger, USD-quoted).
+            // The raw trade book is NOT: its amounts are unlabelled and are
+            // exposed in `module_breakdown` with an explicit unit.
+            "units": {
+                "usd_fields": [
+                    "realized_pnl_usd",
+                    "unrealized_pnl_usd",
+                    "total_volume_usd",
+                    "total_fees_usd",
+                    "pnl_series[].pnl_usd",
+                    "pnl_series[].cumulative_usd",
+                ],
+                "usd_source": "tenant_daily_accounting (global ledger, USD-quoted)",
+                "unlabelled_fields": ["module_breakdown[].volume", "module_breakdown[].fees"],
+                "unlabelled_source": "raw trades book (venue units, no currency)",
+                "unavailable": {
+                    "win_rate_pct": "no closed-trade sample is derived for this window",
+                    "sharpe_ratio": "not computed from a daily series yet",
+                    "avg_slippage_bps": "no quoted-vs-filled price pair is stored",
+                    "module_breakdown[].pnl": "the raw trade book has no realized PnL column",
+                    "reverted_txs": "an execution attempt is not a transaction"
+                },
+            },
             "pnl_series": pnl_series,
             "module_breakdown": module_breakdown,
+            // `executions.latency_ms` is the ROUND-TRIP of an API call, not the
+            // time a fill took, and a failed attempt is NOT a reverted
+            // transaction (an attempted send can fail without ever landing).
+            // Both are reported under names that say what they measure, and
+            // the misleading keys are gone rather than deprecated in place.
             "execution_quality": {
-                "avg_fill_time_ms": avg_fill_time_ms,
+                "avg_execution_latency_ms": avg_fill_time_ms,
+                "avg_execution_latency_unit": "milliseconds of API round-trip, not fill time",
                 "avg_slippage_bps": Value::Null,
                 "failed_attempts_pct": failed_attempts_pct,
-                "reverted_txs": execution.get::<i64, _>("failed_attempts"),
+                "failed_attempts_count": execution.get::<i64, _>("failed_attempts"),
+                "reverted_txs": Value::Null,
+                "reverted_txs_unavailable_reason": "an execution attempt is not a transaction; no reverted-tx count is derived from it",
             }
         })),
     )

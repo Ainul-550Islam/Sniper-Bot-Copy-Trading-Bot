@@ -428,6 +428,13 @@ max_trades_in_memory = 1000
 # signatures, last-exit & last-copy timestamps). Oldest entries are evicted once
 # exceeded, so memory stays bounded on long runs. Raise for very high throughput.
 max_dedup_entries = 100000
+# Clustered copy execution in simulate/live mode requires shared dedup.
+# Enable [database] and set dedup_backend = "postgres" here, or enable
+# [redis] and set dedup_backend = "redis" with a nonzero [redis] TTL.
+# The memory default does not authorize clustered copy simulate/live events.
+# Retention, Redis persistence/eviction and failure recovery still matter.
+# dedup_backend = "postgres"
+# dedup_ttl_secs = 604800
 
 # --- Observability (logging, metrics, health probes) ------------------------
 # RUST_LOG (env) always overrides log_level. LOG_FORMAT / METRICS_ENABLED /
@@ -567,6 +574,16 @@ keys = []
 # label = "monitoring"
 # key_env = "API_KEY_RO"
 # role = "readonly"
+
+# --- Platform fee collection (disabled by default) ----------------------------
+# Direct routes transfer native SOL to vault. Jupiter uses a separate,
+# initialized and unfrozen WSOL token account, not the system-account vault.
+# Fee preparation does not prove settlement or revenue ledger posting.
+[platform_fee]
+vault = ""
+jupiter_fee_account = ""
+bps = 0
+min_fee_lamports = 10000
 
 # --- Signing / key custody -----------------------------------------------------
 # provider selects the signing backend. Only "local" (keypair material via

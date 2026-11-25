@@ -52,9 +52,9 @@ pub async fn list(
             Err(e) => plane_error(e),
         };
     }
-    let (since, until) = match window(&params) {
-        Some(w) => w,
-        None => return bad_window(),
+    let (since, until) = match window_or_response(&params) {
+        Ok(w) => w,
+        Err(response) => return response,
     };
     match plane
         .executions_read()
@@ -147,30 +147,193 @@ pub async fn transaction(
     }
 }
 
-/// `?since=<rfc3339>&until=<rfc3339>` (defaults: last 24h).
-pub(super) fn window(
-    params: &HashMap<String, String>,
-) -> Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
-    let until = params
-        .get("until")
-        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now);
-    let since = params
-        .get("since")
-        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|| until - chrono::Duration::hours(24));
-    if since >= until {
-        return None;
-    }
-    Some((since, until))
+/// A resolved `(since, until)` reporting window.
+pub(super) type Window = (chrono::DateTime<Utc>, chrono::DateTime<Utc>);
+
+/// Why a requested reporting window was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WindowError {
+    /// A present `since`/`until` is not an RFC 3339 timestamp.
+    Malformed,
+    /// `since >= until`, or a window longer than [`MAX_WINDOW_DAYS`].
+    Empty,
 }
 
-fn bad_window() -> Response {
+impl WindowError {
+    /// Stable machine-readable reason for the JSON body and the logs.
+    pub(super) fn as_str(&self) -> &'static str {
+        match self {
+            WindowError::Malformed => "window_timestamp_is_not_rfc3339",
+            WindowError::Empty => "window_must_be_a_positive_range_of_at_most_365_days",
+        }
+    }
+}
+
+/// The widest window a reporting query may ask for. Every read is capped, but a
+/// request for "the last ten years" still makes the database touch the whole
+/// journal before the cap applies — so the bound is enforced up front and
+/// documented instead of surfacing as an arbitrary truncation.
+pub(super) const MAX_WINDOW_DAYS: i64 = 365;
+
+/// `?since=<rfc3339>&until=<rfc3339>` (defaults: the 24h ending now).
+///
+/// **A supplied timestamp that cannot be parsed is REFUSED, never silently
+/// replaced.** The old helper fell back to "now" per parameter, so
+/// `?since=garbage` quietly became the default 24-hour window and
+/// `?until=garbage` became `now` — the caller got a plausible-looking page of
+/// data for a period it never asked for, with no signal that its request was
+/// ignored.
+pub(super) fn window(params: &HashMap<String, String>) -> Result<Window, WindowError> {
+    let parse = |key: &str| -> Result<Option<chrono::DateTime<Utc>>, WindowError> {
+        match params.get(key) {
+            None => Ok(None),
+            Some(raw) => chrono::DateTime::parse_from_rfc3339(raw.trim())
+                .map(|d| Some(d.with_timezone(&Utc)))
+                .map_err(|_| WindowError::Malformed),
+        }
+    };
+    let until = parse("until")?.unwrap_or_else(Utc::now);
+    let since = match parse("since")? {
+        Some(since) => since,
+        None => until - chrono::Duration::hours(24),
+    };
+    if since >= until {
+        return Err(WindowError::Empty);
+    }
+    if until - since > chrono::Duration::days(MAX_WINDOW_DAYS) {
+        return Err(WindowError::Empty);
+    }
+    Ok((since, until))
+}
+
+/// Convenience for handlers that want the caller's window or the refusal
+/// response, in one step.
+pub(super) fn window_or_response(params: &HashMap<String, String>) -> Result<Window, Response> {
+    window(params).map_err(bad_window)
+}
+
+pub(super) fn bad_window(reason: WindowError) -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(json!({ "error": "invalid_window" })),
+        Json(json!({ "error": "invalid_window", "reason": reason.as_str() })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{window, WindowError, MAX_WINDOW_DAYS};
+    use std::collections::HashMap;
+
+    fn params(kv: &[(&str, &str)]) -> HashMap<String, String> {
+        kv.iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_malformed_timestamp_is_refused_and_never_replaced_by_a_default() {
+        // The old helper parsed each parameter with `.ok()` and fell back to
+        // "now"/"24h ago", so `?since=yesterday` returned a REAL page of the
+        // WRONG period with a 200. This must be a refusal.
+        assert_eq!(
+            window(&params(&[("since", "yesterday")])).unwrap_err(),
+            WindowError::Malformed
+        );
+        assert_eq!(
+            window(&params(&[("until", "2026-13-45T99:99:99Z")])).unwrap_err(),
+            WindowError::Malformed
+        );
+        assert_eq!(
+            window(&params(&[
+                ("since", "2026-11-01T00:00:00Z"),
+                ("until", "not-a-time")
+            ]))
+            .unwrap_err(),
+            WindowError::Malformed
+        );
+        // An empty string is malformed too (it is not "absent").
+        assert_eq!(
+            window(&params(&[("until", "  ")])).unwrap_err(),
+            WindowError::Malformed
+        );
+        // Non-ASCII junk must not panic either.
+        assert_eq!(
+            window(&params(&[("since", "недавно")])).unwrap_err(),
+            WindowError::Malformed
+        );
+    }
+
+    #[test]
+    fn a_valid_window_is_returned_exactly_and_defaults_only_when_absent() {
+        let (since, until) = window(&params(&[
+            ("since", "2026-11-01T00:00:00Z"),
+            ("until", "2026-11-02T00:00:00Z"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            until.to_rfc3339(),
+            "2026-11-02T00:00:00+00:00",
+            "the caller's instant is honoured exactly"
+        );
+        assert_eq!(since.to_rfc3339(), "2026-11-01T00:00:00+00:00");
+
+        // No parameters at all ⇒ the documented 24h default.
+        let (since, until) = window(&params(&[])).unwrap();
+        assert_eq!(until - since, chrono::Duration::hours(24));
+
+        // Only `until` ⇒ 24h before it (not 24h before "now").
+        let (since, until) = window(&params(&[("until", "2026-11-02T00:00:00Z")])).unwrap();
+        assert_eq!(until.to_rfc3339(), "2026-11-02T00:00:00+00:00");
+        assert_eq!(since.to_rfc3339(), "2026-11-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn a_reversed_impossible_or_oversized_window_is_refused() {
+        // Reversed (the old code silently served "today").
+        assert_eq!(
+            window(&params(&[
+                ("since", "2026-11-02T00:00:00Z"),
+                ("until", "2026-11-01T00:00:00Z")
+            ]))
+            .unwrap_err(),
+            WindowError::Empty
+        );
+        // Empty (since == until).
+        assert_eq!(
+            window(&params(&[
+                ("since", "2026-11-01T00:00:00Z"),
+                ("until", "2026-11-01T00:00:00Z")
+            ]))
+            .unwrap_err(),
+            WindowError::Empty
+        );
+        // Wider than the documented cap.
+        let too_far =
+            (chrono::Utc::now() + chrono::Duration::days(MAX_WINDOW_DAYS + 1)).to_rfc3339();
+        assert_eq!(
+            window(&params(&[
+                ("since", "2020-01-01T00:00:00Z"),
+                ("until", &too_far)
+            ]))
+            .unwrap_err(),
+            WindowError::Empty
+        );
+        // Exactly at the cap is allowed.
+        let (since, until) = window(&params(&[
+            ("since", "2026-01-01T00:00:00Z"),
+            ("until", "2026-06-01T00:00:00Z"),
+        ]))
+        .unwrap();
+        assert_eq!(until - since, chrono::Duration::days(151));
+    }
+
+    #[test]
+    fn the_refusal_reason_is_machine_readable() {
+        assert_eq!(
+            WindowError::Malformed.as_str(),
+            "window_timestamp_is_not_rfc3339"
+        );
+        assert!(WindowError::Empty.as_str().contains("365"));
+    }
 }

@@ -219,12 +219,60 @@ impl QuoteRequest {
         }
         if let Some(bps) = self.platform_fee_bps {
             q.push(("platformFeeBps".to_string(), bps.to_string()));
-            if let Some(acc) = self.platform_fee_account {
-                q.push(("feeAccount".to_string(), acc.to_string()));
-            }
         }
         q
     }
+}
+
+/// Never silently downgrade a requested fee-bearing quote when the provider
+/// omits or changes its rate. This checks the quoted rate, not settlement.
+fn validate_requested_fee(request: &QuoteRequest, quote: &JupiterQuote) -> BotResult<()> {
+    if let Some(rate) = request.platform_fee_bps.filter(|rate| *rate > 0) {
+        if request.platform_fee_account.is_none() {
+            return Err(BotError::invalid(
+                "Jupiter fee requested without fee token account",
+            ));
+        }
+        let fee = quote
+            .platform_fee
+            .as_ref()
+            .ok_or_else(|| BotError::invalid("Jupiter omitted the requested platform fee"))?;
+        if fee.fee_bps != Some(rate)
+            || fee
+                .amount
+                .as_deref()
+                .and_then(|amount| amount.parse::<u64>().ok())
+                .is_none()
+        {
+            return Err(BotError::invalid(
+                "Jupiter returned a missing, malformed or different platform fee",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A nonzero or malformed fee requires an explicit destination. A known
+/// zero-fee object is equivalent to no fee, which Jupiter may return even
+/// when the client did not request one.
+fn validate_swap_fee_account(quote: &JupiterQuote, account: Option<Pubkey>) -> BotResult<()> {
+    let Some(fee) = &quote.platform_fee else {
+        return Ok(());
+    };
+    let rate = fee.fee_bps.unwrap_or(0);
+    let amount = match fee.amount.as_deref() {
+        Some(value) => value
+            .parse::<u64>()
+            .map_err(|_| BotError::invalid("invalid Jupiter platform fee amount"))?,
+        None if rate == 0 => 0,
+        None => return Err(BotError::invalid("missing Jupiter platform fee amount")),
+    };
+    if (rate > 0 || amount > 0) && account.is_none() {
+        return Err(BotError::invalid(
+            "Jupiter fee-bearing quote requires a fee token account on /swap",
+        ));
+    }
+    Ok(())
 }
 
 /// Swap-instruction options sent to `POST /swap`.
@@ -233,6 +281,9 @@ impl QuoteRequest {
 pub struct SwapRequest {
     pub user_public_key: String,
     pub quote_response: JupiterQuote,
+    /// Initialized SPL token account for the fee mint, passed to /swap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee_account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_and_unwrap_sol: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -344,6 +395,8 @@ impl Jupiter {
         let quote: JupiterQuote = serde_json::from_str(&text)
             .map_err(|e| BotError::encoding(format!("jupiter quote json: {e} — {text}")))?;
 
+        validate_requested_fee(req, &quote)?;
+
         if quote.out_amount == "0" {
             return Err(BotError::solana(format!(
                 "jupiter found no route for {} -> {} of {} (impact {})",
@@ -370,9 +423,23 @@ impl Jupiter {
         quote: JupiterQuote,
         compute_unit_price_micro_lamports: Option<u64>,
     ) -> BotResult<SwapResponse> {
+        self.swap_transaction_with_fee_account(user, quote, compute_unit_price_micro_lamports, None)
+            .await
+    }
+
+    /// Build a swap while preserving the fee account used by the quote.
+    async fn swap_transaction_with_fee_account(
+        &self,
+        user: &Pubkey,
+        quote: JupiterQuote,
+        compute_unit_price_micro_lamports: Option<u64>,
+        fee_account: Option<Pubkey>,
+    ) -> BotResult<SwapResponse> {
+        validate_swap_fee_account(&quote, fee_account)?;
         let body = SwapRequest {
             user_public_key: user.to_string(),
             quote_response: quote,
+            fee_account: fee_account.map(|account| account.to_string()),
             wrap_and_unwrap_sol: Some(true),
             use_shared_accounts: Some(true),
             dynamic_compute_unit_limit: Some(true),
@@ -467,10 +534,11 @@ impl Jupiter {
     ) -> BotResult<(JupiterQuote, VersionedTransaction, Option<u64>)> {
         let quote = self.quote(req).await?;
         let response = self
-            .swap_transaction(
+            .swap_transaction_with_fee_account(
                 &wallet.pubkey,
                 quote.clone(),
                 compute_unit_price_micro_lamports,
+                req.platform_fee_account,
             )
             .await?;
         let last_valid = response.last_valid_block_height;
@@ -655,6 +723,51 @@ mod tests {
     }
 
     #[test]
+    fn requested_jupiter_fee_cannot_silently_disappear_or_change() {
+        let req = QuoteRequest::new(*WSOL_MINT, Pubkey::new_unique(), 1_000)
+            .platform_fee(20, Pubkey::new_unique());
+        let mut quote: JupiterQuote = serde_json::from_str(&quote_json("100", "0")).unwrap();
+        assert!(validate_requested_fee(&req, &quote).is_err());
+        quote.platform_fee = Some(PlatformFee {
+            amount: Some("3".into()),
+            fee_bps: Some(10),
+        });
+        assert!(validate_requested_fee(&req, &quote).is_err());
+        quote.platform_fee = Some(PlatformFee {
+            amount: Some("broken".into()),
+            fee_bps: Some(20),
+        });
+        assert!(validate_requested_fee(&req, &quote).is_err());
+        quote.platform_fee = Some(PlatformFee {
+            amount: Some("3".into()),
+            fee_bps: Some(20),
+        });
+        assert!(validate_requested_fee(&req, &quote).is_ok());
+    }
+
+    #[test]
+    fn fee_destination_is_required_only_for_nonzero_quote_fee() {
+        let mut quote: JupiterQuote = serde_json::from_str(&quote_json("1", "0")).unwrap();
+        assert!(validate_swap_fee_account(&quote, None).is_ok());
+        quote.platform_fee = Some(PlatformFee {
+            amount: Some("0".into()),
+            fee_bps: Some(0),
+        });
+        assert!(validate_swap_fee_account(&quote, None).is_ok());
+        quote.platform_fee = Some(PlatformFee {
+            amount: Some("10".into()),
+            fee_bps: Some(20),
+        });
+        assert!(validate_swap_fee_account(&quote, None).is_err());
+        assert!(validate_swap_fee_account(&quote, Some(Pubkey::new_unique())).is_ok());
+        quote.platform_fee = Some(PlatformFee {
+            amount: Some("invalid".into()),
+            fee_bps: Some(1),
+        });
+        assert!(validate_swap_fee_account(&quote, Some(Pubkey::new_unique())).is_err());
+    }
+
+    #[test]
     fn quote_request_builds_the_expected_query() {
         let req = QuoteRequest::new(*WSOL_MINT, Pubkey::new_unique(), 1_000)
             .slippage_bps(120)
@@ -667,7 +780,10 @@ mod tests {
         assert_eq!(get("swapMode").as_deref(), Some("ExactIn"));
         assert_eq!(get("onlyDirectRoutes").as_deref(), Some("true"));
         assert_eq!(get("platformFeeBps").as_deref(), Some("10"));
-        assert!(get("feeAccount").is_some());
+        assert!(
+            get("feeAccount").is_none(),
+            "feeAccount belongs in POST /swap, not the quote query"
+        );
         assert!(get("maxAccounts").is_none());
     }
 
@@ -867,6 +983,7 @@ mod tests {
         let req = SwapRequest {
             user_public_key: Pubkey::new_unique().to_string(),
             quote_response: q,
+            fee_account: None,
             wrap_and_unwrap_sol: Some(true),
             use_shared_accounts: None,
             dynamic_compute_unit_limit: None,
@@ -879,6 +996,12 @@ mod tests {
         assert!(json.get("prioritizationFeeLamports").is_none());
         assert_eq!(json["wrapAndUnwrapSol"], true);
         assert!(json.get("quoteResponse").is_some());
+        assert!(json.get("feeAccount").is_none());
+        let mut charged = req;
+        let account = Pubkey::new_unique();
+        charged.fee_account = Some(account.to_string());
+        let json = serde_json::to_value(charged).unwrap();
+        assert_eq!(json["feeAccount"], account.to_string());
     }
 
     #[test]

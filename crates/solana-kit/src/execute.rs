@@ -137,6 +137,27 @@ impl ExecutionResult {
             .then(|| self.signature.clone())
     }
 
+    /// Conservative write-ahead journal disposition. A live result that
+    /// could have broadcast but lacks a signature stays pending for review.
+    pub fn intent_disposition(&self) -> bot_core::recovery::IntentDisposition {
+        use bot_core::recovery::IntentDisposition;
+        if let Some(signature) = self.broadcast_signature() {
+            IntentDisposition::Link(signature)
+        } else if self.paper
+            || matches!(
+                self.status,
+                ExecStatus::SimulationFailed
+                    | ExecStatus::Skipped
+                    | ExecStatus::SendFailed
+                    | ExecStatus::PaperFilled
+            )
+        {
+            IntentDisposition::Abandon
+        } else {
+            IntentDisposition::Retain
+        }
+    }
+
     /// Refused by the duplicate guard (an attempt for this intent was
     /// already live or had landed).
     pub fn is_duplicate(&self) -> bool {
@@ -270,7 +291,10 @@ impl SendError {
             RpcErrorClass::Timeout | RpcErrorClass::Transport => {
                 (SendFailure::Ambiguous, FailureClass::TransportAmbiguous)
             }
-            RpcErrorClass::RateLimited { .. } => (SendFailure::Definite, FailureClass::RateLimited),
+            RpcErrorClass::RateLimited { .. } => {
+                // A gateway can rate-limit after forwarding the transaction.
+                (SendFailure::Ambiguous, FailureClass::TransportAmbiguous)
+            }
             RpcErrorClass::Blockhash => (SendFailure::Definite, FailureClass::BlockhashExpired),
             RpcErrorClass::Permanent => {
                 let class = match FailureClass::classify_message(&f.message) {
@@ -281,15 +305,10 @@ impl SendError {
                 };
                 (SendFailure::Definite, class)
             }
-            // The node could not serve — but a gateway 5xx can arrive after
-            // the node forwarded the tx. Trust a textual rejection, else be
-            // conservative.
-            RpcErrorClass::Unavailable => match classify_send_error(&f.message) {
-                SendFailure::Definite => (SendFailure::Definite, FailureClass::Rejected),
-                SendFailure::Ambiguous => {
-                    (SendFailure::Ambiguous, FailureClass::TransportAmbiguous)
-                }
-            },
+            // A gateway 5xx can arrive after forwarding, regardless of text.
+            RpcErrorClass::Unavailable => {
+                (SendFailure::Ambiguous, FailureClass::TransportAmbiguous)
+            }
         };
         SendError {
             message: f.message.clone(),
@@ -740,6 +759,19 @@ impl Executor {
         }
     }
 
+    /// The key this executor's signer registry resolves for the guard's
+    /// captured signer identity. `None` when the identity is not registered (or
+    /// when no registry is attached and the funding wallet signs).
+    fn resolve_tenant_signer(
+        &self,
+        guard: &crate::tenant_broadcast_guard::TenantBroadcastGuard,
+    ) -> Option<Pubkey> {
+        let registry = self.signers.as_ref()?;
+        registry
+            .get(guard.context().signer_identity())
+            .map(|signer| signer.pubkey())
+    }
+
     /// Build a `TxBuilder` wired with this executor's wallet and (when
     /// present) its signer registry.
     fn builder(&self) -> TxBuilder<'_> {
@@ -869,7 +901,24 @@ impl Executor {
         // work: fail-closed, before the ledger records an attempt, so a
         // refused tenant transaction leaves no lifecycle residue.
         if let Some(guard) = &self.tenant_guard {
-            if let Err(deny) = guard.authorize(&req) {
+            // `authorize` = captured-context rules; the guard additionally asks
+            // its live fence probe (when attached) whether this runtime is still
+            // the tenant's current one — a module built before a rotation must
+            // not broadcast one more order.
+            if let Err(deny) = guard.authorize_tx(&req).await {
+                guard.record_deny(&deny);
+                let mut r = guard.veto_result(&label, &deny);
+                r.total_ms = started.elapsed().as_millis() as u64;
+                meter_attempt(ExecStatus::Skipped);
+                return Ok(r);
+            }
+
+            // The signer key is re-resolved RIGHT NOW. A key rotated under an
+            // unchanged reference leaves the binding row active and the captured
+            // context valid, but changes what would actually sign — so the veto
+            // is taken here, not at the first failed signature.
+            let resolved = self.resolve_tenant_signer(guard);
+            if let Err(deny) = guard.authorize_signer_identity(resolved) {
                 guard.record_deny(&deny);
                 let mut r = guard.veto_result(&label, &deny);
                 r.total_ms = started.elapsed().as_millis() as u64;
@@ -1204,13 +1253,8 @@ impl Executor {
             BroadcastMode::Rpc => self.broadcast_rpc(&built).await,
             BroadcastMode::Jito => self.broadcast_jito(&built, req.jito_tip_lamports).await,
             BroadcastMode::JitoThenRpc => {
-                match self.broadcast_jito(&built, req.jito_tip_lamports).await {
-                    Ok(sig) => Ok(sig),
-                    Err(e) => {
-                        warn!(label = %req.label, error = %e, "jito bundle rejected, falling back to rpc");
-                        self.broadcast_rpc(&built).await
-                    }
-                }
+                self.broadcast_jito_then_rpc(&built, req.jito_tip_lamports)
+                    .await
             }
             BroadcastMode::Race => self.broadcast_race(&built, req.jito_tip_lamports).await,
         };
@@ -1534,31 +1578,39 @@ impl Executor {
 
     /// Submit as a Jito bundle. The bundle carries exactly one transaction;
     /// Jito requires the tip transfer to be inside it (see `TxBuilder`).
+    async fn broadcast_jito_then_rpc(
+        &self,
+        built: &BuiltTx,
+        tip_lamports: u64,
+    ) -> Result<Signature, SendError> {
+        match self.broadcast_jito(built, tip_lamports).await {
+            Ok(sig) => Ok(sig),
+            Err(jito_error) => {
+                warn!(error = %jito_error, "jito did not acknowledge; falling back to rpc");
+                self.broadcast_rpc(built)
+                    .await
+                    .map_err(|rpc_error| SendError::combine(jito_error, rpc_error))
+            }
+        }
+    }
+
     async fn broadcast_jito(
         &self,
         built: &BuiltTx,
         tip_lamports: u64,
     ) -> Result<Signature, SendError> {
-        self.broadcast_jito_inner(built, tip_lamports)
-            .await
-            .map_err(|e| SendError::from_error(&e))
-    }
-
-    async fn broadcast_jito_inner(
-        &self,
-        built: &BuiltTx,
-        tip_lamports: u64,
-    ) -> BotResult<Signature> {
         let base = self
             .policy
             .jito_url
             .as_deref()
-            .ok_or_else(|| BotError::config("jito broadcast requested but no jito_url is set"))?
+            .ok_or_else(|| {
+                SendError::from_text("invalid jito configuration: no jito_url is set".into())
+            })?
             .trim_end_matches('/')
             .to_string();
         if tip_lamports == 0 {
-            return Err(BotError::invalid(
-                "jito bundles require a tip; set jito_tip_lamports > 0",
+            return Err(SendError::from_text(
+                "invalid jito bundle: tip must be greater than zero".into(),
             ));
         }
 
@@ -1570,35 +1622,46 @@ impl Executor {
             "params": [[b64], {"encoding": "base64"}]
         });
 
+        // After attempting the HTTP request, neither arbitrary proxy text nor
+        // a malformed/negative response proves that no bytes were forwarded.
+        // Do not classify these errors by matching words such as "invalid".
+        let ambiguous = |message: String| SendError {
+            message,
+            failure: SendFailure::Ambiguous,
+            class: FailureClass::TransportAmbiguous,
+        };
         let response = self
             .http
             .post(format!("{base}{JITO_BUNDLE_PATH}"))
             .json(&body)
             .send()
             .await
-            .map_err(|e| BotError::http(format!("jito bundle post: {e}")))?;
+            .map_err(|e| ambiguous(format!("jito bundle post: {e}")))?;
         let status = response.status();
         let text = response
             .text()
             .await
-            .map_err(|e| BotError::http(format!("jito bundle body: {e}")))?;
+            .map_err(|e| ambiguous(format!("jito bundle body: {e}")))?;
         if !status.is_success() {
-            return Err(BotError::http(format!(
+            return Err(ambiguous(format!(
                 "jito bundle http {status}: {}",
                 truncate(&text, 300)
             )));
         }
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| BotError::encoding(format!("jito bundle json: {e}")))?;
-        if let Some(err) = value.get("error") {
-            return Err(BotError::solana(format!("jito bundle error: {err}")));
+        let value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| ambiguous(format!("jito bundle json: {e}")))?;
+        if let Some(err) = value.get("error").filter(|err| !err.is_null()) {
+            return Err(ambiguous(format!("jito bundle error: {err}")));
         }
-        // sendBundle returns the bundle id, not the tx signature.
-        let _bundle_id = value
+        // sendBundle returns a bundle id, not the transaction signature.
+        // A successful HTTP status without a nonempty id is not acceptance.
+        if !value
             .get("result")
             .and_then(|r| r.as_str())
-            .unwrap_or_default()
-            .to_string();
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Err(ambiguous("jito bundle response missing bundle id".into()));
+        }
         Ok(built.signature())
     }
 
@@ -1628,14 +1691,12 @@ impl Executor {
                 Ok(sig)
             }
             (Err(jito_err), Err(rpc_err)) => {
-                // Report the RPC error class (the route every deployment
-                // has); the Jito failure is already logged above.
                 warn!(
                     jito = %jito_err.message,
                     rpc = %rpc_err.message,
-                    "race: every broadcast route refused"
+                    "race: no broadcast route acknowledged"
                 );
-                Err(rpc_err)
+                Err(SendError::combine(jito_err, rpc_err))
             }
         }
     }
@@ -1662,7 +1723,21 @@ impl Executor {
         // a prebuilt transaction without matching tenant metadata before
         // anything is submitted.
         if let Some(guard) = &self.tenant_guard {
-            if let Err(deny) = guard.authorize_prebuilt(built) {
+            // Prebuilt path: the same live fence applies. A transaction built
+            // before a rotation is exactly the case this must catch.
+            if let Err(deny) = guard.authorize_prebuilt_live(built).await {
+                guard.record_deny(&deny);
+                let mut r = guard.veto_result(&built.label, &deny);
+                r.signature = signature.to_string();
+                r.total_ms = started.elapsed().as_millis() as u64;
+                meter_attempt(ExecStatus::Skipped);
+                return Ok(r);
+            }
+
+            // Prebuilt too: a key rotated under the same reference is caught
+            // before the already-signed bytes leave the process.
+            let resolved = self.resolve_tenant_signer(guard);
+            if let Err(deny) = guard.authorize_signer_identity(resolved) {
                 guard.record_deny(&deny);
                 let mut r = guard.veto_result(&built.label, &deny);
                 r.signature = signature.to_string();
@@ -1792,16 +1867,11 @@ impl Executor {
                 let tip = self.jito_tip_for(built);
                 self.broadcast_race(built, tip).await
             }
-            BroadcastMode::Jito | BroadcastMode::JitoThenRpc => {
-                match self.broadcast_jito(built, self.jito_tip_for(built)).await {
-                    Ok(sig) => Ok(sig),
-                    Err(e) if self.policy.broadcast == BroadcastMode::JitoThenRpc => {
-                        warn!(error = %e, "jito rejected prebuilt, falling back to rpc");
-                        self.broadcast_rpc(built).await
-                    }
-                    Err(e) => Err(e),
-                }
+            BroadcastMode::JitoThenRpc => {
+                self.broadcast_jito_then_rpc(built, self.jito_tip_for(built))
+                    .await
             }
+            BroadcastMode::Jito => self.broadcast_jito(built, self.jito_tip_for(built)).await,
         };
         let send_ms = t.elapsed().as_millis() as u64;
         observe_stage("send", t.elapsed());
@@ -2173,6 +2243,39 @@ mod tests {
     }
 
     #[test]
+    fn intent_disposition_retains_live_ambiguous_missing_signature() {
+        use bot_core::recovery::IntentDisposition;
+        for status in [
+            ExecStatus::Sent,
+            ExecStatus::SendUnknown,
+            ExecStatus::Confirmed,
+            ExecStatus::LandedFailed,
+        ] {
+            let mut result = ExecutionResult::empty("test", "intent", false);
+            result.status = status;
+            result.attempts = 1;
+            assert_eq!(result.intent_disposition(), IntentDisposition::Retain);
+        }
+        for status in [
+            ExecStatus::SimulationFailed,
+            ExecStatus::Skipped,
+            ExecStatus::SendFailed,
+        ] {
+            let mut result = ExecutionResult::empty("test", "intent", false);
+            result.status = status;
+            assert_eq!(result.intent_disposition(), IntentDisposition::Abandon);
+        }
+        let mut result = ExecutionResult::empty("test", "intent", false);
+        result.status = ExecStatus::SendUnknown;
+        result.attempts = 1;
+        result.signature = "known-signature".into();
+        assert_eq!(
+            result.intent_disposition(),
+            IntentDisposition::Link("known-signature".into())
+        );
+    }
+
+    #[test]
     fn broadcast_signature_only_for_real_broadcasts() {
         // The intent journal (§I) links ONLY signatures that left the
         // process: paper fills and empty signatures must map to None so the
@@ -2460,7 +2563,8 @@ mod tests {
             RpcErrorClass::RateLimited { retry_after: None },
             "http 429",
         ));
-        assert_eq!(e.class, FailureClass::RateLimited);
+        assert_eq!(e.class, FailureClass::TransportAmbiguous);
+        assert_eq!(e.failure, SendFailure::Ambiguous);
 
         let e = SendError::from_rpc(&f(RpcErrorClass::Permanent, "insufficient funds for rent"));
         assert_eq!(e.class, FailureClass::InsufficientFunds);
@@ -2472,6 +2576,16 @@ mod tests {
             e.failure,
             SendFailure::Ambiguous,
             "a gateway 5xx may follow a forward"
+        );
+
+        let e = SendError::from_rpc(&f(
+            RpcErrorClass::Unavailable,
+            "503 gateway: invalid blockhash",
+        ));
+        assert_eq!(
+            e.failure,
+            SendFailure::Ambiguous,
+            "gateway text cannot prove non-delivery"
         );
 
         // Combining: one ambiguous leg makes the whole verdict ambiguous.
@@ -2576,6 +2690,96 @@ mod tests {
             blockhash: Some(solana_sdk::hash::Hash::new_unique()),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn jito_ambiguity_survives_definite_rpc_rejection_for_fallback_and_race() {
+        let jito = spawn_drop_server().await;
+        let rpc = spawn_jsonrpc_error_server("BlockhashNotFound").await;
+        let wallet = Arc::new(Wallet::generate());
+        let mut policy = live_policy(Duration::from_millis(100));
+        policy.jito_url = Some(jito);
+        let executor = Executor::new(mock_rpc(&rpc), wallet.clone(), policy);
+        let built = executor
+            .builder()
+            .build(&self_transfer_req(&wallet))
+            .await
+            .unwrap();
+        let fallback = executor
+            .broadcast_jito_then_rpc(&built, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(fallback.failure, SendFailure::Ambiguous);
+        assert_eq!(fallback.class, FailureClass::TransportAmbiguous);
+        let raced = executor.broadcast_race(&built, 1).await.unwrap_err();
+        assert_eq!(raced.failure, SendFailure::Ambiguous);
+        assert_eq!(raced.class, FailureClass::TransportAmbiguous);
+    }
+
+    #[tokio::test]
+    async fn jito_then_rpc_ambiguous_delivery_does_not_become_retryable_failure() {
+        let jito = spawn_drop_server().await;
+        let rpc = spawn_jsonrpc_error_server("BlockhashNotFound").await;
+        let wallet = Arc::new(Wallet::generate());
+        let mut policy = live_policy(Duration::from_millis(100));
+        policy.jito_url = Some(jito);
+        policy.broadcast = BroadcastMode::JitoThenRpc;
+        let executor = Executor::new(mock_rpc(&rpc), wallet.clone(), policy)
+            .with_ledger(ExecutionLedger::new(64));
+        let req = self_transfer_req(&wallet).jito_tip(1);
+        let result = executor.run(req).await.unwrap();
+        assert_eq!(result.status, ExecStatus::SendUnknown, "{:?}", result.error);
+        assert_eq!(result.state, ExecutionState::Pending);
+        assert!(!result.signature.is_empty());
+        assert!(!executor
+            .ledger()
+            .get(&result.intent_id)
+            .await
+            .unwrap()
+            .can_rearm());
+    }
+
+    #[tokio::test]
+    async fn jito_error_response_is_ambiguous_even_with_rejection_words() {
+        let jito = spawn_jsonrpc_error_server("invalid blockhash").await;
+        let wallet = Arc::new(Wallet::generate());
+        let mut policy = live_policy(Duration::from_millis(100));
+        policy.jito_url = Some(jito);
+        let executor = Executor::new(mock_rpc("http://127.0.0.1:1"), wallet.clone(), policy);
+        let built = executor
+            .builder()
+            .build(&self_transfer_req(&wallet))
+            .await
+            .unwrap();
+        let error = executor.broadcast_jito(&built, 1).await.unwrap_err();
+        assert_eq!(error.failure, SendFailure::Ambiguous);
+        assert_eq!(error.class, FailureClass::TransportAmbiguous);
+        assert_eq!(
+            executor
+                .broadcast_jito(&built, 0)
+                .await
+                .unwrap_err()
+                .failure,
+            SendFailure::Definite
+        );
+    }
+
+    #[tokio::test]
+    async fn jito_http_success_without_bundle_id_is_not_acknowledgement() {
+        // The mock returns JSON-RPC `result: null` for sendBundle.
+        let jito = spawn_mock_node(Arc::new(MockNode::default())).await;
+        let wallet = Arc::new(Wallet::generate());
+        let mut policy = live_policy(Duration::from_millis(100));
+        policy.jito_url = Some(jito);
+        let executor = Executor::new(mock_rpc("http://127.0.0.1:1"), wallet.clone(), policy);
+        let built = executor
+            .builder()
+            .build(&self_transfer_req(&wallet))
+            .await
+            .unwrap();
+        let error = executor.broadcast_jito(&built, 1).await.unwrap_err();
+        assert_eq!(error.failure, SendFailure::Ambiguous);
+        assert!(error.message.contains("missing bundle id"));
     }
 
     #[tokio::test]

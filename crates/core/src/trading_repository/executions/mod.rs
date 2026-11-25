@@ -10,7 +10,9 @@ pub mod write;
 
 pub use claim::TenantClaimRepo;
 pub use idempotency::TenantIdempotencyRepo;
-pub use lifecycle::{TenantLifecycleRecord, TenantLifecycleRepo};
+pub use lifecycle::{
+    TenantLifecyclePage, TenantLifecycleRecord, TenantLifecycleRepo, LIFECYCLE_PAGE_MAX,
+};
 pub use model::{TenantExecution, TenantTransaction};
 pub use read::TenantExecutionRead;
 pub use write::TenantExecutionWrite;

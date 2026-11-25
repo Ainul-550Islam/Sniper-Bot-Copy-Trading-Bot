@@ -41,7 +41,7 @@ use bot_core::events::AppEvent;
 use bot_core::models::{
     BotModule, ExecutionMode, Position, PositionSide, PositionStatus, Trade, TradeSource, Venue,
 };
-use bot_core::recovery::{with_intent, IntentSink};
+use bot_core::recovery::IntentSink;
 use bot_core::risk::RiskEngine;
 use bot_core::state::Shared;
 use bot_core::{maths, BotError};
@@ -61,6 +61,29 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+/// Versioned marker in a booked trade's note. It binds the deterministic
+/// trade id to the exact command payload, so a restart replay can detect a
+/// reused command id instead of guessing from a receipt.
+const COMMAND_FINGERPRINT_PREFIX: &str = "tgfp1=";
+
+fn command_note(req: &OrderRequest, label: &str) -> String {
+    format!(
+        "telegram {label} command={} chat={} {}{}",
+        req.idempotency_key,
+        req.chat_id,
+        COMMAND_FINGERPRINT_PREFIX,
+        req.payload_fingerprint()
+    )
+}
+
+fn fingerprint_from_trade(trade: &Trade) -> Option<&str> {
+    trade
+        .note
+        .as_deref()?
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(COMMAND_FINGERPRINT_PREFIX))
+}
+
 /// Server-side trade port for Telegram commands, bound to the deployment
 /// organization and the deployment wallet.
 pub struct DeploymentTradePort {
@@ -73,7 +96,7 @@ pub struct DeploymentTradePort {
     intents: Option<Arc<dyn IntentSink>>,
     risk: RiskEngine,
     org_id: String,
-    receipts: Mutex<HashMap<Uuid, ExecutionReceipt>>,
+    receipts: Mutex<HashMap<Uuid, (String, ExecutionReceipt)>>,
 }
 
 impl DeploymentTradePort {
@@ -137,18 +160,25 @@ impl DeploymentTradePort {
     /// A previously completed receipt for this command, from the in-memory
     /// memo or reconstructed from the deterministic trade in shared state
     /// (covers restarts where the memo is gone but state was restored).
+    /// Both paths require the exact original payload fingerprint: a reused
+    /// command id with different economics is a conflict, not a replay.
     async fn completed_receipt(
         &self,
         req: &OrderRequest,
     ) -> Option<Result<ExecutionReceipt, PortError>> {
-        if let Some(receipt) = self
+        let expected = req.payload_fingerprint();
+        if let Some((stored, receipt)) = self
             .receipts
             .lock()
             .await
             .get(&req.idempotency_key)
             .cloned()
         {
-            return Some(Ok(receipt));
+            return Some(if stored == expected {
+                Ok(receipt)
+            } else {
+                Err(PortError::PayloadMismatch)
+            });
         }
         let trade_id = Self::trade_id(req.idempotency_key);
         let trade = self
@@ -157,14 +187,26 @@ impl DeploymentTradePort {
             .await
             .into_iter()
             .find(|t| t.id == trade_id)?;
-        Some(Ok(receipt_from_trade(&trade, req.idempotency_key)))
+        let stored = match fingerprint_from_trade(&trade) {
+            Some(stored) => stored,
+            None => {
+                return Some(Err(PortError::Unavailable(
+                    "restored trade lacks a command payload fingerprint; refusing replay".into(),
+                )))
+            }
+        };
+        if stored != expected {
+            return Some(Err(PortError::PayloadMismatch));
+        }
+        let receipt = receipt_from_trade(&trade, req.idempotency_key);
+        Some(Ok(self.memoise(req, receipt).await))
     }
 
-    async fn memoise(&self, command_id: Uuid, receipt: ExecutionReceipt) -> ExecutionReceipt {
-        self.receipts
-            .lock()
-            .await
-            .insert(command_id, receipt.clone());
+    async fn memoise(&self, req: &OrderRequest, receipt: ExecutionReceipt) -> ExecutionReceipt {
+        self.receipts.lock().await.insert(
+            req.idempotency_key,
+            (req.payload_fingerprint(), receipt.clone()),
+        );
         receipt
     }
 
@@ -220,14 +262,29 @@ impl DeploymentTradePort {
         base_decimals: u8,
         percent_bps: u16,
     ) -> Result<u64, PortError> {
+        let tracked_raw = maths::to_raw_amount(position.qty, base_decimals);
         let total_raw = if mode.is_live() {
             let token_program = self.rpc.token_program_of(mint).await.map_err(unavailable)?;
-            self.wallet
+            let wallet_raw = self
+                .wallet
                 .token_balance(&self.rpc, mint, &token_program)
                 .await
-                .map_err(unavailable)?
+                .map_err(unavailable)?;
+            let scoped = live_sellable_raw(wallet_raw, tracked_raw, mint)?;
+            if wallet_raw != tracked_raw {
+                self.state.events.publish(AppEvent::Audit {
+                    ts: Utc::now(),
+                    actor: "telegram".into(),
+                    action: "telegram.sell.wallet_scope".into(),
+                    target: Some(mint.to_string()),
+                    outcome: format!(
+                        "status=tolerated_rounding wallet_raw={wallet_raw} tracked_raw={tracked_raw}"
+                    ),
+                });
+            }
+            scoped
         } else {
-            maths::to_raw_amount(position.qty, base_decimals)
+            tracked_raw
         };
         if total_raw == 0 {
             return Err(PortError::RiskRejected(format!(
@@ -253,12 +310,23 @@ impl DeploymentTradePort {
         action: TradeAction,
         cfg: &Config,
         mint: Pubkey,
-        quote_req: QuoteRequest,
+        quote: FeeQuote,
         book: BookFill<'_>,
     ) -> Result<ExecutionReceipt, PortError> {
         let started = Instant::now();
         let mode = cfg.execution.mode;
         let jupiter = Jupiter::new();
+        let quote_req = module_copy::platform_fee::jupiter_fee_request(
+            &self.state,
+            &self.rpc,
+            quote.request,
+            quote.fee_notional_lamports,
+            &cfg.platform_fee,
+            &Self::intent_id(req.idempotency_key),
+            "telegram",
+        )
+        .await
+        .map_err(unavailable)?;
         match mode {
             ExecutionMode::Paper => {
                 let quote = jupiter.quote(&quote_req).await.map_err(unavailable)?;
@@ -370,11 +438,24 @@ impl DeploymentTradePort {
                     if *executor.fee_policy() != fees {
                         executor.set_fee_policy(fees);
                     }
-                    with_intent(
+                    // Durable PRE-BROADCAST reservation. The reservation key
+                    // is the deterministic intent id (one command → one
+                    // intent), so a second replica or a restarted process
+                    // that replays the same command cannot broadcast it
+                    // twice while the first attempt's outcome is unknown.
+                    // Losing the lease (or an unreadable reservation store)
+                    // refuses the send instead of hoping.
+                    bot_core::recovery::with_reserved_intent_disposition(
                         self.intents.as_ref(),
+                        &Self::intent_id(req.idempotency_key),
                         record,
                         executor.send_prebuilt(&built),
-                        |r: &ExecutionResult| r.broadcast_signature(),
+                        |r: &ExecutionResult| match r.broadcast_signature() {
+                            Some(sig) if !sig.is_empty() => {
+                                bot_core::recovery::IntentDisposition::Link(sig)
+                            }
+                            _ => bot_core::recovery::IntentDisposition::Abandon,
+                        },
                     )
                     .await
                     .map_err(unavailable)?
@@ -484,10 +565,7 @@ impl DeploymentTradePort {
                     slippage_bps: u64::from(req.slippage_bps),
                     signature: signature.clone(),
                     position_id: Some(position_id.clone()),
-                    note: Some(format!(
-                        "telegram buy command={} chat={}",
-                        req.idempotency_key, req.chat_id
-                    )),
+                    note: Some(command_note(req, "buy")),
                     latency_ms: Some(latency_ms),
                 };
                 let mut ledger_event = bot_core::accounting::fill_event_for_trade(
@@ -531,7 +609,9 @@ impl DeploymentTradePort {
                         position: Box::new(p),
                     });
                 }
-                self.state.ledger().submit(ledger_event).await;
+                self.state
+                    .submit_ledger_event(BotModule::Sniper, ledger_event)
+                    .await;
                 info!(
                     command_id = %req.idempotency_key,
                     mint = %book.symbol,
@@ -572,10 +652,7 @@ impl DeploymentTradePort {
                     slippage_bps: u64::from(req.slippage_bps),
                     signature: signature.clone(),
                     position_id: Some(position.id.clone()),
-                    note: Some(format!(
-                        "telegram sell command={} chat={}",
-                        req.idempotency_key, req.chat_id
-                    )),
+                    note: Some(command_note(req, "sell")),
                     latency_ms: Some(latency_ms),
                 };
                 let ledger_event = bot_core::accounting::fill_event_for_trade(
@@ -600,7 +677,9 @@ impl DeploymentTradePort {
                     })
                     .await;
                 self.risk.book_pnl(BotModule::Sniper, realized).await;
-                self.state.ledger().submit(ledger_event).await;
+                self.state
+                    .submit_ledger_event(BotModule::Sniper, ledger_event)
+                    .await;
 
                 let remaining = position.qty - sold_human;
                 if remaining <= f64::EPSILON || req.percent_bps == Some(10_000) {
@@ -636,10 +715,13 @@ impl DeploymentTradePort {
         req: &OrderRequest,
         action: TradeAction,
     ) -> Result<ExecutionReceipt, PortError> {
+        // Authorize the tenant before consulting either the in-memory memo or
+        // restored trade history. A guessed/reused command id must not expose
+        // another organization's receipt.
+        self.check_org(&req.organization_id)?;
         if let Some(done) = self.completed_receipt(req).await {
             return done;
         }
-        self.check_org(&req.organization_id)?;
         validate_request(req, action)?;
         if self.state.kill_switch() {
             return Err(PortError::Halted);
@@ -690,7 +772,10 @@ impl DeploymentTradePort {
                     action,
                     &cfg,
                     mint,
-                    quote_req,
+                    FeeQuote {
+                        request: quote_req,
+                        fee_notional_lamports: amount,
+                    },
                     BookFill {
                         symbol: &symbol,
                         base_decimals,
@@ -735,7 +820,10 @@ impl DeploymentTradePort {
                     action,
                     &cfg,
                     mint,
-                    quote_req,
+                    FeeQuote {
+                        request: quote_req,
+                        fee_notional_lamports: expected_out,
+                    },
                     BookFill {
                         symbol: &symbol,
                         base_decimals,
@@ -746,7 +834,7 @@ impl DeploymentTradePort {
                 .await?
             }
         };
-        Ok(self.memoise(req.idempotency_key, receipt).await)
+        Ok(self.memoise(req, receipt).await)
     }
 }
 
@@ -758,6 +846,12 @@ struct FillOutcome {
     signature: Option<String>,
     /// Dispatch start, for the trade's latency record.
     started: Instant,
+}
+
+/// Executable quote request and the notional used to prepare its fee.
+struct FeeQuote {
+    request: QuoteRequest,
+    fee_notional_lamports: u64,
 }
 
 /// Booking context handed to [`DeploymentTradePort::book_fill`].
@@ -794,6 +888,11 @@ fn lamport_limits(cfg: &Config) -> Option<OrgRiskLimits> {
 /// Request-shape invariants the port enforces independently of the console
 /// (the port never trusts its caller to have validated).
 fn validate_request(req: &OrderRequest, action: TradeAction) -> Result<(), PortError> {
+    if req.command_id != req.idempotency_key {
+        return Err(PortError::RiskRejected(
+            "command id must equal idempotency key".into(),
+        ));
+    }
     if req.action != action {
         return Err(PortError::RiskRejected(format!(
             "order action {} does not match the {} endpoint",
@@ -840,6 +939,25 @@ fn validate_request(req: &OrderRequest, action: TradeAction) -> Result<(), PortE
 /// `percent_bps` of `total`, in u128 so no balance can overflow the math.
 fn percent_of(total: u64, percent_bps: u16) -> u64 {
     ((total as u128 * percent_bps as u128) / 10_000) as u64
+}
+
+/// A live Telegram sell must sell only the quantity belonging to the one
+/// tracked position it will reduce. A wallet-wide token balance may contain
+/// other positions, untracked exposure or stale dust; using it as the sell
+/// notional would misattribute proceeds and inventory. Allow at most one raw
+/// unit of decimal-rounding difference, and never exceed the tracked raw qty.
+fn live_sellable_raw(wallet_raw: u64, tracked_raw: u64, mint: &Pubkey) -> Result<u64, PortError> {
+    if tracked_raw == 0 || wallet_raw == 0 {
+        return Err(PortError::RiskRejected(format!(
+            "no sellable tracked balance for mint {mint}"
+        )));
+    }
+    if wallet_raw.abs_diff(tracked_raw) > 1 {
+        return Err(PortError::RiskRejected(format!(
+            "wallet token balance {wallet_raw} does not match the tracked position quantity {tracked_raw} for mint {mint}; refusing a wallet-wide sell against one position"
+        )));
+    }
+    Ok(wallet_raw.min(tracked_raw))
 }
 
 /// The open position a Telegram order should act on: a manually opened one
@@ -952,6 +1070,240 @@ mod tests {
         }
     }
 
+    fn test_port_with_state() -> (DeploymentTradePort, Shared) {
+        use bot_core::config::AppConfig;
+        use solana_sdk::signature::Keypair;
+
+        let app = AppConfig::from_defaults();
+        let state = bot_core::state::AppState::new(app.clone());
+        let rpc = Rpc::new(&app.raw.network).expect("lazy RPC client");
+        let wallet = Arc::new(Wallet::from_keypair(Keypair::new()));
+        let port = DeploymentTradePort::new(
+            state.clone(),
+            rpc,
+            wallet,
+            None,
+            None,
+            "org-1".into(),
+            &app.raw,
+        );
+        (port, state)
+    }
+
+    fn recorded_trade(req: &OrderRequest, with_fingerprint: bool) -> Trade {
+        Trade {
+            id: DeploymentTradePort::trade_id(req.idempotency_key),
+            ts: Utc::now(),
+            source: TradeSource::Manual,
+            venue: Venue::Jupiter,
+            mode: ExecutionMode::Paper,
+            side: PositionSide::Long,
+            symbol: req.mint.clone(),
+            symbol_display: short_mint(&req.mint),
+            amount_in: 0.1,
+            amount_out: 10.0,
+            quote_symbol: "SOL".into(),
+            price: 0.01,
+            fee: 0.0,
+            slippage_bps: u64::from(req.slippage_bps),
+            signature: Some("Sig111".into()),
+            position_id: None,
+            note: Some(if with_fingerprint {
+                command_note(req, "buy")
+            } else {
+                "legacy telegram trade without a payload fingerprint".into()
+            }),
+            latency_ms: None,
+        }
+    }
+
+    /// Telegram's live send sits behind the same durable pre-broadcast
+    /// reservation as copy/sniper: a failed or unreachable reservation store
+    /// must abort the send, never fall back to "just send it". The gate is
+    /// reached only AFTER every cheap local refusal, so an unfunded paper
+    /// request still terminates locally (proving the order of the gates).
+    #[tokio::test]
+    async fn a_failed_durable_reservation_aborts_the_telegram_broadcast() {
+        struct AlwaysFails;
+        #[async_trait::async_trait]
+        impl IntentSink for AlwaysFails {
+            async fn record(&self, _rec: bot_core::db::repo::IntentRecord) {}
+            async fn record_checked(
+                &self,
+                _rec: bot_core::db::repo::IntentRecord,
+            ) -> bot_core::BotResult<()> {
+                Err(bot_core::BotError::invalid("journal unavailable (test)"))
+            }
+            async fn reserve(
+                &self,
+                _key: &str,
+                _rec: &bot_core::db::repo::IntentRecord,
+            ) -> bot_core::BotResult<()> {
+                Err(bot_core::BotError::invalid(
+                    "durable reservation unavailable (test)",
+                ))
+            }
+            async fn link(&self, _intent_id: &str, _signature: &str) {}
+            async fn abandon(&self, _intent_id: &str) {}
+        }
+
+        let app = bot_core::config::AppConfig::from_defaults();
+        let state = bot_core::state::AppState::new(app.clone());
+        let rpc = Rpc::new(&app.raw.network).expect("lazy RPC client");
+        let wallet = Arc::new(Wallet::from_keypair(solana_sdk::signature::Keypair::new()));
+        let sink: Arc<dyn IntentSink> = Arc::new(AlwaysFails);
+        let port = DeploymentTradePort::new(
+            state.clone(),
+            rpc,
+            wallet,
+            None,
+            Some(sink),
+            "org-1".into(),
+            &app.raw,
+        );
+
+        // Paper + unfunded: refused locally, before any reservation or send.
+        let request = buy_req();
+        let local = port.execute(&request, TradeAction::Buy).await;
+        assert!(
+            matches!(
+                local,
+                Err(PortError::Unavailable(_)) | Err(PortError::RiskRejected(_))
+            ),
+            "an unfunded paper order must fail locally, got {local:?}"
+        );
+        assert_eq!(
+            port.intents.as_ref().map(|_| ()),
+            Some(()),
+            "the sink must be attached, so the gate below is real"
+        );
+
+        // The durable reservation is the gate the money-moving future sits
+        // behind: with a sink that cannot reserve, the same broadcast is
+        // refused instead of executed.
+        let rec = bot_core::db::repo::IntentRecord {
+            intent_id: "telegram-gate-test".into(),
+            module: "telegram".into(),
+            symbol: "GateMint".into(),
+            wallet: "Wallet1111".into(),
+            side: "buy".into(),
+            qty: "1000".into(),
+            status: "pending".into(),
+            signature: None,
+            created_at: Utc::now(),
+        };
+        let out: bot_core::BotResult<()> = bot_core::recovery::with_reserved_intent_disposition(
+            port.intents.as_ref(),
+            "telegram-gate-test",
+            rec,
+            async { Ok::<(), bot_core::BotError>(()) },
+            |_| bot_core::recovery::IntentDisposition::Abandon,
+        )
+        .await;
+        assert!(
+            out.is_err(),
+            "losing the durable reservation must refuse the telegram broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_org_command_id_reuse_with_different_payload_is_refused() {
+        use bot_core::config::AppConfig;
+        use solana_sdk::signature::Keypair;
+
+        let app = AppConfig::from_defaults();
+        let state = bot_core::state::AppState::new(app.clone());
+        let rpc = Rpc::new(&app.raw.network).expect("lazy RPC client");
+        let wallet = Arc::new(Wallet::from_keypair(Keypair::new()));
+        let port =
+            DeploymentTradePort::new(state, rpc, wallet, None, None, "org-1".into(), &app.raw);
+        let mut request = buy_req();
+        let receipt = ExecutionReceipt {
+            reference: "original-receipt".into(),
+            detail: "original".into(),
+        };
+        port.memoise(&request, receipt).await;
+        let original = request.clone();
+        assert_eq!(
+            port.execute(&original, TradeAction::Buy)
+                .await
+                .expect("identical replay"),
+            ExecutionReceipt {
+                reference: "original-receipt".into(),
+                detail: "original".into(),
+            }
+        );
+        request.amount_lamports = Some(9_000_000);
+        assert_eq!(
+            port.execute(&request, TradeAction::Buy).await,
+            Err(PortError::PayloadMismatch),
+            "same organization and command id with a changed amount must not replay the old receipt"
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_trade_replay_requires_exact_command_fingerprint() {
+        let (port, state) = test_port_with_state();
+        let request = buy_req();
+        state.record_trade(recorded_trade(&request, true)).await;
+        assert_eq!(
+            port.execute(&request, TradeAction::Buy)
+                .await
+                .expect("identical restart replay")
+                .reference,
+            "Sig111"
+        );
+        let mut changed = request.clone();
+        changed.slippage_bps = 101;
+        assert_eq!(
+            port.execute(&changed, TradeAction::Buy).await,
+            Err(PortError::PayloadMismatch),
+            "a restored trade must not vouch for a different command payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_trade_without_fingerprint_fails_closed() {
+        let (port, state) = test_port_with_state();
+        let request = buy_req();
+        state.record_trade(recorded_trade(&request, false)).await;
+        assert!(matches!(
+            port.execute(&request, TradeAction::Buy).await,
+            Err(PortError::Unavailable(reason)) if reason.contains("fingerprint")
+        ));
+    }
+
+    #[tokio::test]
+    async fn receipt_replay_never_bypasses_organization_check() {
+        use bot_core::config::AppConfig;
+        use solana_sdk::signature::Keypair;
+
+        let app = AppConfig::from_defaults();
+        let state = bot_core::state::AppState::new(app.clone());
+        let rpc = Rpc::new(&app.raw.network).expect("lazy RPC client");
+        let wallet = Arc::new(Wallet::from_keypair(Keypair::new()));
+        let port =
+            DeploymentTradePort::new(state, rpc, wallet, None, None, "org-1".into(), &app.raw);
+        let mut request = buy_req();
+        let receipt = ExecutionReceipt {
+            reference: "private-receipt".into(),
+            detail: "private".into(),
+        };
+        port.memoise(&request, receipt).await;
+        assert_eq!(
+            port.execute(&request, TradeAction::Buy)
+                .await
+                .unwrap()
+                .reference,
+            "private-receipt"
+        );
+        request.organization_id = "other-org".into();
+        assert!(matches!(
+            port.execute(&request, TradeAction::Buy).await,
+            Err(PortError::Unavailable(_))
+        ));
+    }
+
     #[test]
     fn limits_require_both_telegram_caps() {
         assert!(lamport_limits(&cfg_with_caps(0, 10, 0.0)).is_none());
@@ -977,6 +1329,13 @@ mod tests {
     fn validate_request_shape() {
         let ok = buy_req();
         assert!(validate_request(&ok, TradeAction::Buy).is_ok());
+
+        let mut mismatched_id = buy_req();
+        mismatched_id.command_id = Uuid::new_v4();
+        assert!(matches!(
+            validate_request(&mismatched_id, TradeAction::Buy),
+            Err(PortError::RiskRejected(_))
+        ));
 
         let mut wrong_endpoint = buy_req();
         assert!(matches!(
@@ -1034,6 +1393,42 @@ mod tests {
         assert_eq!(percent_of(1_000_000, 2_500), 250_000);
         assert_eq!(percent_of(3, 3_333), 0);
         assert_eq!(percent_of(u64::MAX, 10_000), u64::MAX);
+    }
+
+    #[test]
+    fn live_sell_never_uses_untracked_wallet_wide_balance() {
+        let mint = Pubkey::new_unique();
+        assert_eq!(
+            live_sellable_raw(1_000_000, 1_000_000, &mint).unwrap(),
+            1_000_000
+        );
+        assert_eq!(
+            live_sellable_raw(1_000_001, 1_000_000, &mint).unwrap(),
+            1_000_000
+        );
+        assert_eq!(
+            live_sellable_raw(999_999, 1_000_000, &mint).unwrap(),
+            999_999
+        );
+        // A second position's tokens in the same wallet must not be sold
+        // against this one tracked position.
+        assert!(matches!(
+            live_sellable_raw(2_000_000, 1_000_000, &mint),
+            Err(PortError::RiskRejected(reason)) if reason.contains("wallet-wide")
+        ));
+        assert!(matches!(
+            live_sellable_raw(1_000_000, 2_000_000, &mint),
+            Err(PortError::RiskRejected(_))
+        ));
+        assert!(matches!(
+            live_sellable_raw(0, 1_000_000, &mint),
+            Err(PortError::RiskRejected(_))
+        ));
+        assert!(matches!(
+            live_sellable_raw(1_000_000, 0, &mint),
+            Err(PortError::RiskRejected(_))
+        ));
+        assert_eq!(percent_of(1_000_000, 10_000), 1_000_000);
     }
 
     #[test]

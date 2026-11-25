@@ -140,22 +140,18 @@ impl PlatformFeePolicy {
 /// Compute the platform fee for one trade, in micro-units of the quote
 /// currency. Returns `0` for a zero notional or a zero-rate policy.
 ///
-/// Rounding: HALF-UP on the micro unit. Overflow is impossible: every
-/// intermediate uses checked math and saturates to the nearest bound that
-/// still respects cap and minimum rather than wrapping.
+/// Rounding: HALF-UP on the micro unit. Valid policies use widened integer
+/// arithmetic so multiplication cannot overflow before division.
 pub fn compute_platform_fee(notional_micros: i64, policy: &PlatformFeePolicy) -> i64 {
     if notional_micros <= 0 || policy.fee_bps == 0 {
         return 0;
     }
-    // notional * bps, half-up division by 10_000. Checked throughout; on
-    // overflow the fee would exceed any sane cap, so saturate to i64::MAX
-    // and let the cap (when present) bring it back. Without a cap the
-    // saturated value is still an honest upper bound, never a wrap.
-    let raw = notional_micros
-        .checked_mul(policy.fee_bps as i64)
-        .and_then(|v| v.checked_add(BPS_DENOMINATOR / 2))
-        .and_then(|v| v.checked_div(BPS_DENOMINATOR))
-        .unwrap_or(i64::MAX);
+    // Widen before multiplication: saturation before division would turn
+    // a large but valid notional into a grossly overstated charge.
+    let raw = (((notional_micros as i128) * i128::from(policy.fee_bps)
+        + i128::from(BPS_DENOMINATOR / 2))
+        / i128::from(BPS_DENOMINATOR))
+    .min(i128::from(i64::MAX)) as i64;
     let mut fee = raw;
     if let Some(cap) = policy.cap_micros {
         fee = fee.min(cap);
@@ -176,11 +172,25 @@ pub fn micros_to_units(micros: i64) -> f64 {
     clamped as f64 / 1_000_000.0
 }
 
+/// Origin of a platform-fee charge. Historical charges can lack a surface;
+/// callers must not guess one from venue alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeeSurface {
+    Sniper,
+    Copy,
+    TelegramSwap,
+    Polymarket,
+}
+
 /// One assessed platform fee, ready for journaling and posting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlatformFeeCharge {
     /// Unique charge id (idempotency: the same id never posts twice).
     pub charge_id: String,
+    /// None for historical or not-yet-attributed charges.
+    #[serde(default)]
+    pub surface: Option<FeeSurface>,
     /// Tenant organization the charge belongs to.
     pub organization_id: String,
     /// Venue the underlying trade executed on.
@@ -216,9 +226,13 @@ impl PlatformFeeCharge {
         if notional_micros < 0 {
             return Err(PlatformFeeError::NegativeNotional);
         }
+        // Public fields and serde allow callers to bypass `new`; never assess
+        // an invalid policy even when it came from an untrusted serialized row.
+        PlatformFeePolicy::new(policy.fee_bps, policy.cap_micros, policy.minimum_micros)?;
         let fee_micros = compute_platform_fee(notional_micros, &policy);
         Ok(PlatformFeeCharge {
             charge_id: charge_id.into(),
+            surface: None,
             organization_id: organization_id.into(),
             venue: venue.into(),
             asset: asset.into(),
@@ -228,6 +242,13 @@ impl PlatformFeeCharge {
             tenant_wallet: tenant_wallet.into(),
             platform_wallet: platform_wallet.into(),
         })
+    }
+
+    /// Attribute this charge explicitly; does not post or collect a fee.
+    #[must_use]
+    pub fn with_surface(mut self, surface: FeeSurface) -> Self {
+        self.surface = Some(surface);
+        self
     }
 
     /// The balanced TENANT-side entry: Debit `Fees` (the tenant recognises
@@ -267,6 +288,31 @@ impl PlatformFeeCharge {
                 },
             ],
         }
+    }
+
+    /// Tenant-side fee projection for a particular execution mode. Paper and
+    /// simulation are non-cash accounting projections, never cash transfers.
+    pub fn entry_for_mode(&self, mode: crate::models::ExecutionMode) -> Entry {
+        let mut entry = self.entry();
+        if mode != crate::models::ExecutionMode::Live {
+            for posting in &mut entry.postings {
+                if posting.account == Account::Cash {
+                    posting.account = Account::Adjustments;
+                }
+            }
+        }
+        entry
+    }
+
+    /// Platform-side projection: paper/simulate revenue is non-cash and must
+    /// not be reported as a cash receipt. No persistence is implied.
+    pub fn revenue_for_mode(&self, mode: crate::models::ExecutionMode) -> Option<Posting> {
+        self.platform_revenue_posting().map(|mut posting| {
+            if mode != crate::models::ExecutionMode::Live {
+                posting.account = Account::Adjustments;
+            }
+            posting
+        })
     }
 
     /// The PLATFORM-side revenue posting for the operator's own book
@@ -348,10 +394,11 @@ mod tests {
     #[test]
     fn overflow_saturates_instead_of_wrapping() {
         let p = policy(MAX_PLATFORM_FEE_BPS, None, 0);
-        // i64::MAX notional * 500 bps overflows checked_mul -> saturates.
+        // Widened multiplication retains exact HALF-UP math even at i64::MAX.
         let fee = compute_platform_fee(i64::MAX, &p);
-        assert!(fee > 0, "saturated fee is still a positive upper bound");
-        // With a cap, the saturated value collapses back to the cap.
+        let expected = ((i64::MAX as i128 * 500 + 5_000) / 10_000) as i64;
+        assert_eq!(fee, expected);
+        // A cap still applies to the exact result.
         let capped = policy(MAX_PLATFORM_FEE_BPS, Some(1_000), 0);
         assert_eq!(compute_platform_fee(i64::MAX, &capped), 1_000);
     }

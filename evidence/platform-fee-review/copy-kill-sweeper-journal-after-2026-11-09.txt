@@ -1,0 +1,112 @@
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 21.20s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-85ff6589a8b0fe0c)
+
+running 12 tests
+test built_signed_transaction_contains_fee_transfer_for_buy_and_sell ... ok
+test buy_and_sell_prepare_atomic_sol_transfer_and_audit ... ok
+test confirmed_curve_buy_and_sell_audit_verified_fee_leg ... ok
+test curve_pipeline_refuses_self_vault_before_buy_or_sell_broadcast ... ok
+test curve_pipeline_skips_disabled_and_dust_fees_without_fee_transfer ... ok
+test direct_fee_rejects_payer_as_vault_and_audits_the_reason ... ok
+test direct_verification_never_claims_unconfirmed_or_missing_transaction ... ok
+test dust_and_disabled_are_audited_without_instruction ... ok
+test invalid_jupiter_account_is_audited_as_rejected_for_each_actor ... ok
+test invalid_vault_cannot_silently_drop_a_due_fee ... ok
+test jupiter_fee_account_must_be_initialized_wsol_token_account ... ok
+test real_copy_curve_pipeline_builds_fee_leg_for_buy_and_sell_on_mock_rpc ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/event_pipeline.rs (target/debug/deps/event_pipeline-66b4e8c38b169766)
+
+running 7 tests
+test execution_failures_are_failed_not_rejected_and_note_the_mint ... ok
+test legacy_mirror_trade_door_runs_the_pipeline ... ok
+test live_terminal_states_filled_ambiguous_and_exit_mirrored ... ok
+test malformed_events_are_refused_at_the_door ... ok
+test paper_buy_walks_every_stage_and_books_a_linked_position ... ok
+test policy_rejections_name_their_rule ... ok
+test risk_gates_are_the_authority_and_are_labelled ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.88s
+
+     Running tests/intent_execution.rs (target/debug/deps/intent_execution-f28d5b50750b0de8)
+
+running 26 tests
+test ambiguous_broadcast_parks_without_booking_a_fill ... ok
+test ambiguous_exit_keeps_position_and_does_not_book_a_sell ... ok
+test balance_audit_reports_mock_match_and_mismatch_without_posting_fees ... ok
+test confirmed_buy_and_sell_report_unresolved_balance_metadata_without_changing_bookkeeping ... ok
+test confirmed_live_buy_keeps_live_mode_when_kill_switch_changes_after_send ... ok
+test failed_ambiguous_exit_journal_write_disables_reconciliation_auto_exit ... ok
+test failed_ambiguous_journal_write_latches_live_buy_after_confirmation ... ok
+test failed_journal_after_kill_switch_still_latches_unbooked_live_buy ... ok
+test kill_switch_after_live_buy_broadcast_does_not_book_ambiguous_fill ... ok
+test kill_switch_after_live_exit_broadcast_does_not_book_ambiguous_sale ... ok
+test kill_switch_sweeper_cannot_bypass_missing_live_exit_journal ... ok
+test kill_switch_sweeper_checks_latch_and_allows_clear_journal ... ok
+test leader_fee_is_never_booked_as_follower_fee ... ok
+test live_buy_refuses_to_broadcast_if_copy_journal_is_unavailable ... ok
+test live_buy_refuses_to_broadcast_when_journal_scan_is_saturated ... ok
+test live_mirror_confirms_through_the_executor_with_a_deterministic_intent ... ok
+test mirrored_exit_and_sweeper_fail_closed_on_journal_outage_and_saturation ... ok
+test mirrored_exit_refuses_unbooked_ambiguous_exit_after_confirmation ... ok
+test node_rejection_is_a_definite_failure_with_nothing_booked ... ok
+test paper_and_ambiguous_buys_do_not_claim_live_balance_observation ... ok
+test pending_execution_cap_throttles_new_mirrors ... ok
+test simulation_failure_never_broadcasts_and_abandons_the_journal_entry ... ok
+test standalone_live_sweeper_without_journal_refuses_exit ... ok
+test sweeper_ambiguous_exit_sets_shared_latch_and_blocks_retry ... ok
+test sweeper_blocks_journaled_ambiguous_mirror_exit_after_confirmation ... ok
+test the_ledger_refuses_a_second_attempt_at_the_same_logical_trade ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.57s
+
+     Running tests/reconciliation.rs (target/debug/deps/reconciliation-55a58a5fc84c5689)
+
+running 8 tests
+test ambiguous_exit_does_not_auto_resell_after_execution_turns_confirmed ... ok
+test clean_state_reconciles_without_findings ... ok
+test leader_exit_seen_while_paused_is_flagged_then_mirrored_when_enabled ... ok
+test leader_rebuy_after_exit_cancels_the_finding ... ok
+test quantity_drift_orphans_and_ambiguous_entries_are_surfaced ... ok
+test saturated_journal_disables_reconciliation_auto_exit ... ok
+test sweeper_closed_positions_close_their_links ... ok
+test unfollowed_leader_with_open_position_is_flagged_not_sold ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.78s
+
+    Finished `test` profile [unoptimized] target(s) in 0.85s
+     Running tests/failure_injection.rs (target/debug/deps/failure_injection-22a6a75a61bd754f)
+
+running 27 tests
+test ambiguous_live_exit_does_not_book_fill_or_allow_local_retry ... ok
+test ambiguous_send_does_not_book_a_fill_and_leaves_the_intent_pending ... ok
+test blockhash_rejected_by_the_node_is_a_definite_failure_with_cooldown ... ok
+test confirmation_timeout_parks_the_entry_without_booking_it ... ok
+test confirmed_live_entry_keeps_attempt_mode_when_killed_after_send ... ok
+test confirmed_live_exit_keeps_attempt_mode_when_killed_after_send ... ok
+test duplicate_intent_is_refused_by_the_execution_ledger ... ok
+test failed_simulation_never_broadcasts_and_marks_the_entry_failed ... ok
+test intent_journal_records_before_broadcast_and_abandons_on_rejection ... ok
+test kill_switch_engaged_mid_pipeline_stops_the_hand_off ... ok
+test killed_after_ambiguous_live_sniper_entry_does_not_book ... ok
+test killed_after_ambiguous_live_sniper_exit_does_not_book ... ok
+test malformed_curve_account_is_execution_unavailable_not_a_trade ... ok
+test malformed_feed_payloads_are_dropped_by_the_detector ... ok
+test missing_liquidity_is_insufficient_liquidity ... ok
+test missing_mint_refuses_entry_in_both_modes ... ok
+test pumpswap_event_without_a_pool_account_is_pool_not_ready ... ok
+test restart_with_a_failed_entry_cleans_the_position_up_without_selling ... ok
+test rpc_failover_to_a_healthy_provider_completes_the_entry ... ok
+test rpc_timeout_without_fallback_is_execution_unavailable ... ok
+test sniper_daily_loss_limit_blocks_new_entries ... ok
+test stale_blockhash_is_replaced_before_broadcast ... ok
+test stale_market_snapshot_is_refused_at_submit_time ... ok
+test tripped_provider_pool_is_reported_before_any_read ... ok
+test ws_disconnect_after_detection_does_not_affect_the_entry ... ok
+test ws_disconnect_during_detection_reconnects_and_keeps_detecting ... ok
+test ws_slot_regression_after_reconnect_is_counted_not_traded_twice ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.91s

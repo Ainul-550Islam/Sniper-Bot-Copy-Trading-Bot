@@ -520,7 +520,7 @@ impl Position {
             && self.last_mark >= 0.0
             && self
                 .realized_pnl_quote
-                .map_or(true, |value| value.is_finite())
+                .is_none_or(|value| value.is_finite())
     }
 
     /// Apply a fill to the position, maintaining a volume-weighted entry.

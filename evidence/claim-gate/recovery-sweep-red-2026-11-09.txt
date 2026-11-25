@@ -1,0 +1,41 @@
+=== RED: the recovery sweep truncated, re-paired and mis-reported (gap #74) ===
+-- injection: cursor ignored, page capped at 1,000, one tenant-wide order list cloned onto every intent, has_more/total_remaining hard-coded --
+test the_recovery_sweep_pages_pairs_and_never_holds_the_lock_for_the_caller ... FAILED
+
+failures:
+
+---- the_recovery_sweep_pages_pairs_and_never_holds_the_lock_for_the_caller stdout ----
+--
+thread 'the_recovery_sweep_pages_pairs_and_never_holds_the_lock_for_the_caller' (2287183) panicked at crates/core/tests/recovery_sweep_pg.rs:148:9:
+a page never exceeds the cap
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+error: test failed, to rerun pass `-p bot-core --test recovery_sweep_pg`
+
+=== RED (pairing only): paging intact, the tenant-wide list cloned onto every intent ===
+test the_recovery_sweep_pages_pairs_and_never_holds_the_lock_for_the_caller ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.16s
+
+
+=== RED (pairing only, original clone semantics): paging intact, one tenant-wide list cloned onto every intent ===
+test the_recovery_sweep_pages_pairs_and_never_holds_the_lock_for_the_caller ... FAILED
+
+failures:
+
+---- the_recovery_sweep_pages_pairs_and_never_holds_the_lock_for_the_caller stdout ----
+--
+thread 'the_recovery_sweep_pages_pairs_and_never_holds_the_lock_for_the_caller' (2287328) panicked at crates/core/tests/recovery_sweep_pg.rs:180:5:
+assertion `left == right` failed: intent 0 is paired with its own open order only
+  left: ["rc-ord-0-5280a5ae-60f2-4e9c-ba89-32fec8a881ec", "rc-ord-1a-5280a5ae-60f2-4e9c-ba89-32fec8a881ec", "rc-ord-1b-5280a5ae-60f2-4e9c-ba89-32fec8a881ec"]
+ right: ["rc-ord-0-5280a5ae-60f2-4e9c-ba89-32fec8a881ec"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s

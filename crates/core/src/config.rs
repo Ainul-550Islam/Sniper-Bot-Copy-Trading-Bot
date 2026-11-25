@@ -58,6 +58,9 @@ pub struct PlatformFeeConfig {
     /// vault is operator-specific and must never ship with a default that
     /// could receive funds by accident.
     pub vault: String,
+    /// Initialized WSOL token account for Jupiter fees. Separate from the
+    /// native SOL system-account vault used by direct transfer instructions.
+    pub jupiter_fee_account: String,
     /// Fee in basis points of the swap notional (`100` = 1%).
     pub bps: u64,
     /// Fees below this many lamports are skipped (dust guard): collecting
@@ -69,6 +72,7 @@ impl Default for PlatformFeeConfig {
     fn default() -> Self {
         PlatformFeeConfig {
             vault: String::new(),
+            jupiter_fee_account: String::new(),
             bps: 0,
             // Ten thousand lamports (~0.00001 SOL): below this the transfer
             // is economically pointless.
@@ -289,6 +293,11 @@ pub struct RiskConfig {
     /// Global kill switch. When true, every module refuses to send anything and
     /// open positions are flattened by the risk sweeper.
     pub kill_switch: bool,
+    /// Why the deployment was halted (written by an emergency stop / operator
+    /// halt; empty when nothing halted it). Reported by `/resume` and by the
+    /// status surface so a latch nobody explained is visible instead of silent.
+    #[serde(default)]
+    pub halt_reason: String,
     /// Max simultaneous open positions per module.
     pub max_open_positions: usize,
     /// Max fraction of quote balance in a single position (0.0 .. 1.0).
@@ -404,6 +413,7 @@ impl Default for RiskConfig {
     fn default() -> Self {
         RiskConfig {
             kill_switch: false,
+            halt_reason: String::new(),
             max_open_positions: 8,
             max_position_fraction: 0.10,
             max_position_quote: 0.5,
@@ -2167,6 +2177,9 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     if let Some(v) = env_str("PLATFORM_FEE_VAULT", w) {
         c.platform_fee.vault = v;
     }
+    if let Some(v) = env_str("PLATFORM_FEE_JUPITER_FEE_ACCOUNT", w) {
+        c.platform_fee.jupiter_fee_account = v;
+    }
     if let Some(v) = env_u64("PLATFORM_FEE_BPS", w) {
         c.platform_fee.bps = v.min(10_000);
     }
@@ -2532,6 +2545,12 @@ fn apply_env_overrides(c: &mut Config, w: &mut Vec<String>) {
     }
     if let Some(v) = env_str("POLYMARKET_STRATEGY", w) {
         c.polymarket.strategy = v;
+    }
+    // Feed the public builder profile code into the same resolved config
+    // used by strategy and copy order signing. Validation happens in the
+    // Polymarket signer and rejects malformed nonempty values before POST.
+    if let Some(v) = env_str("POLY_BUILDER_CODE", w) {
+        c.polymarket.builder_code = Some(v);
     }
     if let Some(v) = env_str("CLOB_URL", w) {
         c.polymarket.clob_url = v;
@@ -5056,6 +5075,64 @@ max_open_positions = 4
         assert!(warnings
             .iter()
             .any(|w| w.contains("heartbeat_timeout_secs")));
+    }
+
+    #[test]
+    fn polymarket_builder_env_overrides_the_configured_builder() {
+        const MARKER: &str = "CONFIG_POLY_BUILDER_CHILD";
+        if std::env::var_os(MARKER).is_some() {
+            let mut config = Config::default();
+            config.polymarket.builder_code = Some("config-code".into());
+            apply_env_overrides(&mut config, &mut Vec::new());
+            assert_eq!(config.polymarket.builder_code.as_deref(), Some("env-code"));
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::polymarket_builder_env_overrides_the_configured_builder",
+                "--test-threads=1",
+            ])
+            .env(MARKER, "1")
+            .env("POLY_BUILDER_CODE", " env-code ")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn platform_fee_jupiter_account_env_is_separate_from_native_vault() {
+        const MARKER: &str = "CONFIG_FEE_ACCOUNT_CHILD";
+        if std::env::var_os(MARKER).is_some() {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config, &mut Vec::new());
+            assert_eq!(config.platform_fee.vault, "native-vault");
+            assert_eq!(
+                config.platform_fee.jupiter_fee_account,
+                "jupiter-token-account"
+            );
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::platform_fee_jupiter_account_env_is_separate_from_native_vault",
+                "--test-threads=1",
+            ])
+            .env(MARKER, "1")
+            .env("PLATFORM_FEE_VAULT", "native-vault")
+            .env("PLATFORM_FEE_JUPITER_FEE_ACCOUNT", "jupiter-token-account")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 
     #[test]

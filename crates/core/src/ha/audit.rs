@@ -208,6 +208,63 @@ pub fn feed_replay(bus: &EventBus, feed: &str, detail: &str) {
     );
 }
 
+/// A durable cursor write was refused (fenced or stale).
+pub fn cursor_write_refused(bus: &EventBus, cursor_key: &str, detail: &str) {
+    publish(
+        bus,
+        "ha.cursor.refused".into(),
+        cursor_key.to_string(),
+        detail.to_string(),
+    );
+}
+
+/// An unacknowledged advance was re-delivered (crash before the side
+/// effect, or a takeover while it was pending).
+pub fn cursor_replay_pending(
+    bus: &EventBus,
+    feed: &str,
+    scope: &str,
+    position: Option<u64>,
+    token: Option<&str>,
+) {
+    publish(
+        bus,
+        "ha.cursor.replay_pending".into(),
+        feed.to_string(),
+        format!(
+            "scope={} position={} token={}",
+            if scope.is_empty() { "-" } else { scope },
+            position
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".into()),
+            token.unwrap_or("-")
+        ),
+    );
+}
+
+/// A cursor advance was acknowledged (its side effect completed).
+pub fn cursor_acknowledged(
+    bus: &EventBus,
+    feed: &str,
+    scope: &str,
+    position: Option<u64>,
+    token: Option<&str>,
+) {
+    publish(
+        bus,
+        "ha.cursor.acknowledged".into(),
+        feed.to_string(),
+        format!(
+            "scope={} position={} token={}",
+            if scope.is_empty() { "-" } else { scope },
+            position
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".into()),
+            token.unwrap_or("-")
+        ),
+    );
+}
+
 /// Readiness changed.
 pub fn readiness(bus: &EventBus, worker_id: &str, ready: bool, detail: &str) {
     publish(

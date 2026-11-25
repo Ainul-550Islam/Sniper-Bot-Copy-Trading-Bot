@@ -1,0 +1,16 @@
+Source review batch 009, 2026-11-09. 13 complete file versions read; hashes below. Observations only, no production impact demonstrated.
+0a131014d0a4665fd53bfcae7982b999fbd6ce0c357322102fee039982a90c93  crates/server/src/trading_data_plane/onboarding.rs
+19419e5d45d0b22b0d7e81113cd4b8852db44ab6a8ec73e39c12c694c31c73db  crates/server/src/trading_data_plane/positions.rs
+51a16d7ea29687fdac23312b6129899500474e0421cbda921f1b8d6ad9eabbbd  crates/server/src/trading_data_plane/orders.rs
+a3109d6b127b56a40ef769f0549159f947c3e6db27d311c3cd6585de1d40985a  crates/server/src/trading_data_plane/authorization_chain.rs
+621ae86e34e06eba57386380fa9211f54622c421c5905db6611e2dc87789618f  crates/server/src/trading_data_plane/executions.rs
+5e63f93a1371c242daac84092c87db90485baecad22b734c2f9cd4b9db7d58cb  crates/server/src/trading_data_plane/mod.rs
+74af9a3967b016efe121f3f6f24f787c832f7353ee4e2511615e212e57664e42  crates/server/src/trading_data_plane/recovery.rs
+653b4352ee969e59c0dbf16f7aecabadd5e1745e71d92d71dbc6c883f47c6275  crates/server/src/trading_data_plane/analytics.rs
+bec03a369b345eb08e9c59a5b1499e4326e6ae7028fe7d534b205a9f61411414  crates/server/src/trading_data_plane/service.rs
+6f9827eb8cbd0ee20c6e3b37d5240afd8c47170ca73430a989a4f205198ad469  crates/server/src/trading_data_plane/copy.rs
+de647379c5ef053966acd19189a847148d802d42732f3ad9bbe1ee19781bd598  crates/server/src/trading_data_plane/polymarket.rs
+f907c9a45e4c8432f54231239d387762d39193ab11d92ea4b6d3bba86dc7f4d1  crates/server/src/trading_data_plane/bots.rs
+e03f5f3b07e7340a7130a50b221d096533d9dd6e513b8833aa6a072986cd33bf  crates/server/src/trading_data_plane/integrations.rs
+
+Analytics module_breakdown labels ABS(amount_in)+ABS(amount_out) as volume_usd, and SUM(fee) as fees_usd without converting trade units; position last_mark*qty-cost_basis labeled USD without checking quote currency, and null marks are skipped by SUM. Daily accounting periods are date granularity with no upper day bound; execution metrics labeled fill latency and reverted transactions include simulate/send/confirm attempts. These labels/values are not proven USD or actual fills/reverts. API window silently replaces invalid RFC3339 with defaults; invalid pagination limit similarly defaults; PnL without params uses past 24h despite today-UTC doc, and reversed window falls back to today instead of 400. Recovery sweep doc claims one consistent snapshot though transaction defaults Read Committed with two SELECTs. Integrations calls globally sampled healthy+ready components live_verified without proving tenant-specific live venue validation; detail originates global registry. Service read_scope accepts arbitrary organization_id and db() exposes raw handle, so auth boundary is callers, not type enforcement. No live production exploit established.

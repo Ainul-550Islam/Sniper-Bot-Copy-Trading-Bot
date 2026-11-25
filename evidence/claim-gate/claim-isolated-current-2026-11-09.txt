@@ -1,0 +1,25 @@
+Current workspace-built test binaries; real PostgreSQL/Redis
+
+running 11 tests
+test actual_process_exit_and_restart_recovers_expired_lease ... ok
+test claim_crash_worker ... ok
+test clustered_copy_fails_closed_without_shared_dedup ... ok
+test crashed_owner_leaks_nothing_and_expiry_allows_exactly_one_takeover ... ok
+test expired_owner_can_release_only_before_a_takeover ... ok
+test independent_processes_send_one_mock_transaction_per_event ... ok
+test n_replicas_same_event_exactly_one_winner ... ok
+test postgres_replicas_send_exactly_one_mock_transaction_per_event ... ok
+test released_claim_is_reacquirable_and_fenced_for_the_old_owner ... ok
+test shared_redis_dedup_refuses_zero_ttl_and_serializes_first_arrival ... ok
+test subprocess_broadcast_worker ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.72s
+
+
+running 2 tests
+test sequential_fast_failures_can_both_reach_rpc ... ok
+test two_replicas_one_whale_trade_one_execution ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+EXIT=0

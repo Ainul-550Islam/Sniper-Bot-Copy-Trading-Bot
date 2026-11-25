@@ -1,0 +1,33 @@
+=== GREEN: recovery-input reads page, report truncation, and read the row's organization (gap #78) ===
+
+-- recovery_bounds_pg (real PostgreSQL; lifecycle 4 unsettled @2-row pages, copy links, poly orders) --
+test copy_and_polymarket_recovery_reads_page_without_silent_caps ... ok
+test unsettled_lifecycle_reads_page_and_report_truncation ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+-- cross-tenant contracts for the same tables --
+execution_cross_tenant_pg: test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
+copy_cross_tenant_pg: test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+orders_cross_tenant_pg: test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+-- copy crash recovery (restart re-seed path) --
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+-- bot-core --lib --
+test result: ok. 719 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.52s
+
+-- clippy workspace -D warnings (no output = clean) --
+clippy_exit_marker
+
+-- fmt/diff --
+fmt_exit=0
+diff_check_exit=0
+
+-- lapsed broadcast-reservation operator view (gap #78, db_integration) --
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.46s
+
+-- clippy workspace -D warnings (no output = clean) --
+
+-- fmt/diff --
+fmt_exit=0
+diff_check_exit=0

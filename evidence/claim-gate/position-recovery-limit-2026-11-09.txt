@@ -1,0 +1,45 @@
+Deployment and tenant position recovery >5000, 2026-11-09.
+Source: PositionRepo::list_open feeds server persist::restore before modules and periodic PositionRepo book sync in server main. Old LIMIT 5000 returned a prefix without signaling truncation. Real PG test inserted 5001 open rows in the deployment organization, with distinct increasing timestamps; desired completeness assertion failed before fix. Removed LIMIT from both deployment and tenant list_open, added deterministic id tie-breaker; real PG suite 10/10 passed, including both queries returning row 5001. Temporary witness rows cleaned. The test does not start server or prove live effects. Both queries now load entire result in memory and are subject to DB/client timeouts and memory pressure for large books; no snapshot across later state changes, no live test, and restore still logs errors and starts empty. Tenant closed-position and trade window query caps remain.
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 1.31s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-2172416d723dc0d8)
+
+running 1 test
+test deployment_open_position_read_includes_more_than_5000 ... FAILED
+
+failures:
+
+---- deployment_open_position_read_includes_more_than_5000 stdout ----
+
+thread 'deployment_open_position_read_includes_more_than_5000' (563427) panicked at crates/core/tests/positions_cross_tenant_pg.rs:921:5:
+live position recovery must not silently truncate
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    deployment_open_position_read_includes_more_than_5000
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.35s
+
+error: test failed, to rerun pass `-p bot-core --test positions_cross_tenant_pg`
+EXIT=101
+--- after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 19.66s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-2172416d723dc0d8)
+
+running 10 tests
+test colliding_legacy_position_ids_can_mix_distinct_positions ... ok
+test cross_tenant_position_id_collision_cannot_mutate ... ok
+test daily_risk_pnl_excludes_future_utc_days ... ok
+test deployment_open_position_read_includes_more_than_5000 ... ok
+test independent_states_persist_distinct_position_ids ... ok
+test legacy_trade_id_collision_silently_drops_distinct_fill ... ok
+test polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fills ... ok
+test positions_trades_balances_isolation_and_pnl_exclusion ... ok
+test risk_exposure_fails_closed_when_positions_use_an_unexpected_quote_unit ... ok
+test tenant_trade_rejects_foreign_or_missing_position ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.10s
+
+EXIT=0

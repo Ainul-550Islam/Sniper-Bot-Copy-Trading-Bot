@@ -1,13 +1,17 @@
 //! Live billing contract test (Batch 7).
-//! Default #[ignore] AND requires explicit LIVE_BILLING=1. Use actual configured provider.
-//! Verify signature/event/checkout semantics. Never use a fake provider for a test named live.
-//! LIVE_EXTERNAL — must not run during ordinary cargo test --workspace.
+//!
+//! These run on every ordinary `cargo test` run (gap #31 removed the blanket
+//! `#[ignore]`). Each one asserts the safety contract itself — that live
+//! verification stays NOT_RUN / EXTERNAL_REQUIRED without the explicit
+//! `LIVE_BILLING=1` opt-in and real credentials, and never fabricates a PASS.
+//! The network-dependent live legs still require an operator with credentials;
+//! what runs here is the refusal, which is precisely the property that must
+//! never regress. Never use a fake provider for a test named live.
 
 use sniper_suite::billing::live_provider_contract::{LiveBillingConfig, LiveBillingContract};
 use sniper_suite::ops::provider_contract::ProviderStatus;
 
 #[test]
-#[ignore]
 fn live_billing_requires_explicit_opt_in() {
     // LIVE_EXTERNAL — should be NOT_RUN without LIVE_BILLING=1
     // This test is #[ignore] so ordinary `cargo test --workspace` skips it
@@ -32,7 +36,6 @@ fn live_billing_requires_explicit_opt_in() {
 }
 
 #[test]
-#[ignore]
 fn live_billing_never_hardcoded_success() {
     // LIVE_EXTERNAL — even with all flags, must not return hardcoded success
     let cfg = LiveBillingConfig::stub("stripe", true, true, true);
@@ -47,7 +50,6 @@ fn live_billing_never_hardcoded_success() {
 }
 
 #[test]
-#[ignore]
 fn live_billing_uses_real_provider_not_fake() {
     // LIVE_EXTERNAL — verify provider name is preserved, not fake
     for provider in ["stripe", "paddle"] {

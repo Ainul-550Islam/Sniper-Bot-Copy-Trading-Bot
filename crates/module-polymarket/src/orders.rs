@@ -234,6 +234,14 @@ impl SignedOrderBundle {
 
 /// Build and sign an order, returning the bundle the CLOB expects.
 pub fn sign_order_bundle(key: &SigningKey, params: &OrderParams) -> PolyResult<SignedOrderBundle> {
+    // Canonicalize through the same builder parser for every signing route.
+    // `None` intentionally disables attribution; an invalid configured value
+    // fails before signing. Keep the raw value in the salt for retry
+    // compatibility with orders already signed by previous versions.
+    let builder = match params.builder_code {
+        None => String::new(),
+        Some(value) => crate::builder::BuilderCode::parse(value)?.to_hex(),
+    };
     let signer_address = eip712::address_from_signing_key(key);
     let cfg = RoundConfig::for_tick(params.tick_size)?;
     let amounts = limit_order_amounts(params.is_buy, params.size, params.price, cfg);
@@ -309,7 +317,7 @@ pub fn sign_order_bundle(key: &SigningKey, params: &OrderParams) -> PolyResult<S
         // separately on the bundle and only in the wire body).
         timestamp: params.created_at_ms.to_string(),
         metadata: String::new(),
-        builder: params.builder_code.unwrap_or("").to_string(),
+        builder,
     };
 
     let digest = eip712::order_digest(
@@ -1510,6 +1518,37 @@ mod tests {
             created_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
             builder_code: None,
         }
+    }
+
+    #[test]
+    fn signing_attaches_canonical_builder_and_rejects_invalid_codes() {
+        let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let mut params = test_params(10.0, 0);
+        params.builder_code = Some("operator");
+        let bundle = sign_order_bundle(&key, &params).unwrap();
+        let expected = crate::builder::BuilderCode::parse("operator")
+            .unwrap()
+            .to_hex();
+        assert_eq!(bundle.order.builder, expected);
+        let attributed_hash = bundle.order.struct_hash().unwrap();
+        let mut tampered = bundle.order.clone();
+        tampered.builder.clear();
+        assert_ne!(attributed_hash, tampered.struct_hash().unwrap());
+        for invalid in [
+            "",
+            "0x1234",
+            "has space",
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            params.builder_code = Some(invalid);
+            assert!(sign_order_bundle(&key, &params).is_err(), "{invalid}");
+        }
+        params.builder_code = None;
+        assert!(sign_order_bundle(&key, &params)
+            .unwrap()
+            .order
+            .builder
+            .is_empty());
     }
 
     #[test]

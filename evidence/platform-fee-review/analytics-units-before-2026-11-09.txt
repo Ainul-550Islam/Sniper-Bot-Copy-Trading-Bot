@@ -1,0 +1,13 @@
+=== RED: analytics/health labels claim more than they measure ===
+-- injected: raw trade amount labelled volume_usd, execution latency labelled avg_fill_time_ms,
+   a failed attempt counted as a reverted transaction, and a health sample labelled live_verified --
+test trading_data_plane::integrations::tests::a_healthy_sample_is_never_labelled_live_verified ... FAILED
+thread 'trading_data_plane::integrations::tests::a_healthy_sample_is_never_labelled_live_verified' (3787546) panicked at crates/server/src/trading_data_plane/integrations.rs:140:9:
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 994 filtered out; finished in 0.01s
+-- second injection with the SOURCE-LEVEL guard in place (this is the proof that the guard bites) --
+test api::tests::analytics_vocabulary_never_relabels_raw_amounts_or_latency ... FAILED
+test trading_data_plane::integrations::tests::a_healthy_sample_is_never_labelled_live_verified ... FAILED
+thread 'api::tests::analytics_vocabulary_never_relabels_raw_amounts_or_latency' (3787677) panicked at crates/server/src/api.rs:2400:9:
+thread 'trading_data_plane::integrations::tests::a_healthy_sample_is_never_labelled_live_verified' (3787678) panicked at crates/server/src/trading_data_plane/integrations.rs:140:9:
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 995 filtered out; finished in 0.00s
+red_exit=101 (both guard tests failed as they must)

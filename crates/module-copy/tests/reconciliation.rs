@@ -17,6 +17,82 @@ use module_copy::recovery::{link_for, CopyStore, MemoryCopyStore};
 use std::sync::Arc;
 
 #[tokio::test]
+async fn ambiguous_exit_does_not_auto_resell_after_execution_turns_confirmed() {
+    use bot_core::execution::ExecutionState;
+    use std::sync::atomic::Ordering;
+
+    let mut cfg = live_copy_config();
+    cfg.copy.reconcile_auto_exit = true;
+    cfg.copy.mirror_exits = true;
+    let mut w = CopyWorld::new(cfg).await;
+    let store = Arc::new(MemoryCopyStore::new());
+    w.attach_store(store).await;
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    assert_eq!(w.process(&w.buy(110)).await.stage, CopyStage::Filled);
+    w.node.set_send(SendBehaviour::Drop);
+    w.node.confirm.store(false, Ordering::SeqCst);
+    let result = w.process(&w.sell(111)).await;
+    assert_eq!(result.stage, CopyStage::Ambiguous);
+    bot_core::execution::ledger()
+        .transition(
+            result.intent_id.as_deref().unwrap(),
+            ExecutionState::Confirmed,
+            None,
+        )
+        .await
+        .unwrap();
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    let sends = w.node.sends.load(Ordering::SeqCst);
+    let cfg = w.state.config_snapshot().await;
+    let report = w.bot.reconcile_once(&cfg).await;
+    assert_eq!(report.count(FindingKind::UnresolvedExit), 1);
+    assert!(report
+        .findings
+        .iter()
+        .all(|finding| !matches!(finding.action, ReconAction::MirrorExit { .. })));
+    assert_eq!(w.node.sends.load(Ordering::SeqCst), sends);
+}
+
+#[tokio::test]
+async fn saturated_journal_disables_reconciliation_auto_exit() {
+    let mut w = CopyWorld::new(copy_config()).await;
+    let store = Arc::new(MemoryCopyStore::new());
+    w.attach_store(store.clone()).await;
+    assert_eq!(w.process(&w.buy(115)).await.stage, CopyStage::Filled);
+    let mut cfg = w.cfg.clone();
+    cfg.copy.mirror_exits = false;
+    w.reload(cfg.clone()).await;
+    let sell = w.sell(116);
+    assert_eq!(
+        w.process(&sell).await.rejection.unwrap().reason,
+        RejectReason::MirrorExitsDisabled
+    );
+    let mut filler = store.event(&sell.event_id).unwrap();
+    filler.side = "buy".into();
+    filler.mint = "unrelated".into();
+    for i in 0..9_998 {
+        filler.event_id = format!("filler-{i}");
+        assert!(store.record_event(filler.clone()).await);
+    }
+    cfg.copy.mirror_exits = true;
+    cfg.copy.reconcile_auto_exit = true;
+    w.reload(cfg.clone()).await;
+    let report = w.bot.reconcile_once(&cfg).await;
+    assert_eq!(report.count(FindingKind::LeaderExitedWeHold), 1);
+    assert!(report
+        .findings
+        .iter()
+        .all(|f| !matches!(f.action, ReconAction::MirrorExit { .. })));
+    assert!(w
+        .state
+        .find_open(BotModule::Copy, &w.mint.to_string())
+        .await
+        .is_some());
+}
+
+#[tokio::test]
 async fn clean_state_reconciles_without_findings() {
     let mut w = CopyWorld::new(copy_config()).await;
     let store = Arc::new(MemoryCopyStore::new());

@@ -1,0 +1,134 @@
+Static source review of tenant copy shared dedup identity, 2026-11-09.
+Conditional risk only: when tenant-bound bots share an AppState or shared dedup backend, identical events use the same copy-event key because no tenant id is passed to claim/claim_shared. Actual deployment wiring and end-to-end cross-tenant effects were not demonstrated by this review.
+
+--- CopyBot claim selection ---
+   835	        // ---- 3. the one authoritative dedup --------------------------------
+   836	        // A lease prevents overlapping holders, not sequential replay after
+   837	        // release. For configured clustered simulate/live execution, require
+   838	        // an authoritative shared dedup decision and never use L1 fallback.
+   839	        let dedup = if cfg.ha.ha_mode().is_clustered()
+   840	            && cfg.execution.mode != bot_core::models::ExecutionMode::Paper
+   841	        {
+   842	            match event_dedup::claim_shared(&self.state, event).await {
+   843	                Ok(outcome) => outcome,
+   844	                Err(error) => {
+   845	                    return self
+   846	                        .finish_rejected(
+   847	                            event,
+   848	                            Some(&rule),
+   849	                            Rejection::new(
+   850	                                RejectReason::DedupUnavailable,
+   851	                                CopyStage::LeaderResolved,
+   852	                                error.to_string(),
+   853	                            ),
+   854	                            &mut tl,
+   855	                        )
+   856	                        .await;
+   857	                }
+   858	            }
+   859	        } else {
+   860	            event_dedup::claim(&self.state, event).await
+   861	        };
+   862	        if dedup == DedupOutcome::Duplicate {
+   863	            debug!(event = %event.event_id, source = event.source.as_str(), "duplicate leader event");
+--- claim paths ---
+    52
+    53	/// Claim `event` in the event dedup. The memory backend is process-local;
+    54	/// Redis and Postgres marks are shared while available, but the facade falls
+    55	/// back to process-local marks on backend errors and entries can expire or be
+    56	/// evicted. This is not an unconditional cross-replica exactly-once guarantee.
+    57	///
+    58	/// Process-local dedup does not elect an executor across replicas. Durable
+    59	/// dedup is an early, non-released event filter; ownership is a separate,
+    60	/// lease-based execution gate. These facts do not by themselves establish
+    61	/// the cause of a prior workspace-only test failure.
+    62	pub async fn claim(state: &Shared, event: &LeaderTradeEvent) -> DedupOutcome {
+    63	    let key = event.dedup_key();
+    64	    let outcome = if state.mark_copy_event_seen(&key).await {
+    65	        DedupOutcome::Fresh
+    66	    } else {
+    67	        DedupOutcome::Duplicate
+    68	    };
+    69	    metrics::count_dedup(outcome.as_str());
+    70	    outcome
+    71	}
+    72
+    73	/// Require a shared first-arrival decision. Unlike [`claim`], this fails
+    74	/// closed when the facade is missing, memory-only, or the shared backend
+    75	/// cannot be reached. A failed or ambiguous write never authorizes execution.
+    76	pub async fn claim_shared(
+    77	    state: &Shared,
+    78	    event: &LeaderTradeEvent,
+    79	) -> bot_core::error::BotResult<DedupOutcome> {
+    80	    let store = state.dedup().ok_or_else(|| {
+    81	        bot_core::error::BotError::config("clustered copy execution requires shared event dedup")
+    82	    })?;
+    83	    let fresh = store.mark_shared("copy_event", &event.dedup_key()).await?;
+    84	    let outcome = if fresh {
+    85	        DedupOutcome::Fresh
+    86	    } else {
+    87	        DedupOutcome::Duplicate
+    88	    };
+    89	    metrics::count_dedup(outcome.as_str());
+    90	    Ok(outcome)
+    91	}
+--- dedup key ---
+   282	    }
+   283
+   284	    /// The one authoritative dedup key (`copy:{signature}:{leader}:{mint}:{side}`).
+   285	    /// Human-readable on purpose: it appears in logs and the durable journal.
+   286	    pub fn dedup_key(&self) -> String {
+   287	        format!(
+   288	            "copy:{}:{}:{}:{}",
+   289	            self.signature.trim(),
+   290	            self.leader.trim(),
+   291	            self.mint.trim(),
+   292	            self.side_str()
+   293	        )
+   294	    }
+   295
+   296	    /// `buy` for a leader purchase, `sell` for a leader sale.
+   297	    pub fn side_str(&self) -> &'static str {
+   298	        match self.side {
+--- tenant binding ---
+   276	    /// Bind this copy bot to ONE tenant (PROMPT 4/10 §C).
+   277	    ///
+   278	    /// Attaches the final tenant broadcast guard to the internal executor
+   279	    /// and remembers the tenant signing context so every mirrored buy and
+   280	    /// every exit carries tenant metadata. The guard's funding wallet
+   281	    /// must be this bot's wallet. Without this call the bot keeps its
+   282	    /// deployment-global operator behaviour unchanged.
+   283	    pub fn with_tenant_context(
+   284	        mut self,
+   285	        guard: Arc<solana_kit::tenant_broadcast_guard::TenantBroadcastGuard>,
+   286	    ) -> BotResult<Self> {
+   287	        self.executor = self.executor.with_tenant_guard(Arc::clone(&guard))?;
+   288	        // Same tenant binding for the risk engine as for the broadcast
+   289	        // guard: cluster-wide capacity / daily-loss reads stay inside this
+   290	        // tenant (see `RiskEngine::with_tenant`).
+   291	        self.risk = self.risk.clone().with_tenant(guard.organization_id());
+   292	        self.tenant = Some(guard.context().clone());
+   293	        self.tenant_guard = Some(guard);
+   294	        Ok(self)
+   295	    }
+--- legacy PostgreSQL dedup tenant binding ---
+   674	            .timed(
+   675	                "dedup_mark",
+   676	                sqlx::query(
+   677	                    r#"INSERT INTO dedup_keys (organization_id, namespace, key, expires_at)
+   678	                       VALUES ($1, $2, $3, $4)
+   679	                       ON CONFLICT (organization_id, namespace, key) DO NOTHING"#,
+   680	                )
+   681	                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+   682	                .bind(ns)
+   683	                .bind(key)
+   684	                .bind(expires)
+   685	                .execute(self.db.pool()),
+   686	            )
+   687	            .await?;
+   688	        Ok(res.rows_affected() == 1)
+--- Redis dedup key ---
+   103	    fn redis_key(ns: &str, key: &str) -> String {
+   104	        format!("dedup:{ns}:{key}")
+   105	    }
+   106

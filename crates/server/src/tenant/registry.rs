@@ -429,3 +429,167 @@ mod tests {
         assert!(!signers[0].active);
     }
 }
+
+/// The live signer-binding check the broadcast guard calls.
+///
+/// The guard's captured context carries `is_active()` from issue time, so a
+/// binding revoked afterwards stays "active" forever in every module that was
+/// already running. This adapter asks the DURABLE registry (`tenant_bindings`,
+/// migration 0025) at broadcast time.
+///
+/// Fail-closed by construction: a missing row is a refusal (an unbound signer
+/// must never sign), an inactive row is a refusal, and a registry error is a
+/// refusal. Only an active row passes.
+pub struct RegistrySignerProbe {
+    registry: Arc<dyn TenantBindingRegistry>,
+}
+
+impl std::fmt::Debug for RegistrySignerProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RegistrySignerProbe")
+    }
+}
+
+impl RegistrySignerProbe {
+    /// Wrap the tenant binding registry.
+    pub fn new(registry: Arc<dyn TenantBindingRegistry>) -> Self {
+        RegistrySignerProbe { registry }
+    }
+}
+
+#[async_trait]
+impl solana_kit::tenant_broadcast_guard::SignerBindingProbe for RegistrySignerProbe {
+    async fn signer_is_active(
+        &self,
+        organization_id: OrganizationId,
+        provider: SignerProvider,
+        key_ref: &str,
+    ) -> Result<(), String> {
+        match self
+            .registry
+            .signer(organization_id, provider, key_ref)
+            .await
+        {
+            Ok(Some(row)) if row.active => Ok(()),
+            Ok(Some(_)) => Err("binding_revoked".to_string()),
+            Ok(None) => Err("binding_not_found".to_string()),
+            Err(error) => Err(format!("binding lookup failed: {error}")),
+        }
+    }
+
+    fn probe_name(&self) -> &'static str {
+        "binding_registry"
+    }
+}
+
+#[cfg(test)]
+mod signer_probe_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A registry whose answer the test controls, plus a call counter.
+    struct Scripted {
+        row: Mutex<Option<SignerBindingRow>>,
+        calls: Mutex<usize>,
+        fail: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl TenantBindingRegistry for Scripted {
+        async fn put_wallet(&self, _b: WalletBinding) -> bot_core::error::BotResult<()> {
+            Ok(())
+        }
+        async fn wallet(
+            &self,
+            _o: OrganizationId,
+            _l: &str,
+        ) -> bot_core::error::BotResult<Option<WalletBinding>> {
+            Ok(None)
+        }
+        async fn wallets(
+            &self,
+            _o: OrganizationId,
+        ) -> bot_core::error::BotResult<Vec<WalletBinding>> {
+            Ok(vec![])
+        }
+        async fn put_signer(&self, _b: SignerBindingRow) -> bot_core::error::BotResult<()> {
+            Ok(())
+        }
+        async fn signer(
+            &self,
+            _o: OrganizationId,
+            _p: SignerProvider,
+            _k: &str,
+        ) -> bot_core::error::BotResult<Option<SignerBindingRow>> {
+            *self.calls.lock().unwrap() += 1;
+            if *self.fail.lock().unwrap() {
+                return Err(bot_core::error::BotError::Http("binding store down".into()));
+            }
+            Ok(self.row.lock().unwrap().clone())
+        }
+        async fn signers(
+            &self,
+            _o: OrganizationId,
+        ) -> bot_core::error::BotResult<Vec<SignerBindingRow>> {
+            Ok(vec![])
+        }
+    }
+
+    fn row(active: bool) -> SignerBindingRow {
+        SignerBindingRow {
+            organization_id: OrganizationId::new(),
+            provider: SignerProvider::Local,
+            key_ref: "copy-key".into(),
+            active,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn only_an_active_binding_passes_and_everything_else_refuses() {
+        use solana_kit::tenant_broadcast_guard::SignerBindingProbe;
+
+        let scripted = Arc::new(Scripted {
+            row: Mutex::new(Some(row(true))),
+            calls: Mutex::new(0),
+            fail: Mutex::new(false),
+        });
+        let probe = RegistrySignerProbe::new(scripted.clone());
+        let org = OrganizationId::new();
+
+        probe
+            .signer_is_active(org, SignerProvider::Local, "copy-key")
+            .await
+            .expect("an active binding passes");
+
+        *scripted.row.lock().unwrap() = Some(row(false));
+        assert_eq!(
+            probe
+                .signer_is_active(org, SignerProvider::Local, "copy-key")
+                .await
+                .unwrap_err(),
+            "binding_revoked"
+        );
+
+        // A missing binding is refused: unbound never signs.
+        *scripted.row.lock().unwrap() = None;
+        assert_eq!(
+            probe
+                .signer_is_active(org, SignerProvider::Local, "copy-key")
+                .await
+                .unwrap_err(),
+            "binding_not_found"
+        );
+
+        // A registry failure is refused, not assumed fine.
+        *scripted.fail.lock().unwrap() = true;
+        let err = probe
+            .signer_is_active(org, SignerProvider::Local, "copy-key")
+            .await
+            .unwrap_err();
+        assert!(err.contains("binding lookup failed"), "{err}");
+
+        assert_eq!(*scripted.calls.lock().unwrap(), 4, "every call is a lookup");
+        assert_eq!(probe.probe_name(), "binding_registry");
+    }
+}

@@ -1,0 +1,19 @@
+Source review batch 007, 2026-11-09.
+15 complete files read; post-read hashes below. Findings are source observations unless separately validated, not proof of production impact.
+e5e83cd95bc0c44dc9469436ab3f0c18b40c73ae3b1894a20987f859be3c9c18  crates/core/src/trading_repository/mod.rs
+b533ce7cb4e6a5487eb1ec39509d1fbe0906a264e9cdc205c5d5ea6396a419fa  crates/core/src/trading_repository/worker_claim/model.rs
+97cc2c9e167c80e6ccb0339ae574671761173ba83730cb2c63f0ee8cb895a8b3  crates/core/src/trading_repository/worker_claim/acquire.rs
+89a16539a8da67122f80c37f46466281377eef5cc0644a65b845438f6b8a7605  crates/core/src/trading_repository/worker_claim/release.rs
+e808fc2755632cc935f558e19ba98e2b10e4ebacf9a3f87539af6877a08a827e  crates/core/src/trading_repository/worker_claim/recovery.rs
+022b5c5f03ffc1a4bc3e31cb433b79d0fa0704924ac2f6c53909a97df19ff67f  crates/core/src/trading_repository/intent/recovery.rs
+e2bf7294d482e20a21383386b9678683c326fad387d7c3494ec978ac269d9fc1  crates/core/src/trading_repository/executions/idempotency.rs
+e1238f7db2cc861ea7b6416f9e6724b8ed1fd3840d05f36658a89b0afc642193  crates/core/src/trading_repository/executions/model.rs
+34b80a093a845c7c60d7b0e1319b7ed4dd97d4e40086457a93dcdb4b0fb61875  crates/core/src/trading_repository/executions/read.rs
+999400177c30b435bcb159137835a1aa921b3b29a605a218347bc4e0df3e2302  crates/core/src/trading_repository/executions/write.rs
+cfd2bd85ed6eeeed5d0fb36894da1c386406cd8d6905c1d1c58a1214e498fe8d  crates/core/src/trading_repository/orders/model.rs
+061aa962e5b0239eddfcab643698d203cc9b0f1801fd6b6f557e28fbb474d94f  crates/core/src/trading_repository/orders/read.rs
+dd2d5c8ff78d11e18e95f423a3072ea6898f55bc0beaeb656f1103a36ddf3bd1  crates/core/src/trading_repository/orders/write.rs
+507010e6fc89e9ef65fef42d3579c62ccf1ae77e448c15a3d9045348e35325b2  crates/core/src/trading_repository/copy/events.rs
+8fc494a2df62559d67a8645588a2ddf655df72c01706a69f365e3c1d751f895e  crates/core/src/trading_repository/copy/model.rs
+
+set_status INSERT into order_status_history omits organization_id: default deployment org from migration 0024, unlike cancel which inserts tenant org. History read joins order and masks wrong attribution. Real-PG direct-row reproduction and app-role behavior needed, fix pending. TenantOrderWrite::upsert ignores zero affected rows on foreign id conflict; same-tenant nonidentical immutable fields are also not checked. Worker claim renew/verify/force_release accept caller supplied at/as_of unlike acquire database now, potential clock skew or stale time lease safety issue; downstream fencing not demonstrated. Recovery sweep: lock released before caller acts, 1000 intents/5000 orders and attaches every open order to every intent; repeated reads can starve later items. Read-side in-flight caps no truncation signal. record_transaction_submitted checks owned order separately, then writes; conflict merges info without checking all immutable values. Copy event record uses mutable latest stage, no monotonic enforcement, allows conflicting payload by ID. Row decoders often replace errors with defaults. Pagination updated_at mutable between requests; no stable snapshot.

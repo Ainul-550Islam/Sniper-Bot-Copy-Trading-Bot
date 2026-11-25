@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
@@ -24,6 +25,10 @@ use crate::models::{
 pub(crate) struct BoundedSet {
     set: HashSet<String>,
     order: VecDeque<String>,
+    /// First-seen time per key, so a caller with a TTL can honour it. Only
+    /// populated by [`BoundedSet::remember`]; a set used purely as a size-bounded
+    /// window (launch mints, signatures) leaves it empty and pays nothing.
+    seen_at: HashMap<String, Instant>,
 }
 
 impl BoundedSet {
@@ -44,6 +49,7 @@ impl BoundedSet {
         while self.order.len() > cap {
             if let Some(old) = self.order.pop_front() {
                 self.set.remove(&old);
+                self.seen_at.remove(&old);
             } else {
                 break;
             }
@@ -51,11 +57,46 @@ impl BoundedSet {
         true
     }
 
+    /// Record `key`'s first-seen time (used by TTL-aware callers).
+    pub(crate) fn remember(&mut self, key: &str, now: Instant) {
+        self.seen_at.entry(key.to_string()).or_insert(now);
+    }
+
+    /// Is `key` still inside a window of `ttl` from when it was remembered?
+    /// A zero TTL is indefinite, matching the shared layer.
+    pub(crate) fn is_current(&self, key: &str, now: Instant, ttl: std::time::Duration) -> bool {
+        if ttl.is_zero() {
+            return self.set.contains(key);
+        }
+        match self.seen_at.get(key) {
+            Some(at) => now.saturating_duration_since(*at) < ttl,
+            // No stamp: unknowable, so do not keep claiming the key is current.
+            None => false,
+        }
+    }
+
+    /// Drop keys whose window has passed (lazy, on insert).
+    pub(crate) fn prune_older_than(&mut self, now: Instant, ttl: std::time::Duration) {
+        if ttl.is_zero() {
+            return;
+        }
+        let expired: Vec<String> = self
+            .seen_at
+            .iter()
+            .filter(|(_, at)| now.saturating_duration_since(**at) >= ttl)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in expired {
+            self.remove(&key);
+        }
+    }
+
     /// Remove `key` if present. Returns `true` when it was there.
     pub(crate) fn remove(&mut self, key: &str) -> bool {
         if !self.set.remove(key) {
             return false;
         }
+        self.seen_at.remove(key);
         if let Some(pos) = self.order.iter().position(|k| k == key) {
             self.order.remove(pos);
         }
@@ -266,6 +307,20 @@ fn generate_replica_id() -> String {
     format!("{host}-{}-{:08x}", std::process::id(), rand)
 }
 
+/// What a [`AppState::resume`] actually released.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ResumeOutcome {
+    /// The operator kill switch was engaged and has been cleared.
+    pub kill_switch_cleared: bool,
+    /// The emergency `halted` latch was set and has been cleared (and
+    /// published to the other replicas).
+    pub halted_cleared: bool,
+    /// Trading modules still disabled in the configuration: an emergency stop
+    /// disables them and `resume` does not guess which ones the operator wants
+    /// back, so it reports them instead of silently re-enabling a module.
+    pub still_disabled_modules: Vec<String>,
+}
+
 impl AppState {
     pub fn new(config: AppConfig) -> Arc<Self> {
         let raw = config.raw.clone();
@@ -374,6 +429,24 @@ impl AppState {
         &self.ledger
     }
 
+    /// Submit a typed fill through the one accounting door and surface a
+    /// rejection instead of silently losing the booking. This reports a
+    /// post-trade bookkeeping failure; it does not undo the trade itself.
+    pub async fn submit_ledger_event(
+        &self,
+        module: BotModule,
+        event: crate::accounting::AccountingEvent,
+    ) -> crate::accounting::Applied {
+        let event_id = event.event_id();
+        let outcome = self.ledger.submit(event).await;
+        if let crate::accounting::Applied::Rejected(reason) = &outcome {
+            let message = format!("ledger rejected event {event_id}: {reason}");
+            tracing::warn!(%event_id, %reason, "fill was not booked in the global ledger");
+            self.record_error(module, &message).await;
+        }
+        outcome
+    }
+
     /// The global risk engine (TASK 5).
     pub fn global_risk(&self) -> &Arc<crate::global_risk::GlobalRiskEngine> {
         &self.global_risk
@@ -454,13 +527,28 @@ impl AppState {
             .sum()
     }
 
-    /// `p-1`, `p-2`, … — short, unique, sortable.
+    /// Short counter-based identity, unique only within this `AppState`.
+    /// Do not use for persisted cross-process position or trade identities.
     pub fn next_id(&self, prefix: &str) -> String {
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         format!("{prefix}-{n}")
     }
 
+    /// Fresh identity for a persisted position or trade. Unlike `next_id`,
+    /// it does not restart from the same counter when a replica restarts or
+    /// another `AppState` is created. UUID-v4 collision risk is negligible,
+    /// not mathematically impossible; existing legacy ids remain untouched.
+    pub fn next_persistent_id(&self, prefix: &str) -> String {
+        format!("{prefix}-{}", uuid::Uuid::new_v4())
+    }
+
     // ---------------------------------------------------------- kill switch --
+
+    /// The emergency `halted` latch on its own (the kill gate is
+    /// `kill_switch()`, which OR-s this in).
+    pub fn halted(&self) -> bool {
+        self.halted.load(Ordering::SeqCst)
+    }
 
     pub fn kill_switch(&self) -> bool {
         self.kill_switch.load(Ordering::SeqCst) || self.halted.load(Ordering::SeqCst)
@@ -480,8 +568,87 @@ impl AppState {
         self.publish_flag("kill_switch", on, reason).await;
     }
 
+    /// Publish a PROVEN accounting conflict to every replica.
+    ///
+    /// The ledger conflict itself is process-local: another replica that has
+    /// not observed the divergence keeps booking and keeps accepting entries.
+    /// Once this process has PROVEN a pending-vs-durable conflict, the
+    /// deployment-wide kill switch is the safe direction (`kill-ON` applies
+    /// immediately on every replica per the flag rules), so publishing it
+    /// stops the cluster instead of one process. This is NOT a substitute for
+    /// the durable claim/reservation fences — it is the last line that
+    /// prevents a divergent book from silently driving new entries
+    /// elsewhere. Idempotent: a replica already halted publishes nothing.
+    pub async fn publish_accounting_conflict(&self, conflict: &str) -> bool {
+        if self.kill_switch.load(Ordering::SeqCst) {
+            return false;
+        }
+        let reason = format!("accounting journal conflict ({conflict})");
+        self.set_kill_switch(true, &reason).await;
+        self.events.publish(AppEvent::Audit {
+            ts: Utc::now(),
+            actor: "ledger".into(),
+            action: "accounting.conflict.cluster_halt".into(),
+            target: Some(conflict.to_string()),
+            outcome:
+                "status=engaged reason=proven journal conflict; every replica refuses new entries"
+                    .into(),
+        });
+        true
+    }
+
+    /// The exact inverse of [`AppState::emergency_stop`], refusing to guess.
+    ///
+    /// `emergency_stop` latches BOTH the operator kill switch and the `halted`
+    /// latch, disables every trading module in the config, and publishes the
+    /// same three facts to every replica. `/resume` used to clear ONLY the
+    /// kill switch, so a stopped deployment came back reporting `ok`, still
+    /// refused every entry through the `halted` latch, and still had every
+    /// module disabled — the operator saw a clean status on a dead system.
+    ///
+    /// `resume` clears what a stop set, and nothing it did not: it does not
+    /// re-enable modules the operator had disabled before the stop (it cannot
+    /// know which those were), it reports them, and the caller decides. The
+    /// kill switch is only cleared when the caller asks for it.
+    pub async fn resume(&self, reason: &str, clear_kill_switch: bool) -> ResumeOutcome {
+        let mut outcome = ResumeOutcome::default();
+        if clear_kill_switch && self.kill_switch.load(Ordering::SeqCst) {
+            self.set_kill_switch(false, reason).await;
+            outcome.kill_switch_cleared = true;
+        }
+        if self.halted.load(Ordering::SeqCst) {
+            // Same path the cross-replica flag sync uses, so a resume served by
+            // one replica reaches the others.
+            self.clear_halt().await;
+            outcome.halted_cleared = true;
+        }
+        {
+            let config = self.config.read().await;
+            for module in BotModule::TRADING {
+                let disabled = match module {
+                    BotModule::Sniper => !config.sniper.enabled,
+                    BotModule::Copy => !config.copy.enabled,
+                    BotModule::Polymarket => !config.polymarket.enabled,
+                    _ => false,
+                };
+                if disabled {
+                    outcome
+                        .still_disabled_modules
+                        .push(module.as_str().to_string());
+                }
+            }
+        }
+        outcome
+    }
+
     /// Emergency stop: engage the kill switch and disable every trading module.
     pub async fn emergency_stop(&self, reason: &str) {
+        // The reason is reported by `resume`/status: a stop nobody explained is
+        // indistinguishable from a crash-loop latch.
+        {
+            let mut config = self.config.write().await;
+            config.risk.halt_reason = reason.to_string();
+        }
         self.kill_switch.store(true, Ordering::SeqCst);
         self.halted.store(true, Ordering::SeqCst);
         {
@@ -522,6 +689,10 @@ impl AppState {
     /// /resume served by replica B would leave replica A halted forever.
     pub async fn clear_halt(&self) {
         self.halted.store(false, Ordering::SeqCst);
+        {
+            let mut config = self.config.write().await;
+            config.risk.halt_reason.clear();
+        }
         self.events.publish(AppEvent::Lifecycle {
             ts: Utc::now(),
             message: "emergency halt released — modules are still disabled".into(),
@@ -1862,6 +2033,50 @@ mod tests {
         assert!(!m2.contains_key("k4"), "oldest evicted");
     }
 
+    #[tokio::test]
+    async fn rejected_ledger_booking_is_surfaced_instead_of_ignored() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let mut event = crate::accounting::fill_event(
+            BotModule::Sniper,
+            crate::models::Venue::PumpFun,
+            "w",
+            "sniper",
+            "MINT",
+            "SOL",
+            crate::accounting::EventSide::Buy,
+            10.0,
+            0.1,
+            1.0,
+            0.0,
+            crate::models::ExecutionMode::Paper,
+            "rejected-booking",
+            None,
+            None,
+            Utc::now(),
+            "",
+        );
+        event.quantity = -1.0;
+        let outcome = state.submit_ledger_event(BotModule::Sniper, event).await;
+        assert!(matches!(outcome, crate::accounting::Applied::Rejected(_)));
+        assert_eq!(state.ledger().len().await, 0);
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                match events.recv().await {
+                    Ok(event) => {
+                        if matches!(&*event, AppEvent::Error { message, .. } if message.contains("ledger rejected event")) {
+                            break true;
+                        }
+                    }
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(observed, "ledger rejection was not published");
+    }
+
     #[test]
     fn prune_zero_cooldown_uses_floor_ttl() {
         let now = Utc::now();
@@ -1872,5 +2087,80 @@ mod tests {
         prune_timestamps(&mut m, now, 0, 100);
         assert!(m.contains_key("recent"));
         assert!(!m.contains_key("old"));
+    }
+
+    /// `/resume` must release what `/kill` latched — all of it.
+    ///
+    /// `emergency_stop` sets the kill switch AND the `halted` latch, disables
+    /// every trading module and publishes all three facts. The old `/resume`
+    /// cleared only the kill switch, so the deployment answered `ok` while its
+    /// kill gate stayed closed (`halted` OR-s in) and every module stayed
+    /// disabled.
+    #[tokio::test]
+    async fn resume_releases_both_latches_and_reports_the_modules_it_leaves_off() {
+        let state = test_state();
+        state.emergency_stop("test stop").await;
+        assert!(state.kill_switch(), "the stop engaged the kill gate");
+        assert!(state.halted(), "the stop latched `halted` too");
+        assert_eq!(
+            state.config_snapshot().await.risk.halt_reason,
+            "test stop",
+            "the stop records WHY, so a latch nobody explained is visible"
+        );
+        {
+            let cfg = state.config_snapshot().await;
+            assert!(!cfg.sniper.enabled && !cfg.copy.enabled && !cfg.polymarket.enabled);
+        }
+
+        let outcome = state.resume("test resume", true).await;
+        assert!(outcome.kill_switch_cleared, "the kill switch is released");
+        assert!(outcome.halted_cleared, "the halt latch is released");
+        assert!(
+            !state.kill_switch(),
+            "the kill gate is open again — the point of the fix"
+        );
+        assert!(
+            !state.halted(),
+            "the `halted` latch no longer OR-s into the gate"
+        );
+        assert_eq!(
+            outcome.still_disabled_modules,
+            vec![
+                "sniper".to_string(),
+                "copy".to_string(),
+                "polymarket".to_string()
+            ],
+            "the modules an emergency stop disabled are REPORTED, not silently re-enabled"
+        );
+        assert!(
+            state.config_snapshot().await.risk.halt_reason.is_empty(),
+            "the released reason is cleared"
+        );
+
+        // A second resume releases nothing (both latches are already clear)
+        // but STILL reports the modules the stop disabled: it never claims a
+        // module is back when the configuration says otherwise.
+        let again = state.resume("test resume 2", true).await;
+        assert!(!again.kill_switch_cleared && !again.halted_cleared);
+        assert_eq!(again.still_disabled_modules, outcome.still_disabled_modules);
+        assert!(!state.kill_switch());
+    }
+
+    /// A resume that must NOT open the kill gate can be told so.
+    #[tokio::test]
+    async fn resume_can_release_the_halt_without_opening_the_kill_switch() {
+        let state = test_state();
+        state.emergency_stop("operator stop").await;
+        let outcome = state.resume("halt only", false).await;
+        assert!(!outcome.kill_switch_cleared);
+        assert!(outcome.halted_cleared);
+        assert!(
+            state.kill_switch(),
+            "the operator kill switch stays engaged by request"
+        );
+        // … and it is reported as still disabled, truthfully.
+        assert!(outcome
+            .still_disabled_modules
+            .contains(&"sniper".to_string()));
     }
 }

@@ -1,0 +1,51 @@
+Tenant config refresh regression, 2026-11-09 in user timezone.
+Before: a tenant config with a paused new leader was passed to process_trade, but the registry remained stale and returned LEADER_UNKNOWN. After: process_trade synchronizes its leader registry first; 13/13 tenant execution tests passed, including pause and unfollow using distinct event signatures, with real Redis available for the separately gated collision witness. This is not production server configuration propagation or live broadcast coverage.
+
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 2.24s
+     Running tests/tenant_execution.rs (target/debug/deps/tenant_execution-eec7c191619e41fd)
+
+running 1 test
+test tenant_process_trade_uses_current_leader_pause_and_unfollow_config ... FAILED
+
+failures:
+
+---- tenant_process_trade_uses_current_leader_pause_and_unfollow_config stdout ----
+
+thread 'tenant_process_trade_uses_current_leader_pause_and_unfollow_config' (259884) panicked at crates/module-copy/tests/tenant_execution.rs:693:5:
+assertion `left == right` failed
+  left: Some("LEADER_UNKNOWN")
+ right: Some("LEADER_PAUSED")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tenant_process_trade_uses_current_leader_pause_and_unfollow_config
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p module-copy --test tenant_execution`
+EXIT=101
+--- after ---
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 6.32s
+     Running tests/tenant_execution.rs (target/debug/deps/tenant_execution-eec7c191619e41fd)
+
+running 13 tests
+test a_tenant_copy_executor_denies_foreign_contexts ... ok
+test a_wallet_bound_to_another_tenant_cannot_drive_the_copy_executor ... ok
+test an_unbound_copy_bot_preserves_the_operator_behaviour ... ok
+test shared_app_state_currently_causes_cross_tenant_dedup_collision ... ok
+test shared_app_state_currently_projects_one_position_into_two_tenant_sinks ... ok
+test shared_redis_currently_causes_cross_tenant_dedup_collision ... ok
+test tenant_dedup_distinguishes_same_signature_mint_and_side ... ok
+test tenant_duplicate_does_not_overwrite_first_sink_outcome ... ok
+test tenant_process_trade_uses_current_leader_pause_and_unfollow_config ... ok
+test tenant_unavailable_shared_dedup_retries_without_journaling ... ok
+test the_context_adapter_scopes_leader_and_event_keys_per_tenant ... ok
+test the_same_leader_trade_is_deduplicated_tenant_locally ... ok
+test two_tenants_seeing_the_same_leader_trade_both_process_it ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+EXIT=0

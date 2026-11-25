@@ -1,0 +1,10 @@
+=== RED: before the loop wiring — the venue is never asked about an ambiguous submit ===
+-- injected: the reconciliation pass skips the venue-state settlement (the pre-wiring code) --
+test an_ambiguous_submit_the_venue_holds_is_never_settled_as_a_non_send ... FAILED
+test an_ambiguous_submit_the_venue_never_acknowledged_settles_in_the_loop ... FAILED
+thread 'an_ambiguous_submit_the_venue_holds_is_never_settled_as_a_non_send' (3676448) panicked at crates/module-polymarket/tests/reconciliation.rs:381:5:
+thread 'an_ambiguous_submit_the_venue_never_acknowledged_settles_in_the_loop' (3676449) panicked at crates/module-polymarket/tests/reconciliation.rs:298:5:
+assertion `left == right` failed
+  left: LocalOrderMissingOnVenue
+ right: AmbiguousSubmitResolved
+test result: FAILED. 6 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s

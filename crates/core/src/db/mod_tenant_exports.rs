@@ -14,6 +14,7 @@
 pub use super::tenant_idempotency::{held_by_tenant, insert_once, TenantIdempotencyKey};
 pub use super::tenant_lock::{
     lock_scope, tenant_advisory_xact_lock, tenant_lock_key, try_tenant_advisory_xact_lock,
+    TENANT_LOCK_KEY_PREFIX,
 };
 pub use super::tenant_pagination::{
     TenantPage, TenantPageCursor, TenantPageRequest, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,

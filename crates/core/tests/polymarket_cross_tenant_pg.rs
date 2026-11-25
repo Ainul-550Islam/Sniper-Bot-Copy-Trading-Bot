@@ -242,11 +242,17 @@ async fn signals_orders_fills_same_ids_are_independent_rows() {
         .record_fill(&write_scope(b), &fill(b, &fill_id, &vo, 6.0))
         .await
         .unwrap();
-    // Replay with a DIFFERENT size: idempotent per tenant (DO NOTHING).
+    // An identical economic replay is safe; a changed fill is a conflict.
     writes
-        .record_fill(&write_scope(a), &fill(a, &fill_id, &vo, 99.0))
+        .record_fill(&write_scope(a), &fill(a, &fill_id, &vo, 5.0))
         .await
         .unwrap();
+    assert!(matches!(
+        writes
+            .record_fill(&write_scope(a), &fill(a, &fill_id, &vo, 99.0))
+            .await,
+        Err(RepositoryError::Conflict("poly_fill"))
+    ));
     let a_fill = reads
         .fill(&read_scope(a), &fill_id)
         .await
@@ -440,4 +446,105 @@ async fn reconciliation_drift_and_findings_are_tenant_scoped() {
     assert_eq!(open_a.len(), 2, "A's cancel terminalized only A's order");
     let open_b = recon.open_orders(&read_scope(b)).await.unwrap();
     assert_eq!(open_b.len(), 1, "B's book untouched by A's cancel");
+}
+
+/// A STALE replay must not un-fill a terminal mirror order.
+///
+/// `upsert_order` made `size_matched` monotonic and kept `closed_at` sticky, but
+/// it copied `state`/`venue_status` from the caller unconditionally. The
+/// reconciliation poller re-observing an OLD `resting` snapshot after the order
+/// already filled therefore rewrote the row back to `resting` while
+/// `size_matched` and `closed_at` still described a finished order — an operator
+/// (or an auto-cancel sweep) then re-chased a completed order.
+#[tokio::test]
+async fn a_stale_order_replay_cannot_unfill_a_terminal_row() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: polymarket_cross_tenant_pg — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let a = org(&db, &format!("replay-a-{run}")).await;
+    let writes = TenantPolyWrite::new(db.clone());
+    let reads = TenantPolyRead::new(db.clone());
+    let vo = format!("vo-replay-{run}");
+
+    // 1. The order is seen resting, fully matched.
+    let mut resting = order(a, &vo, 100.0, at(0.05));
+    resting.state = "resting".into();
+    resting.venue_status = "live".into();
+    writes
+        .upsert_order(&write_scope(a), &resting)
+        .await
+        .unwrap();
+
+    // 2. It fills: local `filled`, venue `matched`, closed_at stamped.
+    let filled = writes
+        .close_order(&write_scope(a), &vo, "filled", Some("matched"), Utc::now())
+        .await;
+    assert!(filled.is_ok(), "closing the live order must succeed");
+    let terminal = reads
+        .order(&read_scope(a), &vo)
+        .await
+        .unwrap()
+        .expect("mirror order exists");
+    assert_eq!(terminal.state, "filled");
+    assert!(terminal.closed_at.is_some());
+
+    // 3. The poller replays its OLD resting observation (same numbers, older
+    //    timestamp). The row is still upserted, but its state must not move.
+    let mut stale = order(a, &vo, 100.0, at(0.01));
+    stale.state = "resting".into();
+    stale.venue_status = "live".into();
+    writes.upsert_order(&write_scope(a), &stale).await.unwrap();
+    let after = reads
+        .order(&read_scope(a), &vo)
+        .await
+        .unwrap()
+        .expect("mirror order survives the replay");
+    assert_eq!(
+        after.state, "filled",
+        "a stale replay must not un-fill a terminal order"
+    );
+    assert_eq!(after.venue_status, "matched");
+    assert!(after.closed_at.is_some(), "closed_at stays stamped");
+
+    // 4. A genuinely NEW terminal fact is still recorded: a cancelled row may
+    //    not be overwritten by anything either, and a non-terminal row still
+    //    advances normally.
+    let vo2 = format!("vo-replay2-{run}");
+    let mut live = order(a, &vo2, 0.0, at(0.05));
+    live.state = "live".into();
+    writes.upsert_order(&write_scope(a), &live).await.unwrap();
+    let mut partial = order(a, &vo2, 40.0, at(0.06));
+    partial.state = "partially_filled".into();
+    writes
+        .upsert_order(&write_scope(a), &partial)
+        .await
+        .unwrap();
+    let cur = reads
+        .order(&read_scope(a), &vo2)
+        .await
+        .unwrap()
+        .expect("order exists");
+    assert_eq!(
+        cur.state, "partially_filled",
+        "a non-terminal row still advances"
+    );
+    assert_eq!(cur.size_matched, 40.0);
+
+    // 5. Another tenant's identical venue id is a completely separate row and
+    //    is not frozen by A's terminal state.
+    let b = org(&db, &format!("replay-b-{run}")).await;
+    let mut b_resting = order(b, &vo, 10.0, at(0.02));
+    b_resting.state = "resting".into();
+    writes
+        .upsert_order(&write_scope(b), &b_resting)
+        .await
+        .unwrap();
+    let b_row = reads
+        .order(&read_scope(b), &vo)
+        .await
+        .unwrap()
+        .expect("B's own row");
+    assert_eq!(b_row.state, "resting", "B's row is independent of A's");
 }

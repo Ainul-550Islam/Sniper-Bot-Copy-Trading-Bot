@@ -1,0 +1,21 @@
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Finished `test` profile [unoptimized] target(s) in 6.70s
+     Running tests/failure_injection.rs (target/debug/deps/failure_injection-22a6a75a61bd754f)
+
+running 1 test
+
+thread 'unbooked_entry_blocks_paper_to_live_during_preparation' (3759662) panicked at crates/module-sniper/tests/failure_injection.rs:555:5:
+assertion `left == right` failed: unbooked exposure must prevent another live send
+  left: 3
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test unbooked_entry_blocks_paper_to_live_during_preparation ... FAILED
+
+failures:
+
+failures:
+    unbooked_entry_blocks_paper_to_live_during_preparation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 1.66s
+
+error: test failed, to rerun pass `-p module-sniper --test failure_injection`

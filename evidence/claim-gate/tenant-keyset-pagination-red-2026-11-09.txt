@@ -1,0 +1,8 @@
+=== RED: limit-order keyset was timestamp-only while the page order ties on id ===
+-- injection: the production predicate drops (created_at = $3 AND id < $5) --
+-- real Postgres, tie-heavy fixture, page size 2 --
+test a_tie_heavy_page_boundary_skips_nothing_and_repeats_nothing ... FAILED
+thread 'a_tie_heavy_page_boundary_skips_nothing_and_repeats_nothing' (3880570) panicked at crates/server/tests/tenant_keyset_pagination_pg.rs:194:5:
+  left: ["lo-3880569-1795088353132150342-tie-4", "lo-3880569-1795088353132150342-tie-3", "lo-3880569-1795088353132150342-old-0", "lo-3880569-1795088353132150342-old-1"]
+ right: ["lo-3880569-1795088353132150342-tie-4", "lo-3880569-1795088353132150342-tie-3", "lo-3880569-1795088353132150342-tie-2", "lo-3880569-1795088353132150342-tie-1", "lo-3880569-1795088353132150342-tie-0", "lo-3880569-1795088353132150342-old-0", "lo-3880569-1795088353132150342-old-1"]
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s

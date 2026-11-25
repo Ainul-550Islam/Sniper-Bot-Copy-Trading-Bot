@@ -1,0 +1,31 @@
+=== GREEN: a paused/cancelled schedule or a lapsed DCA lease writes nothing (gap #87) ===
+
+-- dca_lease_pg (real PostgreSQL; pause/cancel + takeover between claim and record) --
+test a_paused_or_expired_schedule_cannot_be_recorded_by_a_stale_worker ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+-- rls_background_paths (DCA worker under tenant RLS) --
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+-- dca route/handler suites (schedule lifecycle, keyset) --
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+-- sniper-suite --lib (single-threaded) --
+test result: ok. 1002 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 126.78s
+-- bot-core --lib --
+test result: ok. 719 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.93s
+
+-- clippy -D warnings --
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 6m 30s
+
+-- fmt/diff --
+(first pass reported the stale batch6 manifest pin — the new witness file broke the rust_files
+ count — and a stray blank line at EOF in evidence/claim-gate/reporting-window-red-2026-11-09.txt;
+ the manifest was re-cut (rust_files 832) and the blank line trimmed, so the verified state is:)
+fmt_exit=0
+diff_check_exit=0
+
+-- full workspace (see evidence/claim-gate/workspace-services-after-dca-lease-2026-11-09.txt) --
+201 targets, 5,028 passed / 0 failed / 38 ignored, workspace_services_exit=0

@@ -1,0 +1,24 @@
+Claim-gate targeted run, 2026-11-09 (PostgreSQL 17; local isolated database)
+Command: POSTGRES_URL=<local PostgreSQL URL> cargo test -p module-copy --test claim_stress --test two_replica_mirror --locked -j 2 -- --test-threads=1
+The claim_crash_worker test is a subprocess helper and is inert when invoked by the parent harness.
+
+     Running tests/claim_stress.rs (target/debug/deps/claim_stress-92135b3ff838fa13)
+
+running 5 tests
+test actual_process_exit_and_restart_recovers_expired_lease ... ok
+test claim_crash_worker ... ok
+test crashed_owner_leaks_nothing_and_expiry_allows_exactly_one_takeover ... ok
+test n_replicas_same_event_exactly_one_winner ... ok
+test released_claim_is_reacquirable_and_fenced_for_the_old_owner ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.51s
+
+     Running tests/two_replica_mirror.rs (target/debug/deps/two_replica_mirror-17ccbf56c0f21490)
+
+running 2 tests
+test sequential_fast_failures_can_both_reach_rpc ... ok
+test two_replicas_one_whale_trade_one_execution ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+EXIT=0

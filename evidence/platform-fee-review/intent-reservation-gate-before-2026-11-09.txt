@@ -1,0 +1,19 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 35.78s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+
+thread 'recovery::tests::failed_durable_reservation_aborts_before_broadcast_future' (587903) panicked at crates/core/src/recovery.rs:610:13:
+checked reservation must not fall back to best-effort record
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test recovery::tests::failed_durable_reservation_aborts_before_broadcast_future ... FAILED
+
+failures:
+
+failures:
+    recovery::tests::failed_durable_reservation_aborts_before_broadcast_future
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 694 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --lib`

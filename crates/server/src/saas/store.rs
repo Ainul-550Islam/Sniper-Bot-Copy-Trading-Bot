@@ -1012,6 +1012,31 @@ impl SaasStore {
             .cloned())
     }
 
+    /// Resolve the compiled fee schedule for this tenant's current effective
+    /// subscription. A missing, expired or undecodable subscription/plan is
+    /// an error, never a silent zero-fee policy. This is a lookup only: it
+    /// does not configure execution, freeze a policy for an intent, or post
+    /// any fee. Callers must persist the selected policy alongside the intent
+    /// before execution if they need replay-safe historical attribution.
+    pub async fn default_platform_fee_policy(
+        &self,
+        organization_id: OrganizationId,
+        now: DateTime<Utc>,
+    ) -> BotResult<bot_core::billing::platform_fee::PlatformFeePolicy> {
+        let sub = self
+            .subscription_of(organization_id)
+            .await?
+            .ok_or_else(|| BotError::NotFound("tenant subscription".into()))?;
+        if sub.organization_id != organization_id || !sub.is_effective(now) {
+            return Err(BotError::invalid("tenant subscription is not effective"));
+        }
+        let plan = self
+            .plan(sub.plan_id)
+            .await?
+            .ok_or_else(|| BotError::NotFound("subscription plan".into()))?;
+        Ok(bot_core::billing::platform_fee::PlatformFeePolicy::default_for(plan.code))
+    }
+
     /// Persist a changed subscription.
     pub async fn update_subscription(&self, sub: &Subscription) -> BotResult<()> {
         if let Some(repo) = &self.repo {
@@ -1731,5 +1756,89 @@ mod session_touch_tests {
         assert_eq!(after.revoked_at, Some(now));
         assert_eq!(after.revoke_reason, "operator revoke");
         assert_eq!(after.last_seen_at, now);
+    }
+}
+
+#[cfg(test)]
+mod default_platform_fee_policy_tests {
+    use super::*;
+    use bot_core::billing::platform_fee::PlatformFeePolicy;
+    use bot_core::billing::subscription::SubscriptionStatus;
+
+    #[tokio::test]
+    async fn postgres_replica_reads_current_plan_and_rejects_expired_policy() {
+        let url = match std::env::var("POSTGRES_URL") {
+            Ok(url) => url,
+            Err(_) if std::env::var_os("REQUIRE_POSTGRES").is_some() => {
+                panic!("POSTGRES_URL required")
+            }
+            Err(_) => {
+                eprintln!("NOT_RUN: POSTGRES_URL missing");
+                return;
+            }
+        };
+        let cfg = bot_core::config::DatabaseConfig {
+            enabled: true,
+            required: true,
+            auto_migrate: true,
+            ..Default::default()
+        };
+        let db = Arc::new(Database::connect(&cfg, &url).await.unwrap());
+        db.migrate().await.unwrap();
+        let first = SaasStore::with_database(Some(db.clone())).await.unwrap();
+        let second = SaasStore::with_database(Some(db.clone())).await.unwrap();
+        let now = Utc::now();
+        let a = OrganizationId::new();
+        let b = OrganizationId::new();
+        first.assign_plan(a, PlanCode::Pro, now).await.unwrap();
+        first.assign_plan(b, PlanCode::Business, now).await.unwrap();
+        assert_eq!(
+            second.default_platform_fee_policy(a, now).await.unwrap(),
+            PlatformFeePolicy::default_for(PlanCode::Pro)
+        );
+        assert_eq!(
+            second.default_platform_fee_policy(b, now).await.unwrap(),
+            PlatformFeePolicy::default_for(PlanCode::Business)
+        );
+        let mut sub = first.subscription_of(a).await.unwrap().unwrap();
+        sub.status = SubscriptionStatus::Expired;
+        first.update_subscription(&sub).await.unwrap();
+        assert!(second.default_platform_fee_policy(a, now).await.is_err());
+        assert!(second.default_platform_fee_policy(b, now).await.is_ok());
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn resolves_tenant_plan_and_fails_closed_without_effective_subscription() {
+        let store = SaasStore::new();
+        let now = Utc::now();
+        let a = OrganizationId::new();
+        let b = OrganizationId::new();
+        assert!(store.default_platform_fee_policy(a, now).await.is_err());
+        store.assign_plan(a, PlanCode::Pro, now).await.unwrap();
+        store
+            .assign_plan(b, PlanCode::Enterprise, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.default_platform_fee_policy(a, now).await.unwrap(),
+            PlatformFeePolicy::default_for(PlanCode::Pro)
+        );
+        assert_eq!(
+            store.default_platform_fee_policy(b, now).await.unwrap(),
+            PlatformFeePolicy::default_for(PlanCode::Enterprise)
+        );
+        let mut sub = store.subscription_of(a).await.unwrap().unwrap();
+        sub.status = SubscriptionStatus::Paused;
+        store.update_subscription(&sub).await.unwrap();
+        assert!(store.default_platform_fee_policy(a, now).await.is_err());
+        assert_eq!(
+            store.default_platform_fee_policy(b, now).await.unwrap(),
+            PlatformFeePolicy::default_for(PlanCode::Enterprise)
+        );
+        sub.status = SubscriptionStatus::Active;
+        sub.current_period_end = Some(now);
+        store.update_subscription(&sub).await.unwrap();
+        assert!(store.default_platform_fee_policy(a, now).await.is_err());
     }
 }

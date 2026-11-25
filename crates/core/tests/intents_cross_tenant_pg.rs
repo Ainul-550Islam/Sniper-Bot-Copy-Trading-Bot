@@ -154,10 +154,35 @@ async fn intents_are_tenant_fenced_end_to_end() {
     let items = recovery.sweep(&read_scope(a), at(-1.0)).await.unwrap();
     assert!(items.iter().all(|i| i.intent.organization_id == a));
     assert!(items.iter().all(|i| i.open_order_ids.iter().all(|_| true)));
-    // A's sweep CAN see its own open order ids.
-    assert!(items
+    // A's open order is attributable to exactly one intent (gap #74: the sweep
+    // pairs per intent instead of cloning one tenant-wide list onto all of
+    // them). This order carries no `meta->>'intent_id'`, so it is reported as
+    // the page's unattributed residual — visible either way, never dropped and
+    // never guessed onto an unrelated intent.
+    let page = recovery
+        .sweep_page(&read_scope(a), at(-1.0), None, 100)
+        .await
+        .unwrap();
+    let ord = format!("ord-rc-{run}");
+    let paired: Vec<&String> = page
+        .items
         .iter()
-        .any(|i| i.open_order_ids.contains(&format!("ord-rc-{run}"))));
+        .flat_map(|i| i.open_order_ids.iter())
+        .filter(|id| **id == ord)
+        .collect();
+    assert!(
+        paired.is_empty() || page.unattributed_open_order_ids.contains(&ord),
+        "A's open order is paired with its intent or reported unattributed"
+    );
+    assert!(
+        page.unattributed_open_order_ids.contains(&ord) || paired.len() == 1,
+        "and it is never attached to more than one intent"
+    );
+    assert!(
+        page.items.iter().all(|i| i.intent.organization_id == a)
+            && !page.unattributed_open_order_ids.is_empty(),
+        "A's sweep sees A's order, and only A's"
+    );
     let items_b = recovery.sweep(&read_scope(b), at(-1.0)).await.unwrap();
     assert!(items_b.iter().all(|i| i.intent.organization_id == b));
 }
@@ -196,4 +221,125 @@ async fn reconciliation_queue_is_tenant_local() {
     assert!(due_a.iter().any(|(k, s, ..)| k == "order" && s == &subject));
     assert!(due_b.iter().any(|(k, s, ..)| k == "order" && s == &subject));
     assert!(!due_a.is_empty() && !due_b.is_empty());
+}
+
+/// A duplicate `(organization_id, intent_id)` must describe the SAME intent.
+///
+/// The journal used `ON CONFLICT … DO NOTHING`, so reusing an id for a
+/// DIFFERENT module/symbol/wallet/side/qty silently aliased the new intent onto
+/// the old row: `record` returned Ok and the caller believed its different
+/// order was journalled. Now an exact retry still succeeds (idempotent, no
+/// rewrite), and a differing payload is `Conflict("intent_id")`.
+#[tokio::test]
+async fn a_reused_intent_id_with_a_different_payload_is_refused() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: intents_cross_tenant_pg — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let a = org(&db, &format!("payload-a-{run}")).await;
+    let id = format!("intent-payload-{run}");
+
+    let writes = TenantIntentWrite::new(db.clone());
+    let reads = TenantIntentRead::new(db.clone());
+
+    writes
+        .record(
+            &write_scope(a),
+            &id,
+            "sniper",
+            "SOL/USDC",
+            "w1",
+            "buy",
+            "1.0",
+        )
+        .await
+        .expect("the first record of this intent id");
+    let original = reads
+        .get(&read_scope(a), &id)
+        .await
+        .expect("read must not fail")
+        .expect("the intent row exists");
+
+    // EXACT retry: succeeds and changes nothing (idempotent).
+    writes
+        .record(
+            &write_scope(a),
+            &id,
+            "sniper",
+            "SOL/USDC",
+            "w1",
+            "buy",
+            "1.0",
+        )
+        .await
+        .expect("an exact retry of the same intent is idempotent");
+    let after_retry = reads
+        .get(&read_scope(a), &id)
+        .await
+        .expect("read must not fail")
+        .expect("the intent row still exists");
+    assert_eq!(
+        after_retry.created_at, original.created_at,
+        "a retry must not rewrite the original journal timestamp"
+    );
+    assert_eq!(after_retry.qty, "1.0");
+
+    // Different payload, same id: REFUSED, and the stored row is untouched.
+    for (module, symbol, wallet, side, qty) in [
+        ("sniper", "SOL/USDC", "w1", "buy", "999.0"),
+        ("sniper", "SOL/USDC", "w1", "sell", "1.0"),
+        ("copier", "SOL/USDC", "w1", "buy", "1.0"),
+        ("sniper", "BONK/USDC", "w1", "buy", "1.0"),
+        ("sniper", "SOL/USDC", "w9", "buy", "1.0"),
+    ] {
+        let err = writes
+            .record(&write_scope(a), &id, module, symbol, wallet, side, qty)
+            .await
+            .expect_err("a different payload under the same id must be refused");
+        match err {
+            RepositoryError::Conflict(kind) => assert_eq!(kind, "intent_id"),
+            other => panic!("expected Conflict(intent_id), got {other:?}"),
+        }
+        let cur = reads
+            .get(&read_scope(a), &id)
+            .await
+            .expect("read must not fail")
+            .expect("the original row survives");
+        assert_eq!(
+            (cur.module.as_str(), cur.symbol.as_str(), cur.qty.as_str()),
+            ("sniper", "SOL/USDC", "1.0"),
+            "the refused payload never reached the row"
+        );
+    }
+
+    // The refusal is terminal: retrying the ORIGINAL payload still works, so a
+    // caller that recovers its true intent is not locked out.
+    writes
+        .record(
+            &write_scope(a),
+            &id,
+            "sniper",
+            "SOL/USDC",
+            "w1",
+            "buy",
+            "1.0",
+        )
+        .await
+        .expect("the original intent id remains usable for its own payload");
+
+    // Another tenant may still reuse the same id text with its own payload.
+    let b = org(&db, &format!("payload-b-{run}")).await;
+    writes
+        .record(
+            &write_scope(b),
+            &id,
+            "sniper",
+            "SOL/USDC",
+            "w1",
+            "buy",
+            "5.0",
+        )
+        .await
+        .expect("a different tenant owns its own id space");
 }

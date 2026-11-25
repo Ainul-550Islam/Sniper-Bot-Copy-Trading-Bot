@@ -194,6 +194,11 @@ pub struct Sniper {
     /// sweeper after every partial/full exit. Entry-only persistence is
     /// insufficient because the risk oracle consumes the durable row.
     tenant_position_sink: Option<Arc<dyn crate::tenant_executor::TenantExecutionSink>>,
+    /// An ambiguous live entry has no booked position. This latch is local to
+    /// this sniper and its sweeper, not durable or cross-replica coordination.
+    unbooked_entry: Arc<std::sync::atomic::AtomicBool>,
+    /// Ambiguous live sell may have changed inventory; local latch only.
+    unbooked_exit: Arc<std::sync::atomic::AtomicBool>,
     /// Sweeper-local exit bookkeeping (mark failures, retry backoff).
     exits: exit::ExitTracker,
     /// Advanced exit policy (GAP-MAP v2 P2): laddered take-profit,
@@ -270,6 +275,8 @@ impl Sniper {
             tenant: None,
             tenant_guard: None,
             tenant_position_sink: None,
+            unbooked_entry: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unbooked_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             exits: exit::ExitTracker::default(),
             exit_policy: crate::exit_policy::engine_from_config(cfg.sniper.advanced_exit.as_ref()),
             dev_sell_rx: None,
@@ -371,6 +378,13 @@ impl Sniper {
         self
     }
 
+    /// The tenant broadcast guard this bot submits through (the copy bot's
+    /// twin: with a live runtime fence attached, a runtime rotated after
+    /// construction is refused at broadcast time).
+    pub fn tenant_guard(&self) -> Option<&Arc<TenantBroadcastGuard>> {
+        self.tenant_guard.as_ref()
+    }
+
     /// The bound tenant context, when this sniper is tenant-scoped.
     pub fn tenant_context(&self) -> Option<&TenantSigningContext> {
         self.tenant.as_ref()
@@ -431,7 +445,7 @@ impl Sniper {
         qty: &str,
     ) -> bot_core::db::repo::IntentRecord {
         bot_core::db::repo::IntentRecord {
-            intent_id: self.state.next_id("intent"),
+            intent_id: bot_core::recovery::new_journal_intent_id(),
             module: "sniper".into(),
             symbol: symbol.to_string(),
             wallet: self.wallet.pubkey.to_string(),
@@ -575,6 +589,8 @@ impl Sniper {
                 tenant: self.tenant.clone(),
                 tenant_guard: self.tenant_guard.clone(),
                 tenant_position_sink: self.tenant_position_sink.clone(),
+                unbooked_entry: self.unbooked_entry.clone(),
+                unbooked_exit: self.unbooked_exit.clone(),
                 exits: exit::ExitTracker::default(),
                 exit_policy: sweeper_exit_policy,
                 dev_sell_rx: sweeper_dev_sell_rx,

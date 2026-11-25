@@ -1,0 +1,14 @@
+=== RED (before the Telegram wiring): the live send must sit behind the durable reservation ===
+$ cargo test -p sniper-suite --lib a_failed_durable_reservation (pre-wiring `with_intent` path)
+   Compiling module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+error[E0425]: cannot find function `with_intent` in this scope
+   --> crates/server/src/telegram_trade_port.rs:441:21
+    |
+441 |                     with_intent(
+    |                     ^^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `sniper-suite` (lib test) due to 1 previous error
+red_exit=101

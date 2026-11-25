@@ -43,6 +43,23 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(4);
 /// Reference size for marking a graduated token via Jupiter (1 whole token).
 const MARK_REFERENCE_RAW: u64 = 1_000_000;
 
+/// Outcome of a copy exit attempt; an ambiguous live broadcast must not be
+/// represented as a settled sale or blindly retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitOutcome {
+    /// No quantity was available to sell.
+    Noop,
+    /// A confirmed or non-live modeled exit was booked.
+    Filled,
+    /// A live broadcast may have landed; the position is unchanged locally.
+    Ambiguous {
+        /// Deterministic execution intent for reconciliation.
+        intent_id: String,
+        /// Broadcast signature, when available.
+        signature: Option<String>,
+    },
+}
+
 /// Background manager for the copy module's open positions.
 pub struct ExitSweeper {
     state: Shared,
@@ -55,13 +72,15 @@ pub struct ExitSweeper {
     /// Write-ahead intent journal (§I crash point C); exits move money too.
     intents: Option<Arc<dyn bot_core::recovery::IntentSink>>,
     /// Distributed execution ownership (Prompt 3 §F); exits claim
-    /// `exit:{position.id}:{rule}` so exactly one replica sells.
+    /// one key per position across rules and exit paths.
     ownership: Option<Arc<bot_core::ownership::OwnershipRegistry>>,
     /// Tenant context (PROMPT 4/10 §C): when present, every exit this
     /// sweeper sells is stamped with the tenant identity and the
     /// executor carries the tenant broadcast guard. `None` = operator
     /// mode, unchanged.
     tenant: Option<solana_kit::tenant_signing_context::TenantSigningContext>,
+    journal: Option<Arc<dyn crate::recovery::CopyStore>>,
+    unresolved_latch: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One journaled broadcast: the sink plus the pre-built intent record.
@@ -101,7 +120,21 @@ impl ExitSweeper {
             intents,
             ownership,
             tenant: None,
+            journal: None,
+            unresolved_latch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Attach the bot's journal and local safety latch. A standalone sweeper
+    /// without a journal refuses live exits rather than assuming a clear scan.
+    pub fn with_journal_guard(
+        mut self,
+        journal: Arc<dyn crate::recovery::CopyStore>,
+        latch: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.journal = Some(journal);
+        self.unresolved_latch = latch;
+        self
     }
 
     /// Bind the sweeper to ONE tenant (PROMPT 4/10 §C): attach the final
@@ -178,20 +211,57 @@ impl ExitSweeper {
             if !decision.should_exit {
                 continue;
             }
+            // A kill switch makes `execution_mode()` report Simulate, but
+            // the protective-exit executor can still be configured Live.
+            // Guard whichever path can actually submit a live exit.
+            if self.executor.policy().mode == ExecutionMode::Live
+                || self.state.execution_mode().await == ExecutionMode::Live
+            {
+                let journal_clear = if self
+                    .unresolved_latch
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    false
+                } else if let Some(store) = &self.journal {
+                    let lookback = cfg.copy.recovery_lookback_hours.max(1);
+                    match store
+                        .events_since(Utc::now() - chrono::Duration::hours(lookback), 10_000)
+                        .await
+                    {
+                        Some(events) if events.len() < 10_000 => !events.iter().any(|e| {
+                            e.side == "sell"
+                                && e.stage == "AMBIGUOUS"
+                                && (e.position_id.as_deref() == Some(position.id.as_str())
+                                    || e.position_id.is_none())
+                        }),
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+                if !journal_clear {
+                    warn!(position = %position.id, "copy exit journal incomplete or unresolved; sweep exit blocked");
+                    self.state
+                        .record_error(
+                            BotModule::Copy,
+                            "copy sweep exit blocked: journal incomplete or unresolved ambiguity",
+                        )
+                        .await;
+                    continue;
+                }
+            }
             info!(
                 symbol = %position.symbol,
                 rule = ?decision.rule,
                 reason = %decision.reason,
                 "copy exit rule fired"
             );
-            // Distributed ownership per SELL DECISION (Prompt 3 §F/§P):
-            // exactly one replica executes `exit:{position.id}:{rule}`.
-            // Losers skip; store failures fail closed for this round (the
-            // 4s sweep retries — exits are delayed, never double-executed).
+            // One lease per position across sweeper, mirror and recovery exits.
+            // A lease is not durable proof of a previous broadcast's outcome.
             let rule_str = decision.rule.map(|r| r.as_str()).unwrap_or("manual");
             let mut permit = match bot_core::ownership::Permit::acquire(
                 self.ownership.as_deref(),
-                format!("exit:{}:{}", position.id, rule_str),
+                crate::intent::exit_claim_id(&position.id),
                 "exit",
                 "copy",
                 rule_str,
@@ -215,7 +285,7 @@ impl ExitSweeper {
                 continue;
             }
 
-            if let Err(e) = sell_position(
+            let result = sell_position(
                 &self.state,
                 &self.rpc,
                 &self.wallet,
@@ -230,16 +300,29 @@ impl ExitSweeper {
                 self.intents.as_ref(),
                 &mut permit,
             )
-            .await
-            {
-                // Pre-broadcast failures release the claim so the next sweep
-                // can re-decide at once (sell_position finishes it internally
-                // once a broadcast outcome exists; double-finish is a no-op).
-                permit.finish(false).await;
-                warn!(symbol = %position.symbol, error = %e, "copy exit sell failed");
-                self.state
-                    .record_error(BotModule::Copy, &format!("exit {}: {e}", position.symbol))
-                    .await;
+            .await;
+            match result {
+                Err(e) => {
+                    // A pre-broadcast error releases; finished permits are no-ops.
+                    permit.finish(false).await;
+                    warn!(symbol = %position.symbol, error = %e, "copy exit sell failed");
+                    self.state
+                        .record_error(BotModule::Copy, &format!("exit {}: {e}", position.symbol))
+                        .await;
+                }
+                Ok(ExitOutcome::Ambiguous {
+                    intent_id,
+                    signature,
+                }) => {
+                    // Sweeper outcomes have no copy-event row. Block further
+                    // attempts in this process rather than assuming they were
+                    // recorded; this latch is not durable across restart.
+                    self.unresolved_latch
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.state.record_error(BotModule::Copy, "ambiguous sweeper exit requires reconciliation; local live buys and exits blocked").await;
+                    warn!(symbol = %position.symbol, %intent_id, ?signature, "copy exit unresolved; reconciliation required");
+                }
+                Ok(ExitOutcome::Noop | ExitOutcome::Filled) => {}
             }
         }
         Ok(())
@@ -340,17 +423,38 @@ pub async fn sell_position(
     rule: Option<ExitRule>,
     intents: Option<&Arc<dyn bot_core::recovery::IntentSink>>,
     permit: &mut bot_core::ownership::Permit,
-) -> BotResult<()> {
+) -> BotResult<ExitOutcome> {
+    // Conservative local protection across exit rules and different fractions:
+    // an in-flight exit for the same wallet/mint can already have sold tokens.
+    // This read is not an atomic, durable cross-replica reservation.
+    if (executor.policy().mode == ExecutionMode::Live
+        || state.execution_mode().await == ExecutionMode::Live)
+        && bot_core::execution::ledger()
+            .open()
+            .await
+            .iter()
+            .any(|record| {
+                record.module == "copy"
+                    && crate::intent::is_exit_label(&record.label)
+                    && record.wallet == wallet.pubkey.to_string()
+                    && record.symbol == position.symbol
+                    && record.state.is_live()
+            })
+    {
+        return Err(BotError::invalid(
+            "unresolved copy exit for wallet and mint; reconcile before another exit",
+        ));
+    }
     let fraction = fraction.clamp(0.0, 1.0);
     if fraction <= 0.0 || position.qty <= 0.0 {
         permit.finish(false).await;
-        return Ok(());
+        return Ok(ExitOutcome::Noop);
     }
     let sell_qty_human = position.qty * fraction;
     let sell_raw = maths::to_raw_amount(sell_qty_human, 6);
     if sell_raw == 0 {
         permit.finish(false).await;
-        return Ok(());
+        return Ok(ExitOutcome::Noop);
     }
 
     let mint = Pubkey::try_from(position.symbol.as_str())
@@ -388,8 +492,11 @@ pub async fn sell_position(
     // money-moving branch.
     permit.fence().await?;
 
-    let (quote_sol, signature, venue, status) = if !ctx.curve.complete {
+    let (quote_sol, signature, venue, status, execution_mode) = if !ctx.curve.complete {
         sell_on_curve(
+            state,
+            rpc,
+            wallet,
             executor,
             tenant,
             layouts,
@@ -423,7 +530,16 @@ pub async fn sell_position(
 
     // Ownership terminal (§I/§M): unproven outcomes hand off to
     // reconciliation; determinate outcomes (incl. unfilled) release.
-    permit.finish(status.is_ambiguous()).await;
+    let ambiguous = execution_mode == ExecutionMode::Live && status.is_ambiguous();
+    permit.finish(ambiguous).await;
+    if ambiguous {
+        // Keep the original position and accounting untouched: the on-chain
+        // sale might or might not have happened and needs reconciliation.
+        return Ok(ExitOutcome::Ambiguous {
+            intent_id,
+            signature,
+        });
+    }
 
     let filled = matches!(
         status,
@@ -447,11 +563,11 @@ pub async fn sell_position(
     };
 
     let trade = Trade {
-        id: state.next_id("t"),
+        id: state.next_persistent_id("t"),
         ts: Utc::now(),
         source: TradeSource::Copy,
         venue,
-        mode: state.execution_mode().await,
+        mode: execution_mode,
         side: PositionSide::Short,
         symbol: position.symbol.clone(),
         symbol_display: position.symbol_display.clone(),
@@ -478,8 +594,9 @@ pub async fn sell_position(
         wallet.pubkey.to_string(),
         bot_core::global_risk::strategy_label(BotModule::Copy, position.copied_wallet.as_deref()),
         None,
-        Some(intent_id),
+        Some(intent_id.clone()),
     );
+    let trade_mode = trade.mode;
     state.record_trade(trade.clone()).await;
     state.events.publish(AppEvent::Fill {
         ts: Utc::now(),
@@ -497,7 +614,9 @@ pub async fn sell_position(
     risk.book_pnl(BotModule::Copy, realized).await;
     // The global ledger is the only mutator of global accounting state; it
     // books the realized slice from its own average cost.
-    state.ledger().submit(ledger_event).await;
+    state
+        .submit_ledger_event(BotModule::Copy, ledger_event)
+        .await;
 
     let remaining = position.qty - sell_qty_human;
     if remaining <= f64::EPSILON || fraction >= 1.0 {
@@ -518,12 +637,29 @@ pub async fn sell_position(
         });
         info!(symbol = %position.symbol, sold = sell_qty_human, remaining, realized, "copy partial exit");
     }
-    Ok(())
+    // The whole-transaction delta is a diagnostic comparison only, not a
+    // replacement for settlement or fee reconciliation.
+    crate::balance_observation::audit_copy_balances(
+        state,
+        rpc,
+        trade_mode,
+        status,
+        signature.as_deref(),
+        &wallet.pubkey,
+        &mint,
+        &intent_id,
+        -i128::from(sell_raw),
+    )
+    .await;
+    Ok(ExitOutcome::Filled)
 }
 
 /// Sell on the bonding curve. Returns (quote_sol, signature, venue, status).
 #[allow(clippy::too_many_arguments)]
 async fn sell_on_curve(
+    state: &Shared,
+    rpc: &Rpc,
+    wallet: &Arc<Wallet>,
     executor: &mut Executor,
     tenant: Option<&solana_kit::tenant_signing_context::TenantSigningContext>,
     layouts: &Arc<RwLock<LayoutStore>>,
@@ -533,7 +669,7 @@ async fn sell_on_curve(
     slippage_pct: f64,
     journal: Journal<'_>,
     intent_id: &str,
-) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+) -> BotResult<(f64, Option<String>, Venue, ExecStatus, ExecutionMode)> {
     let (amount, min_sol_output) = pump::plan_sell(&ctx.curve, sell_raw, slippage_pct)?;
     let opts = BuildOptions {
         extra_accounts: cfg.sniper.pump_extra_accounts.clone(),
@@ -551,26 +687,58 @@ async fn sell_on_curve(
         // One exit decision → one lifecycle record (duplicate-protected).
         .with_intent_id(intent_id)
         .attributed("copy", ctx.mint.to_string());
+    if let Some(fee_ix) = crate::platform_fee::direct_fee_instruction(
+        state,
+        &wallet.pubkey,
+        min_sol_output,
+        &cfg.platform_fee,
+        intent_id,
+    )? {
+        req = req.with_instruction(fee_ix);
+    }
     if cfg.execution.use_jito {
         req = req.jito_tip(cfg.execution.jito_tip_lamports);
     }
     let req = stamp_copy_request(tenant, req);
     let result = match journal {
         Some((sink, rec)) => {
-            bot_core::recovery::with_intent(Some(sink), rec, executor.run(req), |r| {
-                r.broadcast_signature()
-            })
+            // The logical exit identity is the durable reservation key: the same
+            // position/route/size can never be broadcast twice, even across a
+            // restart or a second replica.
+            bot_core::recovery::with_reserved_intent_disposition(
+                Some(sink),
+                intent_id,
+                rec,
+                executor.run(req),
+                |r| r.intent_disposition(),
+            )
             .await?
         }
         None => executor.run(req).await?,
     };
+    crate::platform_fee::audit_confirmed_direct_fee(
+        state,
+        rpc,
+        &wallet.pubkey,
+        min_sol_output,
+        &cfg.platform_fee,
+        intent_id,
+        &result,
+    )
+    .await;
     let quote_sol = maths::lamports_to_sol(min_sol_output);
     let signature = if result.signature.is_empty() {
         None
     } else {
         Some(result.signature.clone())
     };
-    Ok((quote_sol, signature, Venue::PumpFun, result.status))
+    Ok((
+        quote_sol,
+        signature,
+        Venue::PumpFun,
+        result.status,
+        executor.policy().mode,
+    ))
 }
 
 /// Sell a graduated token through Jupiter (mint → WSOL).
@@ -586,13 +754,25 @@ async fn sell_via_jupiter(
     cfg: &bot_core::config::Config,
     journal: Journal<'_>,
     intent_id: &str,
-) -> BotResult<(f64, Option<String>, Venue, ExecStatus)> {
+) -> BotResult<(f64, Option<String>, Venue, ExecStatus, ExecutionMode)> {
     let slippage_bps = (cfg.copy.slippage_pct * 100.0).round() as u64;
     let jupiter = Jupiter::new();
-    let quote = jupiter
-        .quote(&QuoteRequest::new(mint, *WSOL_MINT, sell_raw).slippage_bps(slippage_bps))
-        .await?;
-    let expected_out = quote.out_amount_u64()?;
+    let base_request = QuoteRequest::new(mint, *WSOL_MINT, sell_raw).slippage_bps(slippage_bps);
+    // The first quote provides SOL units for the dust decision. Token raw
+    // units are never treated as lamports.
+    let probe = jupiter.quote(&base_request).await?;
+    let request = crate::platform_fee::jupiter_fee_request(
+        state,
+        rpc,
+        base_request,
+        probe.out_amount_u64()?,
+        &cfg.platform_fee,
+        intent_id,
+        "copy",
+    )
+    .await?;
+    let quote = jupiter.quote(&request).await?;
+    let mut expected_out = quote.out_amount_u64()?;
     let mode = state.execution_mode().await;
 
     // `outcome` is the executor's verdict once a live broadcast went through
@@ -602,14 +782,15 @@ async fn sell_via_jupiter(
         None
     } else {
         let recent = rpc.latest_blockhash(true).await?;
-        let (_q, tx, last_valid) = jupiter
+        let (signed_quote, tx, last_valid) = jupiter
             .build_swap(
                 wallet,
-                &QuoteRequest::new(mint, *WSOL_MINT, sell_raw).slippage_bps(slippage_bps),
+                &request,
                 Some(recent.blockhash),
                 Some(cfg.execution.priority_fee_micro_lamports),
             )
             .await?;
+        expected_out = signed_quote.out_amount_u64()?;
         if mode == ExecutionMode::Simulate {
             let sim = rpc.simulate(&tx).await?;
             if let Some(err) = sim.value.err {
@@ -631,11 +812,12 @@ async fn sell_via_jupiter(
             let built = stamp_copy_built(tenant, built);
             let result = match journal {
                 Some((sink, rec)) => {
-                    bot_core::recovery::with_intent(
+                    bot_core::recovery::with_reserved_intent_disposition(
                         Some(sink),
+                        intent_id,
                         rec,
                         executor.send_prebuilt(&built),
-                        |r| r.broadcast_signature(),
+                        |r| r.intent_disposition(),
                     )
                     .await?
                 }
@@ -648,19 +830,25 @@ async fn sell_via_jupiter(
     // Proof-of-landing decides the status (§I): the executor reports
     // Confirmed only when the signature was observed on chain; an unproven
     // broadcast stays `Sent` (ambiguous) for reconciliation.
-    let (signature, status) = match (&mode, outcome) {
-        (ExecutionMode::Paper, _) => (None, ExecStatus::PaperFilled),
+    let (signature, status, execution_mode) = match (mode, outcome) {
+        (ExecutionMode::Paper, _) => (None, ExecStatus::PaperFilled, ExecutionMode::Paper),
         (_, Some(result)) => (
             (!result.signature.is_empty()).then(|| result.signature.clone()),
             result.status,
+            if result.paper {
+                executor.policy().mode
+            } else {
+                ExecutionMode::Live
+            },
         ),
         // Simulate-success: counts as filled for bookkeeping, as before.
-        (_, None) => (None, ExecStatus::Sent),
+        (_, None) => (None, ExecStatus::Sent, ExecutionMode::Simulate),
     };
     Ok((
         maths::lamports_to_sol(expected_out),
         signature,
         Venue::Jupiter,
         status,
+        execution_mode,
     ))
 }

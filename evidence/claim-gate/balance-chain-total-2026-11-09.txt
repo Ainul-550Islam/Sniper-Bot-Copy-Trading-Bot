@@ -1,0 +1,49 @@
+Tenant balances: multi-chain identity and unknown valuation, 2026-11-09.
+Real PostgreSQL: prior query returned one row for the same address and asset across two chains; desired regression failed. Now latest uses (chain,address,asset), timestamp then id descending; unknown USD valuation returns None rather than partial sum. 12/12 position/balance PG suite passes; test also runs old SUM SQL to witness it returns a non-None partial value. None now means no rows OR at least one unknown value. Onboarding funding SQL and separate response snapshot queries are NOT fixed, and type/chain normalization, live feeds, stale balances and real production impact remain unverified.
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 33.66s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-2172416d723dc0d8)
+
+running 1 test
+test balance_latest_separates_chains_and_breaks_timestamp_ties ... FAILED
+
+failures:
+
+---- balance_latest_separates_chains_and_breaks_timestamp_ties stdout ----
+
+thread 'balance_latest_separates_chains_and_breaks_timestamp_ties' (1194424) panicked at crates/core/tests/positions_cross_tenant_pg.rs:1120:5:
+assertion `left == right` failed: same address and asset on distinct chains are different balances
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    balance_latest_separates_chains_and_breaks_timestamp_ties
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p bot-core --test positions_cross_tenant_pg`
+EXIT=101
+--- after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 21.12s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-2172416d723dc0d8)
+
+running 12 tests
+test balance_latest_separates_chains_and_breaks_timestamp_ties ... ok
+test colliding_legacy_position_ids_can_mix_distinct_positions ... ok
+test cross_tenant_position_id_collision_cannot_mutate ... ok
+test daily_risk_pnl_excludes_future_utc_days ... ok
+test deployment_open_position_read_includes_more_than_5000 ... ok
+test independent_states_persist_distinct_position_ids ... ok
+test legacy_trade_repo_rejects_distinct_fill_with_same_id ... ok
+test polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fills ... ok
+test positions_trades_balances_isolation_and_pnl_exclusion ... ok
+test risk_exposure_fails_closed_when_positions_use_an_unexpected_quote_unit ... ok
+test tenant_trade_id_collision_fails_closed ... ok
+test tenant_trade_rejects_foreign_or_missing_position ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.61s
+
+EXIT=0

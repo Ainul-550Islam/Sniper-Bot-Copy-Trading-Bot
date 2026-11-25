@@ -48,6 +48,8 @@ pub enum FindingKind {
     QuantityMismatch,
     /// A copy position that cannot be attributed to a leader.
     OrphanPosition,
+    /// A previous mirrored exit has not been reconciled to a booked result.
+    UnresolvedExit,
     /// The entry is still ambiguous in the execution ledger.
     AmbiguousEntry,
 }
@@ -61,6 +63,7 @@ impl FindingKind {
             FindingKind::LinkWithoutPosition => "link_without_position",
             FindingKind::QuantityMismatch => "quantity_mismatch",
             FindingKind::OrphanPosition => "orphan_position",
+            FindingKind::UnresolvedExit => "unresolved_exit",
             FindingKind::AmbiguousEntry => "ambiguous_entry",
         }
     }
@@ -236,10 +239,29 @@ pub fn reconcile(inputs: &ReconInputs) -> ReconReport {
                 _ => {}
             }
         }
+        // A previously broadcast exit may have landed even after its
+        // execution lifecycle stopped being pending. The leader event journal
+        // must be reconciled before this path can auto-sell that position.
+        let unresolved_exit = inputs.activity.iter().any(|event| {
+            event.side == "sell"
+                && event.stage == "AMBIGUOUS"
+                && (event.position_id.as_deref() == Some(position.id.as_str())
+                    || event.position_id.is_none())
+        });
+        if unresolved_exit {
+            findings.push(Finding {
+                kind: FindingKind::UnresolvedExit,
+                leader: link.leader.clone(),
+                mint: link.mint.clone(),
+                position_id: Some(position.id.clone()),
+                detail: "a previous exit remains ambiguous in the copy journal; reconcile before another sale".into(),
+                action: ReconAction::Flag,
+            });
+        }
         if let Some((sold_at, event_id, tokens)) = last_sell {
             let re_bought = last_buy.map(|t| t > sold_at).unwrap_or(false);
             if !re_bought {
-                let action = if inputs.auto_exit {
+                let action = if inputs.auto_exit && !unresolved_exit {
                     ReconAction::MirrorExit {
                         position_id: position.id.clone(),
                         fraction: 1.0,
@@ -426,6 +448,48 @@ mod tests {
         assert!(r.is_clean(), "{:?}", r.findings);
         assert_eq!(r.links_checked, 1);
         assert_eq!(r.positions_checked, 1);
+    }
+
+    #[test]
+    fn unresolved_exit_disables_reconciliation_auto_sell() {
+        let mut sell = activity("ambiguous-exit", "A", "m1", "sell", 60, 5000.0);
+        sell.stage = "AMBIGUOUS".into();
+        sell.position_id = Some("p1".into());
+        let inputs = ReconInputs {
+            links: vec![open_link("p1", "A", "m1", 100.0)],
+            positions: vec![position("p1", "m1", 100.0, Some("A"), None)],
+            activity: vec![sell],
+            auto_exit: true,
+            ..Default::default()
+        };
+        let report = reconcile(&inputs);
+        assert_eq!(report.count(FindingKind::UnresolvedExit), 1);
+        assert_eq!(report.count(FindingKind::LeaderExitedWeHold), 1);
+        assert!(report
+            .findings
+            .iter()
+            .all(|finding| finding.action == ReconAction::Flag));
+    }
+
+    #[test]
+    fn ambiguous_exit_without_position_identity_disables_auto_exit() {
+        let mut sell = activity("unattributed-exit", "A", "m1", "sell", 60, 5000.0);
+        sell.stage = "AMBIGUOUS".into();
+        sell.position_id = None;
+        let inputs = ReconInputs {
+            links: vec![open_link("p1", "A", "m1", 100.0)],
+            positions: vec![position("p1", "m1", 100.0, Some("A"), None)],
+            activity: vec![sell],
+            auto_exit: true,
+            ..Default::default()
+        };
+        let report = reconcile(&inputs);
+        assert_eq!(report.count(FindingKind::UnresolvedExit), 1);
+        assert_eq!(report.count(FindingKind::LeaderExitedWeHold), 1);
+        assert!(report
+            .findings
+            .iter()
+            .all(|finding| finding.action == ReconAction::Flag));
     }
 
     #[test]

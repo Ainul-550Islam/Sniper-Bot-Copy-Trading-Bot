@@ -1,0 +1,23 @@
+=== batch6 ===
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+batch6_exit=0
+=== openapi ===
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+openapi_exit=0
+=== workspace clippy ===
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 3m 12s
+workspace_clippy_exit=0
+fmt_exit=0
+diff_check_exit=0
+=== make gates ===
+  note: container_assets_live.sh uses hadolint + docker compose + the live
+        registry when they are installed and prints SKIP (not a failure)
+        for each section it cannot run. It never builds an image.
+make_gates_exit=0
+=== verify-delivery ===
+tree: 55547 files (excluding .git), 12583210195 bytes
+verify-delivery: 14 PASS / 0 FAIL
+verify_delivery_exit=0

@@ -1,0 +1,18 @@
+=== RED: a stale limit-order worker acted on a lapsed lease ===
+-- injection: the write predicates lose `lease_expires_at > now()` and the pre-hand-off lease probe is bypassed --
+test a_lapsed_lease_cannot_hand_off_or_mark_a_limit_order ... FAILED
+
+failures:
+
+---- a_lapsed_lease_cannot_hand_off_or_mark_a_limit_order stdout ----
+--
+thread 'a_lapsed_lease_cannot_hand_off_or_mark_a_limit_order' (1886649) panicked at crates/server/tests/limit_order_lease_pg.rs:199:5:
+a worker whose lease lapsed must not hand the order off: ["lo-fire-1886648-1795189849428625241"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+error: test failed, to rerun pass `-p sniper-suite --test limit_order_lease_pg`

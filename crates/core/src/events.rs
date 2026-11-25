@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::models::{BotModule, Position, TokenLaunch, Trade, WalletTrade};
+use crate::models::{BotModule, Position, TokenLaunch, Trade, TradeSource, WalletTrade};
 
 /// Everything that flows through the process.
 ///
@@ -171,10 +171,10 @@ impl AppEvent {
             | AppEvent::Signal { module, .. }
             | AppEvent::RiskRejected { module, .. }
             | AppEvent::OrderSent { module, .. } => Some(*module),
-            AppEvent::Launch { .. }
-            | AppEvent::Fill { .. }
-            | AppEvent::PositionUpdate { .. }
-            | AppEvent::PositionClosed { .. } => Some(BotModule::Sniper),
+            AppEvent::Launch { .. } => Some(BotModule::Sniper),
+            AppEvent::Fill { trade, .. } => module_for_source(trade.source),
+            AppEvent::PositionUpdate { position, .. }
+            | AppEvent::PositionClosed { position, .. } => module_for_source(position.source),
             AppEvent::WalletTrade { .. } => Some(BotModule::Copy),
             AppEvent::Polymarket { .. } => Some(BotModule::Polymarket),
             AppEvent::Command { .. } => Some(BotModule::Telegram),
@@ -336,6 +336,15 @@ impl AppEvent {
     }
 }
 
+fn module_for_source(source: TradeSource) -> Option<BotModule> {
+    match source {
+        TradeSource::Sniper => Some(BotModule::Sniper),
+        TradeSource::Copy => Some(BotModule::Copy),
+        TradeSource::Polymarket => Some(BotModule::Polymarket),
+        TradeSource::Manual | TradeSource::Risk => None,
+    }
+}
+
 /// Convenience accessors used by `summary()`.
 pub trait SideStr {
     fn side_str(&self) -> String;
@@ -428,5 +437,74 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         EventBus::new(2_000)
+    }
+}
+
+#[cfg(test)]
+mod source_attribution_tests {
+    use super::*;
+    use crate::models::{ExecutionMode, PositionSide, TradeSource, Venue};
+
+    #[test]
+    fn fill_and_position_module_follow_their_actual_source() {
+        for (source, expected) in [
+            (TradeSource::Sniper, Some(BotModule::Sniper)),
+            (TradeSource::Copy, Some(BotModule::Copy)),
+            (TradeSource::Polymarket, Some(BotModule::Polymarket)),
+            (TradeSource::Manual, None),
+            (TradeSource::Risk, None),
+        ] {
+            let trade = Trade {
+                id: "t".into(),
+                ts: Utc::now(),
+                source,
+                venue: Venue::Paper,
+                mode: ExecutionMode::Paper,
+                side: PositionSide::Long,
+                symbol: "mint".into(),
+                symbol_display: "mint".into(),
+                amount_in: 1.0,
+                amount_out: 1.0,
+                quote_symbol: "SOL".into(),
+                price: 1.0,
+                fee: 0.0,
+                slippage_bps: 0,
+                signature: None,
+                position_id: None,
+                note: None,
+                latency_ms: None,
+            };
+            let fill = AppEvent::Fill {
+                ts: Utc::now(),
+                trade: Box::new(trade),
+            };
+            let p = Position::new(
+                "p".into(),
+                source,
+                Venue::Paper,
+                ExecutionMode::Paper,
+                "mint".into(),
+                "mint".into(),
+                "SOL".into(),
+            );
+            let update = AppEvent::PositionUpdate {
+                ts: Utc::now(),
+                position: Box::new(p.clone()),
+            };
+            let close = AppEvent::PositionClosed {
+                ts: Utc::now(),
+                position: Box::new(p),
+                pnl: 0.0,
+                pnl_pct: 0.0,
+                reason: "test".into(),
+            };
+            assert_eq!(fill.module(), expected, "fill source {source:?}");
+            assert_eq!(
+                update.module(),
+                expected,
+                "position update source {source:?}"
+            );
+            assert_eq!(close.module(), expected, "position close source {source:?}");
+        }
     }
 }

@@ -1,0 +1,12 @@
+App role/RLS tenant trade conflict targeted test, 2026-11-09.
+Real PostgreSQL 17, Database configured with RLS enabled, request-bound bot_app role verified via current_user. First insert and exact retry succeed for tenant A; changed same-ID payload and tenant B collision return an error; B cannot SELECT A row; DDL verification shows A row unchanged. Test does not distinguish SQL/RepositoryError variants, prove absence of id-existence side channels, exercise legacy TradeRepo under its actual background role, or prove multi-process/live behavior. Requires REQUIRE_POSTGRES=1 and configured separate app/system/DDL URLs; otherwise explicitly NOT_RUN.
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 2m 40s
+     Running tests/rls_trade_conflict.rs (target/debug/deps/rls_trade_conflict-fbf8d84515d750b4)
+
+running 1 test
+test app_role_trade_retry_and_foreign_id_collision ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+EXIT=0

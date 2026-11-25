@@ -132,6 +132,115 @@ impl AccountingRepo {
         Ok(true)
     }
 
+    /// Read one deployment-organization journal event by its indexed identity.
+    /// A malformed row is an error, not an absent or matching event.
+    /// The postings recorded for one event, in `seq` order.
+    ///
+    /// `Ok(None)` = the event has no journaled entry. Used by replicas that must
+    /// price a slice from what the journal committed rather than from a local
+    /// book that may not have seen the opening buy.
+    pub async fn load_entry(&self, event_id: &str) -> RepoResult<Option<Entry>> {
+        use crate::accounting::posting::{Account, Entry, EntrySide, Posting};
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let rows = self
+            .db
+            .timed(
+                "ledger_postings_load_one",
+                sqlx::query(
+                    r#"SELECT event_id, seq, account, wallet, asset, side, amount, quantity,
+                              base_asset
+                       FROM ledger_postings
+                      WHERE organization_id = $1 AND event_id = $2
+                      ORDER BY seq"#,
+                )
+                .bind(org)
+                .bind(event_id)
+                .fetch_all(self.pool()),
+            )
+            .await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let decode = |error: sqlx::Error, what: &str| {
+            TimedDbError::Error(sqlx::Error::Decode(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("stored ledger posting {what}: {error}"),
+            ))))
+        };
+        let mut postings = Vec::with_capacity(rows.len());
+        for row in rows {
+            let account_raw: String =
+                sqlx::Row::try_get(&row, "account").map_err(|e| decode(e, "account"))?;
+            let side_raw: String =
+                sqlx::Row::try_get(&row, "side").map_err(|e| decode(e, "side"))?;
+            let seq_raw: i32 = sqlx::Row::try_get(&row, "seq").map_err(|e| decode(e, "seq"))?;
+            let (Some(account), Some(side)) =
+                (Account::parse(&account_raw), EntrySide::parse(&side_raw))
+            else {
+                return Err(decode(
+                    sqlx::Error::Decode(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unknown account/side",
+                    ))),
+                    &format!("has an unknown account/side: {account_raw}/{side_raw}"),
+                ));
+            };
+            let seq = u32::try_from(seq_raw).map_err(|_| {
+                decode(
+                    sqlx::Error::Decode(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "negative seq",
+                    ))),
+                    "has a negative seq",
+                )
+            })?;
+            postings.push(Posting {
+                event_id: sqlx::Row::try_get(&row, "event_id")
+                    .map_err(|e| decode(e, "event_id"))?,
+                seq,
+                account,
+                wallet: sqlx::Row::try_get(&row, "wallet").map_err(|e| decode(e, "wallet"))?,
+                asset: sqlx::Row::try_get(&row, "asset").map_err(|e| decode(e, "asset"))?,
+                side,
+                amount: sqlx::Row::try_get(&row, "amount").map_err(|e| decode(e, "amount"))?,
+                quantity: sqlx::Row::try_get(&row, "quantity")
+                    .map_err(|e| decode(e, "quantity"))?,
+                base_asset: sqlx::Row::try_get(&row, "base_asset")
+                    .map_err(|e| decode(e, "base_asset"))?,
+            });
+        }
+        Ok(Some(Entry { postings }))
+    }
+
+    pub async fn load_event(&self, event_id: &str) -> RepoResult<Option<StoredEvent>> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let row = self
+            .db
+            .timed(
+                "ledger_event_load_one",
+                sqlx::query(
+                    r#"SELECT event_id, kind, module, venue, wallet, strategy, asset, quote_asset,
+                          side, quantity, price, quote_amount, fee, mode, reference_id,
+                          correlation_id, position_id, trade_id, counterparty_wallet,
+                          detail, ts, recorded_at, replica_id
+                   FROM ledger_events WHERE organization_id = $1 AND event_id = $2"#,
+                )
+                .bind(org)
+                .bind(event_id)
+                .fetch_optional(self.pool()),
+            )
+            .await?;
+        row.map(|row| {
+            stored_from_row(&row).ok_or_else(|| {
+                TimedDbError::Error(sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "ledger journal row could not be decoded",
+                ))))
+            })
+        })
+        .transpose()
+    }
+
     /// Every event in durable append order (record time, then event id).
     pub async fn load_events(&self) -> RepoResult<Vec<StoredEvent>> {
         let rows = self

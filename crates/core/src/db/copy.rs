@@ -301,11 +301,18 @@ impl CopyRepo {
 
     /// Events observed at or after `since`, oldest first — the restart
     /// recovery re-seeds the dedup facade from these.
+    ///
+    /// When the lookback window holds MORE events than the cap, the re-seed is
+    /// a prefix and that is logged with the shortfall: a silent prefix means a
+    /// replayed backlog could re-execute copies the journal already covers
+    /// (gap #78).
     pub async fn events_since(
         &self,
         since: DateTime<Utc>,
         limit: i64,
     ) -> RepoResult<Vec<CopyEventRecord>> {
+        let cap = limit.clamp(1, 10_000);
+        let organization_id = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
         let rows = self
             .db
             .timed(
@@ -313,14 +320,30 @@ impl CopyRepo {
                 sqlx::query(
                     r#"SELECT * FROM copy_events
                         WHERE organization_id = $1 AND observed_at >= $2
-                        ORDER BY observed_at ASC LIMIT $3"#,
+                        ORDER BY observed_at ASC, event_id ASC LIMIT $3"#,
                 )
-                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(organization_id)
                 .bind(since)
-                .bind(limit.clamp(1, 10_000))
+                .bind(cap)
                 .fetch_all(self.db.pool()),
             )
             .await?;
+        if rows.len() as i64 == cap {
+            let total: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM copy_events WHERE organization_id = $1 AND observed_at >= $2",
+            )
+            .bind(organization_id)
+            .bind(since)
+            .fetch_one(self.db.pool())
+            .await
+            .unwrap_or(cap);
+            tracing::warn!(
+                returned = rows.len(),
+                total,
+                omitted = total - cap,
+                "copy dedup re-seed TRUNCATED at the cap: the backlog exceeds the lookback limit"
+            );
+        }
         Ok(rows.iter().map(event_from_row).collect())
     }
 
@@ -413,7 +436,13 @@ impl CopyRepo {
     }
 
     /// Links that are still open — the reconciliation input.
+    ///
+    /// The read is capped; when the cap is HIT the call logs how many open
+    /// links are not in the returned set, so a restart-recovery pass can never
+    /// believe it saw the whole book (gap #78).
     pub async fn open_links(&self) -> RepoResult<Vec<CopyLinkRecord>> {
+        const CAP: i64 = 5000;
+        let organization_id = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
         let rows = self
             .db
             .timed(
@@ -421,12 +450,28 @@ impl CopyRepo {
                 sqlx::query(
                     "SELECT * FROM copy_links \
                      WHERE organization_id = $1 AND status = 'open' \
-                     ORDER BY opened_at ASC LIMIT 5000",
+                     ORDER BY opened_at ASC, position_id ASC LIMIT $2",
                 )
-                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .bind(organization_id)
+                .bind(CAP)
                 .fetch_all(self.db.pool()),
             )
             .await?;
+        if rows.len() as i64 == CAP {
+            let total: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM copy_links WHERE organization_id = $1 AND status = 'open'",
+            )
+            .bind(organization_id)
+            .fetch_one(self.db.pool())
+            .await
+            .unwrap_or(CAP);
+            tracing::warn!(
+                returned = rows.len(),
+                total,
+                omitted = total - CAP,
+                "open copy links TRUNCATED at the cap: reconciliation sees a prefix"
+            );
+        }
         Ok(rows.iter().map(link_from_row).collect())
     }
 

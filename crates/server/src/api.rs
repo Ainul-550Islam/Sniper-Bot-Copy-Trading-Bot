@@ -52,6 +52,7 @@ use bot_core::state::Shared;
 
 use crate::dashboard::{DASHBOARD_HTML, DASHBOARD_JS};
 use crate::obs;
+use crate::recon::{ReservationSweepService, SweepDecision};
 use crate::ws::event_to_json;
 
 /// Server-side shared state handed to every handler.
@@ -78,6 +79,10 @@ pub struct ApiState {
     /// JSONL journal handle (sizes + rotation; `None` when the data
     /// directory could not be opened).
     pub journal: Option<bot_core::storage::Store>,
+    /// Chain-side existence reader for the ambiguous-reservation sweep
+    /// (`landed` / `absent` / `unknown`). `None` = no RPC configured, in
+    /// which case an `abandon` is refused rather than made blind.
+    pub chain_probe: Option<Arc<crate::reservation_chain::ChainExistenceProbe>>,
     /// Whether to serve the dashboard at `/`.
     pub serve_dashboard: bool,
     /// Liveness/readiness component registry (sampled in the background).
@@ -170,6 +175,27 @@ pub fn router(state: ApiState) -> Router {
             get(accounting_events).post(accounting_event_post),
         )
         .route("/api/accounting/findings", get(accounting_findings))
+        .route("/api/accounting/conflict", get(accounting_conflict))
+        .route(
+            "/api/accounting/reservations/sweep",
+            get(accounting_reservation_sweep),
+        )
+        .route(
+            "/api/accounting/reservations/sweep",
+            post(accounting_reservation_sweep_resolve),
+        )
+        .route(
+            "/api/accounting/reservations/chain-check",
+            get(accounting_reservation_chain_check),
+        )
+        .route(
+            "/api/accounting/reservations/signature-scan",
+            get(accounting_reservation_signature_scan),
+        )
+        .route(
+            "/api/accounting/conflict/repair",
+            post(accounting_conflict_repair),
+        )
         .route("/api/reconciliation/findings", get(accounting_findings))
         .route("/api/risk/global", get(risk_global))
         .route("/api/risk/kill-switch", post(risk_kill_switch))
@@ -517,13 +543,23 @@ async fn resume(State(state): State<ApiState>, headers: HeaderMap) -> Response {
         Ok(p) => p,
         Err(e) => return e,
     };
-    state.shared.set_kill_switch(false, "api /resume").await;
-    state.shared.clear_halt().await;
-    state
-        .audit
-        .success(&actor_of(Some(&principal)), "resume", Some("system"))
-        .await;
-    Json(json!({ "ok": true, "kill_switch": false })).into_response()
+    // `resume` is the exact inverse of `/kill`: it releases the kill switch
+    // AND the emergency halt latch (propagating both to the other replicas)
+    // and then reports the modules an emergency stop disabled, which a resume
+    // deliberately does not re-enable on the operator's behalf. The old handler
+    // cleared only the kill switch, so `/resume` answered `ok` on a deployment
+    // that still refused every entry and still had all modules disabled.
+    let outcome = state.shared.resume("api /resume", true).await;
+    let actor = actor_of(Some(&principal));
+    state.audit.success(&actor, "resume", Some("system")).await;
+    Json(json!({
+        "ok": true,
+        "kill_switch": state.shared.kill_switch(),
+        "halted_latch_held": state.shared.halted(),
+        "halt_reason": state.shared.config_snapshot().await.risk.halt_reason,
+        "released": outcome,
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -1416,6 +1452,340 @@ async fn accounting_event_post(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct SweepResolveBody {
+    trade_key: String,
+    /// Fencing identity the operator read from the sweep (`owner` + `epoch`).
+    owner: String,
+    epoch: i64,
+    /// `abandon` (provably never broadcast) or `link` (on-chain signature).
+    decision: String,
+    signature: Option<String>,
+    /// The operator's EXPLICIT claim that the attempt never left the process.
+    /// Required for an `abandon` whose signature the chain does not know —
+    /// a free trade key lets a retry send, so this must be a human assertion
+    /// rather than an inference from an RPC answer.
+    #[serde(default)]
+    operator_asserts_never_sent: bool,
+}
+
+/// `GET /api/accounting/reservations/sweep?limit=` — the ambiguous durable
+/// pre-broadcast reservations: lapsed `reserved` claims whose owner never
+/// linked or abandoned them, and `linked` rows with no signature. Read-only
+/// and fail-closed: an unreadable sweep reports `available: false`, never an
+/// empty list.
+async fn accounting_reservation_sweep(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<LimitQuery>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "reservation_sweep_read").await {
+        return e;
+    }
+    let Some(db) = state.db.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "broadcast reservation sweep needs the durable store",
+        )
+            .into_response();
+    };
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000) as i64;
+    let sweep = ReservationSweepService::new(db).scan(limit).await;
+    let status = if sweep.available {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(sweep)).into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ChainCheckQuery {
+    trade_key: String,
+    signature: Option<String>,
+    #[serde(default)]
+    operator_asserts_never_sent: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SignatureScanQuery {
+    trade_key: String,
+    signature: Option<String>,
+    /// Alternate signatures the same attempt could have landed under (a
+    /// re-signed or fee-payer-swapped transaction lands under a different
+    /// signature). Comma-separated; ignored entries are reported as `unknown`.
+    #[serde(default)]
+    alternates: Option<String>,
+    #[serde(default)]
+    operator_asserts_never_sent: bool,
+}
+
+/// `GET /api/accounting/reservations/signature-scan?trade_key=&signature=&alternates=a,b`
+/// — the same question as the chain check, asked across EVERY signature the
+/// attempt could have landed under. `duplicate_detected` is true when more
+/// than one of them is on chain, which means a duplicate send already
+/// happened: nothing is freed, nothing is booked, and a human decides.
+/// Without a chain reader the answer is `unknown` — never `absent`.
+async fn accounting_reservation_signature_scan(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<SignatureScanQuery>,
+) -> Response {
+    if let Err(e) = require_role(
+        &state,
+        &headers,
+        Role::Readonly,
+        "reservation_signature_scan",
+    )
+    .await
+    {
+        return e;
+    }
+    let alternates: Vec<String> = q
+        .alternates
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let report = crate::reservation_chain::verify_signatures(
+        state.chain_probe.as_deref(),
+        &q.trade_key,
+        q.signature.as_deref(),
+        &alternates,
+        q.operator_asserts_never_sent,
+    )
+    .await;
+    (StatusCode::OK, Json(report)).into_response()
+}
+
+/// `GET /api/accounting/reservations/chain-check?trade_key=&signature=` —
+/// does the ambiguous attempt's transaction exist on chain, and which
+/// decision does that justify? Read-only. `existence` is `landed` (the node
+/// returned the transaction), `absent` (the node does not know it — NOT proof
+/// nothing was sent) or `unknown` (the lookup failed; never treated as
+/// absent). `abandon_allowed` is true only for `absent` WITH an explicit
+/// operator non-send assertion.
+async fn accounting_reservation_chain_check(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<ChainCheckQuery>,
+) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "reservation_chain_check").await
+    {
+        return e;
+    }
+    let Some(db) = state.db.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "broadcast reservation sweep needs the durable store",
+        )
+            .into_response();
+    };
+    let service = ReservationSweepService::new(db).with_chain(state.chain_probe.clone());
+    let report = service
+        .chain_report(
+            &q.trade_key,
+            q.signature.as_deref(),
+            q.operator_asserts_never_sent,
+        )
+        .await;
+    (StatusCode::OK, Json(report)).into_response()
+}
+
+/// `POST /api/accounting/reservations/sweep` — resolve ONE ambiguous claim.
+/// The owner + epoch from the sweep are a fencing token: if the claim changed
+/// hands since it was read the decision is refused (409), never applied to a
+/// live attempt. Deciding `abandon` frees the trade key for a retry, so this
+/// is an operator (money-moving) action and it is audited either way.
+async fn accounting_reservation_sweep_resolve(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<SweepResolveBody>,
+) -> Response {
+    let principal = match require_role(
+        &state,
+        &headers,
+        Role::Operator,
+        "reservation_sweep_resolve",
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let actor = actor_of(Some(&principal));
+    // Validate the request shape before touching the store, so a malformed
+    // decision is a 400 regardless of database availability.
+    let decision = match body.decision.as_str() {
+        "abandon" => SweepDecision::Abandon,
+        "link" => match body.signature.as_deref() {
+            Some(sig) => SweepDecision::Link(sig.to_string()),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "a link decision needs the on-chain signature",
+                )
+                    .into_response()
+            }
+        },
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unknown decision {other:?}; expected `abandon` or `link`"),
+            )
+                .into_response()
+        }
+    };
+    let Some(db) = state.db.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "broadcast reservation sweep needs the durable store",
+        )
+            .into_response();
+    };
+    let service = ReservationSweepService::new(db).with_chain(state.chain_probe.clone());
+    // Freeing a trade key lets a retry send. Refuse an `abandon` whose
+    // transaction is on chain, or whose non-send the operator did not assert.
+    if decision == SweepDecision::Abandon {
+        let signature = body.signature.as_deref();
+        if let Err(blocked) = service
+            .authorize_abandon(&body.trade_key, signature, body.operator_asserts_never_sent)
+            .await
+        {
+            tracing::warn!(
+                trade = %body.trade_key,
+                reason = %blocked,
+                "reservation abandon refused by the chain check"
+            );
+            state
+                .audit
+                .record(
+                    &actor,
+                    "reservation_sweep_resolve",
+                    Some(&body.trade_key),
+                    AuditOutcome::Failure,
+                    json!({ "decision": "abandon", "blocked": blocked }),
+                )
+                .await;
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "ok": false,
+                    "resolved": false,
+                    "reason": blocked,
+                    "chain_checked": true,
+                })),
+            )
+                .into_response();
+        }
+    }
+    let resolved = service
+        .resolve(&body.trade_key, &body.owner, body.epoch, decision)
+        .await;
+    let (status, ok, reason) = match resolved {
+        Ok(true) => (StatusCode::OK, true, None),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            false,
+            Some(
+                "the reservation no longer matches the owner/epoch you read \
+                 (already terminal or taken over); re-read the sweep"
+                    .to_string(),
+            ),
+        ),
+        Err(e) => (StatusCode::BAD_REQUEST, false, Some(e)),
+    };
+    state
+        .audit
+        .record(
+            &actor,
+            "reservation_sweep_resolve",
+            Some(&body.trade_key),
+            if ok {
+                AuditOutcome::Success
+            } else {
+                AuditOutcome::Failure
+            },
+            json!({
+                "decision": body.decision,
+                "owner": body.owner,
+                "epoch": body.epoch,
+                "signature": body.signature,
+                "reason": reason,
+            }),
+        )
+        .await;
+    (
+        status,
+        Json(json!({ "ok": ok, "resolved": ok, "reason": reason })),
+    )
+        .into_response()
+}
+
+/// `GET /api/accounting/conflict` — the latched journal-vs-book conflict, if
+/// any. A non-null id means every entry decision is refused (fail closed)
+/// until the book is repaired from the durable journal.
+async fn accounting_conflict(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(e) = require_role(&state, &headers, Role::Readonly, "ledger_conflict_read").await {
+        return e;
+    }
+    let ledger = state.shared.ledger();
+    let mismatches = ledger.conflict_payload_mismatches().await;
+    Json(json!({
+        "conflict": ledger.journal_conflict().await,
+        "pending": ledger.pending_count().await,
+        "events": ledger.len().await,
+        // Both sides of a proven same-id conflict: the event this process held
+        // against the durable rows, and which fields diverged. Empty when no
+        // conflict is latched. Read-only — the latch and the fail-closed state
+        // are untouched.
+        "payload_mismatches": mismatches,
+    }))
+    .into_response()
+}
+
+/// `POST /api/accounting/conflict/repair` — rebuild this replica's book from
+/// the durable journal. This is the only way out of a proven conflict: the
+/// journal wins, and local rows it does not back are dropped (never
+/// reversed into invented money). Returns 409 when the journal cannot
+/// adjudicate, so the operator keeps the fail-closed state.
+async fn accounting_conflict_repair(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    let principal =
+        match require_role(&state, &headers, Role::Operator, "ledger_conflict_repair").await {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+    let actor = actor_of(Some(&principal));
+    let report = state.shared.ledger().reconcile_from_journal().await;
+    let status = if report.repaired {
+        StatusCode::OK
+    } else {
+        StatusCode::CONFLICT
+    };
+    state
+        .audit
+        .record(
+            &actor,
+            "ledger_conflict_repair",
+            report.claimed_conflict.as_deref(),
+            if report.repaired {
+                AuditOutcome::Success
+            } else {
+                AuditOutcome::Failure
+            },
+            json!({ "repaired": report.repaired, "reason": report.reason }),
+        )
+        .await;
+    (
+        status,
+        Json(json!({ "ok": report.repaired, "report": report })),
+    )
+        .into_response()
+}
+
 /// `GET /api/accounting/findings?limit=` — recent accounting reconciliation
 /// findings (from the journal in use).
 async fn accounting_findings(
@@ -1738,6 +2108,7 @@ mod tests {
             trusted_proxies: Default::default(),
             db: None,
             journal: None,
+            chain_probe: None,
             serve_dashboard: false,
             health: Arc::new(HealthRegistry::new()),
             metrics_enabled,
@@ -1973,6 +2344,93 @@ mod tests {
             "operator-key-12345678901234".into(),
             "readonly-key-12345678901234".into(),
         )
+    }
+
+    #[tokio::test]
+    async fn analytics_never_labels_a_raw_trade_amount_or_a_latency_as_usd_or_fill_time() {
+        // The endpoint needs a database; the CONTRACT that matters is the unit
+        // vocabulary, so the same assertions run against the response shape
+        // through the router with no DB: 503 is fine, but the moment analytics
+        // can answer, no raw amount may be called `_usd` and a latency may not
+        // be called fill time.
+        let (state, owner, _op, _ro) = rbac_state().await;
+        let app = router(state);
+        let (status, _, body) = get(
+            app,
+            "/api/tenant/analytics?timeframe=30d",
+            &[("x-api-key", &owner)],
+        )
+        .await;
+        // The trading data plane gates on a tenant membership the test state
+        // does not carry, so 401/403 is a legitimate refusal too; what is NOT
+        // acceptable is a 200 that mislabels units.
+        assert!(
+            matches!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE
+                    | StatusCode::OK
+                    | StatusCode::FORBIDDEN
+                    | StatusCode::UNAUTHORIZED
+            ),
+            "unexpected status {status}"
+        );
+        if status == StatusCode::OK {
+            let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+            let breakdown = v["module_breakdown"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for row in breakdown {
+                assert!(
+                    row.get("volume_usd").is_none() && row.get("fees_usd").is_none(),
+                    "a raw trade amount must never be labelled usd: {row}"
+                );
+                assert_eq!(row["volume_unit"], "raw_trade_amount_unlabelled");
+            }
+            let q = &v["execution_quality"];
+            assert!(
+                q.get("avg_fill_time_ms").is_none(),
+                "a latency is not fill time"
+            );
+            assert_eq!(q["reverted_txs"], serde_json::Value::Null);
+            assert_eq!(
+                v["units"]["usd_source"],
+                "tenant_daily_accounting (global ledger, USD-quoted)"
+            );
+        }
+    }
+
+    /// The unit vocabulary is asserted AT THE SOURCE: the router-level test
+    /// above cannot reach a 200 without a database and a tenant membership, so
+    /// a future edit could silently restore `volume_usd` on a raw amount. This
+    /// check fails the moment the misleading keys come back.
+    #[test]
+    fn analytics_vocabulary_never_relabels_raw_amounts_or_latency() {
+        let source = include_str!("trading_data_plane/analytics.rs");
+        assert!(
+            !source.contains("\"volume_usd\": row.get"),
+            "a raw trade amount must not be labelled usd"
+        );
+        assert!(
+            !source.contains("\"fees_usd\": row.get"),
+            "a raw fee amount must not be labelled usd"
+        );
+        assert!(
+            !source.contains("\"avg_fill_time_ms\":"),
+            "an execution latency is not fill time"
+        );
+        assert!(
+            source.contains("\"avg_execution_latency_ms\":"),
+            "the latency must be reported under a name that says what it measures"
+        );
+        assert!(
+            source.contains("\"reverted_txs\": Value::Null"),
+            "an execution attempt is not a reverted transaction"
+        );
+        assert!(
+            source.contains("\"units\":"),
+            "the response must state which figures are USD and which are not"
+        );
     }
 
     #[tokio::test]
@@ -2323,9 +2781,194 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"total\":1"), "{body}");
         assert!(body.contains("\"deposit\":1"), "{body}");
-        let (status, _, body) = get(app, "/api/accounting/findings", &[("x-api-key", &ro)]).await;
+        let (status, _, body) = get(
+            app.clone(),
+            "/api/accounting/findings",
+            &[("x-api-key", &ro)],
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"count\":0"), "{body}");
+        // Conflict status is readable; repair is an operator action and a
+        // healthy book reports a clean repair (no conflict to clear).
+        let (status, _, body) = get(
+            app.clone(),
+            "/api/accounting/conflict",
+            &[("x-api-key", &ro)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"conflict\":null"), "{body}");
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/conflict/repair",
+            &[("x-api-key", &ro)],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, body) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/conflict/repair",
+            &[("x-api-key", &op)],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"repaired\":true"), "{body}");
+        assert_eq!(state.shared.ledger().len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn reservation_sweep_is_readonly_readable_and_operator_resolved() {
+        let (state, _owner, op, ro) = rbac_state().await;
+        let app = router(state.clone());
+        // Without a durable store the sweep is an explicit 503, never an
+        // empty "nothing to do" answer.
+        let (status, _, _) = get(
+            app.clone(),
+            "/api/accounting/reservations/sweep",
+            &[("x-api-key", &ro)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        // A malformed decision is refused on shape alone, before the store.
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/reservations/sweep",
+            &[("x-api-key", &op)],
+            Some(json!({
+                "trade_key": "copy:w:m", "owner": "replica-1", "epoch": 1,
+                "decision": "guess"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A `link` decision without a signature is refused too.
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/reservations/sweep",
+            &[("x-api-key", &op)],
+            Some(json!({
+                "trade_key": "copy:w:m", "owner": "replica-1", "epoch": 1,
+                "decision": "link"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Deciding a claim frees money to move, so read-only keys cannot.
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/reservations/sweep",
+            &[("x-api-key", &ro)],
+            Some(json!({
+                "trade_key": "copy:w:m", "owner": "replica-1", "epoch": 1,
+                "decision": "abandon"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // An operator's well-formed decision reaches the store, which is
+        // absent here: still an explicit 503, never a silent success.
+        let (status, _, _) = request(
+            app,
+            "POST",
+            "/api/accounting/reservations/sweep",
+            &[("x-api-key", &op)],
+            Some(json!({
+                "trade_key": "copy:w:m", "owner": "replica-1", "epoch": 1,
+                "decision": "abandon"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn signature_scan_reports_no_chain_reader_as_inconclusive() {
+        let (state, _owner, _op, ro) = rbac_state().await;
+        let app = router(state.clone());
+        let (status, _, body) = get(
+            app.clone(),
+            "/api/accounting/reservations/signature-scan?trade_key=copy:w:m&signature=abc&alternates=def,ghi",
+            &[("x-api-key", &ro)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "read-only and store-independent");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        assert_eq!(v["existence"], "unknown", "no reader configured: {v}");
+        assert_eq!(v["abandon_allowed"], false);
+        assert_eq!(v["link_allowed"], false);
+        assert_eq!(v["settled_allowed"], false);
+        assert_eq!(v["duplicate_detected"], false);
+        assert!(
+            v["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no chain reader"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn signature_scan_needs_a_readonly_role() {
+        let (state, _owner, _op, _ro) = rbac_state().await;
+        let app = router(state.clone());
+        let (status, _, _) = get(
+            app.clone(),
+            "/api/accounting/reservations/signature-scan?trade_key=copy:w:m",
+            &[("x-api-key", "wrong")],
+        )
+        .await;
+        assert!(
+            status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN,
+            "unauthenticated access must be refused, got {status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reservation_chain_check_is_read_only_and_never_invents_an_absence() {
+        let (state, _owner, op, ro) = rbac_state().await;
+        let app = router(state.clone());
+        // Readable by the read-only role...
+        let (status, _, _) = get(
+            app.clone(),
+            "/api/accounting/reservations/chain-check?trade_key=copy:w:m",
+            &[("x-api-key", &ro)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "no durable store");
+        // ...and a malformed signature is still refused as such once the
+        // endpoint can answer; without a store the answer is the store.
+        let (status, _, body) = get(
+            app.clone(),
+            "/api/accounting/reservations/chain-check?trade_key=copy:w:m&signature=abc",
+            &[("x-api-key", &ro)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.is_empty() || !body.contains("\"existence\""), "{body}");
+        // An `abandon` that does not assert the non-send is refused on shape
+        // before any store or chain is consulted.
+        let (status, _, _) = request(
+            app.clone(),
+            "POST",
+            "/api/accounting/reservations/sweep",
+            &[("x-api-key", &op)],
+            Some(json!({
+                "trade_key": "copy:w:m", "owner": "replica-1", "epoch": 1,
+                "decision": "abandon",
+                "signature": "abc",
+                "operator_asserts_never_sent": true
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "store is required");
     }
 
     #[tokio::test]

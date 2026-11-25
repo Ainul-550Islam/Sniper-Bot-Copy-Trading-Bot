@@ -1,0 +1,82 @@
+# Gap #31 — crates/server gated/live tests: every #[ignore] discharged (2026-11-09)
+
+Starting inventory: 26 raw '#[ignore]' lines in crates/server/{src,tests};
+17 were real attribute markers on test fns across 6 files, 3 were unit tests
+in crates/server/src/billing/, and the remainder were prose in doc comments.
+Ending inventory: 0 attribute markers (verified by grep '^\s*#\[ignore').
+
+## What each file was hiding
+
+1) ledger_conflict_repair_postgres.rs — #[ignore] hid a REAL failure.
+   With --ignored the test failed in 0.10s:
+     JournalRepair { repaired: false, ..., reason: "durable journal unavailable" }
+   Root cause (NOT a code bug): DbLedgerStore::load_events refuses to hand out the
+   journal unless AccountingRepo::position_ledger_coverage_complete() is true, and
+   that probe is deployment-wide. The shared gate database carried 14 closed
+   positions with no ledger backing, so the repair CORRECTLY refused. The test had
+   no way to say so: it asserted 'repaired' and printed only 'durable journal
+   unavailable', which reads like a broken connection.
+   Fix: the test now asserts the coverage precondition itself, with a message that
+   names the real cause; it is no longer #[ignore]d, it is env-gated.
+
+2) trusted_proxy_client_ip.rs, accounting_production_retry_postgres.rs — ignored
+   only for convenience; both pass against a real database.
+
+3) live_billing_contract.rs (5), live_custody_contract.rs (5), live_stripe_mock.rs (4),
+   vault_live_transit.rs (4) — every one of these ALREADY self-skipped: each test
+   returns early when its env is absent. The #[ignore] was therefore redundant AND
+   harmful: it meant the refusal assertions (NOT_RUN / EXTERNAL_REQUIRED / no local
+   fallback / no hardcoded success / no key leak) never ran on any ordinary run.
+
+4) crates/server/src/billing/{paddle,stripe}_adapter.rs + provider_registry.rs — the
+   three ignored unit tests asserted 'LIVE_BILLING=1 and a key are set', i.e. they
+   checked the environment, not the product. Rewritten to assert the actual gate:
+   live requires the opt-in AND a key; a reachable key WITHOUT the opt-in must still
+   refuse checkout and name LIVE_BILLING in the refusal.
+
+## Evidence — GREEN (fresh migrated database)
+
+$ POSTGRES_URL=.../sniper_gate_31_clean REQUIRE_POSTGRES=1 cargo test -p sniper-suite --test <t>
+ledger_conflict_repair_postgres: 1 passed; 0 failed; 0 ignored
+trusted_proxy_client_ip:        5 passed; 0 failed; 0 ignored
+accounting_production_retry_postgres: 1 passed; 0 failed; 0 ignored
+
+$ cargo test -p sniper-suite --test <t>   (no --ignored flag anywhere)
+live_billing_contract:  5 passed; 0 failed; 0 ignored
+live_custody_contract:  5 passed; 0 failed; 0 ignored
+live_stripe_mock:       4 passed; 0 failed; 0 ignored   (each printed SKIPPED: set STRIPE_MOCK_URL)
+vault_live_transit:     5 passed; 0 failed; 0 ignored   (4 printed SKIPPED: set VAULT_ADDR/...)
+
+$ LIVE_BILLING=1 PADDLE_API_KEY=... STRIPE_API_KEY=... cargo test -p sniper-suite --lib -- billing::
+paddle_live_checkout_requires_live_billing_opt_in ....... ok
+stripe_live_checkout_requires_live_billing_opt_in ....... ok
+registry_resolves_stripe_only_when_configured ........... ok
+
+## Evidence — RED (each new guard was verified to actually bite)
+
+R1) Repair test against the DIRTY shared database now fails with the real reason:
+    'this test needs a database whose positions are all backed by the ledger journal;
+     POSTGRES_URL points at one that already carries closed positions without ledger
+     rows, so the repair correctly refuses.'   -> test result: FAILED (expected)
+
+R2) Billing checkout gate deleted (if false && !Self::is_live_enabled()) with a key
+    present and no opt-in:
+    paddle_live_checkout_requires_live_billing_opt_in ... FAILED
+    stripe_live_checkout_requires_live_billing_opt_in ... FAILED
+    gates restored afterwards; both green again.
+
+R3) Absence-is-not-a-pass guards:
+    REQUIRE_POSTGRES=1 with POSTGRES_URL unset -> FAILED 'requires POSTGRES_URL'
+    REQUIRE_VAULT=1                            -> FAILED 'REQUIRE_VAULT=1 is set'
+    REQUIRE_STRIPE_MOCK=1                      -> FAILED 'REQUIRE_STRIPE_MOCK=1 is set'
+    (unset, each is NOT_RUN/SKIPPED and the suite stays green — a documented skip,
+     no longer an #[ignore] that hid the test entirely)
+
+## Quality gates
+cargo fmt --all: exit 0 ; git diff --check: exit 0 ;
+cargo clippy -p sniper-suite --all-targets -- -D warnings: clean
+
+## What is still genuinely blocked (unchanged, correctly fails closed)
+A real stripe-mock binary, a live Vault transit engine, live Stripe/Paddle
+accounts — all remain operator steps; the tests now run, report, and are forced
+to fail by REQUIRE_* flags instead of vanishing behind #[ignore].

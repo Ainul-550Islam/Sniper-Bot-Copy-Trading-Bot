@@ -475,15 +475,17 @@ async fn failed_simulation_never_broadcasts_and_marks_the_entry_failed() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn ambiguous_send_books_the_position_and_leaves_the_intent_pending() {
+async fn ambiguous_send_does_not_book_a_fill_and_leaves_the_intent_pending() {
     let mut w = World::new(live_config()).await;
+    let ledger_before = w.state.ledger().len().await;
+    let trades_before = w.state.trades(100).await.len();
     // The socket dies on send AND the node never shows the transaction:
     // the outcome is genuinely unknown for the whole confirmation window.
     w.node.set_send(SendBehaviour::Drop);
     w.node.confirm.store(false, Ordering::SeqCst);
     let o = w.sniper.consider_event(w.event(12)).await;
-    // SendUnknown: the transaction MAY have landed → position booked, stage
-    // stays SUBMITTED (never CONFIRMED), ledger parks the intent.
+    // SendUnknown: the transaction MAY have landed, but no fill is proven.
+    // Keep the intent pending without inventing accounting or a position.
     assert!(o.rejection.is_none(), "{:?}", o.rejection);
     assert_eq!(o.stage, SniperStage::Submitted);
     assert_eq!(o.timeline.confirmation_ms(), None);
@@ -492,9 +494,28 @@ async fn ambiguous_send_books_the_position_and_leaves_the_intent_pending() {
         .await
         .unwrap();
     assert!(rec.state.is_ambiguous(), "{:?}", rec.state);
-    let positions = w.state.open_positions_for(BotModule::Sniper).await;
-    assert_eq!(positions.len(), 1);
-    assert!(positions[0].entry_signature.is_some());
+    assert!(w
+        .state
+        .open_positions_for(BotModule::Sniper)
+        .await
+        .is_empty());
+    assert!(o.position_id.is_none());
+    assert_eq!(w.state.ledger().len().await, ledger_before);
+    assert_eq!(w.state.trades(100).await.len(), trades_before);
+    bot_core::execution::ledger()
+        .transition(
+            o.intent_id.as_deref().unwrap(),
+            ExecutionState::Confirmed,
+            None,
+        )
+        .await
+        .unwrap();
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    let sends = w.node.sends.load(Ordering::SeqCst);
+    let next = w.sniper.consider_event(w.event(99)).await;
+    assert_eq!(next.rejection.unwrap().reason, RejectReason::ExposureLimit);
+    assert_eq!(w.node.sends.load(Ordering::SeqCst), sends);
     // No failed-entry cooldown: ambiguous is not failed.
     assert!(w
         .state
@@ -503,12 +524,70 @@ async fn ambiguous_send_books_the_position_and_leaves_the_intent_pending() {
         .is_none());
 }
 
+#[tokio::test]
+async fn unbooked_entry_blocks_paper_to_live_during_preparation() {
+    let mut w = World::new(live_config()).await;
+    w.node.set_send(SendBehaviour::Drop);
+    w.node.confirm.store(false, Ordering::SeqCst);
+    let first = w.sniper.consider_event(w.event(231)).await;
+    assert_eq!(first.stage, SniperStage::Submitted);
+    bot_core::execution::ledger()
+        .transition(
+            first.intent_id.as_deref().unwrap(),
+            ExecutionState::Confirmed,
+            None,
+        )
+        .await
+        .unwrap();
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    w.state
+        .update_config(|c| c.execution.mode = bot_core::models::ExecutionMode::Paper)
+        .await;
+    let mint2 = Pubkey::new_unique();
+    install_pump_token(&w.node, mint2, w.creator, CurveSpec::fresh());
+    w.node.pause_multiple_accounts.store(true, Ordering::SeqCst);
+    let node = w.node.clone();
+    let state = w.state.clone();
+    let switch = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !node.multiple_accounts_paused.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("preparation barrier");
+        state
+            .update_config(|c| {
+                c.execution.mode = bot_core::models::ExecutionMode::Live;
+                c.execution.allow_live_trading = true;
+            })
+            .await;
+        node.resume_accounts();
+    });
+    let sends = w.node.sends.load(Ordering::SeqCst);
+    let outcome = w
+        .sniper
+        .consider_event(pump_event(mint2, w.creator, 232))
+        .await;
+    switch.await.unwrap();
+    assert_eq!(
+        w.node.sends.load(Ordering::SeqCst),
+        sends,
+        "unbooked exposure must prevent another live send"
+    );
+    assert_eq!(
+        outcome.rejection.unwrap().reason,
+        RejectReason::ExposureLimit
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 8. Confirmation timeout
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn confirmation_timeout_parks_the_entry_and_the_sweeper_holds_it() {
+async fn confirmation_timeout_parks_the_entry_without_booking_it() {
     let mut w = World::new(live_config()).await;
     w.node.confirm.store(false, Ordering::SeqCst);
     let o = w.sniper.consider_event(w.event(13)).await;
@@ -519,12 +598,400 @@ async fn confirmation_timeout_parks_the_entry_and_the_sweeper_holds_it() {
         .await
         .unwrap();
     assert_eq!(rec.state, ExecutionState::Pending);
-    // The exit sweeper must not sell an entry whose outcome is unknown.
+    // No estimated position or ledger fill exists for the sweeper to sell.
+    let sends = w.node.sends.load(Ordering::SeqCst);
     w.sniper.sweep_once().await.unwrap();
-    let p = &w.state.open_positions_for(BotModule::Sniper).await[0];
-    assert_eq!(p.status, PositionStatus::Open);
-    let text = bot_core::obs::metrics::global().encode();
-    assert!(text.contains("held_ambiguous"));
+    assert!(w
+        .state
+        .open_positions_for(BotModule::Sniper)
+        .await
+        .is_empty());
+    assert!(w.state.trades(100).await.is_empty());
+    assert_eq!(w.state.ledger().len().await, 0);
+    assert_eq!(w.node.sends.load(Ordering::SeqCst), sends);
+}
+
+#[tokio::test]
+async fn killed_after_ambiguous_live_sniper_entry_does_not_book() {
+    let mut w = World::new(live_config()).await;
+    w.node.set_send(SendBehaviour::Drop);
+    w.node.confirm.store(false, Ordering::SeqCst);
+    let node = w.node.clone();
+    let state = w.state.clone();
+    let trip = tokio::spawn(async move {
+        while node.sends.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        state.set_kill_switch(true, "after sniper entry send").await;
+    });
+    let outcome = w.sniper.consider_event(w.event(203)).await;
+    trip.await.unwrap();
+    assert_eq!(outcome.stage, SniperStage::Submitted);
+    assert!(outcome.position_id.is_none());
+    assert!(w.state.trades(10).await.is_empty());
+    assert_eq!(w.state.ledger().len().await, 0);
+    assert!(bot_core::execution::ledger()
+        .get(outcome.intent_id.as_deref().unwrap())
+        .await
+        .unwrap()
+        .state
+        .is_ambiguous());
+}
+
+#[tokio::test]
+async fn killed_after_ambiguous_live_sniper_exit_does_not_book() {
+    let mut w = World::new(live_config()).await;
+    let opened = w.sniper.consider_event(w.event(204)).await;
+    assert_eq!(
+        opened.stage,
+        SniperStage::Confirmed,
+        "{:?}",
+        opened.rejection
+    );
+    let position = w
+        .state
+        .position(opened.position_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    let trade_count = w.state.trades(10).await.len();
+    let ledger_count = w.state.ledger().len().await;
+    w.node.set_send(SendBehaviour::Drop);
+    w.node.confirm.store(false, Ordering::SeqCst);
+    let node = w.node.clone();
+    let state = w.state.clone();
+    let sends = node.sends.load(Ordering::SeqCst);
+    let trip = tokio::spawn(async move {
+        while node.sends.load(Ordering::SeqCst) == sends {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        state.set_kill_switch(true, "after sniper exit send").await;
+    });
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    let result = w
+        .sniper
+        .sell_position(&position, 1.0, "test", None, &mut permit)
+        .await;
+    trip.await.unwrap();
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous sniper exit"));
+    assert_eq!(
+        w.state.position(&position.id).await.unwrap().qty,
+        position.qty
+    );
+    assert_eq!(w.state.trades(10).await.len(), trade_count);
+    assert_eq!(w.state.ledger().len().await, ledger_count);
+}
+
+#[tokio::test]
+async fn confirmed_live_entry_keeps_attempt_mode_when_killed_after_send() {
+    let mut w = World::new(live_config()).await;
+    w.node.latency_ms.store(25, Ordering::SeqCst);
+    let node = w.node.clone();
+    let state = w.state.clone();
+    let trip = tokio::spawn(async move {
+        while node.sends.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        state.set_kill_switch(true, "after sniper entry send").await;
+    });
+    let outcome = w.sniper.consider_event(w.event(201)).await;
+    trip.await.unwrap();
+    assert_eq!(
+        outcome.stage,
+        SniperStage::Confirmed,
+        "{:?}",
+        outcome.rejection
+    );
+    assert_eq!(
+        w.state.trades(10).await[0].mode,
+        bot_core::models::ExecutionMode::Live
+    );
+    assert_eq!(
+        w.state.ledger().events().await[0].event.mode,
+        bot_core::models::ExecutionMode::Live
+    );
+}
+
+#[tokio::test]
+async fn confirmed_live_exit_keeps_attempt_mode_when_killed_after_send() {
+    let mut w = World::new(live_config()).await;
+    let opened = w.sniper.consider_event(w.event(202)).await;
+    assert_eq!(
+        opened.stage,
+        SniperStage::Confirmed,
+        "{:?}",
+        opened.rejection
+    );
+    let position = w
+        .state
+        .position(opened.position_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    w.node.latency_ms.store(25, Ordering::SeqCst);
+    let node = w.node.clone();
+    let state = w.state.clone();
+    let sends = node.sends.load(Ordering::SeqCst);
+    let trip = tokio::spawn(async move {
+        while node.sends.load(Ordering::SeqCst) == sends {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        state.set_kill_switch(true, "after sniper exit send").await;
+    });
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    w.sniper
+        .sell_position(&position, 1.0, "test", None, &mut permit)
+        .await
+        .unwrap();
+    trip.await.unwrap();
+    let trades = w.state.trades(10).await;
+    assert_eq!(trades.len(), 2);
+    assert!(trades
+        .iter()
+        .all(|trade| trade.mode == bot_core::models::ExecutionMode::Live));
+    assert!(w
+        .state
+        .ledger()
+        .events()
+        .await
+        .iter()
+        .all(|event| event.event.mode == bot_core::models::ExecutionMode::Live));
+}
+
+#[tokio::test]
+async fn ambiguous_live_exit_does_not_book_fill_or_allow_local_retry() {
+    let mut w = World::new(live_config()).await;
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    let opened = w.sniper.consider_event(w.event(15)).await;
+    assert_eq!(
+        opened.stage,
+        SniperStage::Confirmed,
+        "{:?}",
+        opened.rejection
+    );
+    let position = w
+        .state
+        .position(opened.position_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    let ledger_before = w.state.ledger().len().await;
+    let trades_before = w.state.trades(100).await.len();
+    w.node.set_send(SendBehaviour::Drop);
+    w.node.confirm.store(false, Ordering::SeqCst);
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    let result = w
+        .sniper
+        .sell_position(&position, 1.0, "test", None, &mut permit)
+        .await;
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous sniper exit"));
+    let after = w.state.position(&position.id).await.unwrap();
+    assert_eq!(after.qty, position.qty);
+    assert_eq!(after.status, position.status);
+    assert_eq!(w.state.ledger().len().await, ledger_before);
+    assert_eq!(w.state.trades(100).await.len(), trades_before);
+    let intent = module_sniper::exit::exit_intent_id_for(
+        &position,
+        bot_core::maths::to_raw_amount(position.qty, 6),
+        module_sniper::pipeline::EntryRoute::PumpCurve,
+    );
+    bot_core::execution::ledger()
+        .transition(&intent, ExecutionState::Confirmed, None)
+        .await
+        .unwrap();
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    let sends = w.node.sends.load(Ordering::SeqCst);
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    assert!(w
+        .sniper
+        .sell_position(&position, 0.5, "retry", None, &mut permit)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("unbooked ambiguous sniper exit"));
+    assert_eq!(w.node.sends.load(Ordering::SeqCst), sends);
+}
+
+#[tokio::test]
+async fn kill_switch_allows_protective_sniper_exit_when_latch_clear() {
+    let mut w = World::new(live_config()).await;
+    let opened = w.sniper.consider_event(w.event(216)).await;
+    assert_eq!(
+        opened.stage,
+        SniperStage::Confirmed,
+        "{:?}",
+        opened.rejection
+    );
+    let position = w
+        .state
+        .position(opened.position_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    w.state.set_kill_switch(true, "protective flatten").await;
+    let sends = w.node.sends.load(Ordering::SeqCst);
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    w.sniper
+        .sell_position(&position, 1.0, "flatten", None, &mut permit)
+        .await
+        .unwrap();
+    assert_eq!(w.node.sends.load(Ordering::SeqCst), sends + 1);
+    assert_eq!(
+        w.state.position(&position.id).await.unwrap().status,
+        PositionStatus::Closed
+    );
+}
+
+#[tokio::test]
+async fn kill_switch_cannot_bypass_unbooked_live_exit_latch() {
+    let mut w = World::new(live_config()).await;
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    let opened = w.sniper.consider_event(w.event(15)).await;
+    assert_eq!(
+        opened.stage,
+        SniperStage::Confirmed,
+        "{:?}",
+        opened.rejection
+    );
+    let position = w
+        .state
+        .position(opened.position_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    let ledger_before = w.state.ledger().len().await;
+    let trades_before = w.state.trades(100).await.len();
+    w.node.set_send(SendBehaviour::Drop);
+    w.node.confirm.store(false, Ordering::SeqCst);
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    let result = w
+        .sniper
+        .sell_position(&position, 1.0, "test", None, &mut permit)
+        .await;
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous sniper exit"));
+    let after = w.state.position(&position.id).await.unwrap();
+    assert_eq!(after.qty, position.qty);
+    assert_eq!(after.status, position.status);
+    assert_eq!(w.state.ledger().len().await, ledger_before);
+    assert_eq!(w.state.trades(100).await.len(), trades_before);
+    let intent = module_sniper::exit::exit_intent_id_for(
+        &position,
+        bot_core::maths::to_raw_amount(position.qty, 6),
+        module_sniper::pipeline::EntryRoute::PumpCurve,
+    );
+    bot_core::execution::ledger()
+        .transition(&intent, ExecutionState::Confirmed, None)
+        .await
+        .unwrap();
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    w.state.set_kill_switch(true, "protective flatten").await;
+    let sends = w.node.sends.load(Ordering::SeqCst);
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    let retry = w
+        .sniper
+        .sell_position(&position, 0.5, "retry", None, &mut permit)
+        .await;
+    assert_eq!(
+        w.node.sends.load(Ordering::SeqCst),
+        sends,
+        "unbooked exit must block kill-switch retry"
+    );
+    assert!(retry
+        .unwrap_err()
+        .to_string()
+        .contains("unbooked ambiguous sniper exit"));
+}
+
+#[tokio::test]
+async fn unbooked_exit_blocks_paper_to_live_during_route_preparation() {
+    let mut w = World::new(live_config()).await;
+    let opened = w.sniper.consider_event(w.event(217)).await;
+    assert_eq!(
+        opened.stage,
+        SniperStage::Confirmed,
+        "{:?}",
+        opened.rejection
+    );
+    let position = w
+        .state
+        .position(opened.position_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    w.node.set_send(SendBehaviour::Drop);
+    w.node.confirm.store(false, Ordering::SeqCst);
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    assert!(w
+        .sniper
+        .sell_position(&position, 1.0, "test", None, &mut permit)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous sniper exit"));
+    let intent = module_sniper::exit::exit_intent_id_for(
+        &position,
+        bot_core::maths::to_raw_amount(position.qty, 6),
+        module_sniper::pipeline::EntryRoute::PumpCurve,
+    );
+    bot_core::execution::ledger()
+        .transition(&intent, ExecutionState::Confirmed, None)
+        .await
+        .unwrap();
+    w.node.set_send(SendBehaviour::Accept);
+    w.node.confirm.store(true, Ordering::SeqCst);
+    w.state
+        .update_config(|c| c.execution.mode = bot_core::models::ExecutionMode::Paper)
+        .await;
+    // Refresh the same executor to Paper using a separate paper entry.
+    let mint2 = Pubkey::new_unique();
+    install_pump_token(&w.node, mint2, w.creator, CurveSpec::fresh());
+    let paper = w
+        .sniper
+        .consider_event(pump_event(mint2, w.creator, 218))
+        .await;
+    assert_eq!(paper.stage, SniperStage::Confirmed, "{:?}", paper.rejection);
+    w.node.pause_multiple_accounts.store(true, Ordering::SeqCst);
+    let node = w.node.clone();
+    let state = w.state.clone();
+    let change = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !node.multiple_accounts_paused.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("exit route barrier");
+        state
+            .update_config(|c| {
+                c.execution.mode = bot_core::models::ExecutionMode::Live;
+                c.execution.allow_live_trading = true;
+            })
+            .await;
+        node.resume_accounts();
+    });
+    let sends = w.node.sends.load(Ordering::SeqCst);
+    let mut permit = bot_core::ownership::Permit::Unmanaged;
+    let retry = w
+        .sniper
+        .sell_position(&position, 0.5, "retry", None, &mut permit)
+        .await;
+    change.await.unwrap();
+    assert_eq!(
+        w.node.sends.load(Ordering::SeqCst),
+        sends,
+        "unbooked exit must block live upgrade"
+    );
+    assert!(retry
+        .unwrap_err()
+        .to_string()
+        .contains("unbooked ambiguous sniper exit"));
 }
 
 // ---------------------------------------------------------------------------

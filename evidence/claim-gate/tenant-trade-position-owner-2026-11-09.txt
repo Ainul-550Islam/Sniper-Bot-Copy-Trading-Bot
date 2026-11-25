@@ -1,0 +1,44 @@
+Tenant trade position ownership, 2026-11-09.
+Real PostgreSQL: before change tenant B trade referencing tenant A position was accepted; expected tenant-safe NotFound, regression failed. Change uses one statement with tenant-scoped position existence predicate and INSERT; foreign and missing return NotFound, null remains allowed, owned links pass. 8/8 position/trade suite tests pass. No direct SQL/global TradeRepo enforcement, historical repair, concurrent ownership reassignment test or live runtime proof. ON CONFLICT(id) DO NOTHING still silently accepts duplicate trade IDs, including foreign-tenant collisions; UUID producer change reduces new accidental collisions but does not eliminate this repository limitation.
+--- before ---
+    Finished `test` profile [unoptimized] target(s) in 0.98s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-f14adad0c49ec3b9)
+
+running 1 test
+test tenant_trade_rejects_foreign_or_missing_position ... FAILED
+
+failures:
+
+---- tenant_trade_rejects_foreign_or_missing_position stdout ----
+
+thread 'tenant_trade_rejects_foreign_or_missing_position' (468461) panicked at crates/core/tests/positions_cross_tenant_pg.rs:806:5:
+assertion failed: matches!(trades.append(&write_scope(b), &trade).await,
+    Err(RepositoryError::NotFound("position")))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tenant_trade_rejects_foreign_or_missing_position
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p bot-core --test positions_cross_tenant_pg`
+EXIT=101
+--- after ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 13.37s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-f14adad0c49ec3b9)
+
+running 8 tests
+test colliding_legacy_position_ids_can_mix_distinct_positions ... ok
+test cross_tenant_position_id_collision_cannot_mutate ... ok
+test daily_risk_pnl_excludes_future_utc_days ... ok
+test independent_states_persist_distinct_position_ids ... ok
+test polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fills ... ok
+test positions_trades_balances_isolation_and_pnl_exclusion ... ok
+test risk_exposure_fails_closed_when_positions_use_an_unexpected_quote_unit ... ok
+test tenant_trade_rejects_foreign_or_missing_position ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+EXIT=0

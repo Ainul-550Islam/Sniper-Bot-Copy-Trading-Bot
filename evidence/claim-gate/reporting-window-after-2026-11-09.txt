@@ -1,0 +1,22 @@
+=== GREEN: reporting windows are validated, never silently replaced (gap #81) ===
+
+-- executions window unit tests (4) --
+test trading_data_plane::executions::tests::a_malformed_timestamp_is_refused_and_never_replaced_by_a_default ... ok
+test trading_data_plane::executions::tests::a_reversed_impossible_or_oversized_window_is_refused ... ok
+test trading_data_plane::executions::tests::a_valid_window_is_returned_exactly_and_defaults_only_when_absent ... ok
+test trading_data_plane::executions::tests::the_refusal_reason_is_machine_readable ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 999 filtered out; finished in 0.03s
+
+-- server lib (all unit tests, --test-threads=1: the billing tests mutate LIVE_BILLING) --
+test result: ok. 1000 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 119.47s
+
+-- OpenAPI + router conformance --
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
+
+-- clippy -D warnings (sniper-suite, all targets) --
+    Finished `dev` profile [unoptimized] target(s) in 0.62s
+
+-- fmt --
+fmt_exit=0
+diff_check_exit=0

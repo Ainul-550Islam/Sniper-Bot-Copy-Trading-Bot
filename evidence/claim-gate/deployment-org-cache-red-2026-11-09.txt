@@ -1,0 +1,7 @@
+=== RED: deployment-org cache shared by the whole process ===
+-- injection: the cache key is a constant, not the database identity --
+   --> crates/core/tests/deployment_org_cache_pg.rs:183:5
+   --> crates/core/tests/deployment_org_cache_pg.rs:184:5
+thread 'two_databases_in_one_process_never_share_a_deployment_organization' (782971) panicked at crates/core/tests/deployment_org_cache_pg.rs:132:5:
+assertion `left == right` failed: the cached value is B's OWN deployment organization
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s

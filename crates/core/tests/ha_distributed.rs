@@ -385,14 +385,26 @@ async fn feed_cursor_recovery_gap_detection_and_replay() {
             a.ha().offer(FeedId::PolymarketUser, "", pos, None).await,
             CursorAdvance::Advanced
         );
+        // The work for this event completed: the advance is acknowledged and
+        // can no longer be re-delivered.
+        assert!(
+            a.ha()
+                .acknowledge(FeedId::PolymarketUser, "", Some(pos), None)
+                .await
+        );
     }
-    // Duplicate suppression.
+    // Duplicate suppression over ACKNOWLEDGED positions.
     assert_eq!(
         a.ha().offer(FeedId::PolymarketUser, "", 2, None).await,
         CursorAdvance::Duplicate
     );
     // Gap: 4 and 5 missing — reported, never silently skipped.
     let adv = a.ha().offer(FeedId::PolymarketUser, "", 6, None).await;
+    assert!(
+        a.ha()
+            .acknowledge(FeedId::PolymarketUser, "", Some(6), None)
+            .await
+    );
     match adv {
         CursorAdvance::Gap(ref g) => {
             assert_eq!((g.from_position, g.to_position), (4, 5));
@@ -417,6 +429,35 @@ async fn feed_cursor_recovery_gap_detection_and_replay() {
     assert_eq!(
         b.ha().offer(FeedId::PolymarketUser, "", 7, None).await,
         CursorAdvance::Advanced
+    );
+
+    // Crash BETWEEN the advance and the side effect: 7 is written as
+    // pending and never acknowledged, so a third worker replays 7 instead of
+    // skipping it (the pre-fix code would have resumed after 7 and lost it).
+    assert_eq!(
+        b.ha().offer(FeedId::PolymarketUser, "", 7, None).await,
+        CursorAdvance::Advanced
+    );
+    let pending = store.pending_cursors(10).await.unwrap();
+    assert_eq!(pending.len(), 1, "the unacknowledged advance is listed");
+    assert_eq!(pending[0].position, Some(7));
+    let c = worker("w-c", store.clone(), vec![]).await;
+    make_ready(&c).await;
+    assert_eq!(
+        c.ha().offer(FeedId::PolymarketUser, "", 7, None).await,
+        CursorAdvance::Advanced,
+        "an unacknowledged advance is re-delivered, never skipped"
+    );
+    assert!(
+        c.ha()
+            .acknowledge(FeedId::PolymarketUser, "", Some(7), None)
+            .await
+    );
+    assert!(store.pending_cursors(10).await.unwrap().is_empty());
+    // Acknowledged positions stay suppressed after the takeover.
+    assert_eq!(
+        c.ha().offer(FeedId::PolymarketUser, "", 7, None).await,
+        CursorAdvance::Duplicate
     );
 
     // Deliberate replay / backfill of the gap, then resolve it.
@@ -445,11 +486,17 @@ async fn feed_cursor_recovery_gap_detection_and_replay() {
             .await,
         CursorAdvance::Advanced
     );
+    assert!(
+        b.ha()
+            .acknowledge(FeedId::CopyLogs, "leader-1", None, Some("sig-a"))
+            .await
+    );
     assert_eq!(
         b.ha()
             .offer_token(FeedId::CopyLogs, "leader-1", "sig-a", None)
             .await,
-        CursorAdvance::Duplicate
+        CursorAdvance::Duplicate,
+        "an acknowledged head is not processed again"
     );
     assert_eq!(
         b.ha()
@@ -940,12 +987,24 @@ async fn feed_wiring_shapes_survive_a_restart() {
                 .await,
             CursorAdvance::Advanced
         );
+        assert!(
+            life1
+                .ha()
+                .acknowledge(FeedId::CopyLogs, "leader-A", None, Some(sig))
+                .await
+        );
     }
     // A second wallet keeps its own position.
     life1
         .ha()
         .offer_token(FeedId::CopyLogs, "leader-B", "sig-9", None)
         .await;
+    assert!(
+        life1
+            .ha()
+            .acknowledge(FeedId::CopyLogs, "leader-B", None, Some("sig-9"))
+            .await
+    );
 
     // Restart: the new life resumes from the durable token instead of
     // re-seeding with "newest signature now" (which would skip everything

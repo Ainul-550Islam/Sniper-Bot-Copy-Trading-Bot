@@ -611,7 +611,14 @@ impl ExecutionLedger {
                     existing.state = ExecutionState::Created;
                     existing.failure = None;
                     existing.error = None;
-                    existing.signature = None;
+                    if let Some(old_signature) = existing.signature.take() {
+                        let mut by_signature = self.by_signature.write().await;
+                        if by_signature.get(&old_signature).map(String::as_str)
+                            == Some(existing.intent_id.as_str())
+                        {
+                            by_signature.remove(&old_signature);
+                        }
+                    }
                     existing.blockhash = None;
                     existing.last_valid_block_height = None;
                     existing.updated_at = Utc::now();
@@ -692,19 +699,21 @@ impl ExecutionLedger {
             let rec = records
                 .get_mut(intent_id)
                 .ok_or_else(|| BotError::NotFound(format!("execution intent {intent_id}")))?;
-            rec.signature = Some(signature.to_string());
+            let mut by_signature = self.by_signature.write().await;
+            if let Some(old_signature) = rec.signature.replace(signature.to_string()) {
+                if by_signature.get(&old_signature).map(String::as_str) == Some(intent_id) {
+                    by_signature.remove(&old_signature);
+                }
+            }
+            if !signature.is_empty() {
+                by_signature.insert(signature.to_string(), intent_id.to_string());
+            }
             rec.blockhash = blockhash;
             rec.last_valid_block_height = last_valid_block_height;
             rec.priority_fee_micro_lamports = priority_fee_micro_lamports;
             rec.updated_at = Utc::now();
             rec.clone()
         };
-        if !signature.is_empty() {
-            self.by_signature
-                .write()
-                .await
-                .insert(signature.to_string(), intent_id.to_string());
-        }
         Ok(snapshot)
     }
 
@@ -724,7 +733,7 @@ impl ExecutionLedger {
         to: ExecutionState,
         reason: Option<&str>,
     ) -> BotResult<ExecutionRecord> {
-        self.apply(intent_id, to, None, reason).await
+        self.apply(intent_id, to, None, reason, None).await
     }
 
     /// Record a failure: sets the class + error and moves to the class's
@@ -757,7 +766,7 @@ impl ExecutionLedger {
             }
             return Err(BotError::NotFound(format!("execution intent {intent_id}")));
         }
-        self.apply(intent_id, target, Some((class, error)), Some(error))
+        self.apply(intent_id, target, Some((class, error)), Some(error), None)
             .await
     }
 
@@ -772,6 +781,9 @@ impl ExecutionLedger {
     ) -> Option<ExecutionRecord> {
         let intent_id = self.by_signature.read().await.get(signature).cloned()?;
         let current = self.get(&intent_id).await?;
+        if current.signature.as_deref() != Some(signature) {
+            return None;
+        }
         if current.state.is_terminal() {
             return Some(current);
         }
@@ -786,6 +798,7 @@ impl ExecutionLedger {
                 ExecutionState::Reconciled,
                 failure,
                 Some(detail),
+                Some(signature),
             )
             .await
         {
@@ -805,12 +818,20 @@ impl ExecutionLedger {
         to: ExecutionState,
         failure: Option<(FailureClass, &str)>,
         reason: Option<&str>,
+        expected_signature: Option<&str>,
     ) -> BotResult<ExecutionRecord> {
         let (snapshot, transition, dwell_ms, from) = {
             let mut records = self.records.write().await;
             let rec = records
                 .get_mut(intent_id)
                 .ok_or_else(|| BotError::NotFound(format!("execution intent {intent_id}")))?;
+            // A reconciliation lookup may race a re-arm. Check the current
+            // attempt while holding the same lock as the state mutation.
+            if expected_signature.is_some() && rec.signature.as_deref() != expected_signature {
+                return Err(BotError::invalid(
+                    "reconciliation signature no longer current",
+                ));
+            }
             if !rec.state.can_transition_to(to) {
                 return Err(BotError::invalid(format!(
                     "illegal execution transition {} -> {} for {intent_id}",
@@ -905,7 +926,9 @@ impl ExecutionLedger {
             let evicted = fifo.remove(pos).expect("pos came from the same deque");
             if let Some(rec) = records.remove(&evicted) {
                 if let Some(sig) = rec.signature {
-                    by_sig.remove(&sig);
+                    if by_sig.get(&sig).map(String::as_str) == Some(evicted.as_str()) {
+                        by_sig.remove(&sig);
+                    }
                 }
             }
         }
@@ -1267,6 +1290,63 @@ mod tests {
         assert_eq!(*sink.last.lock().unwrap(), Some(ExecutionState::Reconciled));
         assert!(ledger.get_by_signature("SIG1").await.is_some());
         assert!(ledger.reconcile_signature("nope", true, "").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_checks_signature_atomically_at_mutation() {
+        let ledger = ExecutionLedger::new(64);
+        ledger.begin(intent("race")).await.unwrap();
+        ledger
+            .transition("race", ExecutionState::Validated, None)
+            .await
+            .unwrap();
+        ledger
+            .attach_submission("race", "old", None, None, 0)
+            .await
+            .unwrap();
+        ledger
+            .transition("race", ExecutionState::Submitted, None)
+            .await
+            .unwrap();
+        // Model a reconciliation lookup that found "old" just before the
+        // old attempt expires and a replacement takes its place.
+        let looked_up = ledger
+            .by_signature
+            .read()
+            .await
+            .get("old")
+            .cloned()
+            .unwrap();
+        ledger
+            .fail("race", FailureClass::BlockhashExpired, "expired")
+            .await
+            .unwrap();
+        ledger.begin(intent("race")).await.unwrap();
+        ledger
+            .transition("race", ExecutionState::Validated, None)
+            .await
+            .unwrap();
+        ledger
+            .attach_submission("race", "new", None, None, 0)
+            .await
+            .unwrap();
+        ledger
+            .transition("race", ExecutionState::Submitted, None)
+            .await
+            .unwrap();
+        assert!(ledger
+            .apply(
+                &looked_up,
+                ExecutionState::Reconciled,
+                None,
+                Some("old verdict"),
+                Some("old")
+            )
+            .await
+            .is_err());
+        let record = ledger.get("race").await.unwrap();
+        assert_eq!(record.state, ExecutionState::Submitted);
+        assert_eq!(record.signature.as_deref(), Some("new"));
     }
 
     #[tokio::test]

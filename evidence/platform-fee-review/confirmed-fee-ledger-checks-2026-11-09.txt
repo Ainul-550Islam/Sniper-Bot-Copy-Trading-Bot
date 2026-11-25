@@ -1,0 +1,143 @@
+=== module-copy lib + integration ===
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 8.95s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-c09a4392293a7fa9)
+
+running 79 tests
+test audit::tests::sanitize_collapses_whitespace_and_empty ... ok
+test event::tests::age_uses_chain_time_when_present ... ok
+test event::tests::risk_codes_map_onto_pipeline_reasons ... ok
+test event::tests::event_id_is_deterministic_and_side_sensitive ... ok
+test event::tests::round_trips_to_wallet_trade ... ok
+test event::tests::source_mapping_and_execution_gate ... ok
+test event::tests::stage_and_reason_labels_are_unique_and_terminal_flags_hold ... ok
+test event::tests::validation_names_each_defect ... ok
+test event_dedup::tests::one_trade_maps_to_one_executor_intent ... ok
+test event_dedup::tests::pipeline_namespace_is_independent_of_feed_signature_marks ... ok
+test event_dedup::tests::claim_is_fresh_once_then_duplicate ... ok
+test event_dedup::tests::seed_marks_journaled_keys ... ok
+test event_ordering::tests::advisory_mode_processes_late_events_but_counts_them ... ok
+test event_ordering::tests::leaders_have_independent_cursors ... ok
+test event_ordering::tests::seed_only_raises_the_mark ... ok
+test event_dedup::tests::process_local_dedup_lets_both_replicas_through ... ok
+test event_ordering::tests::sequence_gaps_are_per_source_and_never_reject ... ok
+test event_ordering::tests::strict_mode_rejects_out_of_order_only ... ok
+test feeds::feed_health_tests::idle_feed_reports_idle_and_not_degraded ... ok
+test feeds::feed_health_tests::recv_records_event_time_and_chain_lag ... ok
+test feeds::tests::decoded_non_sol_quote_has_zero_sol_amount ... ok
+test feeds::tests::decoded_raydium_cpmm_and_launchlab_keep_their_precise_venues ... ok
+test feeds::tests::decoded_sol_quote_converts_lamports ... ok
+test feeds::tests::null_fetch_allows_retry_and_other_wallet ... ok
+test feeds::feed_health_tests::finished_tasks_mark_feed_degraded_and_recv_sets_last_event ... ok
+test feeds::tests::poll_batch_paginates_to_saved_cursor_without_skipping_full_page ... ok
+test feeds::tests::poll_batch_rejects_malformed_signature_in_full_page ... ok
+test feeds::tests::poll_batch_repeated_provider_page_is_rejected ... ok
+test feeds::tests::poll_requests_newer_transactions_using_until_cursor ... ok
+test feeds::tests::poll_retries_null_fetch_without_advancing_cursor ... ok
+test feeds::tests::pumpportal_buy_maps_to_long_on_the_curve ... ok
+test feeds::tests::pumpportal_sell_on_amm_maps_to_short_pumpswap ... ok
+test intent::tests::exit_ids_are_deterministic_per_decision_and_unique_per_position_lifetime ... ok
+test intent::tests::intent_ids_are_deterministic_and_route_specific ... ok
+test intent::tests::labels_follow_the_legacy_scheme ... ok
+test leader::tests::config_sync_adds_updates_pauses_and_removes ... ok
+test leader::tests::counters_and_restore_take_the_larger_view ... ok
+test leader::tests::empty_address_is_refused ... ok
+test leader::tests::follow_pause_resume_unfollow_refollow ... ok
+test leader::tests::history_is_bounded ... ok
+test leader::tests::snapshot_describes_sizing ... ok
+test metrics::tests::counters_register_under_copy_prefix ... ok
+test metrics::tests::timeline_intervals_are_monotone_and_total_matches ... ok
+test mirror::tests::fixed_size_wins_over_fraction ... ok
+test mirror::tests::fraction_is_capped_by_max_sol ... ok
+test mirror::tests::fraction_without_cap ... ok
+test mirror::tests::journal_record_carries_outcome_fields ... ok
+test platform_fee::tests::verified_fee_is_exact_balanced_and_idempotent_per_signature ... ok
+test policy::tests::buy_precedence_first_failing_rule_wins ... ok
+test policy::tests::sell_rules_and_exit_fraction ... ok
+test policy::tests::venue_flags_map_to_decoders ... ok
+test reconcile::tests::ambiguous_exit_without_position_identity_disables_auto_exit ... ok
+test reconcile::tests::clean_book_has_no_findings ... ok
+test reconcile::tests::leader_exit_is_flagged_or_mirrored ... ok
+test reconcile::tests::link_and_quantity_drift ... ok
+test reconcile::tests::orphans_and_ambiguous_entries ... ok
+test reconcile::tests::unresolved_exit_disables_reconciliation_auto_sell ... ok
+test recovery::tests::empty_inputs_make_an_empty_plan ... ok
+test recovery::tests::entry_fate_classification ... ok
+test recovery::tests::journal_seeds_dedup_and_cursors ... ok
+test recovery::tests::links_are_restored_and_closed_against_the_book ... ok
+test recovery::tests::live_ledger_entries_are_held_and_failed_ones_cleaned ... ok
+test recovery::tests::memory_store_semantics_match_the_repo_contract ... ok
+test recovery::tests::poisoned_memory_store_remains_usable ... ok
+test recovery::tests::settled_ambiguous_events_without_booked_fills_need_review ... ok
+test sizing::tests::global_caps_apply_after_the_rule ... ok
+test sizing::tests::matches_legacy_size_for_arithmetic ... ok
+test sizing::tests::rejects_bad_inputs_and_dust ... ok
+test tenant_context::tests::a_copy_context_adapts_and_a_sniper_context_is_refused ... ok
+test tenant_context::tests::stale_runtime_fails_reverification ... ok
+test tenant_context::tests::the_same_external_leader_is_independent_per_tenant ... ok
+test tenant_executor::tests::a_sniper_context_cannot_drive_a_copy_executor ... ok
+test tenant_executor::tests::position_update_events_are_projected_for_background_copy_exits ... ok
+test tenant_executor::tests::the_authorization_chain_is_exhaustive ... ok
+test tenant_state::tests::counters_track_the_full_outcome_set ... ok
+test tenant_state::tests::duplicate_events_are_suppressed_within_a_tenant ... ok
+test feeds::tests::poll_batch_page_cap_reports_incomplete_without_returning_a_partial_batch ... ok
+test tenant_state::tests::two_tenants_never_share_dedup_or_counters ... ok
+test tenant_state::tests::the_dedup_window_is_fifo_bounded ... ok
+
+test result: ok. 79 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+module_copy_lib_exit=0
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 8.66s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-85ff6589a8b0fe0c)
+
+running 12 tests
+test buy_and_sell_prepare_atomic_sol_transfer_and_audit ... ok
+test built_signed_transaction_contains_fee_transfer_for_buy_and_sell ... ok
+test confirmed_curve_buy_and_sell_audit_verified_fee_leg ... ok
+test curve_pipeline_refuses_self_vault_before_buy_or_sell_broadcast ... ok
+test direct_fee_rejects_payer_as_vault_and_audits_the_reason ... ok
+test direct_verification_never_claims_unconfirmed_or_missing_transaction ... ok
+test dust_and_disabled_are_audited_without_instruction ... ok
+test invalid_jupiter_account_is_audited_as_rejected_for_each_actor ... ok
+test invalid_vault_cannot_silently_drop_a_due_fee ... ok
+test jupiter_fee_account_must_be_initialized_wsol_token_account ... ok
+test real_copy_curve_pipeline_builds_fee_leg_for_buy_and_sell_on_mock_rpc ... ok
+test curve_pipeline_skips_disabled_and_dust_fees_without_fee_transfer ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+copy_platform_fee_exit=0
+=== core accounting ledger ===
+    Finished `test` profile [unoptimized] target(s) in 0.36s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 18 tests
+test accounting::ledger::tests::arithmetic_overflow_is_rejected_before_it_corrupts_the_book ... ok
+test accounting::ledger::tests::conflict_discovered_during_submission_refuses_that_submission ... ok
+test accounting::ledger::tests::detected_pending_conflict_blocks_further_local_booking ... ok
+test accounting::ledger::tests::concurrent_identical_events_yield_one_mutation ... ok
+test accounting::ledger::tests::direct_durable_payload_conflict_latches_the_local_fence ... ok
+test accounting::ledger::tests::hydrate_reports_rows_whose_durable_id_does_not_match_the_event ... ok
+test accounting::ledger::tests::hydrate_rejects_same_event_id_with_changed_economics ... ok
+test accounting::ledger::tests::local_retry_rejects_changed_economics_without_double_booking ... ok
+test accounting::ledger::tests::malformed_events_change_nothing ... ok
+test accounting::ledger::tests::journal_that_already_holds_the_fact_makes_it_a_duplicate ... ok
+test accounting::ledger::tests::pending_conflict_with_other_replica_stays_unresolved ... ok
+test accounting::ledger::tests::realized_series_overflow_is_rejected_before_journaling ... ok
+test accounting::ledger::tests::realized_series_tracks_day_totals_and_peak ... ok
+test accounting::ledger::tests::recovery_replays_append_order_not_out_of_order_fact_timestamps ... ok
+test accounting::ledger::tests::pending_journal_events_cannot_be_overtaken_by_new_submissions ... ok
+test accounting::ledger::tests::standalone_fee_quote_amount_counts_as_realized_loss ... ok
+test accounting::ledger::tests::unavailable_journal_parks_the_event_and_flushes_later ... ok
+test accounting::ledger::tests::the_same_fact_is_booked_exactly_once ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 676 filtered out; finished in 0.15s
+
+core_ledger_exit=0
+=== clippy + fmt ===
+    Checking module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `dev` profile [unoptimized] target(s) in 19.55s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

@@ -1,0 +1,8 @@
+    Checking bot-core v0.1.0 (/home/user/repo/crates/core)
+    Checking solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Checking module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Checking module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Checking module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 7m 18s

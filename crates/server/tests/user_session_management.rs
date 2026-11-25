@@ -32,6 +32,7 @@ fn state_with(saas: Arc<SaasStore>) -> ApiState {
         trusted_proxies: Default::default(),
         db: None::<Arc<Database>>,
         journal: None,
+        chain_probe: None,
         serve_dashboard: false,
         health: Arc::new(HealthRegistry::new()),
         metrics_enabled: false,

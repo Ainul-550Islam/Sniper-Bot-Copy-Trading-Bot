@@ -875,7 +875,7 @@ impl RiskEngine {
         //     Only an accept reaches the remaining module checks below.
         let reservation = match self.global_gate(req).await {
             Ok(reservation) => reservation,
-            Err(rejected) => return rejected,
+            Err(rejected) => return *rejected,
         };
 
         // 3. Slippage cap --------------------------------------------------
@@ -1176,7 +1176,7 @@ impl RiskEngine {
     async fn global_gate(
         &self,
         req: &EntryRequest,
-    ) -> Result<Option<crate::global_risk::GlobalRiskReservation>, RiskDecision> {
+    ) -> Result<Option<crate::global_risk::GlobalRiskReservation>, Box<RiskDecision>> {
         let global = self.state.global_risk();
         let request = req.global_request(&self.state).await;
         let ctx = crate::global_risk::DecisionContext {
@@ -1196,11 +1196,11 @@ impl RiskEngine {
         let reason = decision
             .reason
             .unwrap_or(crate::global_risk::GlobalRejectReason::InvalidRequest);
-        Err(RiskDecision::reject(
+        Err(Box::new(RiskDecision::reject(
             RiskCode::from_global(reason),
             req.requested_quote,
             format!("global risk [{}]: {}", reason, decision.detail),
-        ))
+        )))
     }
 
     /// Sniper-only throttles (step 6b of [`RiskEngine::check_entry`]).

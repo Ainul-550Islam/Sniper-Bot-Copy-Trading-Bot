@@ -1,0 +1,16 @@
+=== RED: a landed transaction is treated as settled regardless of depth ===
+-- injected: settled_allowed = true for every landing; finality always DeeplyConfirmed --
+test a_landing_ahead_of_the_reported_head_is_not_settleable ... FAILED
+test a_shallow_landing_is_linkable_but_never_settleable ... FAILED
+test an_unknown_head_leaves_the_landing_unsettled ... FAILED
+thread 'a_landing_ahead_of_the_reported_head_is_not_settleable' (3692319) panicked at crates/server/tests/reservation_chain_check.rs:263:5:
+assertion `left == right` failed
+  left: DeeplyConfirmed
+ right: Unfinalized
+thread 'a_shallow_landing_is_linkable_but_never_settleable' (3692321) panicked at crates/server/tests/reservation_chain_check.rs:209:5:
+assertion `left == right` failed
+  left: DeeplyConfirmed
+ right: Unfinalized
+thread 'an_unknown_head_leaves_the_landing_unsettled' (3692328) panicked at crates/server/tests/reservation_chain_check.rs:248:5:
+assertion `left == right` failed
+  left: DeeplyConfirmed

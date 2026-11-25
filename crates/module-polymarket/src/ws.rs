@@ -403,11 +403,30 @@ pub async fn run_user_feed(
                                             )
                                             .await;
                                         if !advance.should_process() {
+                                            // Duplicate, or the durable
+                                            // advance was refused (another
+                                            // replica owns the feed): do not
+                                            // process, do not acknowledge.
                                             continue;
                                         }
                                         if tx.send(ev).await.is_err() {
                                             return Ok(());
                                         }
+                                        // The delivery reached the consumer:
+                                        // acknowledge the durable advance so a
+                                        // restart does not replay it. If this
+                                        // acknowledgement is lost (crash right
+                                        // here) the event is re-delivered —
+                                        // at-least-once, never lost.
+                                        let _ = state
+                                            .ha()
+                                            .acknowledge(
+                                                bot_core::ha::FeedId::PolymarketUser,
+                                                "",
+                                                Some(delivery_seq),
+                                                None,
+                                            )
+                                            .await;
                                     }
                                 }
                                 Some(Ok(Message::Ping(p))) => {

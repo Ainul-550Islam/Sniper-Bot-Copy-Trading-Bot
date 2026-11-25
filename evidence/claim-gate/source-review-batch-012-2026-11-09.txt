@@ -1,0 +1,13 @@
+Source review batch 012, 2026-11-09. Whole file versions examined; hashes:
+0dfc929df1445f3bbe0d994bb9d59a989ebe5f61cc9d5c039c981eead78c300d  crates/core/src/ha/mod.rs
+8a28bf523f064af1c302075bb5fa2b80ad7484c441bbd0763cf05550da13a389  crates/core/src/ha/lease.rs
+76618faa761440e7f2a60859ff99d220af9755ecaf82d5b2216ba917baff3daa  crates/core/src/ha/store.rs
+c3e95881b875cee68c2913e358f90bf9c011872d1a495fa05068fcf8f5c40dad  crates/core/src/ha/cursor.rs
+c143b0961fdfc335820edd8a0e6d7d70fcd1c0cf2c106bbaea464214bd9371a5  crates/core/src/ha/worker.rs
+ab7e35f5a1341e4564b7ac6f0e910d6a9c49b394aea6167b15526219fb388708  crates/core/src/ha/recovery_plan.rs
+de7cea0cfd77276bab7759bebf46b930889fab8d11ace7132f76b76415e48939  crates/core/src/ha/runtime.rs
+79aa7b6883513e8cc73e296ed52af7da6267aff74e83b1bbf233836001934b41  crates/core/src/ha/audit.rs
+448068886374160c989038465fdf438ec096f14eb442329afa657910b1904132  crates/core/src/ha/metrics.rs
+fd760d6a6bee75ea0768c6beeb3ffbb017ef7fa16ca79997c1a8f0113479c89b  crates/server/src/ha.rs
+
+Source observations (not production-incident proof): HaRuntime::offer/offer_token persists the advanced cursor before returning to caller for processing; a failure/crash before side effect can cause restart suppression. save/load failures are swallowed; separate offer calls clone and persist without per-key lock, potentially losing updates. shutdown saves cached cursors without ownership fencing; stale runtime can overwrite later state (see db/ha upsert). LeaseGuard fence is a separate check before job, not an atomic transaction fencing external mutations; slow jobs may run past expiry and renew runs in same tick loop, so no continuous exclusive execution guarantee. A stale guard renew/fence/release can remove the local cached newer guard by role key; concurrent acquisition/check race also can remove newer cache. readiness() itself checks cached membership, refresh_readiness verifies separately. These need deterministic witnesses and wiring review. HA recovery record list caps 5000; register_and_recover logs record actions rather than executing full recovery plan, ignores record errors and cursor read failures and returns Ready; inspect startup wiring before assessing effect.

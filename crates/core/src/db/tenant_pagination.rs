@@ -7,7 +7,8 @@
 //!    can never be replayed against tenant B's request
 //!    ([`TenantPageCursor::require_same_tenant`]).
 //! 2. The page result exposes the NEXT cursor only — a client can walk
-//!    forward inside one tenant, never sideways into another.
+//!    forward inside one tenant when caller validation is used; the cursor
+//!    is unsigned and its tenant claim can be edited by a client.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

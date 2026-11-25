@@ -1,0 +1,74 @@
+COMMAND: cargo test -p solana-kit --lib rpc::tests --locked -j 1
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 16.59s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 15 tests
+test rpc::tests::commitment_parsing_defaults_safely ... ok
+test rpc::tests::confirm_outcome_summary_is_human_readable ... ok
+test rpc::tests::blockhash_cache_expires ... ok
+test rpc::tests::contradictory_transaction_status_is_not_success ... ok
+test rpc::tests::das_social_count_ignores_empty_links ... ok
+test rpc::tests::failing_primary_fails_over_to_the_fallback_within_one_call ... ok
+test rpc::tests::failover_chain_advances ... ok
+test rpc::tests::fresh_blockhash_refreshes_when_the_cached_one_is_too_old ... ok
+test rpc::tests::missing_transaction_metadata_is_never_a_confirmed_fill ... ok
+test rpc::tests::permanent_errors_are_not_retried ... ok
+test rpc::tests::rate_limited_primary_is_cooled_down_and_skipped ... ok
+test rpc::tests::confirm_tracked_reports_expiry_instead_of_burning_the_timeout ... ok
+test rpc::tests::transient_node_error_is_retried_on_the_same_provider_and_recovers ... ok
+test rpc::tests::ws_url_is_derived_from_the_http_url ... ok
+test rpc::tests::timeout_is_classified_and_retried_then_exhausted ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 471 filtered out; finished in 0.74s
+
+COMMAND: cargo test -p solana-kit --lib fee_transfer::tests --locked -j 1
+    Finished `test` profile [unoptimized] target(s) in 0.46s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 12 tests
+test fee_transfer::tests::build_ix_is_none_when_there_is_nothing_to_collect ... ok
+test fee_transfer::tests::build_ix_transfers_the_exact_fee_to_the_vault ... ok
+test fee_transfer::tests::disabled_collection_yields_zero_without_a_vault_or_bps ... ok
+test fee_transfer::tests::dust_fees_are_skipped_entirely ... ok
+test fee_transfer::tests::charged_jupiter_fee_requires_wsol_in_the_allowed_swap_leg ... ok
+test fee_transfer::tests::fee_is_half_up_bps_of_the_notional ... ok
+test fee_transfer::tests::fee_never_overflows_on_extreme_notional ... ok
+test fee_transfer::tests::jupiter_fee_is_applied_only_when_chargeable ... ok
+test fee_transfer::tests::jupiter_sell_fee_uses_sol_notional_not_token_raw_amount ... ok
+test fee_transfer::tests::skipped_fee_clears_preexisting_jupiter_fields ... ok
+test fee_transfer::tests::zero_notional_is_dust ... ok
+test fee_transfer::tests::zero_rounded_fee_is_dust_even_with_zero_minimum ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 474 filtered out; finished in 0.00s
+
+COMMAND: cargo test -p bot-core --lib platform_fee_jupiter_account_env_is_separate_from_native_vault --locked -j 1
+    Finished `test` profile [unoptimized] target(s) in 0.30s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test config::tests::platform_fee_jupiter_account_env_is_separate_from_native_vault ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 682 filtered out; finished in 0.01s
+
+COMMAND: cargo test -p module-copy --test copy_platform_fee --locked -j 1
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Finished `test` profile [unoptimized] target(s) in 49.29s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-85ff6589a8b0fe0c)
+
+running 8 tests
+test buy_and_sell_prepare_atomic_sol_transfer_and_audit ... ok
+test built_signed_transaction_contains_fee_transfer_for_buy_and_sell ... ok
+test dust_and_disabled_are_audited_without_instruction ... ok
+test invalid_jupiter_account_is_audited_as_rejected_for_each_actor ... ok
+test invalid_vault_cannot_silently_drop_a_due_fee ... ok
+test jupiter_fee_account_must_be_initialized_wsol_token_account ... ok
+test real_copy_curve_pipeline_builds_fee_leg_for_buy_and_sell_on_mock_rpc ... ok
+test curve_pipeline_skips_disabled_and_dust_fees_without_fee_transfer ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+EXIT=0

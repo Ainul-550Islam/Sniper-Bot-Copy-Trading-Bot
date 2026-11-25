@@ -1,0 +1,13 @@
+Source review batch 014, 2026-11-09. Whole file versions; global-risk engine hash is post targeted correction.
+54a8d45d31092805471cd83b8dca1406fd9397cfa071d02b25224aca69ddfb07  crates/core/src/execution.rs
+8f85b1e54d1073e0fbae5dd9fa327d35b65a881a3dd748d3013c74ca9f102c78  crates/core/src/recovery.rs
+9ad34b9baa968168fa36502668646c730af5007263480de571f5fa9c2b449c90  crates/core/src/global_risk/mod.rs
+4eb68ed3df90eea5f141d63fd03b7b7eb69a1ae0a243340b9fff8a5607425d42  crates/core/src/global_risk/audit.rs
+9901e757acfd6e36fe71190acf26bb8a76d59d262c31086375beffb5a523ed00  crates/core/src/global_risk/metrics.rs
+6e9fb19edc5d92075652375909fa08bd87a06ad0199de6d326f85d2bb417321f  crates/core/src/global_risk/decision.rs
+424e6e4c5d37913a28fc14adcbacf7352561705f329a29b6fd607b226b0f30db  crates/core/src/global_risk/kill_switch.rs
+bca22f7deba89778b636176b89978fa36c9ec638c75c3e4420e5d85e6c033b0e  crates/core/src/global_risk/store.rs
+efb5d082db6bbf7cf3578f95e5437cea8267109f7e0a1bb0205a0c394339f22a  crates/core/src/global_risk/engine.rs
+08a4e520d47de9f276e95a8fa9494ee166a6e073e1a6ac20055b13bf76ec8427  crates/server/src/recon.rs
+
+Global risk max-open check ignored in-flight snapshot: offline regression reproduced and corrected, separate evidence. Source-only observations: reservation TTL fixed at 300s without renewal, a long execution may outlive capacity reservation. Decision ID depends on request, millisecond and per-process counter, not replica identity, so identical synchronized replicas can collide; investigate DB duplicate path. Runtime kill-switch restore failure retains only configured switches, and runtime mutation reports Changed even if persistence fails. with_intent abandons every Err, including a potentially ambiguous broadcast error; check actual call-site result types before claiming a live effect. Startup reconcile silently treats failed unresolved count as empty; recon worker ignores queue finalization errors. Position truth converts is_active DB errors to false and fill-history failures to empty; position correction mutates local state and returns Resolved despite DB upsert failure; inspect tests/wiring before asserting impact. Polymarket order unknown status empty is treated as resting; provider shape validation needed.

@@ -1,0 +1,42 @@
+=== GREEN: Polymarket venue-state check for an ambiguous submission ===
+--- pure decision table ---
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 178 filtered out; finished in 0.00s
+
+venue_state_exit=0
+--- live probe against the real ClobClient (unreachable venue) ---
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 183 filtered out; finished in 0.00s
+
+venue_probe_exit=0
+--- mock CLOB HTTP venue (production client path) ---
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+mock_venue_exit=0
+--- regression: the whole module + reservation/chain/recon surfaces ---
+
+test result: ok. 185 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+module_lib_exit=0
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 989 filtered out; finished in 0.00s
+
+server_recon_exit=0
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.23s
+
+chain_check_exit=0
+--- clippy / fmt / diff ---
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 2m 55s
+clippy_exit=0
+fmt_exit=1
+diff_check_exit=0
+-- cargo fmt --all re-applied formatting to the new files; recheck --
+fmt_exit=0
+diff_check_exit=0
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+mock_venue_exit=0

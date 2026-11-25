@@ -1,0 +1,31 @@
+Source review batch 008, 2026-11-09: 28 complete file versions read. Hashes identify reviewed versions; reading does not prove correctness.
+1517816dd49f754f3278546c48fccaa8672038b403c1d99e3e462d28733621d8  crates/core/src/trading_repository/copy/read.rs
+45e36252fad760d88dee18a2d1165757f7e0658c5c62cb101c235a05753ad655  crates/core/src/trading_repository/copy/write.rs
+7dac18b532386d6ccccb0303ca0dd197cd807520f7599fd0dfa2f9c3400bb4d2  crates/core/src/trading_repository/copy/mod.rs
+d89b700ab9800c3d5b00a00343471527e90f46d856c7bd4507ad1a373779cce1  crates/core/src/trading_repository/polymarket/model.rs
+63ab89ea473e659d45b00fff80512c20a597d3f1b9fdb5c07f5895cd1fb63a69  crates/core/src/trading_repository/polymarket/read.rs
+951dbb0f8a987f2b777bc07973ee68bf7ccadff1004b4ee0edec3040859239fb  crates/core/src/trading_repository/polymarket/write.rs
+08cd48e4c6b8716c259b0cfe793112293c338b1bbf496335cea0ec942e6a2ec7  crates/core/src/trading_repository/polymarket/reconciliation.rs
+0cbb5dd182288eae17c5e417020b9da7077c5e489a1ad892fc88d5ae4047e41c  crates/core/src/trading_repository/polymarket/mod.rs
+af6321f3f36c3e291ce244f010c7f3b9aea2c7e5faff3227afadbe89a2f67f41  crates/core/src/trading_repository/executions/mod.rs
+affc2830febafdb82530d5befad85501c7a6be509d6e60c77ee1dfcf67e2f3ab  crates/core/src/trading_repository/orders/mod.rs
+df8bd9d189fd15767d34256fd37ad913eb37e01da96f483df81edab687d49fc2  crates/core/src/trading_repository/worker_claim/mod.rs
+7c2e35847821d3db35178f899e7ce2d74ef4ef04ebe343177b436bacfc93f205  crates/core/src/trading_repository/intent/mod.rs
+f8b4a22b4037393fe8930fce796dbedd8ff7aad77499bede4243e1664f6cbca5  crates/core/src/trading_repository/executions/claim.rs
+97dbb6176959cb41301fce8f4569d295a6de6c4826d014e1e0613107cd333f9e  crates/core/src/trading_repository/executions/lifecycle.rs
+f8c3ddb48d4d6755a907ab0d3943b8cea3d9eef35a1dc1d320fe88fc8433053a  crates/core/src/db/tenant_idempotency.rs
+fd8f692884a810e1657bcfc9ee0fb96d9639939fe9b1fd12886012bfe8587b7e  crates/core/src/db/copy.rs
+babc63f33bfa8cab7b605ce3d37b6918673580fab8fb379c7e6d47615d6bb4d3  crates/core/src/db/polymarket.rs
+3142e4251531aeb6f4265028540ed58aad29173658ddb6dbe757077db2f5e9b3  crates/core/src/db/ha.rs
+fb7d51532d91da6b8ff67cc6eb4eba42ebabdb9161a0bd0586654b6312f83157  crates/core/src/db/deployment_org.rs
+6115cf1d6405c2217a8d9f3b352bc931699e2d99f2a7e5fc957ad425d4ec32fa  crates/core/src/db/tenant_row.rs
+ab60f4a62d212d8ade732f4f954409a33e45d4fee5caada31ffb01f33166861c  crates/core/src/db/mod_tenant_exports.rs
+f824d851de3fe4a04ef3256ff37fa585ce81ce8520217de2143d5fd4324f39b7  crates/core/tests/orders_cross_tenant_pg.rs
+c5f72991e954497e724bcacb46279dc4dd7aab6dc32540c27dcb6126c69d57ab  crates/core/migrations/0023_trading_tenant_columns.sql
+e8ff0363cfb70ddeaf02fee5dc0ebaac847403bee840622a0df28e625e63f160  crates/core/migrations/0024_trading_tenant_backfill_constraints.sql
+606e33ff0083d31f94105e552c8b9bcb216671a511b89e4f1f5665ead77ee753  crates/core/migrations/0026_orders_tenant_conflict.sql
+c05558200f8daefbad37e6fb2afcd7278b93ee2acd404c81631c8e44c9933c6c  crates/core/migrations/0028_execution_claims_tenant_conflict.sql
+4be216f8651aa5302564e77a6c1751955f8388103a75254ea4b7b4f9b329ad15  crates/core/migrations/0030_polymarket_orders_tenant_conflict.sql
+72c56dd6203f656b7138d98d96056cb9ae92533517e82576d40a563d1b589dd9  crates/core/migrations/0031_execution_intents_tenant_conflict.sql
+
+Findings (source observation, not live-impact proof): tenant Polymarket fill record ignores duplicate id payload differences; both legacy and tenant poly order upserts can change state after close and prefer incoming linkage, despite closed_at retained. Reconciliation treats fills for closed orders as orphan by its own definition, bounded to 1000 findings. Copy links and tenant poly open orders read capped 5000 without truncation signal; event/signal reseeding capped. Tenant lifecycle list_open capped and its ownership assertion maps organization from scope rather than returned row. Tenant claims use DB time for renewal/verification unlike worker claims; release accepts Claimed in release builds because guard is debug_assert only. HA save_cursor upsert lacks fencing/monotonic checks. Deployment org static OnceCell is process-global, not per Database, risky for multiple DBs per process; concurrent cold-start callers can return different DB answers. Migration descriptions claiming new binary schema swap is atomic with startup do not cover rolling old binaries. Tenant row helper is optional; comment claims all paths invoke it. Order status history insert missing tenant attribution remains untested and unfixed; direct regression pending.

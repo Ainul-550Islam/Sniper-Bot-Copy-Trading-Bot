@@ -1,0 +1,5 @@
+=== RED: worker-lane renew/verify/force-release trusted the CALLER clock ===
+-- injection: effective_now returns the caller instant; force-release drops the db-clock clamp --
+test a_skewed_caller_clock_cannot_extend_verify_or_sweep_a_lane ... FAILED
+thread 'a_skewed_caller_clock_cannot_extend_verify_or_sweep_a_lane' (3947594) panicked at crates/core/tests/workers_cross_tenant_pg.rs:288:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.09s

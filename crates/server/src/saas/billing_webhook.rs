@@ -581,6 +581,7 @@ mod tests {
             trusted_proxies: Default::default(),
             db: None,
             journal: None,
+            chain_probe: None,
             serve_dashboard: false,
             health: Arc::new(bot_core::obs::health::HealthRegistry::new()),
             metrics_enabled: false,

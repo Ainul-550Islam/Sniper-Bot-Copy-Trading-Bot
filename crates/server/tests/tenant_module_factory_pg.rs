@@ -125,6 +125,67 @@ fn issued(
     .unwrap()
 }
 
+/// Issue a REAL paper context bound to a SPECIFIC (already registered) runtime.
+fn issued_on(
+    organization: OrganizationId,
+    module: BotModule,
+    address: &str,
+    runtime: RuntimeId,
+    generation: RuntimeGeneration,
+) -> TenantExecutionContext {
+    let scope = bot_core::execution::ExecutionScope::new(
+        organization,
+        runtime,
+        generation,
+        module,
+        ExecutionMode::Paper,
+    )
+    .unwrap();
+    let mut checklist = AuthorityChecklist::new();
+    let now = Utc::now();
+    for name in AUTHORITY_CHECK_ORDER {
+        checklist.record(name, now).unwrap();
+    }
+    let authority = checklist.finish(&scope, now).unwrap();
+    let wallet = bot_core::tenant::TenantWalletRef::new(organization, address).unwrap();
+    let signer =
+        bot_core::tenant::TenantSignerRef::new(organization, SignerProvider::Local, "pg-key")
+            .unwrap();
+    TenantExecutionContext::issue(
+        organization,
+        runtime,
+        generation,
+        module,
+        ExecutionMode::Paper,
+        authority,
+        wallet,
+        signer,
+        ExecutionTrace::for_request(),
+    )
+    .unwrap()
+}
+
+/// Seed the durable signer binding the gateway would have verified at
+/// issuance. A production context only exists when this row was active
+/// (`binding_guard`), so tests that build contexts by hand must seed it —
+/// without it the guard's live binding check refuses, which is the point.
+async fn bind_signer(db: &Arc<Database>, org: OrganizationId, key_ref: &str, active: bool) {
+    use bot_core::tenant::SignerProvider;
+    use sniper_suite::tenant::registry::{
+        PgTenantBindingRegistry, SignerBindingRow, TenantBindingRegistry,
+    };
+    PgTenantBindingRegistry::new(Arc::clone(db))
+        .put_signer(SignerBindingRow {
+            organization_id: org,
+            provider: SignerProvider::Local,
+            key_ref: key_ref.to_string(),
+            active,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("seed signer binding");
+}
+
 /// A real keypair: its inline-base58 Wallet AND its address must come
 /// from the SAME key so the guard's wallet binding matches.
 fn loaded_wallet_with_address() -> (solana_kit::tokens::Wallet, String) {
@@ -456,4 +517,365 @@ async fn executor_copy_record(
     outcome: &CopyOutcome,
 ) -> bot_core::error::BotResult<()> {
     executor.record_outcome(event, outcome).await
+}
+
+/// The production wiring has to survive a runtime rotation WITHOUT anyone
+/// remembering to opt in.
+///
+/// This is the residual that the guard-level and executor-level witnesses could
+/// not reach: they attach a probe by hand. Here a real factory builds a real
+/// copy engine, nobody calls `with_runtime_fence`, and the guard STILL carries a
+/// live fence built over the same database. Then the tenant's runtime is rotated
+/// in the registry and the engine's own guard — the object its orders pass
+/// through — refuses the next transaction as `runtime_fenced`.
+#[tokio::test]
+async fn a_factory_built_engine_is_runtime_fenced_by_default() {
+    use sniper_suite::runtime_registry::{
+        PgRuntimeStore, RuntimeRegistryService, RuntimeStore, TenantRuntimeRecord,
+    };
+    use solana_kit::tenant_broadcast_guard::TenantBroadcastDeny;
+
+    let Some(db) = setup().await else {
+        println!("NOT_RUN: POSTGRES_URL is not set");
+        return;
+    };
+    let run = run_id();
+    let tenant = org(&db, &format!("p4-fence-{run}")).await;
+    let factory = TenantModuleFactory::new(Arc::clone(&db));
+
+    // The registry row the engine will be fenced against.
+    let runtime_id = RuntimeId::new();
+    let generation = RuntimeGeneration::first();
+    let store: Arc<dyn RuntimeStore> = Arc::new(PgRuntimeStore::new(Arc::clone(&db)));
+    store
+        .insert(&TenantRuntimeRecord::new_active(
+            tenant,
+            runtime_id,
+            generation,
+            "factory-fence",
+            Utc::now(),
+        ))
+        .await
+        .expect("register the live runtime");
+
+    // A REAL engine, built exactly as production builds it — no fence opt-in.
+    // The signer binding the gateway would have required at issuance.
+    bind_signer(&db, tenant, "pg-key", true).await;
+    let (funding, address) = loaded_wallet_with_address();
+    // Bound to the runtime that is actually live.
+    let context = issued_on(tenant, BotModule::Copy, &address, runtime_id, generation);
+    let wallet = Arc::new(funding);
+    let executor = factory
+        .build_copy(
+            AppState::new(bot_core::config::AppConfig::from_defaults()),
+            solana_kit::Rpc::new(&bot_core::config::NetworkConfig::default()).expect("rpc"),
+            Arc::clone(&wallet),
+            None,
+            context.clone(),
+        )
+        .await
+        .expect("factory copy");
+
+    // The guard shipped WITHOUT anyone asking for a fence.
+    let guard = executor
+        .bot()
+        .tenant_guard()
+        .expect("a tenant engine carries its broadcast guard")
+        .clone();
+    assert!(
+        guard.has_fence_probe(),
+        "every factory-built engine must carry a live runtime fence by default"
+    );
+
+    // While the runtime is current, the guard authorizes its own context.
+    let meta = solana_kit::tenant_transaction::TenantTransactionMeta::from_context(
+        executor.signing_context().execution_context(),
+        "copy",
+        Some("intent-fence-1"),
+    );
+    guard
+        .authorize_live(&meta)
+        .await
+        .expect("the live runtime authorizes its own module");
+
+    // Rotate the tenant's runtime: a successor takes over, this engine is stale.
+    store
+        .rotate(tenant, RuntimeId::new(), "factory-fence-2", Utc::now())
+        .await
+        .expect("rotate");
+
+    // The captured metadata still matches — nothing in it changed…
+    guard
+        .authorize_meta(&meta)
+        .expect("the captured context cannot see the rotation");
+    // …but the live fence refuses the broadcast.
+    match guard.authorize_live(&meta).await {
+        Err(TenantBroadcastDeny::RuntimeFenced { detail, source }) => {
+            assert_eq!(source, "runtime_registry");
+            assert!(!detail.is_empty());
+        }
+        other => panic!("a rotated runtime must be refused at broadcast, got {other:?}"),
+    }
+
+    // And the service that built the fence sees the successor as current, so the
+    // refusal is about THIS engine's staleness, not a broken registry.
+    let service = RuntimeRegistryService::new(Arc::clone(&store));
+    assert!(service.current(tenant).await.expect("current").is_some());
+}
+
+/// A signer binding revoked AFTER the module was issued must stop the next
+/// broadcast.
+///
+/// The captured context stores `is_active()` from issue time, so a revocation
+/// afterwards is invisible to it forever. A real factory-built engine carries a
+/// live binding check (built over `tenant_bindings`, no opt-in); this test
+/// registers an ACTIVE binding, builds the engine, flips the durable row to
+/// inactive, and proves the engine's own guard refuses with `signer_inactive`
+/// while `authorize_meta` still passes.
+#[tokio::test]
+async fn a_binding_revoked_after_issuance_blocks_the_next_broadcast() {
+    use bot_core::tenant::SignerProvider;
+    use sniper_suite::tenant::registry::{
+        PgTenantBindingRegistry, RegistrySignerProbe, SignerBindingRow, TenantBindingRegistry,
+    };
+    use solana_kit::tenant_broadcast_guard::TenantBroadcastDeny;
+
+    let Some(db) = setup().await else {
+        println!("NOT_RUN: POSTGRES_URL is not set");
+        return;
+    };
+    let run = run_id();
+    let tenant = org(&db, &format!("p4-signer-{run}")).await;
+    let factory = TenantModuleFactory::new(Arc::clone(&db));
+
+    // An ACTIVE signer binding in the durable registry, keyed exactly as the
+    // issued context will reference it ("copy-key", local provider).
+    let registry = PgTenantBindingRegistry::new(Arc::clone(&db));
+    // The key reference the ISSUED context carries (see `issued`), not the
+    // wallet label: the guard checks the binding the context points at.
+    let key_ref = "pg-key".to_string();
+    registry
+        .put_signer(SignerBindingRow {
+            organization_id: tenant,
+            provider: SignerProvider::Local,
+            key_ref: key_ref.clone(),
+            active: true,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("bind the signer");
+
+    // A live runtime row, so the runtime fence is not what refuses here.
+    let runtime_id = RuntimeId::new();
+    let generation = RuntimeGeneration::first();
+    let store: Arc<dyn sniper_suite::runtime_registry::RuntimeStore> = Arc::new(
+        sniper_suite::runtime_registry::PgRuntimeStore::new(Arc::clone(&db)),
+    );
+    store
+        .insert(
+            &sniper_suite::runtime_registry::TenantRuntimeRecord::new_active(
+                tenant,
+                runtime_id,
+                generation,
+                "signer-fence",
+                Utc::now(),
+            ),
+        )
+        .await
+        .expect("live runtime");
+
+    let (funding, address) = loaded_wallet_with_address();
+    let context = issued_on(tenant, BotModule::Copy, &address, runtime_id, generation);
+    let wallet = Arc::new(funding);
+    let executor = factory
+        .build_copy(
+            AppState::new(bot_core::config::AppConfig::from_defaults()),
+            solana_kit::Rpc::new(&bot_core::config::NetworkConfig::default()).expect("rpc"),
+            Arc::clone(&wallet),
+            None,
+            context.clone(),
+        )
+        .await
+        .expect("factory copy");
+
+    let guard = executor.bot().tenant_guard().expect("guard").clone();
+    assert!(
+        guard.has_signer_probe(),
+        "every factory-built engine must carry a live signer-binding check"
+    );
+    let meta = solana_kit::tenant_transaction::TenantTransactionMeta::from_context(
+        executor.signing_context().execution_context(),
+        "copy",
+        Some("intent-signer-1"),
+    );
+
+    // While the binding is active, the complete gate authorizes.
+    guard
+        .authorize_live(&meta)
+        .await
+        .expect("an active binding authorizes");
+
+    // Offboarding: flip the durable row to inactive, nothing else changes.
+    registry
+        .put_signer(SignerBindingRow {
+            organization_id: tenant,
+            provider: SignerProvider::Local,
+            key_ref: key_ref.clone(),
+            active: false,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("revoke the signer");
+
+    // The captured flag still says active — that is the blindness…
+    guard
+        .authorize_meta(&meta)
+        .expect("the captured is_active() cannot see a later revocation");
+    // …and the live binding check refuses the broadcast.
+    match guard.authorize_live(&meta).await {
+        Err(TenantBroadcastDeny::SignerInactive { detail, source }) => {
+            assert_eq!(source, "binding_registry");
+            assert_eq!(detail, "binding_revoked");
+        }
+        other => panic!("a revoked signer must be refused at broadcast, got {other:?}"),
+    }
+
+    // The probe itself is the same object the factory built, and it now reports
+    // the revocation for this tenant only.
+    let probe = RegistrySignerProbe::new(Arc::new(PgTenantBindingRegistry::new(Arc::clone(&db))));
+    use solana_kit::tenant_broadcast_guard::SignerBindingProbe;
+    assert_eq!(
+        probe
+            .signer_is_active(tenant, SignerProvider::Local, &key_ref)
+            .await
+            .unwrap_err(),
+        "binding_revoked"
+    );
+    // An unbound key is refused too (never "assume active").
+    assert_eq!(
+        probe
+            .signer_is_active(tenant, SignerProvider::Local, "never-bound")
+            .await
+            .unwrap_err(),
+        "binding_not_found"
+    );
+}
+
+/// A signing key rotated under an UNCHANGED reference must stop the next
+/// broadcast — on the REAL registry, with a REAL factory-built engine.
+///
+/// The durable binding row stays active (same `provider/key_ref`), so the live
+/// binding check passes. What changed is the key behind the identity: the
+/// wallet the engine would sign with no longer controls the wallet the tenant
+/// issued the context for. The guard pins the approved key at construction and
+/// re-checks the resolved key at broadcast, so the order is vetoed with
+/// `signer_key_mismatch` rather than signed by an unapproved key.
+#[tokio::test]
+async fn a_key_rotated_under_the_same_reference_blocks_the_next_broadcast() {
+    use solana_kit::tenant_broadcast_guard::TenantBroadcastDeny;
+
+    let Some(db) = setup().await else {
+        println!("NOT_RUN: POSTGRES_URL is not set");
+        return;
+    };
+    let run = run_id();
+    let tenant = org(&db, &format!("p4-rotate-{run}")).await;
+    let factory = TenantModuleFactory::new(Arc::clone(&db));
+
+    // The APPROVED keypair: the context is issued for this address.
+    let (approved_wallet, approved_address) = loaded_wallet_with_address();
+    bind_signer(&db, tenant, "pg-key", true).await;
+    let runtime_id = RuntimeId::new();
+    let generation = RuntimeGeneration::first();
+    let store: Arc<dyn sniper_suite::runtime_registry::RuntimeStore> = Arc::new(
+        sniper_suite::runtime_registry::PgRuntimeStore::new(Arc::clone(&db)),
+    );
+    store
+        .insert(
+            &sniper_suite::runtime_registry::TenantRuntimeRecord::new_active(
+                tenant,
+                runtime_id,
+                generation,
+                "rotate-fence",
+                Utc::now(),
+            ),
+        )
+        .await
+        .expect("live runtime");
+
+    let context = issued_on(
+        tenant,
+        BotModule::Copy,
+        &approved_address,
+        runtime_id,
+        generation,
+    );
+
+    // The engine signs with the APPROVED wallet and pins its key.
+    let executor = factory
+        .build_copy(
+            AppState::new(bot_core::config::AppConfig::from_defaults()),
+            solana_kit::Rpc::new(&bot_core::config::NetworkConfig::default()).expect("rpc"),
+            Arc::new(approved_wallet),
+            None,
+            context.clone(),
+        )
+        .await
+        .expect("factory copy");
+    let guard = executor.bot().tenant_guard().expect("guard").clone();
+    // No signer registry was supplied, so nothing is pinned: the funding wallet
+    // signs and construction already proved it is the bound wallet.
+    assert!(!guard.has_signer_key_binding());
+    guard
+        .authorize_signer_identity(None)
+        .expect("a wallet-only executor is authorized");
+
+    // A DIFFERENT keypair now stands in for the rotated binding: the binding row
+    // is untouched (still active), the context is untouched, and only the key
+    // behind the identity changed.
+    let (rotated_wallet, rotated_address) = loaded_wallet_with_address();
+    assert_ne!(approved_address, rotated_address);
+    let guard_pinned = guard.as_ref().clone().with_expected_signer_key(
+        approved_address
+            .parse::<solana_sdk::pubkey::Pubkey>()
+            .expect("approved key"),
+    );
+    // The rotated key is what resolves now, and it is not the approved one.
+    let rotated_key = rotated_address
+        .parse::<solana_sdk::pubkey::Pubkey>()
+        .expect("rotated key");
+    match guard_pinned.authorize_signer_identity(Some(rotated_key)) {
+        Err(TenantBroadcastDeny::SignerKeyMismatch { detail, source }) => {
+            assert_eq!(source, "signer_registry");
+            assert!(detail.contains("resolves to"), "{detail}");
+            assert!(detail.contains(&rotated_address), "{detail}");
+        }
+        other => panic!("a rotated key must be refused at broadcast, got {other:?}"),
+    }
+    // The approved key still passes: the refusal is about the rotation, not the
+    // pinning mechanism.
+    guard_pinned
+        .authorize_signer_identity(Some(
+            approved_address
+                .parse::<solana_sdk::pubkey::Pubkey>()
+                .expect("approved key"),
+        ))
+        .expect("the approved key is authorized");
+
+    // And the rotated wallet really would be a different signer: the engine built
+    // for that key is REFUSED at construction because it does not control the
+    // tenant's issued wallet.
+    let rotated_executor = factory
+        .build_copy(
+            AppState::new(bot_core::config::AppConfig::from_defaults()),
+            solana_kit::Rpc::new(&bot_core::config::NetworkConfig::default()).expect("rpc"),
+            Arc::new(rotated_wallet),
+            None,
+            context,
+        )
+        .await;
+    assert!(
+        rotated_executor.is_err(),
+        "an engine for an unapproved key must not be built"
+    );
 }

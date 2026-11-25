@@ -9,10 +9,9 @@
 //!
 //! * **module enforcement** — only a Copy-issued context can drive the
 //!   copy bot;
-//! * **tenant-local leader keys** — the SAME external leader address may
-//!   be tracked by many tenants; every leader/link/event key is scoped
-//!   per organization + runtime so one tenant's leader state can never
-//!   collide with (or suppress) another's;
+//! * **local key helpers** — leader and event keys constructed by this
+//!   adapter include organization + runtime. This does not scope the
+//!   underlying `CopyBot` shared event dedup or position projection;
 //! * **paper-default policy** — a tenant-scoped copy bot runs paper
 //!   unless the context was issued for live mode.
 
@@ -123,8 +122,8 @@ impl CopyTenantContext {
     }
 
     /// A tenant-local key for one tracked leader address. The SAME
-    /// external leader may be tracked by many tenants — this key keeps
-    /// their leader state, links and event cursors independent.
+    /// external leader may be tracked by many tenants. This helper scopes
+    /// the key it returns; callers must actually use it to obtain isolation.
     pub fn leader_key(&self, leader_address: &str) -> String {
         format!(
             "copy:{}:{}:{leader_address}",

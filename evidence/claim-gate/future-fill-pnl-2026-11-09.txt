@@ -1,0 +1,54 @@
+# Gap #6 — a future-dated Polymarket fill blocked today's realized PnL (2026-11-09)
+
+## Defect (real, reproducible)
+PostgresRiskOracle::realized_pnl_read gates the daily figure on two completeness probes
+and then sums positions closed inside TODAY's UTC window:
+  risk_realized_today:  closed_at >= midnight  AND  closed_at < midnight + 1 day
+The generic probe (daily_pnl_projection_complete) asks the same bounded window.
+The Polymarket probe (polymarket_pnl_projection_complete) did not — it asked
+  f.ts >= date_trunc('day', now() AT TIME ZONE 'UTC')
+with NO upper bound, so it returned a verdict about a wider set of rows than the
+number it guards.
+
+Consequence: one poly_fills row timestamped in the future (clock skew on an
+ingesting replica, venue timestamp, bad backfill) makes the probe answer
+Incomplete. realized_pnl_read -> RealizedPnlRead::Incomplete ->
+effective_realized/effective_module_realized -> None ->
+RiskCode::GlobalUnavailable ('tenant-scoped daily PnL is unavailable; refusing
+entry'). Every entry is refused, today and on every following day, for a row the
+sum never looks at. No operator-visible cause.
+
+## Witness (new, real PostgreSQL)
+crates/core/tests/positions_cross_tenant_pg.rs::a_future_dated_poly_fill_does_not_block_todays_pnl
+Three steps on an isolated tenant:
+  1. empty tenant            -> Known(0.0)
+  2. unprojected fill 1h ago -> Incomplete        (today's problem still fails closed)
+  3. unprojected fill +1 day -> Known(0.0)        (future row must not block today)
+
+RED (before the fix):
+  assertion `left == right` failed: a fill dated in the future must not block today's PnL
+    left: Incomplete
+   right: Known(0.0)
+
+## Fix
+crates/core/src/db/claims.rs — polymarket_pnl_projection_complete now bounds the fill
+window exactly like the sum it protects:
+  AND f.ts < (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC'
+plus a doc comment stating the invariant (ask about the same window you sum).
+
+## GREEN
+cargo test -p bot-core --test positions_cross_tenant_pg -- --test-threads=1
+  13 passed; 0 failed; 0 ignored
+  incl. a_future_dated_poly_fill_does_not_block_todays_pnl ... ok
+  and the pre-existing daily_risk_pnl_excludes_future_utc_days ... ok (unchanged)
+
+## Residual
+- Policy choice, stated: a future-dated fill is now simply outside today's window,
+  so it is neither summed nor treated as a reason to fail closed. If the project
+  would rather treat a future timestamp as a data-integrity alarm, that is a
+  different (and defensible) design; it is not what the code did, and it is not
+  what this fix implements.
+- The generic daily probe keeps its documented, intentional behaviour: a position
+  that spans days, or an open partial exit, still refuses the read rather than
+  attributing cumulative PnL to one day.
+- No live Polymarket venue was exercised; this is PostgreSQL-only evidence.

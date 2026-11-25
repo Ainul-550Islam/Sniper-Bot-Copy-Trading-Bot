@@ -324,3 +324,209 @@ fn guard_exposes_its_bound_identity_for_observability() {
     assert_eq!(guard.generation(), generation);
     assert_eq!(guard.context().module(), ModuleKind::Copy);
 }
+
+/// Gap: "tenant runtime freshness at broadcast" — end-to-end at the executor.
+///
+/// A rotation happens AFTER the module was built: the executor and its guard
+/// still hold the captured context, and every metadata rule still matches. The
+/// live fence probe is the only thing that can refuse the broadcast, and a
+/// refusal must surface as a policy veto — never as a submitted transaction.
+#[tokio::test]
+async fn a_rotation_after_build_blocks_the_next_broadcast() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct ToggleProbe {
+        current: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl solana_kit::tenant_broadcast_guard::RuntimeFenceProbe for ToggleProbe {
+        async fn fence_is_current(
+            &self,
+            _organization_id: OrganizationId,
+            _runtime_id: RuntimeId,
+            _generation: RuntimeGeneration,
+        ) -> Result<(), String> {
+            if self.current.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err("superseded: tenant runtime rotated to another instance".into())
+            }
+        }
+        fn probe_name(&self) -> &'static str {
+            "toggle"
+        }
+    }
+
+    let wallet = loaded_wallet();
+    let ctx = issued(
+        BotModule::Sniper,
+        OrganizationId::new(),
+        RuntimeId::new(),
+        RuntimeGeneration::first(),
+        &wallet.pubkey.to_string(),
+    );
+    let probe = Arc::new(ToggleProbe {
+        current: AtomicBool::new(true),
+    });
+    let guard = TenantBroadcastGuard::new(ctx.clone(), wallet.pubkey)
+        .expect("guard")
+        .with_fence_probe(probe.clone());
+    let executor = Executor::new(
+        Rpc::new(&NetworkConfig::default()).expect("rpc pool"),
+        Arc::new(wallet),
+        paper_policy(),
+    )
+    .with_tenant_guard(Arc::new(guard))
+    .expect("guard wallet matches executor wallet");
+
+    // While the runtime is current the paper execution proceeds.
+    let ok = executor
+        .run(tenant_request(&ctx, "fence-live"))
+        .await
+        .expect("paper run");
+    assert_ne!(
+        ok.failure,
+        Some(bot_core::execution::FailureClass::PolicyVeto),
+        "a current runtime must not be vetoed: {ok:?}"
+    );
+
+    // The runtime is rotated; the very next broadcast is refused.
+    probe.current.store(false, Ordering::SeqCst);
+    let vetoed = executor
+        .run(tenant_request(&ctx, "fence-rotated"))
+        .await
+        .expect("paper run");
+    assert_eq!(
+        vetoed.failure,
+        Some(bot_core::execution::FailureClass::PolicyVeto),
+        "a rotated runtime must be refused at broadcast time: {vetoed:?}"
+    );
+    let detail = vetoed.error.clone().unwrap_or_default();
+    assert!(
+        detail.contains("runtime_fenced"),
+        "the veto must name the fence, got: {detail}"
+    );
+    assert!(
+        vetoed.signature.is_empty() && vetoed.broadcast_signature().is_none(),
+        "a vetoed broadcast leaves no signature behind, got {:?}",
+        vetoed.signature
+    );
+    assert!(!vetoed.paper, "a veto is not a paper execution result");
+}
+
+/// A signing key rotated under an UNCHANGED reference must stop the next
+/// broadcast — end to end, through the executor's own run path.
+///
+/// `SwitchSigner` stands in for a custody rotation: the identity string never
+/// changes, but the key it resolves to does. The guard pins the approved key at
+/// construction and re-resolves at broadcast, so the order is vetoed with
+/// `signer_key_mismatch` instead of being signed by an unapproved key.
+#[tokio::test]
+async fn a_key_rotated_under_the_same_reference_blocks_the_next_broadcast() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use solana_kit::signer::{SignerRegistry, TransactionSigner};
+
+    #[derive(Debug)]
+    struct SwitchSigner {
+        rotated: AtomicBool,
+        approved: solana_sdk::pubkey::Pubkey,
+        replacement: solana_sdk::pubkey::Pubkey,
+    }
+
+    #[async_trait::async_trait]
+    impl TransactionSigner for SwitchSigner {
+        fn pubkey(&self) -> solana_sdk::pubkey::Pubkey {
+            if self.rotated.load(Ordering::SeqCst) {
+                self.replacement
+            } else {
+                self.approved
+            }
+        }
+
+        async fn sign_message(
+            &self,
+            _message: &[u8],
+        ) -> Result<solana_sdk::signature::Signature, bot_core::error::SignerError> {
+            Ok(solana_sdk::signature::Signature::new_unique())
+        }
+    }
+
+    // The wallet the context is issued for IS the approved signer key.
+    let wallet = loaded_wallet();
+    let approved = wallet.pubkey;
+    let signer = Arc::new(SwitchSigner {
+        rotated: AtomicBool::new(false),
+        approved,
+        replacement: solana_sdk::pubkey::Pubkey::new_unique(),
+    });
+    let mut registry = SignerRegistry::new();
+    // The key reference the shared `issued(...)` helper binds.
+    let identity = "tenant-key";
+    registry
+        .register(identity, signer.clone())
+        .expect("register signer");
+
+    let ctx = issued(
+        BotModule::Sniper,
+        OrganizationId::new(),
+        RuntimeId::new(),
+        RuntimeGeneration::first(),
+        &approved.to_string(),
+    );
+    assert_eq!(ctx.signer_identity(), identity);
+
+    // Guard pinned to what the registry resolves NOW (the approved key).
+    let guard = TenantBroadcastGuard::new(ctx.clone(), approved)
+        .expect("guard")
+        .with_expected_signer_key(approved);
+    let executor = Executor::new(
+        Rpc::new(&NetworkConfig::default()).expect("rpc pool"),
+        Arc::new(wallet),
+        paper_policy(),
+    )
+    .with_signer_registry(Arc::new(registry))
+    .with_tenant_guard(Arc::new(guard))
+    .expect("guard wallet matches executor wallet");
+
+    // While the reference still resolves to the approved key: normal paper run.
+    let ok = executor
+        .run(tenant_request(&ctx, "snipe-entry"))
+        .await
+        .expect("run must not error");
+    assert!(
+        !ok.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("signer_key_mismatch"),
+        "the approved key must pass: {:?}",
+        ok.error
+    );
+
+    // Custody rotation: same identity, different key.
+    signer.rotated.store(true, Ordering::SeqCst);
+
+    let vetoed = executor
+        .run(tenant_request(&ctx, "snipe-entry"))
+        .await
+        .expect("run must not error");
+    assert_eq!(vetoed.status, ExecStatus::Skipped);
+    assert!(!vetoed.succeeded());
+    assert!(!vetoed.paper, "a veto is not a paper fill");
+    assert!(vetoed.signature.is_empty());
+    assert_eq!(
+        vetoed.failure,
+        Some(bot_core::execution::FailureClass::PolicyVeto)
+    );
+    let detail = vetoed.error.clone().unwrap_or_default();
+    assert!(
+        detail.contains("signer_key_mismatch"),
+        "the veto must name the rotated key, got {detail}"
+    );
+    assert!(
+        detail.contains("resolves to"),
+        "the veto must show what resolved, got {detail}"
+    );
+}

@@ -1,0 +1,122 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 37.15s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 3 tests
+test recovery::tests::with_intent_links_on_signature ... ok
+test recovery::tests::with_intent_retains_errors_and_abandons_classified_missing_signature ... ok
+test recovery::tests::with_intent_without_sink_is_passthrough ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 683 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.89s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+test recovery::tests::explicit_retain_and_empty_signature_leave_intents_pending ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 685 filtered out; finished in 0.00s
+
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 48.40s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 36 tests
+test execute::tests::broadcast_mode_race_serialises_stably ... ok
+test execute::tests::broadcast_signature_only_for_real_broadcasts ... ok
+test execute::tests::classify_send_error_matrix ... ok
+test execute::tests::config_maps_race_and_dynamic_tip ... ok
+test execute::tests::confirmation_timeout_parks_the_intent_in_pending ... ok
+test execute::tests::default_policy_is_paper ... ok
+test execute::tests::definite_failure_is_rearmed_and_retried_with_escalated_fee ... ok
+test execute::tests::definite_rejection_yields_send_failed ... ok
+test execute::tests::derived_intent_ids_are_stable_for_identical_requests ... ok
+test execute::tests::duplicate_run_is_refused_while_the_first_attempt_is_pending ... ok
+test execute::tests::dynamic_tip_policy_defaults_are_sane ... ok
+test execute::tests::execution_result_serde_is_backward_compatible ... ok
+test execute::tests::failed_simulation_aborts_before_any_broadcast ... ok
+test execute::tests::fee_above_emergency_limit_is_vetoed_before_any_network_io ... ok
+test execute::tests::intent_disposition_retains_live_ambiguous_missing_signature ... ok
+test execute::tests::jito_ambiguity_survives_definite_rpc_rejection_for_fallback_and_race ... ok
+test execute::tests::jito_error_response_is_ambiguous_even_with_rejection_words ... ok
+test execute::tests::jito_http_success_without_bundle_id_is_not_acknowledgement ... ok
+test execute::tests::jito_then_rpc_ambiguous_delivery_does_not_become_retryable_failure ... ok
+test execute::tests::paper_fill_price_applies_slippage_downwards ... ok
+test execute::tests::paper_mode_records_a_confirmed_lifecycle_without_broadcast ... ok
+test execute::tests::prebuilt_blockhash_rpc_error_fails_closed_without_broadcast ... ok
+test execute::tests::prebuilt_cache_expires_entries ... ok
+test execute::tests::prebuilt_cache_prune_reports_how_many_were_dropped ... ok
+test execute::tests::prebuilt_cache_take_removes_the_entry ... ok
+test execute::tests::sampler_falls_back_to_the_floor_when_the_feed_is_dark ... ok
+test execute::tests::send_error_maps_rpc_classes_to_lifecycle_classes ... ok
+test execute::tests::stale_blockhash_is_detected_and_rebuilt_with_a_fresh_one ... ok
+test execute::tests::status_success_semantics ... ok
+test execute::tests::tip_floor_accepts_a_bare_sample_object ... ok
+test execute::tests::tip_floor_bucket_maps_up_to_the_nearest_bucket ... ok
+test execute::tests::tip_floor_extraction_clamps_out_of_band_values ... ok
+test execute::tests::tip_floor_extraction_is_total_on_garbage ... ok
+test execute::tests::tip_floor_extraction_reads_buckets_and_rounds ... ok
+test execute::tests::transport_failure_yields_send_unknown_not_send_failed ... ok
+test execute::tests::truncate_respects_char_boundaries ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 461 filtered out; finished in 4.03s
+
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 52.72s
+     Running tests/intent_execution.rs (target/debug/deps/intent_execution-f28d5b50750b0de8)
+
+running 16 tests
+test ambiguous_broadcast_parks_without_booking_a_fill ... ok
+test ambiguous_exit_keeps_position_and_does_not_book_a_sell ... ok
+test failed_ambiguous_exit_journal_write_disables_reconciliation_auto_exit ... ok
+test failed_ambiguous_journal_write_latches_live_buy_after_confirmation ... ok
+test live_buy_refuses_to_broadcast_if_copy_journal_is_unavailable ... ok
+test live_buy_refuses_to_broadcast_when_journal_scan_is_saturated ... ok
+test live_mirror_confirms_through_the_executor_with_a_deterministic_intent ... ok
+test mirrored_exit_and_sweeper_fail_closed_on_journal_outage_and_saturation ... ok
+test mirrored_exit_refuses_unbooked_ambiguous_exit_after_confirmation ... ok
+test node_rejection_is_a_definite_failure_with_nothing_booked ... ok
+test pending_execution_cap_throttles_new_mirrors ... ok
+test simulation_failure_never_broadcasts_and_abandons_the_journal_entry ... ok
+test standalone_live_sweeper_without_journal_refuses_exit ... ok
+test sweeper_ambiguous_exit_sets_shared_latch_and_blocks_retry ... ok
+test sweeper_blocks_journaled_ambiguous_mirror_exit_after_confirmation ... ok
+test the_ledger_refuses_a_second_attempt_at_the_same_logical_trade ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.51s
+
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Finished `test` profile [unoptimized] target(s) in 57.08s
+     Running tests/failure_injection.rs (target/debug/deps/failure_injection-22a6a75a61bd754f)
+
+running 22 tests
+test ambiguous_send_books_the_position_and_leaves_the_intent_pending ... ok
+test blockhash_rejected_by_the_node_is_a_definite_failure_with_cooldown ... ok
+test confirmation_timeout_parks_the_entry_and_the_sweeper_holds_it ... ok
+test duplicate_intent_is_refused_by_the_execution_ledger ... ok
+test failed_simulation_never_broadcasts_and_marks_the_entry_failed ... ok
+test intent_journal_records_before_broadcast_and_abandons_on_rejection ... ok
+test kill_switch_engaged_mid_pipeline_stops_the_hand_off ... ok
+test malformed_curve_account_is_execution_unavailable_not_a_trade ... ok
+test malformed_feed_payloads_are_dropped_by_the_detector ... ok
+test missing_liquidity_is_insufficient_liquidity ... ok
+test missing_mint_refuses_entry_in_both_modes ... ok
+test pumpswap_event_without_a_pool_account_is_pool_not_ready ... ok
+test restart_with_a_failed_entry_cleans_the_position_up_without_selling ... ok
+test rpc_failover_to_a_healthy_provider_completes_the_entry ... ok
+test rpc_timeout_without_fallback_is_execution_unavailable ... ok
+test sniper_daily_loss_limit_blocks_new_entries ... ok
+test stale_blockhash_is_replaced_before_broadcast ... ok
+test stale_market_snapshot_is_refused_at_submit_time ... ok
+test tripped_provider_pool_is_reported_before_any_read ... ok
+test ws_disconnect_after_detection_does_not_affect_the_entry ... ok
+test ws_disconnect_during_detection_reconnects_and_keeps_detecting ... ok
+test ws_slot_regression_after_reconnect_is_counted_not_traded_twice ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.57s

@@ -12,9 +12,11 @@
 //!   (`CopyFeedClient`), parsed by the production parser;
 //! * the whole local pipeline, fed with that live data, in **paper** mode.
 //!
-//! They are `#[ignore]`d so the default `cargo test` stays hermetic and
-//! deterministic, and they *additionally* require `LIVE_POLYMARKET=1`, so a
-//! network outage can never be mistaken for a code failure:
+//! They require `LIVE_POLYMARKET=1` in addition to being online, so a network
+//! outage can never be mistaken for a code failure. The `#[ignore]` was removed
+//! (gap #31): each test skips itself with a printed reason when the flag is
+//! absent, so the default `cargo test` still stays hermetic and deterministic —
+//! but the file now compiles and runs everywhere instead of silently vanishing:
 //!
 //! ```text
 //! LIVE_POLYMARKET=1 cargo test -p module-polymarket --test live_venue -- --ignored --test-threads=1
@@ -76,7 +78,6 @@ async fn a_live_market() -> module_polymarket::gamma::MarketQuery {
 }
 
 #[tokio::test]
-#[ignore = "hits the live Polymarket Gamma API; run with LIVE_POLYMARKET=1 --ignored"]
 async fn live_gamma_catalogue_parses_into_our_market_type() {
     if !live_enabled() {
         eprintln!("LIVE_POLYMARKET!=1 — skipping the live Gamma call");
@@ -119,7 +120,6 @@ async fn live_gamma_catalogue_parses_into_our_market_type() {
 }
 
 #[tokio::test]
-#[ignore = "hits the live Polymarket CLOB API; run with LIVE_POLYMARKET=1 --ignored"]
 async fn live_clob_serves_a_book_and_a_tick_size_for_a_real_token() {
     if !live_enabled() {
         eprintln!("LIVE_POLYMARKET!=1 — skipping the live CLOB calls");
@@ -170,7 +170,6 @@ async fn live_clob_serves_a_book_and_a_tick_size_for_a_real_token() {
 }
 
 #[tokio::test]
-#[ignore = "hits the live Polymarket data API; run with LIVE_POLYMARKET=1 --ignored"]
 async fn live_data_api_leader_trades_parse_into_leader_trades() {
     if !live_enabled() {
         eprintln!("LIVE_POLYMARKET!=1 — skipping the live data-API call");
@@ -228,7 +227,6 @@ async fn live_data_api_leader_trades_parse_into_leader_trades() {
 }
 
 #[tokio::test]
-#[ignore = "hits the live Polymarket APIs; run with LIVE_POLYMARKET=1 --ignored"]
 async fn live_leader_trade_reaches_a_paper_fill_through_the_engine() {
     if !live_enabled() {
         eprintln!("LIVE_POLYMARKET!=1 — skipping the live end-to-end run");

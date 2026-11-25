@@ -1,0 +1,6 @@
+=== RED: the completeness guard must catch a gap row missing from the inventory ===
+-- injection: 3 rows deleted from the appendix of docs/OPEN-REMAINING.md --
+test release_manifest_counts_and_version_are_current ... FAILED
+thread 'release_manifest_counts_and_version_are_current' (3901441) panicked at crates/server/tests/batch6_transaction_readiness.rs:398:9:
+gap row is missing from docs/OPEN-REMAINING.md: Deterministic two-replica test
+test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

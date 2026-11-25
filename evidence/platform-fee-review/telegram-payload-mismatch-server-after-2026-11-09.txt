@@ -1,0 +1,22 @@
+=== GREEN: server telegram trade port ===
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 1m 50s
+     Running unittests src/lib.rs (target/debug/deps/sniper_suite-8473bfd8875fa7ab)
+
+running 11 tests
+test telegram_trade_port::tests::limits_intersect_with_generic_risk_cap ... ok
+test telegram_trade_port::tests::deterministic_ids_are_stable ... ok
+test telegram_trade_port::tests::open_position_lookup_prefers_manual_and_skips_terminal ... ok
+test telegram_trade_port::tests::percent_math_is_exact_and_bounded ... ok
+test telegram_trade_port::tests::limits_require_both_telegram_caps ... ok
+test telegram_trade_port::tests::receipt_reconstruction_uses_signature_or_paper_reference ... ok
+test telegram_trade_port::tests::restored_trade_replay_requires_exact_command_fingerprint ... ok
+test telegram_trade_port::tests::receipt_replay_never_bypasses_organization_check ... ok
+test telegram_trade_port::tests::restored_trade_without_fingerprint_fails_closed ... ok
+test telegram_trade_port::tests::validate_request_shape ... ok
+test telegram_trade_port::tests::same_org_command_id_reuse_with_different_payload_is_refused ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 972 filtered out; finished in 0.01s
+
+server_green_exit=0

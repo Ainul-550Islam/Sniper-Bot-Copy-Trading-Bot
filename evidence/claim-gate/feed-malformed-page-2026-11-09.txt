@@ -1,0 +1,21 @@
+Polling malformed-signature regression, 2026-11-09 in user timezone.
+Command: cargo test -p module-copy --lib feeds::tests::poll_ --locked -j 1 -- --nocapture
+Mock RPC returns a full signature page with one invalid signature. The page is rejected instead of silently becoming a shorter page. No real provider or end-to-end delivery guarantee is tested.
+
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 28.07s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-84834e0020a68c4b)
+
+running 6 tests
+test feeds::tests::poll_batch_paginates_to_saved_cursor_without_skipping_full_page ... ok
+test feeds::tests::poll_batch_rejects_malformed_signature_in_full_page ... ok
+test feeds::tests::poll_batch_repeated_provider_page_is_rejected ... ok
+test feeds::tests::poll_requests_newer_transactions_using_until_cursor ... ok
+test feeds::tests::poll_retries_null_fetch_without_advancing_cursor ... ok
+test feeds::tests::poll_batch_page_cap_reports_incomplete_without_returning_a_partial_batch ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.09s
+
+EXIT=0

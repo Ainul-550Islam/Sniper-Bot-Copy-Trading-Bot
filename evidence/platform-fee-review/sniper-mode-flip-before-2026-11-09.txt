@@ -1,0 +1,31 @@
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Finished `test` profile [unoptimized] target(s) in 7.35s
+     Running tests/failure_injection.rs (target/debug/deps/failure_injection-22a6a75a61bd754f)
+
+running 2 tests
+test confirmed_live_entry_keeps_attempt_mode_when_killed_after_send ... FAILED
+test confirmed_live_exit_keeps_attempt_mode_when_killed_after_send ... FAILED
+
+failures:
+
+---- confirmed_live_entry_keeps_attempt_mode_when_killed_after_send stdout ----
+
+thread 'confirmed_live_entry_keeps_attempt_mode_when_killed_after_send' (3464943) panicked at crates/module-sniper/tests/failure_injection.rs:576:5:
+assertion `left == right` failed
+  left: Simulate
+ right: Live
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- confirmed_live_exit_keeps_attempt_mode_when_killed_after_send stdout ----
+
+thread 'confirmed_live_exit_keeps_attempt_mode_when_killed_after_send' (3464945) panicked at crates/module-sniper/tests/failure_injection.rs:619:5:
+assertion failed: trades.iter().all(|trade| trade.mode == bot_core::models::ExecutionMode::Live)
+
+
+failures:
+    confirmed_live_entry_keeps_attempt_mode_when_killed_after_send
+    confirmed_live_exit_keeps_attempt_mode_when_killed_after_send
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.49s
+
+error: test failed, to rerun pass `-p module-sniper --test failure_injection`

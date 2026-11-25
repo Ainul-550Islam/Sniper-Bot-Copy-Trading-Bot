@@ -1,0 +1,23 @@
+=== GREEN: same-ID payload mismatch — named divergence, both sides, latch untouched ===
+--- core accounting suite ---
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 651 filtered out; finished in 0.17s
+
+accounting_lib_exit=0
+--- server accounting api (conflict surface) ---
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 956 filtered out; finished in 0.11s
+
+server_api_exit=0
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 994 filtered out; finished in 0.00s
+
+server_accounting_exit=0
+--- openapi artifacts ---
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+openapi_exit=0
+--- clippy / fmt / diff ---
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 3m 43s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

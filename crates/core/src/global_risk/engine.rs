@@ -736,6 +736,19 @@ impl GlobalRiskEngine {
                     "wallet, strategy, asset, and quote asset must be non-empty and trimmed".into(),
                 ));
             }
+            // 0b. A proven disagreement between this process's applied book
+            // and the durable journal makes every portfolio figure unreliable.
+            // Refuse new entries even when no aggregate limit is configured.
+            // This is an entry gate only; protective exits are not routed
+            // through decide_inner and remain available.
+            if let Some(conflict) = self.ledger.journal_conflict().await {
+                break 'check Err((
+                    GlobalRejectReason::InvalidPortfolio,
+                    format!(
+                        "deployment accounting journal conflict for {conflict}; refusing new entries until reconciliation"
+                    ),
+                ));
+            }
             // 1–3. Switches.
             if ctx.global_kill {
                 break 'check Err((
@@ -1014,12 +1027,12 @@ impl GlobalRiskEngine {
                     .get(&key)
                     .map(|p| p.is_open())
                     .unwrap_or(false);
-                if !already_open && view.open_positions >= cfg.max_open_positions {
+                if !already_open && snapshot.open_positions >= cfg.max_open_positions {
                     break 'check Err((
                         GlobalRejectReason::MaxOpenPositions,
                         format!(
                             "{} open positions across every module (max {})",
-                            view.open_positions, cfg.max_open_positions
+                            snapshot.open_positions, cfg.max_open_positions
                         ),
                     ));
                 }
@@ -1109,7 +1122,7 @@ impl GlobalRiskEngine {
             Ok(())
         };
 
-        let decision = match outcome {
+        match outcome {
             Ok(()) => GlobalRiskDecision {
                 decision_id: id,
                 ts,
@@ -1130,8 +1143,7 @@ impl GlobalRiskEngine {
                 snapshot,
                 replica_id: self.replica_id.clone(),
             },
-        };
-        decision
+        }
     }
 
     async fn record(&self, decision: &GlobalRiskDecision) {
@@ -1186,5 +1198,184 @@ pub fn strategy_label(module: crate::models::BotModule, detail: Option<&str>) ->
         }
         (crate::models::BotModule::Polymarket, Some(s)) if !s.is_empty() => s.to_string(),
         (m, _) => m.as_str().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod ledger_conflict_tests {
+    use super::*;
+    use crate::accounting::{
+        fill_event, AccountingEvent, Applied, EventSide, GlobalLedger, MemoryLedgerStore,
+    };
+    use crate::models::{BotModule, ExecutionMode, Venue};
+
+    fn fill(quote: f64) -> AccountingEvent {
+        fill_event(
+            BotModule::Sniper,
+            Venue::PumpFun,
+            "conflict-wallet",
+            "sniper",
+            "CONFLICT-MINT",
+            "SOL",
+            EventSide::Buy,
+            10.0,
+            quote / 10.0,
+            quote,
+            0.0,
+            ExecutionMode::Paper,
+            "shared-conflict-fill",
+            Some("conflict-order".into()),
+            Some("conflict-position".into()),
+            Utc::now(),
+            "",
+        )
+    }
+
+    fn request() -> GlobalRiskRequest {
+        GlobalRiskRequest {
+            module: BotModule::Sniper,
+            venue: Venue::PumpFun,
+            wallet: "entry-wallet".into(),
+            strategy: "sniper".into(),
+            asset: "ENTRY-MINT".into(),
+            quote_asset: "SOL".into(),
+            requested_quote: 1.0,
+            mode: ExecutionMode::Paper,
+        }
+    }
+
+    fn context() -> DecisionContext {
+        DecisionContext::default()
+    }
+
+    fn engine(ledger: Arc<GlobalLedger>) -> GlobalRiskEngine {
+        GlobalRiskEngine::new(
+            GlobalRiskConfig::default(),
+            ledger,
+            EventBus::default(),
+            "conflict-test-replica",
+        )
+    }
+
+    /// One replica has applied a pending fill; another durably commits a
+    /// different payload under the same id before the first can flush.
+    async fn conflicted_ledger() -> Arc<GlobalLedger> {
+        let store = Arc::new(MemoryLedgerStore::new());
+        let first = Arc::new(GlobalLedger::new(EventBus::default(), "first"));
+        let second = Arc::new(GlobalLedger::new(EventBus::default(), "second"));
+        first.attach_store(store.clone()).await;
+        second.attach_store(store.clone()).await;
+        store.set_unavailable(true);
+        assert!(first.submit(fill(1.0)).await.is_new());
+        store.set_unavailable(false);
+        assert!(second.submit(fill(2.0)).await.is_new());
+        assert_eq!(first.flush_pending().await, 0);
+        assert!(first.journal_conflict().await.is_some());
+        first
+    }
+
+    #[tokio::test]
+    async fn healthy_ledger_still_permits_entries_without_configured_limits() {
+        let ledger = Arc::new(GlobalLedger::new(EventBus::default(), "healthy"));
+        let decision = engine(ledger).decide(&request(), &context()).await;
+        assert!(decision.accepted(), "{}", decision.detail);
+    }
+
+    #[tokio::test]
+    async fn proven_journal_conflict_fails_closed_on_all_entry_paths() {
+        let ledger = conflicted_ledger().await;
+        let engine = engine(ledger);
+        let decision = engine.decide(&request(), &context()).await;
+        assert!(!decision.accepted(), "{}", decision.detail);
+        assert_eq!(decision.reason, Some(GlobalRejectReason::InvalidPortfolio));
+        assert!(decision.detail.contains("conflict"));
+
+        let (decision, reservation) = engine.decide_with_reservation(&request(), &context()).await;
+        assert!(!decision.accepted(), "{}", decision.detail);
+        assert!(reservation.is_none());
+
+        let decision = engine.decide_tenant(&request(), &context()).await;
+        assert!(!decision.accepted(), "{}", decision.detail);
+
+        let (decision, reservation) = engine
+            .decide_tenant_with_reservation(
+                &request(),
+                &context(),
+                crate::tenant::OrganizationId::new(),
+            )
+            .await;
+        assert!(!decision.accepted(), "{}", decision.detail);
+        assert!(reservation.is_none());
+    }
+
+    /// Async recorder standing in for the deployment kill switch.
+    struct RecordingHalt {
+        seen: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::accounting::ConflictHalt for RecordingHalt {
+        async fn halt(&self, conflict: &str) -> bool {
+            let mut seen = self.seen.lock().await;
+            if seen.is_empty() {
+                seen.push(conflict.to_string());
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conflict_halt_hook_runs_before_the_fence_is_consulted() {
+        // The halt is the cross-replica half of the fence: it must fire from
+        // the same detection that latches the local gate.
+        let store = Arc::new(MemoryLedgerStore::new());
+        let first = Arc::new(GlobalLedger::new(EventBus::default(), "halt-first"));
+        let second = Arc::new(GlobalLedger::new(EventBus::default(), "halt-second"));
+        first.attach_store(store.clone()).await;
+        second.attach_store(store.clone()).await;
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        first
+            .attach_conflict_halt(Arc::new(RecordingHalt { seen: seen.clone() }))
+            .await;
+
+        store.set_unavailable(true);
+        assert!(first.submit(fill(1.0)).await.is_new());
+        store.set_unavailable(false);
+        assert!(second.submit(fill(2.0)).await.is_new());
+        assert_eq!(first.flush_pending().await, 0);
+        assert!(first.journal_conflict().await.is_some());
+
+        // The detached halt task runs promptly and exactly once.
+        for _ in 0..50 {
+            if !seen.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let seen = seen.lock().await.clone();
+        assert_eq!(seen.len(), 1, "the halt must fire exactly once: {seen:?}");
+        assert!(first.journal_conflict().await.is_some());
+
+        // And the entry gate stays closed while the latch is set.
+        let decision = engine(first.clone()).decide(&request(), &context()).await;
+        assert!(!decision.accepted());
+        assert_eq!(decision.reason, Some(GlobalRejectReason::InvalidPortfolio));
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_journal_alone_is_not_treated_as_a_proven_conflict() {
+        let store = Arc::new(MemoryLedgerStore::new());
+        let ledger = Arc::new(GlobalLedger::new(EventBus::default(), "outage"));
+        ledger.attach_store(store.clone()).await;
+        store.set_unavailable(true);
+        assert!(matches!(ledger.submit(fill(1.0)).await, Applied::New(_)));
+        assert_eq!(ledger.journal_conflict().await, None);
+        assert_eq!(ledger.pending_count().await, 1);
+        // This is a separate policy decision from the conflict gate: a
+        // pending-but-unproven event does not latch a permanent local fence.
+        let decision = engine(ledger).decide(&request(), &context()).await;
+        assert!(decision.accepted(), "{}", decision.detail);
     }
 }

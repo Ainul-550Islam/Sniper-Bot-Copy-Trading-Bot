@@ -295,3 +295,55 @@ async fn dashboard_aggregates_exclude_the_other_tenant() {
     assert_eq!(summary_b.executions.attempts, 0);
     assert_eq!(summary_b.realized_pnl.positions_closed, 0);
 }
+
+#[tokio::test]
+async fn symbol_pnl_fails_closed_on_unknown_and_handles_empty_books() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: symbol_pnl_fails_closed_on_unknown_and_handles_empty_books — POSTGRES_URL missing");
+        return;
+    };
+    let tenant = org(&db, &format!("pnl-snapshot-{}", run_id())).await;
+    let reports = TenantReportingRepo::new(db.clone());
+    let write = TenantPositionWrite::new(db.clone());
+    let scope = read_scope(tenant);
+    let since = at(2.0);
+    let until = at(-1.0);
+    assert!(reports
+        .pnl()
+        .by_symbol(&scope, since, until, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    let known = position(tenant, format!("known-{}", run_id()), "closed");
+    write.upsert(&write_scope(tenant), &known).await.unwrap();
+    let report = reports
+        .pnl()
+        .by_symbol(&scope, since, until, 10)
+        .await
+        .unwrap();
+    assert_eq!(report.len(), 1);
+    assert_eq!(report[0].realized_quote, 50.0);
+    // Deterministically reproduce the old two-statement interleaving:
+    // the check sees no unknowns, then a new unknown commits before the
+    // aggregate, which silently filters it out.
+    let old_check: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM positions WHERE organization_id=$1 AND closed_at >= $2 AND closed_at < $3 AND (realized_pnl_quote IS NULL OR opened_at < $2))")
+        .bind(tenant.as_uuid()).bind(since).bind(until).fetch_one(db.pool()).await.unwrap();
+    assert!(!old_check);
+    let mut unknown = position(tenant, format!("unknown-{}", run_id()), "closed");
+    unknown.realized_pnl_quote = None;
+    write.upsert(&write_scope(tenant), &unknown).await.unwrap();
+    let old_partial: f64 = sqlx::query_scalar("SELECT SUM(realized_pnl_quote)::double precision FROM positions WHERE organization_id=$1 AND closed_at >= $2 AND closed_at < $3 AND realized_pnl_quote IS NOT NULL")
+        .bind(tenant.as_uuid()).bind(since).bind(until).fetch_one(db.pool()).await.unwrap();
+    assert_eq!(
+        old_partial, 50.0,
+        "the old aggregate silently omits the new unknown row"
+    );
+    assert!(
+        reports
+            .pnl()
+            .by_symbol(&scope, since, until, 10)
+            .await
+            .is_err(),
+        "unknown PnL must not be silently excluded from an apparently complete report"
+    );
+}

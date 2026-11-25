@@ -1,0 +1,24 @@
+=== GREEN: /resume is the exact inverse of /kill (gap #83 part: tenant kill switch) ===
+
+-- core state unit tests (39, incl. 2 new resume witnesses) --
+test state::tests::resume_can_release_the_halt_without_opening_the_kill_switch ... ok
+test state::tests::resume_releases_both_latches_and_reports_the_modules_it_leaves_off ... ok
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 680 filtered out; finished in 0.01s
+
+-- core lib (all) --
+test result: ok. 719 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.01s
+
+-- server lib (kill/resume handlers) --
+test result: ok. 1000 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 119.33s
+
+-- openapi + router --
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.95s
+
+-- clippy -D warnings (bot-core + sniper-suite) --
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 5m 57s
+
+-- fmt --
+fmt_exit=0
+diff_check_exit=0

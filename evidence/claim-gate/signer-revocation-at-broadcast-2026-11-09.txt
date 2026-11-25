@@ -1,0 +1,95 @@
+# Signer revocation at broadcast — the guard now asks the durable binding registry (2026-11-09)
+
+This closes the last residual recorded in
+`evidence/claim-gate/runtime-fence-freshness-2026-11-09.txt`:
+"the signer binding is still the captured `is_active()` (no live revocation lookup)".
+
+## What was wrong (and what was NOT wrong)
+
+NOT wrong: issuance. `binding_guard` already refuses an inactive or unbound signer
+before a context is issued, so a revoked signer could not obtain a NEW context.
+
+Wrong: everything after issuance. `TenantSigningContext` stores a `TenantSignerRef`
+whose `active: bool` is captured at issue time, and the broadcast guard's
+`authorize_meta` reads exactly that flag. Revocation later — offboarding, key
+compromise, custody rotation — flips the durable row (`tenant_bindings.active`,
+migration 0025) but NOT the captured copy, so a module that was already running kept
+signing with a revoked binding indefinitely. Grep evidence of the gap: `authorize_signer`
+(the only function that reads `is_active()`) had no caller outside its own tests.
+
+## The fix (same seam pattern as the runtime fence)
+
+1. `solana-kit`: new `SignerBindingProbe` trait —
+   `signer_is_active(org, provider, key_ref) -> Result<(), String>`; `Err` is never a pass.
+2. `TenantBroadcastGuard::with_signer_probe`, `has_signer_probe`; `authorize_live`
+   now runs: captured-context rules → LIVE signer binding → runtime fence.
+   Order is deliberate: a revoked signer is refused before any runtime lookup.
+3. New deny `TenantBroadcastDeny::SignerInactive { detail, source }` → label
+   `signer_inactive` (kept distinct from the captured `SignerRevoked` and from
+   `runtime_fenced`: an operator must be able to tell the three apart).
+4. `LivenessProbes { fence, signer }` + `with_liveness(...)` so executors attach both
+   sources in one call; `TenantCopyExecutor::new_with_fence` /
+   `TenantSniperExecutor::new_with_fence` now take `LivenessProbes`.
+5. Server adapter `tenant::registry::RegistrySignerProbe` over the durable registry:
+   active row → pass; inactive row → `binding_revoked`; missing row →
+   `binding_not_found`; registry error → `binding lookup failed: …`. All three refuse.
+6. Wiring is still un-forgettable: `TenantModuleFactory` builds BOTH probes itself over
+   its own `Arc<Database>` (`PgRuntimeStore`/`RuntimeRegistryService` and
+   `PgTenantBindingRegistry`), memoised; `with_runtime_fence` / `with_signer_probe`
+   only substitute a different source. No boot step to remember.
+
+## Witnesses
+
+A. `solana-kit tenant_broadcast_guard::tests::a_revoked_binding_is_refused_at_broadcast_time`
+   baseline passes on the captured flag; with a probe the live source is consulted
+   exactly once, with THIS tenant's provider and key reference; revocation →
+   `signer_inactive` with the exact detail; `authorize_meta` STILL passes (the
+   blindness, demonstrated); unreadable source → refusal; and a revoked signer
+   triggers ZERO runtime-fence lookups (ordering proven, not asserted in prose).
+B. `server tenant::registry::signer_probe_tests::only_an_active_binding_passes_and_everything_else_refuses`
+   active → pass; inactive → `binding_revoked`; missing → `binding_not_found`;
+   store failure → `binding lookup failed`; four calls = four lookups.
+C. `server tenant_module_factory_pg::a_binding_revoked_after_issuance_blocks_the_next_broadcast`
+   REAL PostgreSQL, real factory-built copy engine, no opt-in:
+   seed active `tenant_bindings` row → build engine → `has_signer_probe()` true →
+   active binding authorizes → flip the durable row to inactive → `authorize_meta`
+   still passes BUT `authorize_live` returns
+   `SignerInactive { detail: "binding_revoked", source: "binding_registry" }` →
+   and a never-bound key is refused as `binding_not_found`.
+
+RED evidence (both applied, observed, reverted):
+  * deleting the signer branch in `authorize_live` →
+    `assertion failed: the live signer binding must be consulted  left: 0`
+  * detaching the signer probe in the factory →
+    `every factory-built engine must carry a live signer-binding check`
+    (and the runtime-fence witness fails too: `…live runtime fence by default`)
+
+## GREEN
+
+- `cargo test -p solana-kit --lib -- tenant_broadcast_guard` → 10 passed, 0 failed
+- `cargo test -p sniper-suite --lib -- signer_probe_tests` → 1 passed, 0 failed
+- `cargo test -p sniper-suite --test tenant_module_factory_pg -- --test-threads=1`
+  → 5 passed, 0 failed
+- clippy `-D warnings` clean on solana-kit / module-copy / module-sniper / sniper-suite;
+  fmt 0; `git diff --check` 0
+
+## Behaviour change operators must know
+
+A guard WITH a signer probe now refuses an unbound key reference
+(`binding_not_found`). Production is unaffected — the gateway's `binding_guard` already
+refuses unbound signers before issuance, so every real context has an active row — but
+hand-built contexts (tests, fixtures, operators poking the engine) must seed
+`tenant_bindings` or they are refused. Two pre-existing PG witnesses had exactly that
+omission and were updated; that failure is the feature, not a regression.
+
+## What this still does not establish
+
+* The binding's `public_address` is not compared to the funding wallet at broadcast time
+  (the captured `SignerKeyMismatch` check in `authorize_signer` remains unused in
+  production paths). Rotating a key pair while keeping the same `key_ref` would need
+  that comparison; it is a separate item, not claimed here.
+* Witnesses are paper-mode; no live chain, no funded wallet.
+* `custody_signers` (a second, richer signer table with an `active`-style status) is not
+  consulted by this probe; the binding registry is the authority the gateway issues
+  against, so that is the consistent choice, and the divergence is recorded rather than
+  hidden.

@@ -1,0 +1,15 @@
+Manual source-reading batch 002, 2026-11-09 in user timezone.
+Every line of these three versions was read; this is not proof all behaviors are correct. Paths outside these files were read selectively as evidence, not marked fully read.
+
+1c9849af3aba2d7e0f3b7028dd9af78b6964eeafe49700ddbd04cd20bd5b53db  crates/module-copy/src/tenant_executor.rs
+628 crates/module-copy/src/tenant_executor.rs
+136dffba1921777bee89158c69e875e17500fffca0a4d885be8df7b80ec5ac7f  crates/module-copy/src/intent.rs
+350 crates/module-copy/src/intent.rs
+95041cd8144d623310881412c7706f0a0fbdbf7f2f973a87b4e92552d00593f0  crates/module-copy/src/mirror.rs
+683 crates/module-copy/src/mirror.rs
+
+tenant_executor.rs: examined guards, local dedup, sink/pump, config path and tests. Found stale leader registry; targeted regression evidence tenant-config-refresh-2026-11-09.txt. Shared state isolation and live runtime freshness remain open.
+
+intent.rs: examined all entry/exit identity and journaling; found attempt journal ID collision across independent state counters. UUID-based fix plus real-PostgreSQL evidence intent-journal-identity-2026-11-09.txt; existing legacy rows are not repaired.
+
+mirror.rs: examined both venue paths, fencing, intent journal, result accounting and tests. Journal is optional/best effort; ambiguous/recovery and live execution remain outside tests in this batch.

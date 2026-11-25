@@ -79,6 +79,16 @@ export interface RecoverySweep {
 export interface RecoverySweepResponse {
   organization_id: string;
   items: RecoverySweep[];
+  /**
+   * Truncation signal (gap #74): the server pages this endpoint, so a page is
+   * never the whole story. `has_more` means another page exists and
+   * `next_before`/`next_before_id` continue the walk; a caller that stops early
+   * knows it stopped early instead of assuming completeness.
+   */
+  has_more?: boolean;
+  total_remaining?: number;
+  next_before?: string | null;
+  next_before_id?: string | null;
 }
 
 export interface TransactionDetail {

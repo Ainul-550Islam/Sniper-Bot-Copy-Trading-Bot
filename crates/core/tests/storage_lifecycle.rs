@@ -1,9 +1,8 @@
 //! Persistence lifecycle integration test: append → load → simulated restart
 //! (a fresh [`Store`] over the same directory) → rotate → truncate.
 //!
-//! This is the durability contract the JSONL tier promises: everything
-//! appended before a crash/restart is still readable afterwards, and rotation
-//! archives without losing data.
+//! Tests normal reopen, controlled torn-line recovery, rotation and truncate.
+//! These do not simulate process or machine crashes or establish fsync durability.
 
 use std::io::Write as _;
 use std::time::Duration;
@@ -188,4 +187,60 @@ async fn rotate_archives_and_truncate_clears() {
     assert_eq!(JournalKind::parse("nope"), None);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn append_after_torn_line_keeps_the_next_complete_record() {
+    let dir = temp_dir("torn-then-append");
+    let cfg = StorageConfig {
+        data_dir: dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let store = Store::open(&cfg).await.unwrap();
+    store.append_trade(&sample_trade("before")).await.unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(store.trades_path())
+        .unwrap()
+        .write_all(b"{\"id\":\"torn")
+        .unwrap();
+    store.append_trade(&sample_trade("after")).await.unwrap();
+    let trades = store.load_trades().await.unwrap();
+    let ids: Vec<_> = trades.iter().map(|t| t.id.as_str()).collect();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        ids,
+        vec!["before", "after"],
+        "a torn line must not consume the following complete record"
+    );
+}
+
+#[tokio::test]
+async fn cloned_store_concurrent_appends_preserve_whole_records() {
+    let dir = temp_dir("concurrent-clones");
+    let store = Store::from_dir(&dir);
+    let mut handles = Vec::new();
+    for i in 0..64 {
+        let store = store.clone();
+        handles.push(tokio::spawn(async move {
+            store
+                .append_trade(&sample_trade(&format!("trade-{i}")))
+                .await
+                .unwrap();
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    let mut ids: Vec<_> = store
+        .load_trades()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(ids.len(), 64);
 }

@@ -1,0 +1,3 @@
+Command: POSTGRES_URL=<local PostgreSQL URL> cargo test --workspace --locked -j 1 -- --test-threads=1
+Result: NOT COMPLETED. Dependency compilation reached `Compiling sniper-suite v0.1.0`; the run was manually stopped after several minutes of server compilation under memory pressure (the environment reported approximately 2 GiB RAM, no swap). No workspace test result is claimed.
+The Redis-backed gated paths were not configured for this attempt.

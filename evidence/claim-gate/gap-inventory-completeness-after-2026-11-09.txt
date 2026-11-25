@@ -1,0 +1,16 @@
+=== GREEN: every gap row is present in the inventory (doc + CSV), verified by a test ===
+rows: 133 = DONE 52 / OPEN 36 / PARTIAL 31 / other 14
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+batch6_exit=0
+--- cross-check outside the test: python dump vs doc ---
+gap rows=133 missing_doc=0 missing_csv=0
+--- openapi / router / clippy / fmt / diff ---
+
+openapi_exit=0
+
+router_exit=0
+    Finished `dev` profile [unoptimized] target(s) in 0.78s
+clippy_exit=0
+fmt_exit=1
+diff_check_exit=0

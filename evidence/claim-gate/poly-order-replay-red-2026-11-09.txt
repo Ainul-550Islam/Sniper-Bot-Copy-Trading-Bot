@@ -1,0 +1,16 @@
+=== RED: a stale order replay un-filled a terminal mirror order ===
+-- injection: upsert_order overwrites state/venue_status unconditionally again --
+test a_stale_order_replay_cannot_unfill_a_terminal_row ... FAILED
+
+failures:
+
+--
+thread 'a_stale_order_replay_cannot_unfill_a_terminal_row' (1477853) panicked at crates/core/tests/polymarket_cross_tenant_pg.rs:501:5:
+assertion `left == right` failed: a stale replay must not un-fill a terminal order
+  left: "resting"
+ right: "filled"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.22s

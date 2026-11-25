@@ -21,6 +21,17 @@ impl TenantIntentWrite {
     /// `(organization_id, intent_id)`: a retry of THIS tenant's intent
     /// never rewrites the original timestamp; ANOTHER tenant's same
     /// intent_id journals independently.
+    ///
+    /// **A duplicate id must describe the SAME intent.** `DO NOTHING` used to
+    /// accept ANY row that already owned the id, so reusing an id for a
+    /// different module/symbol/wallet/side/qty silently aliased the new intent
+    /// onto the old row and the caller believed its (different) order was
+    /// journalled. The conflict is now payload-aware: the row is written only
+    /// when the payload is identical (`IS NOT DISTINCT FROM` on every business
+    /// column), and an exact retry still succeeds without touching
+    /// `created_at`/`status`. A differing payload is
+    /// [`RepositoryError::Conflict`]`("intent_id")` — terminal, never retried
+    /// under the same id (generate a new intent id instead).
     #[allow(clippy::too_many_arguments)]
     pub async fn record(
         &self,
@@ -35,14 +46,36 @@ impl TenantIntentWrite {
         if intent_id.trim().is_empty() {
             return Err(RepositoryError::Validation("intent_id"));
         }
-        self.db
+        // `DO UPDATE … WHERE payload differs → RETURNING 1` writes nothing and
+        // returns no row when the payload is identical, so: no row ⇒ exact
+        // retry (idempotent success); `Conflict` from a DO NOTHING-style clash
+        // is impossible now, so a missing row is the ONLY success. A differing
+        // payload produces no row either — which is why the statement also
+        // reports whether the id existed at all, in one round trip.
+        let (existed, accepted): (bool, bool) = self
+            .db
             .timed(
                 "tenant_intent_record",
-                sqlx::query(
-                    r#"INSERT INTO execution_intents
+                sqlx::query_as(
+                    r#"WITH attempted AS (
+                         INSERT INTO execution_intents
                            (organization_id, intent_id, module, symbol, wallet, side, qty)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)
-                       ON CONFLICT (organization_id, intent_id) DO NOTHING"#,
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         ON CONFLICT (organization_id, intent_id) DO UPDATE
+                            SET intent_id = execution_intents.intent_id
+                          WHERE ROW(execution_intents.module, execution_intents.symbol,
+                                    execution_intents.wallet, execution_intents.side,
+                                    execution_intents.qty)
+                            IS NOT DISTINCT FROM
+                                ROW(EXCLUDED.module, EXCLUDED.symbol, EXCLUDED.wallet,
+                                    EXCLUDED.side, EXCLUDED.qty)
+                         RETURNING 1
+                       ), existing AS (
+                         SELECT 1 FROM execution_intents
+                          WHERE organization_id = $1 AND intent_id = $2
+                       )
+                       SELECT EXISTS (SELECT 1 FROM existing),
+                              EXISTS (SELECT 1 FROM attempted)"#,
                 )
                 .bind(write.organization_id().as_uuid())
                 .bind(intent_id)
@@ -51,10 +84,20 @@ impl TenantIntentWrite {
                 .bind(wallet)
                 .bind(side)
                 .bind(qty)
-                .execute(self.db.pool()),
+                .fetch_one(self.db.pool()),
             )
             .await?;
-        Ok(())
+        if accepted {
+            return Ok(());
+        }
+        if existed {
+            // Same id, different payload: refused. Exact retries returned
+            // `accepted` above, so this is exclusively the mismatch case.
+            return Err(RepositoryError::Conflict("intent_id"));
+        }
+        // Neither inserted nor visible: the row was written by a concurrent
+        // caller of the SAME tenant and is not visible in this snapshot.
+        Err(RepositoryError::Conflict("intent_id"))
     }
 
     /// The broadcast produced `signature`: THIS tenant's intent is no
@@ -135,9 +178,34 @@ impl TenantIntentWrite {
                 .fetch_optional(self.db.pool()),
             )
             .await;
-        match row {
-            Ok(Some(_)) => RepositoryError::StaleWrite("intent status"),
-            _ => RepositoryError::NotFound("intent"),
-        }
+        classify_miss_probe(row.map(|row| row.is_some()))
+    }
+}
+
+fn classify_miss_probe(probe: Result<bool, crate::db::TimedDbError>) -> RepositoryError {
+    match probe {
+        Ok(true) => RepositoryError::StaleWrite("intent status"),
+        Ok(false) => RepositoryError::NotFound("intent"),
+        Err(error) => RepositoryError::from(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn miss_probe_timeout_is_storage_error_not_not_found() {
+        let err = classify_miss_probe(Err(crate::db::TimedDbError::Timeout));
+        assert!(matches!(err, RepositoryError::Storage(_)));
+        assert!(err.is_retryable());
+        assert!(matches!(
+            classify_miss_probe(Ok(false)),
+            RepositoryError::NotFound("intent")
+        ));
+        assert!(matches!(
+            classify_miss_probe(Ok(true)),
+            RepositoryError::StaleWrite("intent status")
+        ));
     }
 }

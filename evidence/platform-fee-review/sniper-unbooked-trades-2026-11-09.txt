@@ -1,0 +1,30 @@
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Finished `test` profile [unoptimized] target(s) in 12.91s
+     Running tests/failure_injection.rs (target/debug/deps/failure_injection-22a6a75a61bd754f)
+
+running 23 tests
+test ambiguous_live_exit_does_not_book_fill_or_allow_local_retry ... ok
+test ambiguous_send_does_not_book_a_fill_and_leaves_the_intent_pending ... ok
+test blockhash_rejected_by_the_node_is_a_definite_failure_with_cooldown ... ok
+test confirmation_timeout_parks_the_entry_without_booking_it ... ok
+test duplicate_intent_is_refused_by_the_execution_ledger ... ok
+test failed_simulation_never_broadcasts_and_marks_the_entry_failed ... ok
+test intent_journal_records_before_broadcast_and_abandons_on_rejection ... ok
+test kill_switch_engaged_mid_pipeline_stops_the_hand_off ... ok
+test malformed_curve_account_is_execution_unavailable_not_a_trade ... ok
+test malformed_feed_payloads_are_dropped_by_the_detector ... ok
+test missing_liquidity_is_insufficient_liquidity ... ok
+test missing_mint_refuses_entry_in_both_modes ... ok
+test pumpswap_event_without_a_pool_account_is_pool_not_ready ... ok
+test restart_with_a_failed_entry_cleans_the_position_up_without_selling ... ok
+test rpc_failover_to_a_healthy_provider_completes_the_entry ... ok
+test rpc_timeout_without_fallback_is_execution_unavailable ... ok
+test sniper_daily_loss_limit_blocks_new_entries ... ok
+test stale_blockhash_is_replaced_before_broadcast ... ok
+test stale_market_snapshot_is_refused_at_submit_time ... ok
+test tripped_provider_pool_is_reported_before_any_read ... ok
+test ws_disconnect_after_detection_does_not_affect_the_entry ... ok
+test ws_disconnect_during_detection_reconnects_and_keeps_detecting ... ok
+test ws_slot_regression_after_reconnect_is_counted_not_traded_twice ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.14s

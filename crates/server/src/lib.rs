@@ -27,6 +27,7 @@ pub mod ops;
 pub mod persist;
 pub mod provisioning;
 pub mod recon;
+pub mod reservation_chain;
 pub mod runtime_registry;
 pub mod saas;
 pub mod telegram_trade_port;

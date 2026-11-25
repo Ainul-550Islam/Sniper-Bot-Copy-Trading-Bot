@@ -56,7 +56,7 @@ pub struct BuyReport {
     pub intent_id: String,
     /// Broadcast signature when known.
     pub signature: Option<String>,
-    /// Whether a position was booked (`Confirmed | Sent | SendUnknown | PaperFilled`).
+    /// Whether a confirmed or non-live simulated/paper position was booked.
     pub filled: bool,
     /// Whether the landing is unproven (`Sent | SendUnknown` in live mode).
     pub ambiguous: bool,
@@ -108,11 +108,98 @@ impl CopyBot {
         slippage_pct: f64,
         slippage_bps: u64,
         decision: &bot_core::risk::RiskDecision,
+        pipeline_mode: ExecutionMode,
         permit: &mut bot_core::ownership::Permit,
     ) -> BotResult<BuyReport> {
+        // Freeze the mode used for live-only guards. An attempt cannot later
+        // upgrade to live if these guards or the pipeline ran non-live.
+        let guarded_mode = self.state.execution_mode().await;
+        // A previous ambiguous live buy may already have created exposure
+        // that is not in our position book. Refuse subsequent buys for this
+        // wallet while its local execution record remains in flight. This
+        // check is conservative but is not an atomic distributed reservation.
+        if guarded_mode == ExecutionMode::Live
+            && bot_core::execution::ledger()
+                .open()
+                .await
+                .iter()
+                .any(|record| {
+                    record.module == "copy"
+                        && crate::intent::is_entry_label(&record.label)
+                        && record.wallet == self.wallet.pubkey.to_string()
+                        && record.state.is_ambiguous()
+                })
+        {
+            return Err(BotError::invalid(
+                "unresolved copy buy for wallet; reconcile before another buy",
+            ));
+        }
         let mint = Pubkey::try_from(event.mint.as_str())
             .map_err(|e| BotError::invalid(format!("copy mint {}: {e}", event.mint)))?;
         let cfg = self.state.config_snapshot().await;
+        if guarded_mode == ExecutionMode::Live {
+            if self
+                .unjournaled_ambiguity
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(BotError::invalid(
+                    "copy safety latch set after an unresolved outcome; refusing live buy pending reconciliation",
+                ));
+            }
+            // Pending records can transition to Confirmed before the missing
+            // position has been reconstructed. Keep blocking based on the
+            // copy journal until a position exists or failure is proven.
+            // The existing journal API is bounded and best effort: this is
+            // not a substitute for an atomic durable exposure reservation.
+            let lookback = cfg.copy.recovery_lookback_hours.max(1);
+            let journal = self
+                .store
+                .events_since(Utc::now() - chrono::Duration::hours(lookback), 10_000)
+                .await
+                .ok_or_else(|| BotError::invalid("copy journal unavailable; refusing live buy"))?;
+            if journal.len() >= 10_000 {
+                return Err(BotError::invalid(
+                    "copy journal scan limit reached; refusing live buy pending reconciliation",
+                ));
+            }
+            for event in journal
+                .iter()
+                .filter(|item| item.stage == "AMBIGUOUS" && item.side == "buy")
+            {
+                let Some(intent_id) = event.intent_id.as_deref() else {
+                    return Err(BotError::invalid(
+                        "ambiguous copy buy lacks intent; reconciliation required",
+                    ));
+                };
+                let Some(record) = bot_core::execution::ledger().get(intent_id).await else {
+                    return Err(BotError::invalid(
+                        "ambiguous copy buy missing execution record; reconciliation required",
+                    ));
+                };
+                if record.wallet != self.wallet.pubkey.to_string() {
+                    continue;
+                }
+                if matches!(
+                    record.state,
+                    bot_core::execution::ExecutionState::Failed
+                        | bot_core::execution::ExecutionState::Expired
+                ) {
+                    continue;
+                }
+                let booked = match record.signature.as_deref() {
+                    Some(signature) => self.state.all_positions().await.iter().any(|position| {
+                        position.source == TradeSource::Copy
+                            && position.entry_signature.as_deref() == Some(signature)
+                    }),
+                    None => false,
+                };
+                if !booked {
+                    return Err(BotError::invalid(
+                        "unresolved copy buy for wallet; reconcile before another buy",
+                    ));
+                }
+            }
+        }
 
         let ctx = PumpContext::load(&self.rpc, &mint, &self.wallet.pubkey, None).await?;
         if !ctx.curve.complete {
@@ -124,6 +211,8 @@ impl CopyBot {
                 sized_sol,
                 slippage_pct,
                 decision,
+                guarded_mode,
+                pipeline_mode,
                 permit,
             )
             .await
@@ -136,6 +225,8 @@ impl CopyBot {
                 sized_sol,
                 slippage_bps,
                 decision,
+                guarded_mode,
+                pipeline_mode,
                 permit,
             )
             .await
@@ -153,6 +244,8 @@ impl CopyBot {
         sized_sol: f64,
         slippage_pct: f64,
         decision: &bot_core::risk::RiskDecision,
+        guarded_mode: ExecutionMode,
+        pipeline_mode: ExecutionMode,
         permit: &mut bot_core::ownership::Permit,
     ) -> BotResult<BuyReport> {
         let sol_in = maths::sol_to_lamports(sized_sol);
@@ -176,6 +269,13 @@ impl CopyBot {
             pump::build_buy_ix(ctx, &store, &opts, amount, max_sol_cost)?
         };
         let intent_id = intent::entry_intent_id_for(event, EntryRoute::Curve);
+        let fee_ix = crate::platform_fee::direct_fee_instruction(
+            &self.state,
+            &self.wallet.pubkey,
+            sol_in,
+            &cfg.platform_fee,
+            &intent_id,
+        )?;
         let mut req = TxRequest::new(intent::entry_label(&event.mint, EntryRoute::Curve))
             .with_instruction(buy_ix)
             .priority_fee(cfg.execution.priority_fee_micro_lamports)
@@ -185,10 +285,22 @@ impl CopyBot {
             // same ledger record and is refused as a duplicate.
             .with_intent_id(&intent_id)
             .attributed("copy", event.mint.clone());
+        if let Some(fee_ix) = fee_ix {
+            req = req.with_instruction(fee_ix);
+        }
         if cfg.execution.use_jito {
             req = req.jito_tip(cfg.execution.jito_tip_lamports);
         }
         self.refresh_policy().await;
+        // Freeze the executor's actual mode for the lifetime of this attempt;
+        // a later kill-switch/config change cannot rewrite its outcome.
+        let execution_mode = self.executor.policy().mode;
+        if execution_mode == ExecutionMode::Live {
+            if guarded_mode != ExecutionMode::Live || pipeline_mode != ExecutionMode::Live {
+                return Err(BotError::invalid("copy mode changed to live after pipeline or journal guards; retry with fresh authorization"));
+            }
+            self.state.may_broadcast().await?;
+        }
         // Fencing (§E): ownership must still be ours at broadcast time.
         permit.fence().await?;
         let started = Utc::now();
@@ -201,16 +313,31 @@ impl CopyBot {
             &amount.to_string(),
         );
         let req = self.tenant_stamp(req);
-        let result = bot_core::recovery::with_intent(
+        // The reservation key is the LOGICAL mirrored entry (one leader trade →
+        // one mirror), not the per-attempt journal id: a replayed feed event, a
+        // restarted process or a second replica that maps to the same mirror
+        // cannot broadcast it twice.
+        let result = bot_core::recovery::with_reserved_intent_disposition(
             self.intents.as_ref(),
+            &intent_id,
             intent,
             self.executor.run(req),
-            |r| r.broadcast_signature(),
+            |r| r.intent_disposition(),
         )
         .await?;
         let exec_ms = (Utc::now() - started).num_milliseconds().max(0) as u64;
-        // Ownership terminal (§I/§M).
-        let ambiguous = result.status.is_ambiguous();
+        crate::platform_fee::audit_confirmed_direct_fee(
+            &self.state,
+            &self.rpc,
+            &self.wallet.pubkey,
+            sol_in,
+            &cfg.platform_fee,
+            &intent_id,
+            &result,
+        )
+        .await;
+        // Simulate never broadcasts; only a live ambiguous result hands off.
+        let ambiguous = !result.paper && result.status.is_ambiguous();
         permit.finish(ambiguous).await;
 
         self.record_buy(
@@ -224,6 +351,7 @@ impl CopyBot {
             exec_ms,
             decision,
             ambiguous,
+            execution_mode,
         )
         .await
     }
@@ -239,6 +367,8 @@ impl CopyBot {
         sized_sol: f64,
         slippage_bps: u64,
         decision: &bot_core::risk::RiskDecision,
+        guarded_mode: ExecutionMode,
+        pipeline_mode: ExecutionMode,
         permit: &mut bot_core::ownership::Permit,
     ) -> BotResult<BuyReport> {
         let lamports = maths::sol_to_lamports(sized_sol);
@@ -246,19 +376,25 @@ impl CopyBot {
             return Err(BotError::invalid("sized SOL rounds to zero lamports"));
         }
         let jupiter = Jupiter::new();
-        let quote = jupiter
-            .quote(&QuoteRequest::new(*WSOL_MINT, mint, lamports).slippage_bps(slippage_bps))
-            .await?;
-        let out_amount = quote.out_amount_u64()?;
-        if out_amount == 0 {
-            return Err(BotError::solana("jupiter found no output for the copy buy"));
-        }
-
         let mode = self.state.execution_mode().await;
         let started = Utc::now();
         let label = intent::entry_label(&event.mint, EntryRoute::Jupiter);
-        // Deterministic lifecycle identity (same rule as the curve path).
         let intent_id = intent::entry_intent_id_for(event, EntryRoute::Jupiter);
+        let quote_request = crate::platform_fee::jupiter_fee_request(
+            &self.state,
+            &self.rpc,
+            QuoteRequest::new(*WSOL_MINT, mint, lamports).slippage_bps(slippage_bps),
+            lamports,
+            &cfg.platform_fee,
+            &intent_id,
+            "copy",
+        )
+        .await?;
+        let quote = jupiter.quote(&quote_request).await?;
+        let mut out_amount = quote.out_amount_u64()?;
+        if out_amount == 0 {
+            return Err(BotError::solana("jupiter found no output for the copy buy"));
+        }
 
         // Paper never builds/sends: the quote is the fill. Simulate builds +
         // simulates only. Live hands the Jupiter-signed transaction to the
@@ -272,14 +408,15 @@ impl CopyBot {
             r
         } else {
             let recent = self.rpc.latest_blockhash(true).await?;
-            let (_q, tx, last_valid) = jupiter
+            let (signed_quote, tx, last_valid) = jupiter
                 .build_swap(
                     &self.wallet,
-                    &QuoteRequest::new(*WSOL_MINT, mint, lamports).slippage_bps(slippage_bps),
+                    &quote_request,
                     Some(recent.blockhash),
                     Some(cfg.execution.priority_fee_micro_lamports),
                 )
                 .await?;
+            out_amount = signed_quote.out_amount_u64()?;
             if mode == ExecutionMode::Simulate {
                 let sim = self.rpc.simulate(&tx).await?;
                 if let Some(err) = sim.value.err {
@@ -295,6 +432,9 @@ impl CopyBot {
                 r.attempts = 1;
                 r
             } else {
+                if guarded_mode != ExecutionMode::Live || pipeline_mode != ExecutionMode::Live {
+                    return Err(BotError::invalid("copy mode changed to live after pipeline or journal guards; retry with fresh authorization"));
+                }
                 self.state.may_broadcast().await?;
                 self.refresh_policy().await;
                 // Fencing (§E): ownership must still be ours at broadcast time.
@@ -315,11 +455,12 @@ impl CopyBot {
                     &lamports.to_string(),
                 );
                 let built = self.tenant_stamp_built(built);
-                bot_core::recovery::with_intent(
+                bot_core::recovery::with_reserved_intent_disposition(
                     self.intents.as_ref(),
+                    &intent_id,
                     intent,
                     self.executor.send_prebuilt(&built),
-                    |r| r.broadcast_signature(),
+                    |r| r.intent_disposition(),
                 )
                 .await?
             }
@@ -330,7 +471,13 @@ impl CopyBot {
         // Ownership terminal (§I/§M): only a live broadcast whose landing is
         // unproven (Sent/SendUnknown) is ambiguous; paper/simulate never moved
         // money → release.
-        let ambiguous = mode == ExecutionMode::Live && result.status.is_ambiguous();
+        let ambiguous =
+            mode == ExecutionMode::Live && !result.paper && result.status.is_ambiguous();
+        let execution_mode = if mode == ExecutionMode::Live && result.paper {
+            ExecutionMode::Simulate
+        } else {
+            mode
+        };
         permit.finish(ambiguous).await;
 
         self.record_buy(
@@ -344,6 +491,7 @@ impl CopyBot {
             exec_ms,
             decision,
             ambiguous,
+            execution_mode,
         )
         .await
     }
@@ -362,9 +510,9 @@ impl CopyBot {
         latency_ms: u64,
         decision: &bot_core::risk::RiskDecision,
         ambiguous: bool,
+        mode: ExecutionMode,
     ) -> BotResult<BuyReport> {
         let cfg = self.state.config_snapshot().await;
-        let mode = self.state.execution_mode().await;
         self.state.inc_orders_sent(BotModule::Copy).await;
 
         let filled = matches!(
@@ -379,6 +527,22 @@ impl CopyBot {
         } else {
             Some(result.signature.clone())
         };
+        // A live submission that may have landed is neither a failure nor a
+        // fill. Preserve its intent/signature for reconciliation, but do not
+        // create a trade, position or cash ledger event from the quote.
+        if ambiguous {
+            return Ok(BuyReport {
+                intent_id: result.intent_id.clone(),
+                signature,
+                filled: false,
+                ambiguous: true,
+                position_id: None,
+                status: result.status,
+                error: result.error.clone(),
+                cost_sol: 0.0,
+                qty: 0.0,
+            });
+        }
         if !filled {
             self.state.inc_orders_failed(BotModule::Copy).await;
             self.state
@@ -420,7 +584,7 @@ impl CopyBot {
         });
 
         let trade_rec = Trade {
-            id: self.state.next_id("t"),
+            id: self.state.next_persistent_id("t"),
             ts: Utc::now(),
             source: TradeSource::Copy,
             venue,
@@ -432,7 +596,10 @@ impl CopyBot {
             amount_out: qty,
             quote_symbol: "SOL".into(),
             price,
-            fee: event.fee_sol,
+            // The source event's fee belongs to the leader, not this wallet.
+            // Follower fees are not yet reconstructed from the confirmed
+            // transaction; zero means not separately reported, not proven free.
+            fee: 0.0,
             slippage_bps: (rule.slippage_pct.unwrap_or(cfg.copy.slippage_pct) * 100.0).round()
                 as u64,
             signature: signature.clone(),
@@ -462,7 +629,7 @@ impl CopyBot {
         });
 
         // ---- Position -----------------------------------------------------
-        let pos_id = self.state.next_id("p");
+        let pos_id = self.state.next_persistent_id("p");
         ledger_event.position_id = Some(pos_id.clone());
         let mut position = Position::new(
             pos_id.clone(),
@@ -494,10 +661,29 @@ impl CopyBot {
         });
         // The global ledger is the only mutator of global accounting state;
         // the module hands over the typed event and keeps its own record.
-        self.state.ledger().submit(ledger_event).await;
+        self.state
+            .submit_ledger_event(BotModule::Copy, ledger_event)
+            .await;
 
         // Record the copy so the cooldown applies to repeat signals.
         self.state.mark_copied(&event.leader, &event.mint).await;
+
+        // Diagnostic only: the existing bookkeeping above remains based on
+        // modeled amounts. A transaction-wide delta cannot prove swap economics.
+        if let Ok(mint) = event.mint.parse::<Pubkey>() {
+            crate::balance_observation::audit_copy_balances(
+                &self.state,
+                &self.rpc,
+                mode,
+                result.status,
+                signature.as_deref(),
+                &self.wallet.pubkey,
+                &mint,
+                &result.intent_id,
+                i128::from(amount_raw),
+            )
+            .await;
+        }
 
         info!(
             mint = %event.mint,

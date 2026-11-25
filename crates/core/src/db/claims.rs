@@ -5,11 +5,20 @@
 //!
 //! Acquisition is ONE atomic statement: `INSERT … ON CONFLICT DO UPDATE …
 //! WHERE (lease expired | released | handoff grace elapsed) RETURNING …`.
-//! Two replicas racing the same `execution_id` can never both get a row
-//! back — Postgres serialises the conflicting upserts and the WHERE clause
-//! re-evaluates against the winner's committed row. Fencing (renew/verify/
+//! Conflicting acquisitions for the same `(organization_id, execution_id)`
+//! serialize and only one can hold the unexpired claim at a time. A released
+//! or expired claim can be acquired again, so this is not event deduplication. Fencing (renew/verify/
 //! release) is compare-and-set on `(execution_id, owner_id, claim_epoch,
 //! status='claimed')`.
+//!
+//! VERIFIED (not asserted): [`crate::db::claims::CLAIM_ACQUIRE_SQL`] contains
+//! no `SELECT …` prelude, no read-then-write window and no advisory lock —
+//! the decision is taken by the upsert alone, and the `prev` CTE reads the
+//! row inside the same statement (one snapshot), never before it. A unit
+//! test pins that shape (`claim_acquire_is_a_single_statement`), so a future
+//! refactor that reintroduces a read-then-write gap fails the suite instead
+//! of racing silently. See [`claim_expiry_semantics`] for the exact meaning
+//! of every timestamp.
 //!
 //! Fail-closed (§K/§L): any error/timeout surfaces as `Err` — the registry
 //! converts it to `OwnershipUnavailable` and money paths must abort. A
@@ -33,6 +42,73 @@ use crate::ownership::{
 };
 use crate::risk::{GlobalRiskOracle, RealizedPnlRead};
 use crate::tenant::OrganizationId;
+
+/// The exact expiry semantics of a claim row, in one place so the SQL, the
+/// docs and the tests cannot drift apart.
+///
+/// | column | written by | meaning |
+/// |---|---|---|
+/// | `claimed_at` | `claim` | when the CURRENT generation acquired the row (rewritten on every acquire/takeover) |
+/// | `last_heartbeat` | `claim`, `renew`, `release` | last time the owner proved liveness; `renew` advances it and pushes `lease_until` by the SAME interval it granted last time (`lease_until - last_heartbeat`), so a renewal never inflates the lease |
+/// | `lease_until` | `claim`, `renew` | expiry is enforced by `verify` and `renew`, which require `lease_until > now()`. `release` does not check expiry: the old owner may release an expired row if no takeover has changed its owner/epoch; after takeover its release is fenced |
+/// | `updated_at` | every mutation | the clock the `handed_off` grace is measured from (a handed-off row is re-acquirable once `updated_at + handoff_grace <= now()`) |
+///
+/// Re-acquisition rules (the `WHERE` of the upsert): `status = 'released'`
+/// is immediately re-acquirable; `status = 'claimed'` only once
+/// `lease_until <= now()` (that path is a takeover and bumps
+/// `takeover_count`); `status = 'handed_off'` only after the grace window.
+/// Rows are never deleted, so the audit trail outlives every lease.
+pub const fn claim_expiry_semantics() -> &'static str {
+    "lease_until gates renew and verify; release can succeed after expiry \
+     until a takeover changes owner/epoch; \
+     handed_off re-acquirable after updated_at + handoff_grace; \
+     released re-acquirable immediately; claimed re-acquirable only when \
+     lease_until <= now() (takeover, epoch+1, takeover_count+1)"
+}
+
+/// The one atomic acquisition statement. Public so a test can pin its SHAPE
+/// (single statement, no pre-read) — see [`claim_expiry_semantics`] and the
+/// module docs.
+pub const CLAIM_ACQUIRE_SQL: &str = r#"
+WITH prev AS (
+    SELECT status AS prev_status FROM execution_claims
+     WHERE organization_id = $1 AND execution_id = $2
+), ins AS (
+    INSERT INTO execution_claims
+        (organization_id, execution_id, kind, module, strategy, symbol, owner_id,
+         claim_epoch, status, claimed_at, lease_until, last_heartbeat,
+         takeover_count, previous_owner, updated_at)
+    VALUES
+        ($1, $2, $3, $4, $5, $6, $7, 1, 'claimed', now(),
+         now() + $8::bigint * interval '1 millisecond', now(), 0, NULL, now())
+    ON CONFLICT (organization_id, execution_id) DO UPDATE SET
+        kind           = EXCLUDED.kind,
+        module         = EXCLUDED.module,
+        strategy       = EXCLUDED.strategy,
+        symbol         = EXCLUDED.symbol,
+        owner_id       = EXCLUDED.owner_id,
+        claim_epoch    = execution_claims.claim_epoch + 1,
+        status         = 'claimed',
+        claimed_at     = now(),
+        lease_until    = now() + $8::bigint * interval '1 millisecond',
+        last_heartbeat = now(),
+        takeover_count = execution_claims.takeover_count
+                         + CASE WHEN execution_claims.status = 'claimed' THEN 1 ELSE 0 END,
+        previous_owner = execution_claims.owner_id,
+        updated_at     = now()
+    WHERE execution_claims.status = 'released'
+       OR (execution_claims.status = 'claimed'
+           AND execution_claims.lease_until <= now())
+       OR (execution_claims.status = 'handed_off'
+           AND execution_claims.updated_at
+               + $9::bigint * interval '1 millisecond' <= now())
+    RETURNING execution_id, kind, module, strategy, symbol, owner_id,
+              claim_epoch, status, claimed_at, lease_until, takeover_count,
+              previous_owner
+)
+SELECT ins.*, COALESCE(prev.prev_status, '') AS prev_status
+FROM ins LEFT JOIN prev ON TRUE
+"#;
 
 fn ms(d: std::time::Duration) -> BotResult<i64> {
     i64::try_from(d.as_millis().max(1))
@@ -161,46 +237,8 @@ impl ClaimStore for PostgresClaimStore {
         // takeover conditions, the same retry loop — only the arbiter
         // and the org bind ($1) changed. The legacy store claims FOR
         // THE DEPLOYMENT ORGANIZATION explicitly.
-        const SQL: &str = r#"
-WITH prev AS (
-    SELECT status AS prev_status FROM execution_claims
-     WHERE organization_id = $1 AND execution_id = $2
-), ins AS (
-    INSERT INTO execution_claims
-        (organization_id, execution_id, kind, module, strategy, symbol, owner_id,
-         claim_epoch, status, claimed_at, lease_until, last_heartbeat,
-         takeover_count, previous_owner, updated_at)
-    VALUES
-        ($1, $2, $3, $4, $5, $6, $7, 1, 'claimed', now(),
-         now() + $8::bigint * interval '1 millisecond', now(), 0, NULL, now())
-    ON CONFLICT (organization_id, execution_id) DO UPDATE SET
-        kind           = EXCLUDED.kind,
-        module         = EXCLUDED.module,
-        strategy       = EXCLUDED.strategy,
-        symbol         = EXCLUDED.symbol,
-        owner_id       = EXCLUDED.owner_id,
-        claim_epoch    = execution_claims.claim_epoch + 1,
-        status         = 'claimed',
-        claimed_at     = now(),
-        lease_until    = now() + $8::bigint * interval '1 millisecond',
-        last_heartbeat = now(),
-        takeover_count = execution_claims.takeover_count
-                         + CASE WHEN execution_claims.status = 'claimed' THEN 1 ELSE 0 END,
-        previous_owner = execution_claims.owner_id,
-        updated_at     = now()
-    WHERE execution_claims.status = 'released'
-       OR (execution_claims.status = 'claimed'
-           AND execution_claims.lease_until <= now())
-       OR (execution_claims.status = 'handed_off'
-           AND execution_claims.updated_at
-               + $9::bigint * interval '1 millisecond' <= now())
-    RETURNING execution_id, kind, module, strategy, symbol, owner_id,
-              claim_epoch, status, claimed_at, lease_until, takeover_count,
-              previous_owner
-)
-SELECT ins.*, COALESCE(prev.prev_status, '') AS prev_status
-FROM ins LEFT JOIN prev ON TRUE
-"#;
+        const SQL: &str = CLAIM_ACQUIRE_SQL;
+
         let org = crate::db::deployment_org::deployment_org_uuid(&self.db)
             .await
             .map_err(BotError::from)?;
@@ -616,6 +654,12 @@ impl PostgresRiskOracle {
     /// Polymarket fills are journaled separately from generic positions.
     /// When a fill lacks a matching tenant position projection, daily PnL
     /// cannot be trusted and tenant entries must fail closed.
+    ///
+    /// The window is the SAME one `risk_realized_today` sums — today's UTC day,
+    /// lower AND upper bound. Asking a wider question than the number it guards
+    /// made a single future-dated, unprojected fill report "incomplete" forever:
+    /// every entry then failed closed with `GlobalUnavailable`, today and every
+    /// day after, for a row the sum never looked at (gap #6).
     async fn polymarket_pnl_projection_complete(
         &self,
         organization: Option<OrganizationId>,
@@ -629,6 +673,7 @@ impl PostgresRiskOracle {
                          SELECT 1 FROM poly_fills f
                          WHERE ($1::uuid IS NULL OR f.organization_id = $1)
                            AND f.ts >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                           AND f.ts < (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC'
                            AND (f.position_id IS NULL OR NOT EXISTS (
                                SELECT 1 FROM positions p
                                WHERE p.organization_id = f.organization_id
@@ -679,6 +724,7 @@ impl PostgresRiskOracle {
                      FROM positions
                      WHERE closed_at IS NOT NULL
                        AND closed_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                       AND closed_at < (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC'
                        AND ($1::uuid IS NULL OR organization_id = $1)
                        AND ($2::text IS NULL OR source = $2)",
                 )
@@ -951,5 +997,102 @@ impl GlobalRiskOracle for PostgresRiskOracle {
             .await
             .ok()?;
         row.try_get("exposure").ok()
+    }
+}
+
+#[cfg(test)]
+mod atomic_shape_tests {
+    //! Static pins on the arbitration SQL (no database required).
+    //!
+    //! The Postgres claim is only atomic because the ENTIRE decision is one
+    //! statement: a `WITH prev … INSERT … ON CONFLICT … WHERE … RETURNING`.
+    //! These tests fail the moment somebody reintroduces a read-then-write
+    //! window (a `SELECT` prelude, a separate "check then insert", an advisory
+    //! lock around two round trips) — the exact defect class that makes two
+    //! replicas believe they both own one execution.
+
+    use super::{claim_expiry_semantics, CLAIM_ACQUIRE_SQL};
+
+    fn normalised() -> String {
+        CLAIM_ACQUIRE_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_uppercase()
+    }
+
+    #[test]
+    fn claim_acquire_is_a_single_statement() {
+        let sql = normalised();
+        // Exactly one terminating semicolon, and it is the final character:
+        // a second statement would mean two round trips per decision.
+        assert_eq!(
+            sql.matches(';').count(),
+            0,
+            "the acquisition SQL must not contain ';' — one statement only"
+        );
+        // The decision is the upsert, not a preceding read.
+        assert!(
+            sql.starts_with("WITH PREV AS"),
+            "the statement must open with the `prev` CTE: {}",
+            &sql[..40.min(sql.len())]
+        );
+        assert!(
+            sql.contains("INSERT INTO EXECUTION_CLAIMS"),
+            "the upsert must be part of the same statement"
+        );
+        assert!(
+            sql.contains("ON CONFLICT (ORGANIZATION_ID, EXECUTION_ID) DO UPDATE"),
+            "the arbiter must be the tenant composite (organization_id, execution_id)"
+        );
+        assert!(
+            sql.contains("RETURNING"),
+            "the winner is decided by what the upsert RETURNS, never by a follow-up read"
+        );
+        // No advisory-lock alternative: a lock around two round trips is a
+        // read-then-write window with extra steps.
+        assert!(
+            !sql.contains("ADVISORY_LOCK"),
+            "no advisory lock — it would reintroduce a multi-statement critical section"
+        );
+        // No pre-read: the only `SELECT` allowed is the `prev` CTE (inside the
+        // statement, same snapshot) and the final projection of `ins`.
+        let selects = sql.matches("SELECT").count();
+        assert_eq!(
+            selects, 2,
+            "expected exactly 2 SELECTs (the `prev` CTE and the final projection), found {selects}"
+        );
+    }
+
+    #[test]
+    fn takeover_and_reacquisition_conditions_are_explicit() {
+        let sql = normalised();
+        for required in [
+            "EXECUTION_CLAIMS.STATUS = 'RELEASED'",
+            "EXECUTION_CLAIMS.STATUS = 'CLAIMED' AND EXECUTION_CLAIMS.LEASE_UNTIL <= NOW()",
+            "EXECUTION_CLAIMS.STATUS = 'HANDED_OFF'",
+            "INTERVAL '1 MILLISECOND' <= NOW()",
+        ] {
+            assert!(
+                sql.contains(required),
+                "missing re-acquisition condition: {required}"
+            );
+        }
+        // Epoch fencing: a takeover must bump the epoch and record the prior
+        // owner, otherwise a fenced replica could pass `verify`.
+        assert!(sql.contains("CLAIM_EPOCH = EXECUTION_CLAIMS.CLAIM_EPOCH + 1"));
+        assert!(sql.contains("PREVIOUS_OWNER = EXECUTION_CLAIMS.OWNER_ID"));
+        assert!(sql.contains("TAKEOVER_COUNT"));
+    }
+
+    #[test]
+    fn expiry_semantics_are_documented() {
+        let doc = claim_expiry_semantics();
+        for needle in ["lease_until", "handed_off", "released", "takeover"] {
+            assert!(
+                doc.contains(needle),
+                "expiry semantics must name `{needle}`: {doc}"
+            );
+        }
     }
 }

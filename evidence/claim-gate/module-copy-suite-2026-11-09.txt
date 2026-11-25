@@ -1,0 +1,221 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 26.48s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-84834e0020a68c4b)
+
+running 68 tests
+test audit::tests::sanitize_collapses_whitespace_and_empty ... ok
+test event::tests::age_uses_chain_time_when_present ... ok
+test event::tests::event_id_is_deterministic_and_side_sensitive ... ok
+test event::tests::risk_codes_map_onto_pipeline_reasons ... ok
+test event::tests::round_trips_to_wallet_trade ... ok
+test event::tests::source_mapping_and_execution_gate ... ok
+test event::tests::stage_and_reason_labels_are_unique_and_terminal_flags_hold ... ok
+test event::tests::validation_names_each_defect ... ok
+test event_dedup::tests::claim_is_fresh_once_then_duplicate ... ok
+test event_dedup::tests::one_trade_maps_to_one_executor_intent ... ok
+test event_dedup::tests::pipeline_namespace_is_independent_of_feed_signature_marks ... ok
+test event_dedup::tests::process_local_dedup_lets_both_replicas_through ... ok
+test event_dedup::tests::seed_marks_journaled_keys ... ok
+test event_ordering::tests::advisory_mode_processes_late_events_but_counts_them ... ok
+test event_ordering::tests::leaders_have_independent_cursors ... ok
+test event_ordering::tests::seed_only_raises_the_mark ... ok
+test event_ordering::tests::sequence_gaps_are_per_source_and_never_reject ... ok
+test event_ordering::tests::strict_mode_rejects_out_of_order_only ... ok
+test feeds::feed_health_tests::finished_tasks_mark_feed_degraded_and_recv_sets_last_event ... ok
+test feeds::feed_health_tests::idle_feed_reports_idle_and_not_degraded ... ok
+test feeds::feed_health_tests::recv_records_event_time_and_chain_lag ... ok
+test feeds::tests::decoded_non_sol_quote_has_zero_sol_amount ... ok
+test feeds::tests::decoded_raydium_cpmm_and_launchlab_keep_their_precise_venues ... ok
+test feeds::tests::decoded_sol_quote_converts_lamports ... ok
+test feeds::tests::pumpportal_buy_maps_to_long_on_the_curve ... ok
+test feeds::tests::pumpportal_sell_on_amm_maps_to_short_pumpswap ... ok
+test intent::tests::exit_ids_are_deterministic_per_decision_and_unique_per_position_lifetime ... ok
+test intent::tests::intent_ids_are_deterministic_and_route_specific ... ok
+test intent::tests::labels_follow_the_legacy_scheme ... ok
+test leader::tests::config_sync_adds_updates_pauses_and_removes ... ok
+test leader::tests::counters_and_restore_take_the_larger_view ... ok
+test leader::tests::empty_address_is_refused ... ok
+test leader::tests::follow_pause_resume_unfollow_refollow ... ok
+test leader::tests::history_is_bounded ... ok
+test leader::tests::snapshot_describes_sizing ... ok
+test metrics::tests::counters_register_under_copy_prefix ... ok
+test metrics::tests::timeline_intervals_are_monotone_and_total_matches ... ok
+test mirror::tests::fixed_size_wins_over_fraction ... ok
+test mirror::tests::fraction_is_capped_by_max_sol ... ok
+test mirror::tests::fraction_without_cap ... ok
+test mirror::tests::journal_record_carries_outcome_fields ... ok
+test policy::tests::buy_precedence_first_failing_rule_wins ... ok
+test policy::tests::sell_rules_and_exit_fraction ... ok
+test policy::tests::venue_flags_map_to_decoders ... ok
+test reconcile::tests::clean_book_has_no_findings ... ok
+test reconcile::tests::leader_exit_is_flagged_or_mirrored ... ok
+test reconcile::tests::link_and_quantity_drift ... ok
+test reconcile::tests::orphans_and_ambiguous_entries ... ok
+test recovery::tests::empty_inputs_make_an_empty_plan ... ok
+test recovery::tests::entry_fate_classification ... ok
+test recovery::tests::journal_seeds_dedup_and_cursors ... ok
+test recovery::tests::links_are_restored_and_closed_against_the_book ... ok
+test recovery::tests::live_ledger_entries_are_held_and_failed_ones_cleaned ... ok
+test recovery::tests::memory_store_semantics_match_the_repo_contract ... ok
+test recovery::tests::poisoned_memory_store_remains_usable ... ok
+test sizing::tests::global_caps_apply_after_the_rule ... ok
+test sizing::tests::matches_legacy_size_for_arithmetic ... ok
+test sizing::tests::rejects_bad_inputs_and_dust ... ok
+test tenant_context::tests::a_copy_context_adapts_and_a_sniper_context_is_refused ... ok
+test tenant_context::tests::stale_runtime_fails_reverification ... ok
+test tenant_context::tests::the_same_external_leader_is_independent_per_tenant ... ok
+test tenant_executor::tests::a_sniper_context_cannot_drive_a_copy_executor ... ok
+test tenant_executor::tests::position_update_events_are_projected_for_background_copy_exits ... ok
+test tenant_executor::tests::the_authorization_chain_is_exhaustive ... ok
+test tenant_state::tests::counters_track_the_full_outcome_set ... ok
+test tenant_state::tests::duplicate_events_are_suppressed_within_a_tenant ... ok
+test tenant_state::tests::the_dedup_window_is_fifo_bounded ... ok
+test tenant_state::tests::two_tenants_never_share_dedup_or_counters ... ok
+
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+     Running tests/claim_stress.rs (target/debug/deps/claim_stress-92135b3ff838fa13)
+
+running 6 tests
+test actual_process_exit_and_restart_recovers_expired_lease ... ok
+test claim_crash_worker ... ok
+test crashed_owner_leaks_nothing_and_expiry_allows_exactly_one_takeover ... ok
+test expired_owner_can_release_only_before_a_takeover ... ok
+test n_replicas_same_event_exactly_one_winner ... ok
+test released_claim_is_reacquirable_and_fenced_for_the_old_owner ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.40s
+
+     Running tests/concurrency.rs (target/debug/deps/concurrency-11021cf1ca53cb00)
+
+running 3 tests
+test distinct_leader_trades_in_parallel_all_mirror_and_share_nothing ... ok
+test racing_mirrored_exits_sell_a_position_at_most_once ... ok
+test the_same_leader_trade_seen_by_many_workers_opens_exactly_one_position ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/copy_feed.rs (target/debug/deps/copy_feed-0106a6c795437ad6)
+
+running 1 test
+test copy_feed_subscribes_tracked_wallets_and_maps_trades ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests/crash_recovery.rs (target/debug/deps/crash_recovery-08bf94c968a32809)
+
+running 3 tests
+test live_entries_are_held_and_failed_entries_cleaned_up_without_selling ... ok
+test recovery_runs_before_the_pipeline_accepts_new_events ... ok
+test replayed_backlog_after_restart_is_not_re_mirrored ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/dedup_ordering.rs (target/debug/deps/dedup_ordering-f3f53a0a1295dea2)
+
+running 7 tests
+test advisory_ordering_processes_late_events_and_counts_them ... ok
+test cursors_are_per_leader_and_gaps_are_reported_not_rejected ... ok
+test feed_signature_marks_never_starve_the_pipeline ... ok
+test one_signature_two_mints_or_two_sides_are_distinct_events ... ok
+test seeding_the_dedup_makes_replayed_events_duplicates ... ok
+test strict_ordering_rejects_late_events_but_not_same_or_unknown_slots ... ok
+test the_same_event_from_two_feeds_is_mirrored_exactly_once ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/event_pipeline.rs (target/debug/deps/event_pipeline-e91aa44bb54378be)
+
+running 7 tests
+test execution_failures_are_failed_not_rejected_and_note_the_mint ... ok
+test legacy_mirror_trade_door_runs_the_pipeline ... ok
+test live_terminal_states_filled_ambiguous_and_exit_mirrored ... ok
+test malformed_events_are_refused_at_the_door ... ok
+test paper_buy_walks_every_stage_and_books_a_linked_position ... ok
+test policy_rejections_name_their_rule ... ok
+test risk_gates_are_the_authority_and_are_labelled ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
+
+     Running tests/geyser_feed.rs (target/debug/deps/geyser_feed-7913290820377c0f)
+
+running 2 tests
+test geyser_feed_falls_back_to_polling_without_a_geyser_url ... ok
+test geyser_feed_pushes_a_whale_buy_into_the_copy_channel ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+     Running tests/intent_execution.rs (target/debug/deps/intent_execution-2028dd78f0525f76)
+
+running 6 tests
+test ambiguous_broadcast_books_the_position_and_parks_the_intent ... ok
+test live_mirror_confirms_through_the_executor_with_a_deterministic_intent ... ok
+test node_rejection_is_a_definite_failure_with_nothing_booked ... ok
+test pending_execution_cap_throttles_new_mirrors ... ok
+test simulation_failure_never_broadcasts_and_abandons_the_journal_entry ... ok
+test the_ledger_refuses_a_second_attempt_at_the_same_logical_trade ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.76s
+
+     Running tests/leader_lifecycle.rs (target/debug/deps/leader_lifecycle-25f18944cd5e6b26)
+
+running 4 tests
+test config_seeds_the_registry_and_sync_journals_every_transition ... ok
+test invalid_transitions_are_refused_and_reported ... ok
+test leader_state_gates_the_pipeline ... ok
+test restart_restores_counters_from_the_journal_but_config_owns_membership ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/policy_sizing.rs (target/debug/deps/policy_sizing-734399996ae1b2b5)
+
+running 4 tests
+test approved_size_flows_into_the_position_and_risk_may_reduce_it ... ok
+test policy_precedence_table ... ok
+test sells_bypass_sizing_and_use_the_exit_fraction ... ok
+test sizing_matrix ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/reconciliation.rs (target/debug/deps/reconciliation-be2b836a053003ff)
+
+running 6 tests
+test clean_state_reconciles_without_findings ... ok
+test leader_exit_seen_while_paused_is_flagged_then_mirrored_when_enabled ... ok
+test leader_rebuy_after_exit_cancels_the_finding ... ok
+test quantity_drift_orphans_and_ambiguous_entries_are_surfaced ... ok
+test sweeper_closed_positions_close_their_links ... ok
+test unfollowed_leader_with_open_position_is_flagged_not_sold ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/tenant_execution.rs (target/debug/deps/tenant_execution-eec7c191619e41fd)
+
+running 6 tests
+test a_tenant_copy_executor_denies_foreign_contexts ... ok
+test a_wallet_bound_to_another_tenant_cannot_drive_the_copy_executor ... ok
+test an_unbound_copy_bot_preserves_the_operator_behaviour ... ok
+test the_context_adapter_scopes_leader_and_event_keys_per_tenant ... ok
+test the_same_leader_trade_is_deduplicated_tenant_locally ... ok
+test two_tenants_seeing_the_same_leader_trade_both_process_it ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/two_replica_mirror.rs (target/debug/deps/two_replica_mirror-17ccbf56c0f21490)
+
+running 2 tests
+test sequential_fast_failures_can_both_reach_rpc ... ok
+test two_replicas_one_whale_trade_one_execution ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+   Doc-tests module_copy
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0

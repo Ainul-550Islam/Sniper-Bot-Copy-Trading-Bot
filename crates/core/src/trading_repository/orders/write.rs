@@ -105,7 +105,8 @@ impl TenantOrderWrite {
         if order.id.trim().is_empty() {
             return Err(RepositoryError::Validation("order_id"));
         }
-        self.db
+        let result = self
+            .db
             .timed(
                 "tenant_order_upsert",
                 sqlx::query(
@@ -149,6 +150,9 @@ impl TenantOrderWrite {
                 .execute(self.db.pool()),
             )
             .await?;
+        if result.rows_affected() != 1 {
+            return Err(RepositoryError::Conflict("order_id"));
+        }
         Ok(())
     }
 
@@ -217,8 +221,8 @@ impl TenantOrderWrite {
         }
         sqlx::query(
             r#"INSERT INTO order_status_history
-                   (order_id, from_status, to_status, reason)
-               SELECT id, $3, $4, $5 FROM orders
+                   (organization_id, order_id, from_status, to_status, reason)
+               SELECT organization_id, id, $3, $4, $5 FROM orders
                 WHERE organization_id = $1 AND id = $2"#,
         )
         .bind(write.organization_id().as_uuid())

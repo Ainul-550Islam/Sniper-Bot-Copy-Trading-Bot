@@ -1,12 +1,12 @@
 # API Compatibility Matrix — sniper-suite 0.1.0
 
-> No claim of semantic versioning unless enforced. Version 0.1.0, <!-- stat:migrations -->71<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0071<!-- /stat -->`), <!-- stat:crates -->8<!-- /stat --> members. Legacy path status accurate.
+> No claim of semantic versioning unless enforced. Version 0.1.0, <!-- stat:migrations -->78<!-- /stat --> forward-only migrations (high water `<!-- stat:migrations_high_water -->0078<!-- /stat -->`), <!-- stat:crates -->8<!-- /stat --> members. Legacy path status accurate.
 
 ## Versioning
 
 - **App version:** `0.1.0` (`VERSION`, `Cargo.toml` workspace, `release-manifest.json`, `GET /health` `version`)
 - **No SemVer guarantee yet:** Pre-1.0, breaking changes allowed with minor bump + `CHANGELOG.md` entry (per `docs/RELEASE.md` §1). No automated semver check in CI.
-- **Schema:** DB forward-only <!-- stat:migrations -->71<!-- /stat --> migrations (high water `<!-- stat:migrations_high_water -->0071<!-- /stat -->`), additive.
+- **Schema:** DB forward-only <!-- stat:migrations -->78<!-- /stat --> migrations (high water `<!-- stat:migrations_high_water -->0078<!-- /stat -->`), additive.
 
 ## REST
 

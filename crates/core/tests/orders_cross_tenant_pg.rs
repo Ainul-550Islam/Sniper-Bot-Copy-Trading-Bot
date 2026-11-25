@@ -298,3 +298,100 @@ async fn signature_lookup_and_pagination_stay_tenant_scoped() {
         .expect_err("cross-tenant cursor must fail");
     let _ = err;
 }
+
+#[tokio::test]
+async fn status_history_rows_carry_the_order_tenant() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: status_history_rows_carry_the_order_tenant — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let tenant = org(&db, &format!("history-{run}")).await;
+    let id = format!("history-order-{run}");
+    seed_order(&db, tenant, &id, None, "created").await;
+    let writer = TenantOrderWrite::new(db.clone());
+    writer
+        .set_status(
+            &write_scope(tenant),
+            &id,
+            "created",
+            "submitted",
+            None,
+            None,
+            None,
+            None,
+            at(0.0),
+        )
+        .await
+        .unwrap();
+    let owners: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT organization_id FROM order_status_history WHERE order_id = $1")
+            .bind(&id)
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        owners,
+        vec![tenant.as_uuid()],
+        "history row must carry the same tenant as its order"
+    );
+}
+
+#[tokio::test]
+async fn upsert_foreign_order_collision_must_not_report_success() {
+    let Some(db) = setup().await else {
+        eprintln!("NOT_RUN: upsert_foreign_order_collision_must_not_report_success — POSTGRES_URL missing");
+        return;
+    };
+    let run = run_id();
+    let a = org(&db, &format!("upsert-a-{run}")).await;
+    let b = org(&db, &format!("upsert-b-{run}")).await;
+    let id = format!("upsert-order-{run}");
+    seed_order(&db, a, &id, None, "created").await;
+    let reader = TenantOrderRead::new(db.clone());
+    let writer = TenantOrderWrite::new(db.clone());
+    let mut candidate = reader.get(&read_scope(a), &id).await.unwrap();
+    candidate.organization_id = b;
+    candidate.status = "submitted".to_string();
+    assert!(
+        writer.upsert(&write_scope(b), &candidate).await.is_err(),
+        "foreign id collision must not be silent success"
+    );
+    assert_eq!(
+        reader.get(&read_scope(a), &id).await.unwrap().status,
+        "created"
+    );
+    assert!(reader.get(&read_scope(b), &id).await.is_err());
+}
+
+#[tokio::test]
+async fn deployment_lifecycle_prune_preserves_other_tenants() {
+    let Some(db) = setup().await else {
+        eprintln!(
+            "NOT_RUN: deployment_lifecycle_prune_preserves_other_tenants — POSTGRES_URL missing"
+        );
+        return;
+    };
+    let tenant = org(&db, &format!("prune-foreign-{}", run_id())).await;
+    let deployment = bot_core::db::deployment_org::deployment_org_uuid(&db)
+        .await
+        .unwrap();
+    assert_ne!(tenant.as_uuid(), deployment);
+    let own = format!("prune-own-{}", run_id());
+    let foreign = format!("prune-foreign-{}", run_id());
+    for (owner, id) in [(deployment, &own), (tenant.as_uuid(), &foreign)] {
+        sqlx::query("INSERT INTO execution_lifecycle (organization_id,intent_id,state,updated_at) VALUES ($1,$2,'confirmed',now()-interval '101 years')")
+            .bind(owner).bind(id).execute(db.pool()).await.unwrap();
+    }
+    let repo = bot_core::db::execution::ExecutionRepo::new(db.clone());
+    repo.delete_settled_older_than(chrono::Duration::days(36525))
+        .await
+        .unwrap();
+    let surviving: Vec<(uuid::Uuid,String)> = sqlx::query_as("SELECT organization_id,intent_id FROM execution_lifecycle WHERE intent_id=ANY($1) ORDER BY intent_id")
+        .bind(vec![own.clone(),foreign.clone()]).fetch_all(db.pool()).await.unwrap();
+    assert_eq!(
+        surviving,
+        vec![(tenant.as_uuid(), foreign)],
+        "deployment cleanup must not delete another tenant's history"
+    );
+}

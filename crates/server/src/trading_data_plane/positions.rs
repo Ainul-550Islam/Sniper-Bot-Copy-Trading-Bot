@@ -10,7 +10,6 @@ use serde_json::json;
 
 use bot_core::membership::Permission;
 
-use super::executions::window;
 use super::orders::{page_request, plane_error};
 use crate::api::ApiState;
 
@@ -181,15 +180,9 @@ pub async fn balances(
         Err(e) => return plane_error(e),
     };
     if let Some(address) = params.get("address") {
-        let (since, until) = match window(&params) {
-            Some(w) => w,
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "invalid_window" })),
-                )
-                    .into_response()
-            }
+        let (since, until) = match super::executions::window_or_response(&params) {
+            Ok(w) => w,
+            Err(response) => return response,
         };
         return match plane
             .balances()

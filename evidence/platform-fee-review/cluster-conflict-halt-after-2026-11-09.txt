@@ -1,0 +1,33 @@
+=== GREEN: proven ledger conflict escalates to the deployment kill switch ===
+--- core ledger (latch + exactly-once halt) ---
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 683 filtered out; finished in 0.11s
+
+core_ledger_exit=0
+--- core global risk (halt hook + entry fence) ---
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 696 filtered out; finished in 0.01s
+
+core_global_risk_exit=0
+--- core state (kill switch flag semantics) ---
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 668 filtered out; finished in 0.01s
+
+core_state_exit=0
+--- server accounting (maintenance + ClusterConflictHalt) ---
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 992 filtered out; finished in 0.00s
+
+server_accounting_exit=0
+--- server api (kill-switch + conflict routes) ---
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 956 filtered out; finished in 0.11s
+
+server_api_exit=0
+--- clippy / fmt / diff ---
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 3m 53s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

@@ -47,7 +47,9 @@ pub mod store;
 pub mod worker;
 
 pub use audit::AUDIT_ACTOR;
-pub use cursor::{CursorAdvance, FeedCursor, FeedGap, FeedId, GapStatus};
+pub use cursor::{
+    fence_generation, CursorAdvance, CursorWrite, FeedCursor, FeedGap, FeedId, GapStatus,
+};
 pub use lease::{
     next_generation, renew_interval, FenceError, Lease, LeaseDecision, LeaseRequest, LeaseRole,
 };

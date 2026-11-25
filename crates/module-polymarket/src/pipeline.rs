@@ -461,6 +461,23 @@ impl PolyBot {
                 submitted_at,
             );
             self.insert_tracked(tracked.clone()).await;
+            // Durable PRE-BROADCAST reservation (0079) — FIRST, before any
+            // venue claim is journaled. The key is the venue identity
+            // `poly:entry:{token_id}`, the same identity the ownership lease
+            // guards: a second replica, a restarted process or a replayed
+            // signal that maps to the same venue entry cannot POST while this
+            // claim is held. Losing the claim — or an unreachable reservation
+            // store — refuses the POST and leaves nothing journaled.
+            if let Err(e) = self
+                .reserve_broadcast(&order.id, &venue_order_id, signal, size_tokens, &mode)
+                .await
+            {
+                permit.finish(false).await;
+                self.fail_oms(&order.id, &format!("broadcast reservation refused: {e}"))
+                    .await;
+                self.tracked.write().await.remove(&venue_order_id);
+                return Err((RejectReason::OmsRejected, e.to_string()));
+            }
             // Write-ahead: the venue claim (derived order id, size, price)
             // is journaled BEFORE the POST so a crash during the request
             // leaves a `submitted` row that restart recovery holds as
@@ -682,6 +699,49 @@ impl PolyBot {
         let bundle = sign_order_bundle(key, &params)?;
         let venue_order_id = bundle.derived_order_id()?;
         Ok((bundle, venue_order_id))
+    }
+
+    /// Durably claim the venue entry before the POST. `Ok(())` only when the
+    /// claim was granted to THIS process (a fresh insert or a takeover of a
+    /// lapsed lease) — the sink's reserve is fail-closed, so an unreachable
+    /// store is an error, never an implicit go-ahead.
+    async fn reserve_broadcast(
+        &self,
+        order_id: &str,
+        venue_order_id: &str,
+        signal: &OrderSignal,
+        size_tokens: f64,
+        mode: &ExecutionMode,
+    ) -> PolyResult<()> {
+        let Some(sink) = self.intents.as_ref() else {
+            return Ok(());
+        };
+        let d = &signal.decision;
+        let record = bot_core::db::repo::IntentRecord {
+            intent_id: format!("poly-{venue_order_id}"),
+            module: "polymarket".into(),
+            symbol: d.token_id.clone(),
+            wallet: self
+                .address
+                .clone()
+                .unwrap_or_else(|| "polymarket".to_string()),
+            side: signal.side_str().to_string(),
+            qty: format!("{size_tokens:.6}"),
+            status: "pending".into(),
+            signature: None,
+            created_at: Utc::now(),
+        };
+        let key = format!("poly:entry:{}", d.token_id);
+        sink.reserve(&key, &record).await.map_err(|e| {
+            warn!(
+                order = %order_id,
+                token = %d.token_id,
+                mode = %mode.as_str(),
+                error = %e,
+                "durable broadcast reservation refused; the CLOB POST will not run"
+            );
+            PolyError::clob(format!("broadcast reservation refused: {e}"))
+        })
     }
 
     /// POST a signed bundle. Transport failures are surfaced as

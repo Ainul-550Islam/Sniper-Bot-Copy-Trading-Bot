@@ -1,0 +1,28 @@
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 2m 41s
+     Running unittests src/lib.rs (target/debug/deps/sniper_suite-8473bfd8875fa7ab)
+
+running 1 test
+test telegram_trade_port::tests::receipt_replay_never_bypasses_organization_check ... FAILED
+
+failures:
+
+---- telegram_trade_port::tests::receipt_replay_never_bypasses_organization_check stdout ----
+
+thread 'telegram_trade_port::tests::receipt_replay_never_bypasses_organization_check' (2609780) panicked at crates/server/src/telegram_trade_port.rs:987:9:
+assertion failed: matches!(port.execute(&request, TradeAction::Buy).await,
+    Err(PortError::Unavailable(_)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    telegram_trade_port::tests::receipt_replay_never_bypasses_organization_check
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 979 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p sniper-suite --lib`
+EXIT=101

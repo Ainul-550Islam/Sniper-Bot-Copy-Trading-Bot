@@ -130,7 +130,7 @@ impl TenantOrderRead {
                         WHERE organization_id = $1
                           AND status NOT IN
                               ('filled','failed','cancelled','expired','reconciled')
-                        ORDER BY created_at ASC LIMIT 5000"#,
+                        ORDER BY created_at ASC, id ASC LIMIT 5000"#,
                 )
                 .bind(scope.organization_id().as_uuid())
                 .fetch_all(self.db.pool()),
@@ -278,7 +278,7 @@ impl TenantOrderRead {
                     r#"SELECT * FROM orders
                         WHERE organization_id = $1
                           AND created_at >= $2 AND created_at < $3
-                        ORDER BY created_at ASC LIMIT 5000"#,
+                        ORDER BY created_at ASC, id ASC LIMIT 5000"#,
                 )
                 .bind(scope.organization_id().as_uuid())
                 .bind(since)

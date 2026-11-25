@@ -1,0 +1,21 @@
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Finished `test` profile [unoptimized] target(s) in 29.00s
+     Running tests/failure_injection.rs (target/debug/deps/failure_injection-22a6a75a61bd754f)
+
+running 1 test
+
+thread 'unbooked_exit_blocks_paper_to_live_during_route_preparation' (3827733) panicked at crates/module-sniper/tests/failure_injection.rs:986:5:
+assertion `left == right` failed: unbooked exit must block live upgrade
+  left: 4
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test unbooked_exit_blocks_paper_to_live_during_route_preparation ... FAILED
+
+failures:
+
+failures:
+    unbooked_exit_blocks_paper_to_live_during_route_preparation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 1.71s
+
+error: test failed, to rerun pass `-p module-sniper --test failure_injection`

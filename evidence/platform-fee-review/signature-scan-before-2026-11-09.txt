@@ -1,0 +1,9 @@
+=== RED: a duplicate signature is invisible to the scan ===
+-- injected: duplicate_detected is hard-wired false and a single landing is read as absence --
+test a_scan_with_no_signature_follows_the_operator_assertion ... ok
+test one_landed_signature_is_linkable_and_never_abandonable ... FAILED
+test two_landed_signatures_are_reported_as_a_duplicate_and_nothing_is_settleable ... FAILED
+thread 'one_landed_signature_is_linkable_and_never_abandonable' (3717037) panicked at crates/server/tests/reservation_chain_check.rs:349:5:
+an explicit non-send assertion never beats chain evidence
+thread 'two_landed_signatures_are_reported_as_a_duplicate_and_nothing_is_settleable' (3717038) panicked at crates/server/tests/reservation_chain_check.rs:365:5:
+test result: FAILED. 13 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.47s

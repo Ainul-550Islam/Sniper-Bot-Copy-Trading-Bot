@@ -67,6 +67,7 @@
   },
   "risk": {
     "kill_switch": false,
+    "halt_reason": "",
     "max_open_positions": 8,
     "max_position_fraction": 0.1,
     "max_position_quote": 0.5,

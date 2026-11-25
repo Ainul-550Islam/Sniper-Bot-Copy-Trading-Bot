@@ -1,0 +1,39 @@
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 10.71s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-84834e0020a68c4b)
+
+running 8 tests
+test recovery::tests::empty_inputs_make_an_empty_plan ... ok
+test recovery::tests::journal_seeds_dedup_and_cursors ... ok
+test recovery::tests::entry_fate_classification ... ok
+test recovery::tests::links_are_restored_and_closed_against_the_book ... ok
+test recovery::tests::memory_store_semantics_match_the_repo_contract ... ok
+test recovery::tests::live_ledger_entries_are_held_and_failed_ones_cleaned ... ok
+test recovery::tests::settled_ambiguous_events_without_booked_fills_need_review ... ok
+test recovery::tests::poisoned_memory_store_remains_usable ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.01s
+
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 15.17s
+     Running tests/crash_recovery.rs (target/debug/deps/crash_recovery-08bf94c968a32809)
+
+running 3 tests
+test live_entries_are_held_and_failed_entries_cleaned_up_without_selling ... ok
+test recovery_runs_before_the_pipeline_accepts_new_events ... ok
+test replayed_backlog_after_restart_is_not_re_mirrored ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/intent_execution.rs (target/debug/deps/intent_execution-2028dd78f0525f76)
+
+running 7 tests
+test ambiguous_broadcast_parks_without_booking_a_fill ... ok
+test ambiguous_exit_keeps_position_and_does_not_book_a_sell ... ok
+test live_mirror_confirms_through_the_executor_with_a_deterministic_intent ... ok
+test node_rejection_is_a_definite_failure_with_nothing_booked ... ok
+test pending_execution_cap_throttles_new_mirrors ... ok
+test simulation_failure_never_broadcasts_and_abandons_the_journal_entry ... ok
+test the_ledger_refuses_a_second_attempt_at_the_same_logical_trade ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.40s

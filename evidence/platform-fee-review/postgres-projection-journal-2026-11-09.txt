@@ -1,0 +1,28 @@
+Platform fee projection journal — targeted tests 2026-11-09
+Separate disposable real PostgreSQL database, migration 0076, RLS app-role SELECT, concurrent identical writes (1 inserted + 7 replays), tenant isolation, conflicting payload and paper noncash projections. Does not exercise executor integration, live chain collection, payout, durable global/accounting ledger posting, or production credentials.
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 1.28s
+     Running tests/platform_fee_projection_pg.rs (target/debug/deps/platform_fee_projection_pg-8321cb61ba55366e)
+
+running 1 test
+test projection_is_tenant_scoped_atomic_and_replay_safe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+EXIT=0
+--- mode projection unit tests ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 0.95s
+     Running tests/platform_fee_surfaces.rs (target/debug/deps/platform_fee_surfaces-9893cb523690cb57)
+
+running 4 tests
+test old_serialized_charges_remain_unattributed_instead_of_guessing ... ok
+test paper_and_simulation_project_no_cash_movement ... ok
+test surface_posting_projections_reconcile_with_assessed_amounts ... ok
+test valid_policies_never_produce_negative_fees_or_exceed_cap ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0
+
+Follow-up: tenant-scoped totals_by_surface groups immutable projections by surface with explicit execution mode and asset filters, sums in PostgreSQL numeric then parses i128. Real PostgreSQL regression including four surface groups, cross-tenant and different-asset isolation: /home/user/fee-projection-pg-totals.log, 1 passed, 0 failed, EXIT=0. These are projection totals, not actual ledger revenue or proof of collection.

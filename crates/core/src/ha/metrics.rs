@@ -176,6 +176,19 @@ pub fn count_replay_event(feed: FeedId, outcome: &str) {
     }
 }
 
+/// Count one durable cursor write outcome (`accepted` / `fenced` /
+/// `stale` / `acknowledged` / `error`). A non-zero `fenced`/`stale` rate is
+/// the signal that a worker believes it advanced a feed it does not own.
+pub fn count_cursor_write(feed: FeedId, outcome: &str) {
+    metrics::global()
+        .counter(
+            "ha_cursor_writes_total",
+            "Durable cursor writes by outcome (fenced/stale are refusals).",
+            &[("feed", feed.as_str()), ("outcome", outcome)],
+        )
+        .inc();
+}
+
 /// Count one detected feed gap.
 pub fn count_feed_gap(feed: FeedId) {
     metrics::global()

@@ -1,0 +1,51 @@
+=== core recovery regression ===
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 28.13s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 11 tests
+test accounting::recovery::tests::gaps_are_reported_never_synthesised ... ok
+test accounting::recovery::tests::unavailable_journal_is_reported ... ok
+test recovery::tests::default_checked_reservation_preserves_best_effort_sink ... ok
+test accounting::recovery::tests::restart_rebuilds_the_book_once_and_refuses_replays ... ok
+test recovery::tests::explicit_retain_and_empty_signature_leave_intents_pending ... ok
+test recovery::tests::failed_durable_reservation_aborts_before_broadcast_future ... ok
+test recovery::tests::verdict_meter_labels_are_stable ... ok
+test recovery::tests::with_intent_links_on_signature ... ok
+test recovery::tests::with_intent_retains_errors_and_abandons_classified_missing_signature ... ok
+test recovery::tests::with_intent_without_sink_is_passthrough ... ok
+test recovery::tests::worker_registers_sources_by_kind ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 685 filtered out; finished in 0.00s
+
+core_recovery_exit=0
+=== production DbIntentSink PostgreSQL regression ===
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 4m 34s
+     Running tests/intent_reservation_postgres.rs (target/debug/deps/intent_reservation_postgres-a983d3225a2c42fc)
+
+running 1 test
+test production_reservation_failure_aborts_before_broadcast_future ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+server_reservation_exit=0
+=== affected clippy ===
+    Checking bot-core v0.1.0 (/home/user/repo/crates/core)
+    Checking solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Checking module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+    Checking module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Checking module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 4m 14s
+affected_clippy_exit=0
+=== fmt + diff ===
+fmt_exit=0
+diff_check_exit=0

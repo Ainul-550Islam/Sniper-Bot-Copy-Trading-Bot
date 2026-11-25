@@ -14,11 +14,11 @@
 //!   / module / wallet is refused BEFORE signing or broadcast);
 //! * every mirrored buy and every exit the bot builds is stamped with
 //!   the tenant metadata the guard verifies;
-//! * the per-tenant runtime state (event dedup, counters) lives in
-//!   [`crate::tenant_state::TenantCopyState`], so one tenant's dedup
-//!   set can never suppress another tenant's mirror — even when both
-//!   tenants track the SAME external leader address;
-//! * every mirror outcome is offered to a [`TenantCopySink`] — the
+//! * the local prefilter and counters live in each executor's
+//!   [`crate::tenant_state::TenantCopyState`]. This local set is independent,
+//!   but the underlying `CopyBot` event dedup key is not tenant-scoped: a
+//!   shared state/backend can still suppress another tenant's event;
+//! * authoritative mirror outcomes are offered to a [`TenantCopySink`] — the
 //!   server-side implementation persists the outcome through the
 //!   tenant-scoped `bot-core` `trading_repository`
 //!   (organization-bound writes only).
@@ -233,11 +233,47 @@ impl TenantCopyExecutor {
         signers: Option<Arc<solana_kit::signer::SignerRegistry>>,
         execution: TenantExecutionContext,
     ) -> BotResult<Self> {
+        Self::new_with_fence(
+            state,
+            rpc,
+            wallet,
+            signers,
+            execution,
+            solana_kit::tenant_broadcast_guard::LivenessProbes::default(),
+        )
+        .await
+    }
+
+    /// Build with a LIVE runtime fence attached to the broadcast guard.
+    ///
+    /// The guard's captured context says what was true when the module was
+    /// built; the probe answers whether that is STILL true. With it, a runtime
+    /// rotated after construction is refused at the last gate
+    /// (`runtime_fenced`) instead of broadcasting its next mirror. Without it
+    /// the guard only compares metadata to its own captured context.
+    pub async fn new_with_fence(
+        state: Shared,
+        rpc: Rpc,
+        wallet: Arc<Wallet>,
+        signers: Option<Arc<solana_kit::signer::SignerRegistry>>,
+        execution: TenantExecutionContext,
+        liveness: solana_kit::tenant_broadcast_guard::LivenessProbes,
+    ) -> BotResult<Self> {
         let context = CopyTenantContext::adapt(execution.clone())
             .map_err(|e| BotError::invalid(e.to_string()))?;
         let signing = TenantSigningContext::new(execution);
-        let guard = TenantBroadcastGuard::new(signing.clone(), wallet.pubkey)
+        let mut guard = TenantBroadcastGuard::new(signing.clone(), wallet.pubkey)
             .map_err(|e| BotError::invalid(e.to_string()))?;
+        if !liveness.is_empty() {
+            guard = guard.with_liveness(liveness);
+        }
+        // Pin the signer key this executor can actually sign with, so a key
+        // rotated under an unchanged `key_ref` is caught at the next broadcast.
+        if let Some(registry) = signers.as_ref() {
+            if let Some(signer) = registry.get(signing.signer_identity()) {
+                guard = guard.with_expected_signer_key(signer.pubkey());
+            }
+        }
         let bot = CopyBot::new(state, rpc, wallet, signers)
             .await
             .with_tenant_context(Arc::new(guard))?;
@@ -293,8 +329,8 @@ impl TenantCopyExecutor {
     }
 
     /// Authorize an incoming execution context against this executor's
-    /// bound identity. EVERY scoped entry point calls this first; a
-    /// deny means the pipeline never runs.
+    /// bound identity. This is an explicit helper; `process_trade` uses
+    /// the executor's already-bound context and does not call it.
     pub fn authorize(&self, presented: &TenantExecutionContext) -> Result<(), CopyTenantDeny> {
         if presented.organization_id() != self.context.organization_id() {
             return Err(CopyTenantDeny::OrganizationMismatch);
@@ -327,8 +363,8 @@ impl TenantCopyExecutor {
             .await
     }
 
-    /// Re-verify against a freshly-resolved runtime identity (fence
-    /// check before money moves).
+    /// Re-verify against a runtime identity supplied by the caller. This
+    /// helper does not fetch the current runtime or run automatically.
     pub fn verify_runtime(
         &self,
         organization_id: OrganizationId,
@@ -353,8 +389,14 @@ impl TenantCopyExecutor {
         cfg: &Config,
     ) -> CopyOutcome {
         self.state.on_considered();
+        // `process_event` reads the in-memory registry; passing a config does
+        // not refresh it. Apply this tenant snapshot before evaluating the
+        // trade so follow, pause and unfollow changes take effect here too.
+        self.bot.sync_leaders(cfg).await;
         let event = self.bot.event_from_trade(trade, feed);
-        let dedup_key = self.context.event_key(&event.leader, &event.signature);
+        // One transaction can have distinct mint/side perspectives; use the
+        // pipeline's full event identity rather than the signature alone.
+        let dedup_key = self.context.event_key(&event.leader, &event.event_id);
         let mut outcome = if !self.state.first_sight(&dedup_key) {
             self.state.on_rejected();
             CopyOutcome::rejected(
@@ -371,6 +413,12 @@ impl TenantCopyExecutor {
             )
         } else {
             let outcome = self.bot.process_event(&event, cfg).await;
+            if outcome.rejection.as_ref().map(|r| r.reason) == Some(RejectReason::DedupUnavailable)
+            {
+                // The shared write may or may not have committed. Permit a
+                // retry to ask the shared arbiter again; never release it.
+                self.state.forget_sighting(&dedup_key);
+            }
             if outcome.stage == CopyStage::Submitted || outcome.stage == CopyStage::Filled {
                 self.state.on_submitted();
                 if outcome.rejection.is_none() {
@@ -423,11 +471,22 @@ impl TenantCopyExecutor {
         // write is reflected in the event's terminal detail. A broadcast that
         // already left the process is never undone; its local state and audit
         // record remain available for reconciliation.
-        if let Err(e) = self
-            .sink
-            .record_outcome(&self.context, &event, &outcome)
-            .await
-        {
+        // Neither a duplicate nor an unavailable dedup decision owns the
+        // event's authoritative outcome. A tenant upsert here could overwrite
+        // the winning replica's row, including after an ambiguous shared write.
+        let should_record = !outcome.rejection.as_ref().is_some_and(|r| {
+            matches!(
+                r.reason,
+                RejectReason::DuplicateEvent | RejectReason::DedupUnavailable
+            )
+        });
+        if let Err(e) = if should_record {
+            self.sink
+                .record_outcome(&self.context, &event, &outcome)
+                .await
+        } else {
+            Ok(())
+        } {
             let detail = format!("tenant copy sink: {e}");
             if let Some(rejection) = outcome.rejection.as_mut() {
                 rejection.detail = format!("{}; {detail}", rejection.detail);

@@ -1,0 +1,21 @@
+=== RED: a malformed / reversed reporting window was silently replaced ===
+-- injection: window() parses with .ok() and falls back to now/-24h --
+test trading_data_plane::executions::tests::a_reversed_impossible_or_oversized_window_is_refused ... FAILED
+test trading_data_plane::executions::tests::a_malformed_timestamp_is_refused_and_never_replaced_by_a_default ... FAILED
+test trading_data_plane::executions::tests::the_refusal_reason_is_machine_readable ... ok
+test trading_data_plane::executions::tests::a_valid_window_is_returned_exactly_and_defaults_only_when_absent ... ok
+
+failures:
+
+--
+thread 'trading_data_plane::executions::tests::a_reversed_impossible_or_oversized_window_is_refused' (1509084) panicked at crates/server/src/trading_data_plane/executions.rs:285:14:
+called `Result::unwrap_err()` on an `Ok` value: (2026-11-02T00:00:00Z, 2026-11-01T00:00:00Z)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--
+thread 'trading_data_plane::executions::tests::a_malformed_timestamp_is_refused_and_never_replaced_by_a_default' (1509083) panicked at crates/server/src/trading_data_plane/executions.rs:225:56:
+called `Result::unwrap_err()` on an `Ok` value: (2026-11-19T07:48:54.210858467Z, 2026-11-20T07:48:54.210858467Z)
+
+
+--
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 999 filtered out; finished in 0.00s

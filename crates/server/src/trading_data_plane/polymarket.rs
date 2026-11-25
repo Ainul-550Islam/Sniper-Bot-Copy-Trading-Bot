@@ -14,7 +14,6 @@ use bot_core::models::BotModule;
 use super::config_store::{read_module, write_module};
 
 use super::authorization_chain::{guard, guard_manage, TradingModuleFamily};
-use super::executions::window;
 use super::module_controls::{apply_control, feature_key_for, status_payload, ControlAction};
 use super::orders::{page_request, plane_error};
 use crate::api::ApiState;
@@ -135,15 +134,9 @@ pub async fn fills(
         Err(response) => return response,
     };
     let plane = auth.plane.clone();
-    let (since, until) = match window(&params) {
-        Some(w) => w,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "invalid_window" })),
-            )
-                .into_response()
-        }
+    let (since, until) = match super::executions::window_or_response(&params) {
+        Ok(w) => w,
+        Err(response) => return response,
     };
     let scope = plane.read_scope(auth.organization_id());
     match plane.poly_read().fills_between(&scope, since, until).await {

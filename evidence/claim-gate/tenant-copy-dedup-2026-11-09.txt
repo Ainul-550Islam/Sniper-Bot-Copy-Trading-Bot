@@ -1,0 +1,21 @@
+Tenant copy local dedup and sink regression, 2026-11-09 in user timezone.
+Command: cargo test -p module-copy --test tenant_execution --locked -j 1 -- --test-threads=1
+Rerun after reconstructing source and tests following workspace restoration; Rust 1.98.1, hermetic test sink. Not a real PostgreSQL tenant sink, multi-replica test or live broadcast test.
+
+    Finished `test` profile [unoptimized] target(s) in 4m 56s
+     Running tests/tenant_execution.rs (target/debug/deps/tenant_execution-eec7c191619e41fd)
+
+running 9 tests
+test a_tenant_copy_executor_denies_foreign_contexts ... ok
+test a_wallet_bound_to_another_tenant_cannot_drive_the_copy_executor ... ok
+test an_unbound_copy_bot_preserves_the_operator_behaviour ... ok
+test tenant_dedup_distinguishes_same_signature_mint_and_side ... ok
+test tenant_duplicate_does_not_overwrite_first_sink_outcome ... ok
+test tenant_unavailable_shared_dedup_retries_without_journaling ... ok
+test the_context_adapter_scopes_leader_and_event_keys_per_tenant ... ok
+test the_same_leader_trade_is_deduplicated_tenant_locally ... ok
+test two_tenants_seeing_the_same_leader_trade_both_process_it ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+EXIT=0

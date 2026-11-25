@@ -90,7 +90,20 @@ impl RedisKv {
 
     /// `SET key val NX PX ttl` — true when THIS call created the key
     /// (first arrival). The dedup L2 primitive.
+    /// `SET key val NX PX ttl`. Returns `true` when this call created the key.
+    ///
+    /// A zero TTL is refused rather than clamped: `max(1)` used to turn it into
+    /// one millisecond, which reads as "seen forever" to callers that meant
+    /// "no window on this backend". The dedup layer already maps a zero TTL to
+    /// an explicit error for Redis; this makes the primitive itself fail closed.
+    /// Nothing is sent before the check, so a caller that ignores the error
+    /// leaves no poisoned key behind.
     pub async fn set_nx_ttl(&self, key: &str, val: &str, ttl: Duration) -> BotResult<bool> {
+        if ttl.is_zero() {
+            return Err(BotError::config(
+                "set_nx_ttl requires a nonzero TTL; a zero window would be an indefinite shared key, which this backend cannot express",
+            ));
+        }
         let ttl_ms = i64::try_from(ttl.as_millis().max(1))
             .map_err(|_| BotError::config("Redis TTL exceeds signed milliseconds"))?;
         let key = key.to_string();
@@ -266,6 +279,68 @@ pub async fn open(cfg: &RedisConfig) -> BotResult<Option<RedisKv>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dedup window on Redis must really expire, and a zero window must be
+    /// refused instead of being clamped to one millisecond.
+    #[tokio::test]
+    async fn set_nx_ttl_refuses_a_zero_window_and_honours_a_short_one() {
+        let url = std::env::var("REDIS_URL").unwrap_or_default();
+        let kv = if url.trim().is_empty() {
+            None
+        } else {
+            Some(
+                RedisKv::connect(&RedisConfig::default(), url.trim())
+                    .await
+                    .expect("REDIS_URL must connect"),
+            )
+        };
+        let Some(kv) = kv else {
+            eprintln!("NOT_RUN: set_nx_ttl_* — REDIS_URL missing");
+            assert!(
+                std::env::var("REQUIRE_SERVICES").as_deref() != Ok("1"),
+                "this test requires REDIS_URL and REQUIRE_SERVICES=1 is set"
+            );
+            return;
+        };
+        let key = format!("probe:set_nx_ttl:{}", uuid::Uuid::new_v4().simple());
+
+        // Zero is an error, and it is refused before anything is written.
+        assert!(
+            kv.set_nx_ttl(&key, "1", Duration::ZERO).await.is_err(),
+            "a zero TTL must be refused, not clamped to 1 ms"
+        );
+        assert!(
+            kv.get(&key).await.expect("get").is_none(),
+            "a refused zero-TTL call must not leave a key behind"
+        );
+
+        // A short window: first call creates, second is refused,
+        // and after the window the key is gone for good.
+        assert!(
+            kv.set_nx_ttl(&key, "1", Duration::from_millis(150))
+                .await
+                .expect("set"),
+            "first arrival creates the key"
+        );
+        assert!(
+            !kv.set_nx_ttl(&key, "1", Duration::from_millis(150))
+                .await
+                .expect("set2"),
+            "inside the window the key is seen"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            kv.get(&key).await.expect("get2").is_none(),
+            "an expired dedup key must not survive its window"
+        );
+        assert!(
+            kv.set_nx_ttl(&key, "1", Duration::from_millis(150))
+                .await
+                .expect("set3"),
+            "after the window the key is new again"
+        );
+        let _ = kv.del(&key).await;
+    }
 
     /// URL resolution honours the configured env-var name and treats
     /// empty/whitespace as absent.

@@ -1,0 +1,17 @@
+=== RED: with the tenant namespace removed, the two tenants collide again ===
+test a_shared_redis_dedup_does_not_collide_across_tenants ... FAILED
+test a_tenant_copy_executor_denies_foreign_contexts ... ok
+test a_wallet_bound_to_another_tenant_cannot_drive_the_copy_executor ... ok
+test an_unbound_copy_bot_preserves_the_operator_behaviour ... ok
+test shared_app_state_currently_projects_one_position_into_two_tenant_sinks ... ok
+test shared_app_state_no_longer_collides_across_tenants ... FAILED
+test tenant_dedup_distinguishes_same_signature_mint_and_side ... ok
+test tenant_duplicate_does_not_overwrite_first_sink_outcome ... ok
+test tenant_process_trade_uses_current_leader_pause_and_unfollow_config ... ok
+test tenant_unavailable_shared_dedup_retries_without_journaling ... ok
+test the_context_adapter_scopes_leader_and_event_keys_per_tenant ... ok
+test the_same_leader_trade_is_deduplicated_tenant_locally ... ok
+test two_tenants_seeing_the_same_leader_trade_both_process_it ... ok
+thread 'a_shared_redis_dedup_does_not_collide_across_tenants' (3855744) panicked at crates/module-copy/tests/tenant_execution.rs:550:9:
+thread 'shared_app_state_no_longer_collides_across_tenants' (3855749) panicked at crates/module-copy/tests/tenant_execution.rs:634:5:
+test result: FAILED. 11 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s

@@ -1,0 +1,10 @@
+=== RED: journal-conflict recovery missing before the repair path ===
+error[E0599]: no method named `reconcile_from_journal` found for struct `std::sync::Arc<accounting::ledger::GlobalLedger>` in the current scope
+   --> crates/core/src/accounting/ledger.rs:951:28
+    |
+951 |         let report = first.reconcile_from_journal().await;
+    |                            ^^^^^^^^^^^^^^^^^^^^^^ method not found in `std::sync::Arc<accounting::ledger::GlobalLedger>`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `bot-core` (lib test) due to 1 previous error
+red_exit=101

@@ -1,0 +1,64 @@
+# Reconciliation queue: a bounded claim page starved the caller's own item (2026-11-09)
+
+How it was found: the full workspace sweep after the dedup work. `db_integration`
+passed 31/31 when run alone and failed in the sweep:
+  reconciliation_queue_claim_backoff_and_giveup  ->  panicked at :581 "due item claimed"
+No targeted run had ever seen it, because a targeted run starts from a nearly empty
+deployment.
+
+## Root cause (reproduced deterministically, not guessed)
+
+`ReconRepo::claim_due(limit)` is a DEPLOYMENT-WIDE queue read:
+
+  UPDATE reconciliation_state SET ...
+   WHERE (organization_id, kind, subject) IN (
+       SELECT ... WHERE organization_id = $1 AND status IN ('pending','in_progress')
+                  AND next_attempt_at <= now() AND attempts < max_attempts
+         ORDER BY next_attempt_at ASC LIMIT $2 FOR UPDATE SKIP LOCKED)
+
+It is correct (tenant-scoped, SKIP LOCKED, increments attempts). But one page of
+`limit` rows is all a caller gets, and the ordering is oldest-due-first across the
+whole deployment. The test enqueued one item and asserted that a single
+`claim_due(50)` contains it — which only holds when the queue is nearly empty.
+
+Reproduction: insert 60 due rows for the deployment org, then run the test alone
+  => FAILED "due item claimed"   (deterministic, no sweep needed)
+
+## Why it is a test defect here, not a product defect
+
+- The sweep and the server worker both drain in batches, so a real deployment is not
+  starved: each `claim_due` call advances, and the next call sees the next page.
+- The queue is genuinely deployment-wide by design (one work list, many workers).
+- BUT the underlying property is worth stating, because it is real: a caller that
+  reads only ONE bounded page cannot conclude "my item is not claimable". It can
+  conclude "not in this page". Needing a drain loop is a property of the API.
+
+## Fix (test)
+
+`reconciliation_queue_claim_backoff_and_giveup` now drains in bounded batches
+(up to 8 x `claim_due(200)`) until the subject appears. The assertions are unchanged
+in strength: the item must be claimable exactly once, must not be re-claimable while
+in progress, and backoff/give-up behaviour is untouched. Verified with the 60 noise
+rows still present: 1 passed, 0 failed.
+
+## Not changed, and why
+
+The global `LIMIT` was left as-is. Making `claim_due` per-tenant fair would change
+worker scheduling semantics (which is a product decision about fairness, not a bug),
+and it would need its own RED/GREEN cycle with a multi-tenant witness. Recorded as a
+design note instead: if per-tenant starvation ever matters, the fix is to order by
+`(organization_id, next_attempt_at)` per tenant or to claim per tenant explicitly —
+not to remove the bound.
+
+## GREEN
+
+- `cargo test -p bot-core --test db_integration -- --test-threads=1` -> 31 passed, 0 failed
+  (with the 60-row noise set present)
+- clippy -D warnings clean; fmt 0; `git diff --check` 0
+
+## Bonus fact established during this investigation (worth keeping)
+
+The test harness connects as role `sniper`, which is a SUPERUSER, so FORCE ROW LEVEL
+SECURITY does not apply to it and multi-tenant isolation is NOT exercised by these
+tests. `sniper_app` (no bypass, no superuser) and `sniper_system` (BYPASSRLS) are the
+roles that do exercise it — the restricted-role RLS run remains an external item.

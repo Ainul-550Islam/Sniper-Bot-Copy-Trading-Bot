@@ -562,6 +562,52 @@ async fn live_mode_without_a_verified_collateral_read_rejects() {
 }
 
 #[tokio::test]
+async fn live_strategy_posts_configured_builder_on_every_order() {
+    let venue = mock_venue().await;
+    let mut config = live_config(&venue);
+    config.polymarket.builder_code = Some("operator".into());
+    let (state, _) = state_with_oms(config);
+    let bot = live_bot(&state, Arc::new(MemoryPolyStore::new())).await;
+    let cfg = poly_cfg(&state).await;
+    let outcomes = bot.process_market(&market(), &quotes(), &cfg).await;
+    assert!(outcomes.iter().any(|o| o.reached_venue()), "{outcomes:?}");
+    let expected = module_polymarket::builder::BuilderCode::parse("operator")
+        .unwrap()
+        .to_hex();
+    let posted: Vec<_> = venue
+        .captures()
+        .into_iter()
+        .filter(|c| c.method == "POST" && c.path == "/clob/order")
+        .map(|c| serde_json::from_str::<serde_json::Value>(&c.body).unwrap())
+        .collect();
+    assert!(!posted.is_empty());
+    for body in posted {
+        assert_eq!(body["order"]["builder"], expected);
+    }
+}
+
+#[tokio::test]
+async fn live_invalid_builder_is_rejected_without_post() {
+    let venue = mock_venue().await;
+    let mut config = live_config(&venue);
+    config.polymarket.builder_code = Some("0x1234".into());
+    let (state, _) = state_with_oms(config);
+    let bot = live_bot(&state, Arc::new(MemoryPolyStore::new())).await;
+    let cfg = poly_cfg(&state).await;
+    let out = bot
+        .process_signal(
+            &signal(decision(), ExecutionMode::Live),
+            &market(),
+            &quotes(),
+            &cfg,
+        )
+        .await;
+    assert!(!out.reached_venue(), "{out:?}");
+    assert_eq!(venue.posted_orders(), 0);
+    assert!(out.detail.contains("builder code"), "{}", out.detail);
+}
+
+#[tokio::test]
 async fn live_sizing_uses_the_verified_balance_not_the_paper_seed() {
     let venue = mock_venue().await;
     // 3 USDC on chain; the shared state carries a 1 000 USDC demo seed.

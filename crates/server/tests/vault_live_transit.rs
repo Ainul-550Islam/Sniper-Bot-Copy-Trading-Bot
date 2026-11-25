@@ -1,7 +1,10 @@
 //! LIVE HashiCorp Vault transit integration — executed against a real Vault
 //! server, not a stub.
 //!
-//! This test is `#[ignore]`d by default because it needs an external service.
+//! These tests need an external service. They are not `#[ignore]`d (gap #31):
+//! each resolves its configuration first and reports SKIPPED when the Vault
+//! environment is absent, so an ordinary run exercises the guard instead of
+//! hiding it.
 //! It was written to be run against a genuine `vault server -dev` with the
 //! transit engine enabled and an ed25519 key named by `VAULT_TRANSIT_KEY`:
 //!
@@ -36,6 +39,13 @@ fn live_config() -> Option<VaultConfig> {
             "SKIPPED: set VAULT_ADDR/VAULT_TOKEN/VAULT_TRANSIT_KEY (a live Vault transit engine) \
              to run this test"
         );
+        // Same contract as REQUIRE_POSTGRES: absence is a skip by default and a
+        // hard failure for whoever asked for the proof (REQUIRE_VAULT=1), so a
+        // missing Vault can never masquerade as a green transit test.
+        assert!(
+            std::env::var("REQUIRE_VAULT").as_deref() != Ok("1"),
+            "VAULT_ADDR/VAULT_TOKEN/VAULT_TRANSIT_KEY are required and REQUIRE_VAULT=1 is set"
+        );
         return None;
     }
     let (config, state) = VaultConfig::from_env();
@@ -62,7 +72,6 @@ fn record_for(public_address: &str, provider_ref: Option<&str>) -> SignerRecord 
 
 /// `GET /v1/sys/health` + `GET /v1/auth/token/lookup-self` against real Vault.
 #[tokio::test]
-#[ignore = "requires a live Vault transit engine (VAULT_ADDR/VAULT_TOKEN/VAULT_TRANSIT_KEY)"]
 async fn live_vault_health_and_token_permission() {
     let Some(config) = live_config() else { return };
     let provider = VaultCustodyProvider::new(config.clone());
@@ -83,7 +92,6 @@ async fn live_vault_health_and_token_permission() {
 
 /// The transit key really is ed25519 and really lives in Vault.
 #[tokio::test]
-#[ignore = "requires a live Vault transit engine (VAULT_ADDR/VAULT_TOKEN/VAULT_TRANSIT_KEY)"]
 async fn live_vault_transit_key_metadata() {
     let Some(config) = live_config() else { return };
     let key_name = config.default_key().expect("VAULT_TRANSIT_KEY").to_string();
@@ -105,7 +113,6 @@ async fn live_vault_transit_key_metadata() {
 /// signature must FAIL against a different message — proof the signature is
 /// real and message-bound, not a placeholder.
 #[tokio::test]
-#[ignore = "requires a live Vault transit engine (VAULT_ADDR/VAULT_TOKEN/VAULT_TRANSIT_KEY)"]
 async fn live_vault_sign_and_verify() {
     let Some(config) = live_config() else { return };
     let key_name = config.default_key().expect("VAULT_TRANSIT_KEY").to_string();
@@ -150,7 +157,6 @@ async fn live_vault_sign_and_verify() {
 /// Fail-closed against the REAL Vault: a record pinned to the wrong key, a
 /// key that does not exist, and a bad token.
 #[tokio::test]
-#[ignore = "requires a live Vault transit engine (VAULT_ADDR/VAULT_TOKEN/VAULT_TRANSIT_KEY)"]
 async fn live_vault_fails_closed_on_real_service() {
     let Some(config) = live_config() else { return };
     let provider = VaultCustodyProvider::new(config.clone());

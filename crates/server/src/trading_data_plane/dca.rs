@@ -52,6 +52,15 @@ pub struct ListQuery {
     pub status: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Exclusive upper bound on `created_at` (RFC 3339).
+    #[serde(default)]
+    pub before: Option<DateTime<Utc>>,
+    /// Tie-breaker for [`ListQuery::before`]: the `id` of the last schedule on
+    /// the previous page. Together they form the `(created_at, id)` keyset
+    /// cursor that matches the page ordering, so equal timestamps at a page
+    /// boundary are never skipped.
+    #[serde(default)]
+    pub before_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,6 +220,36 @@ pub async fn create(
         .into_response()
 }
 
+/// ONE page of this organization's DCA schedules (see the identical reasoning
+/// in `limit_orders::fetch_page`: the cursor must be the full sort key).
+pub async fn fetch_page(
+    db: &bot_core::db::Database,
+    organization_id: uuid::Uuid,
+    status: Option<&str>,
+    cursor: Option<(DateTime<Utc>, Option<String>)>,
+    limit: i64,
+) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+    let before_ts = cursor.as_ref().map(|(ts, _)| *ts);
+    let before_id = cursor.as_ref().and_then(|(_, id)| id.clone());
+    sqlx::query(
+        "SELECT id, mint, amount_per_run_sol::float8 AS amount_per_run_sol, interval_secs, \
+                budget_sol::float8 AS budget_sol, spent_sol::float8 AS spent_sol, status, \
+                next_run_at, last_run_at, attempts, last_error, created_at \
+         FROM dca_schedules \
+         WHERE organization_id = $1 AND ($2::text IS NULL OR status = $2) \
+           AND ($4::timestamptz IS NULL OR created_at < $4 \
+                OR (created_at = $4 AND id < $5)) \
+         ORDER BY created_at DESC, id DESC LIMIT $3",
+    )
+    .bind(organization_id)
+    .bind(status)
+    .bind(limit)
+    .bind(before_ts)
+    .bind(before_id)
+    .fetch_all(db.pool())
+    .await
+}
+
 /// `GET /api/tenant/dca-schedules`
 pub async fn list(
     State(state): State<ApiState>,
@@ -242,19 +281,19 @@ pub async fn list(
         return validation_error("limit must be between 1 and 200");
     }
 
-    let rows = sqlx::query(
-        "SELECT id, mint, amount_per_run_sol::float8 AS amount_per_run_sol, interval_secs, \
-                budget_sol::float8 AS budget_sol, spent_sol::float8 AS spent_sol, status, \
-                next_run_at, last_run_at, attempts, last_error, created_at \
-         FROM dca_schedules \
-         WHERE organization_id = $1 AND ($2::text IS NULL OR status = $2) \
-         ORDER BY created_at DESC, id DESC LIMIT $3",
-    )
-    .bind(ctx.organization.id.as_uuid())
-    .bind(status)
-    .bind(limit)
-    .fetch_all(db.pool())
-    .await;
+    // Keyset over the full sort key (`created_at`, `id`) — see the same
+    // reasoning in `limit_orders::list`: the page order breaks ties by id, so
+    // a timestamp-only cursor drops rows that share the boundary timestamp.
+    let cursor: Option<(DateTime<Utc>, Option<String>)> = match (&query.before, &query.before_id) {
+        (Some(ts), Some(id)) => Some((*ts, Some(id.clone()))),
+        (Some(ts), None) => Some((*ts, None)),
+        (None, Some(_)) => {
+            return validation_error("before_id requires before (RFC 3339 created_at)")
+        }
+        (None, None) => None,
+    };
+    let rows = fetch_page(db, ctx.organization.id.as_uuid(), status, cursor, limit).await;
+
     let rows = match rows {
         Ok(r) => r,
         Err(error) => return storage_error("listing DCA schedules", &error),
@@ -282,11 +321,23 @@ pub async fn list(
         })
         .collect();
 
+    // A full page hands back BOTH cursor parts, so the client can resume at
+    // the exact boundary instead of at a timestamp shared by several rows.
+    let (next_before, next_before_id) = match (
+        schedules.len() as i64 == limit,
+        schedules.last().map(|s| (s.created_at, s.id.clone())),
+    ) {
+        (true, Some((ts, id))) => (Some(ts), Some(id)),
+        _ => (None, None),
+    };
+
     (
         StatusCode::OK,
         Json(json!({
             "organization_id": ctx.organization.id.to_string(),
             "schedules": schedules,
+            "next_before": next_before,
+            "next_before_id": next_before_id,
         })),
     )
         .into_response()

@@ -1,0 +1,55 @@
+=== batch6 manifest contract ===
+test webhook_matrix_distinguishes_fixture_vs_live ... ok
+test webhook_matrix_exists_and_covers_hmac_idempotency ... ok
+test sbom_license_crosswalk_files_exist ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+batch6_exit=0
+=== workspace clippy ===
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Checking saas-sdk v0.1.0 (/home/user/repo/crates/saas-sdk)
+    Finished `dev` profile [unoptimized] target(s) in 5m 49s
+workspace_clippy_exit=0
+=== fmt + diff ===
+fmt_exit=0
+diff_check_exit=0
+=== make gates ===
+library/node@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c      digest   200  yes    OK
+library/postgres:16-alpine                                                                tag      200  yes    OK
+library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea  digest   200  yes    OK
+library/redis:7-alpine                                                                    tag      200  yes    OK
+library/redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499     digest   200  yes    OK
+library/rust@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e      digest   200  yes    OK
+9 distinct image references (7 digest-pinned, 2 tag-only), 0 failure(s)
+NOTE: no image was built and no container was run — this verifies the base images against the live registries only.
+PASS  image digests resolve in the live registry
+----------------------------------------
+container_assets_live: PASS (no image built, no container run — by design)
+[claims-test] 1/2 — the real tree must pass the claim gate
+verify-marketing-claims: OK (buyer-facing scope) — no unsupported claims.
+[claims-test] real tree: OK
+[claims-test] 2/2 — the gate must reject a planted unsupported claim
+[claims-test] planted banned phrases rejected — the gate fails closed as required
+[claims-test] PASS — real tree clean and the gate is proven to reject violations
+  note: tests/release/stats_current.sh and manifest_current.sh are the
+        release step's job (they recheck docs/STATS.md and
+        release-manifest.json after scripts/generate-stats.sh /
+        update-release-manifest.sh run); tests/release/buyer_*.sh need the
+        generated buyer-release/ tree, which is not in this repository.
+  note: container_assets_live.sh uses hadolint + docker compose + the live
+        registry when they are installed and prints SKIP (not a failure)
+        for each section it cannot run. It never builds an image.
+make_gates_exit=0
+=== verify-delivery ===
+PASS  single canonical SBOM: sbom.json is CycloneDX with components, no duplicate
+----------------------------------------
+tree: 59068 files (excluding .git), 12416330096 bytes
+verify-delivery: 14 PASS / 0 FAIL
+verify_delivery_exit=0
+=== post-regeneration recheck ===
+snapshot_manifest_files=2036
+release_manifest=docs=168 rust=814 tests=2692 migrations=79 (high water 0079)
+batch6_recheck_exit=0 (12/12)
+diff_check_exit=0

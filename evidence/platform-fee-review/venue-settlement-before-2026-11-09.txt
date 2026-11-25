@@ -1,0 +1,11 @@
+=== RED: the venue answer releases a claim it must not ===
+-- injected 1: the 'the venue once acknowledged it' guard is dropped, so a purged full match
+   (a 404 after a match) frees the token for a SECOND entry --
+-- injected 2: the release is reported as established_non_send = false --
+test a_never_acknowledged_absence_releases_the_claim_and_closes_the_order ... FAILED
+test a_once_acknowledged_order_that_vanished_is_held ... FAILED
+thread 'a_never_acknowledged_absence_releases_the_claim_and_closes_the_order' (3657156) panicked at crates/module-polymarket/tests/venue_state_settlement.rs:183:5:
+assertion `left == right` failed: absence is only ever released as an established non-send
+thread 'a_once_acknowledged_order_that_vanished_is_held' (3657157) panicked at crates/module-polymarket/tests/venue_state_settlement.rs:200:5:
+test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+red_exit=101 (tests failed as they must)

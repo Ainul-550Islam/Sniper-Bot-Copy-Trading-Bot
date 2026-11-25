@@ -290,7 +290,7 @@ impl OrderRepo {
                         WHERE organization_id = $1
                           AND status NOT IN
                               ('filled','failed','cancelled','expired','reconciled')
-                        ORDER BY created_at ASC LIMIT 5000"#,
+                        ORDER BY created_at ASC, id ASC LIMIT 5000"#,
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
@@ -475,7 +475,9 @@ impl PositionRepo {
         Ok(())
     }
 
-    /// Live positions (open or closing) — the restart-recovery input.
+    /// All live positions (open or closing) — restart recovery and book
+    /// sync require the complete set, not an arbitrary prefix. This loads
+    /// all matching rows into memory and can be expensive for large books.
     pub async fn list_open(&self) -> RepoResult<Vec<Position>> {
         let rows = self
             .db
@@ -484,7 +486,7 @@ impl PositionRepo {
                 sqlx::query(
                     r#"SELECT * FROM positions
                         WHERE organization_id = $1 AND status IN ('open','closing')
-                        ORDER BY opened_at ASC LIMIT 5000"#,
+                        ORDER BY opened_at ASC, id ASC"#,
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .fetch_all(self.db.pool()),
@@ -534,10 +536,11 @@ impl TradeRepo {
         TradeRepo { db }
     }
 
-    /// Append a fill. Idempotent on the app-assigned trade id: a retry after
-    /// an ambiguous failure updates rather than duplicates.
+    /// Append a fill. Exact same-id retries succeed; different payloads or
+    /// tenants return a conflict instead of silently discarding a fill.
+    /// An exact retry performs a no-op UPDATE and can fire update triggers.
     pub async fn append(&self, t: &Trade) -> RepoResult<()> {
-        self.db
+        let result = self.db
             .timed(
                 "trade_append",
                 sqlx::query(
@@ -546,7 +549,18 @@ impl TradeRepo {
                          symbol_display, amount_in, amount_out, quote_symbol, price,
                          fee, slippage_bps, signature, position_id, note, latency_ms)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-                       ON CONFLICT (id) DO NOTHING"#,
+                       ON CONFLICT (id) DO UPDATE SET id = trades.id
+                       WHERE ROW(trades.organization_id, trades.ts, trades.source, trades.venue,
+                                 trades.mode, trades.side, trades.symbol, trades.symbol_display,
+                                 trades.amount_in, trades.amount_out, trades.quote_symbol,
+                                 trades.price, trades.fee, trades.slippage_bps, trades.signature,
+                                 trades.position_id, trades.note, trades.latency_ms)
+                         IS NOT DISTINCT FROM
+                             ROW(EXCLUDED.organization_id, EXCLUDED.ts, EXCLUDED.source, EXCLUDED.venue,
+                                 EXCLUDED.mode, EXCLUDED.side, EXCLUDED.symbol, EXCLUDED.symbol_display,
+                                 EXCLUDED.amount_in, EXCLUDED.amount_out, EXCLUDED.quote_symbol,
+                                 EXCLUDED.price, EXCLUDED.fee, EXCLUDED.slippage_bps, EXCLUDED.signature,
+                                 EXCLUDED.position_id, EXCLUDED.note, EXCLUDED.latency_ms)"#,
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(&t.id)
@@ -570,6 +584,9 @@ impl TradeRepo {
                 .execute(self.db.pool()),
             )
             .await?;
+        if result.rows_affected() != 1 {
+            return Err(TimedDbError::Conflict("trade_id"));
+        }
         Ok(())
     }
 
@@ -660,6 +677,14 @@ impl DedupRepo {
 
     /// Atomic first-arrival check. `Ok(true)` = this call is the FIRST for
     /// (namespace, key) — the caller may act. `Ok(false)` = already seen.
+    ///
+    /// The TTL is enforced HERE, not deferred to `cleanup_expired`. A row whose
+    /// `expires_at` has passed is reclaimed by the same statement, so the dedup
+    /// window is the window the caller asked for. Previously the expiry was
+    /// advisory: `ON CONFLICT … DO NOTHING` made an expired row a permanent
+    /// duplicate until the hourly leased cleanup happened to delete it, so a
+    /// 60-second window behaved like "up to an hour". `expires_at IS NULL`
+    /// still means no expiry (a zero TTL) — the one indefinite case.
     pub async fn mark(&self, ns: &str, key: &str, ttl: std::time::Duration) -> RepoResult<bool> {
         let expires = if ttl.is_zero() {
             None
@@ -676,7 +701,11 @@ impl DedupRepo {
                 sqlx::query(
                     r#"INSERT INTO dedup_keys (organization_id, namespace, key, expires_at)
                        VALUES ($1, $2, $3, $4)
-                       ON CONFLICT (organization_id, namespace, key) DO NOTHING"#,
+                       ON CONFLICT (organization_id, namespace, key) DO UPDATE
+                          SET expires_at = EXCLUDED.expires_at,
+                              first_seen_at = now()
+                        WHERE dedup_keys.expires_at IS NOT NULL
+                          AND dedup_keys.expires_at <= now()"#,
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(ns)
@@ -707,6 +736,11 @@ impl DedupRepo {
         Ok(())
     }
 
+    /// Is `(namespace, key)` still inside its dedup window?
+    ///
+    /// Expired rows are physically present until cleanup runs, so the read must
+    /// filter on the window itself; otherwise the answer depends on when the
+    /// hourly housekeeping last happened to run.
     pub async fn exists(&self, ns: &str, key: &str) -> RepoResult<bool> {
         let row = self
             .db
@@ -714,7 +748,8 @@ impl DedupRepo {
                 "dedup_exists",
                 sqlx::query(
                     "SELECT 1 AS one FROM dedup_keys \
-                     WHERE organization_id = $1 AND namespace = $2 AND key = $3",
+                     WHERE organization_id = $1 AND namespace = $2 AND key = $3 \
+                       AND (expires_at IS NULL OR expires_at > now())",
                 )
                 .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
                 .bind(ns)
@@ -2001,6 +2036,39 @@ impl ReconRepo {
         Ok(())
     }
 
+    /// Make an exhausted claim VISIBLE to the operator.
+    ///
+    /// `claim_due` refuses to hand out a claim whose `attempts` reached
+    /// `max_attempts`, which is correct — but if nothing moves such a row out of
+    /// `in_progress` it is invisible to the operator queue forever: it is not
+    /// due (never claimed again) and it is not `failed` (never listed). That
+    /// happens when a worker dies between claiming and recording, or when the
+    /// recording write fails and `fail()` is never reached. This sweep parks
+    /// those rows in `failed` with a reason that says exactly that.
+    ///
+    /// Returns how many rows were parked.
+    pub async fn park_exhausted_in_progress(&self) -> RepoResult<u64> {
+        let res = self
+            .db
+            .timed(
+                "recon_park_exhausted",
+                sqlx::query(
+                    r#"UPDATE reconciliation_state SET
+                          status = 'failed',
+                          last_error = COALESCE(last_error,
+                              'claim exhausted its attempts without a recorded outcome'),
+                          updated_at = now()
+                        WHERE organization_id = $1
+                          AND status = 'in_progress'
+                          AND attempts >= max_attempts"#,
+                )
+                .bind(crate::db::deployment_org::deployment_org_uuid(&self.db).await?)
+                .execute(self.db.pool()),
+            )
+            .await?;
+        Ok(res.rows_affected())
+    }
+
     /// Park a subject permanently (operator queue) without burning the
     /// remaining attempts one by one.
     pub async fn give_up(&self, kind: &str, subject: &str, reason: &str) -> RepoResult<()> {
@@ -2187,6 +2255,636 @@ impl BalanceRepo {
                 )
             })
             .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Durable pre-broadcast broadcast reservations (0079)
+// ---------------------------------------------------------------------------
+
+/// One page of lapsed broadcast reservations (gap #78).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LapsedReservationPage {
+    /// `(trade_key, owner_id, claim_epoch)`, newest lapse first.
+    pub items: Vec<(String, String, i64)>,
+    /// True when a further page exists past this one.
+    pub has_more: bool,
+    /// Lapsed reservations in this cursor window, INCLUDING this page.
+    pub total_remaining: i64,
+    /// Continuation `(lease_until, trade_key)` of the last row in this page.
+    pub next_cursor: Option<(chrono::DateTime<chrono::Utc>, String)>,
+}
+
+/// Result of one reservation attempt. `fresh == false` means another owner
+/// (possibly a stale, still-live one) holds the trade key: the caller MUST
+/// refuse to broadcast. `owner` + `epoch` are the fencing identity every
+/// later completion must present.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BroadcastReservation {
+    pub trade_key: String,
+    pub owner: String,
+    pub epoch: i64,
+    pub fresh: bool,
+}
+
+/// One page of ambiguous broadcast reservations (operator sweep input).
+#[derive(Debug, Clone)]
+pub struct AmbiguousReservationPage {
+    pub items: Vec<BroadcastReservationRow>,
+    /// Another page exists; `next_cursor` continues the walk.
+    pub has_more: bool,
+    /// Rows matching the filter, across the whole deployment.
+    pub total_remaining: i64,
+    /// Keyset cursor `(lease_until, trade_key)` of the last row of this page.
+    pub next_cursor: Option<(chrono::DateTime<chrono::Utc>, String)>,
+}
+
+/// One reservation row as an operator sees it (`BroadcastReservationRepo::
+/// ambiguous`). Carries the fencing identity (`owner` + `epoch`) that a
+/// resolution must name, so a decision can never land on a claim that changed
+/// hands after it was read.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BroadcastReservationRow {
+    pub trade_key: String,
+    pub intent_id: String,
+    pub module: String,
+    pub symbol: String,
+    pub side: String,
+    pub owner_id: String,
+    pub claim_epoch: i64,
+    pub status: String,
+    pub signature: Option<String>,
+    pub lease_until: chrono::DateTime<chrono::Utc>,
+    pub takeover_count: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// True when the lease is over (the attempt is ambiguous, not in flight).
+    pub lease_lapsed: bool,
+    /// Seconds since the lease expired (0 while still held).
+    pub lapsed_secs: i64,
+}
+
+impl BroadcastReservationRow {
+    /// Stable label for logs/audit: never carries a secret.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} status={} owner={} epoch={} lapsed={}s",
+            self.trade_key, self.status, self.owner_id, self.claim_epoch, self.lapsed_secs
+        )
+    }
+}
+
+/// The operator's explicit decision on one ambiguous pre-broadcast claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BroadcastAmbiguity {
+    /// The attempt provably never broadcast: release the trade key so a retry
+    /// may send (the safe direction — an unsent trade is simply retried).
+    Abandon,
+    /// The transaction is established on chain with this signature: record it
+    /// as the claim's outcome instead of rebuilding it from book state.
+    LinkUnder(String),
+}
+
+impl BroadcastReservation {
+    /// Stable label for logs/audit: never carries a secret.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} owner={} epoch={} fresh={}",
+            self.trade_key, self.owner, self.epoch, self.fresh
+        )
+    }
+}
+
+/// Durable, leased ownership of one LOGICAL trade across replicas and
+/// restarts. Unlike the write-ahead intent journal (which only records that
+/// an attempt exists), losing this claim means "do not broadcast".
+pub struct BroadcastReservationRepo {
+    db: Arc<Database>,
+}
+
+impl BroadcastReservationRepo {
+    pub fn new(db: Arc<Database>) -> Self {
+        BroadcastReservationRepo { db }
+    }
+
+    /// Try to claim `trade_key` for `owner`. Atomic: a single INSERT with
+    /// `ON CONFLICT DO NOTHING`, plus a guarded takeover UPDATE that only
+    /// succeeds when the existing row is live but its lease has lapsed. A
+    /// returned `fresh == false` is the caller's stop signal.
+    ///
+    /// `lease_secs` must be greater than zero; the lease bounds how long an
+    /// owner may hold the claim without heartbeating, and every takeover
+    /// bumps `claim_epoch` so the previous owner is fenced out.
+    pub async fn reserve(
+        &self,
+        trade_key: &str,
+        owner: &str,
+        rec: &IntentRecord,
+        lease_secs: i64,
+    ) -> RepoResult<BroadcastReservation> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let lease = lease_secs.clamp(1, 86_400);
+        let row: Option<(String, i64, bool)> = self
+            .db
+            .timed(
+                "broadcast_reservation_claim",
+                sqlx::query_as(
+                    r#"-- One atomic claim: insert wins or nothing happens.
+                       WITH inserted AS (
+                           INSERT INTO intent_broadcast_reservations
+                               (organization_id, trade_key, intent_id, module,
+                                symbol, side, owner_id, lease_until)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7,
+                                   now() + make_interval(secs => $8))
+                           ON CONFLICT (organization_id, trade_key) DO NOTHING
+                           RETURNING owner_id, claim_epoch, true AS fresh
+                       ),
+                       -- Take a claim over ONLY when it is genuinely free:
+                       -- (a) a live lease whose owner went silent past its
+                       -- expiry, or (b) a claim an owner provably abandoned
+                       -- (its attempt never broadcast). A LINKED claim — a
+                       -- trade that did land — is never revived.
+                       taken AS (
+                           UPDATE intent_broadcast_reservations
+                              SET owner_id = $7,
+                                  claim_epoch = claim_epoch + 1,
+                                  takeover_count = takeover_count + 1,
+                                  intent_id = $3,
+                                  lease_until = now() + make_interval(secs => $8),
+                                  status = 'reserved',
+                                  signature = NULL,
+                                  updated_at = now()
+                            WHERE organization_id = $1 AND trade_key = $2
+                              AND NOT EXISTS (SELECT 1 FROM inserted)
+                              AND (status = 'abandoned'
+                                   OR (status = 'reserved' AND lease_until < now()))
+                            RETURNING owner_id, claim_epoch, true AS fresh
+                       )
+                       SELECT * FROM inserted
+                       UNION ALL
+                       SELECT * FROM taken"#,
+                )
+                .bind(org)
+                .bind(trade_key)
+                .bind(&rec.intent_id)
+                .bind(&rec.module)
+                .bind(&rec.symbol)
+                .bind(&rec.side)
+                .bind(owner)
+                .bind(lease)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+
+        if let Some((owner, epoch, fresh)) = row {
+            return Ok(BroadcastReservation {
+                trade_key: trade_key.to_string(),
+                owner,
+                epoch,
+                fresh,
+            });
+        }
+        // Lost the claim: report the CURRENT holder so logs name the blocker.
+        let current: Option<(String, i64)> = self
+            .db
+            .timed(
+                "broadcast_reservation_holder",
+                sqlx::query_as(
+                    "SELECT owner_id, claim_epoch FROM intent_broadcast_reservations \
+                     WHERE organization_id = $1 AND trade_key = $2",
+                )
+                .bind(org)
+                .bind(trade_key)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+        let (owner, epoch) = current.unwrap_or_else(|| ("unknown".into(), 0));
+        Ok(BroadcastReservation {
+            trade_key: trade_key.to_string(),
+            owner,
+            epoch,
+            fresh: false,
+        })
+    }
+
+    /// Extend the lease only while this owner's epoch is still current.
+    /// Returns false when the caller was fenced out (lease taken over).
+    pub async fn heartbeat(
+        &self,
+        trade_key: &str,
+        owner: &str,
+        epoch: i64,
+        lease_secs: i64,
+    ) -> RepoResult<bool> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let row: Option<(i64,)> = self
+            .db
+            .timed(
+                "broadcast_reservation_heartbeat",
+                sqlx::query_as(
+                    r#"UPDATE intent_broadcast_reservations
+                          SET lease_until = now() + make_interval(secs => $4),
+                              updated_at = now()
+                        WHERE organization_id = $1 AND trade_key = $2
+                          AND owner_id = $3 AND claim_epoch = $5
+                          AND status = 'reserved'
+                        RETURNING claim_epoch"#,
+                )
+                .bind(org)
+                .bind(trade_key)
+                .bind(owner)
+                .bind(lease_secs.clamp(1, 86_400))
+                .bind(epoch)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Terminal success: the attempt produced `signature`. Only the current
+    /// owner's epoch may complete the claim. Returns false when fenced out or
+    /// when the reservation was already terminal (idempotent no-op).
+    pub async fn complete(
+        &self,
+        trade_key: &str,
+        signature: &str,
+        owner: &str,
+        epoch: i64,
+    ) -> RepoResult<bool> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let row: Option<(i64,)> = self
+            .db
+            .timed(
+                "broadcast_reservation_complete",
+                sqlx::query_as(
+                    r#"UPDATE intent_broadcast_reservations
+                          SET status = 'linked', signature = $4, updated_at = now()
+                        WHERE organization_id = $1 AND trade_key = $2
+                          AND owner_id = $3 AND claim_epoch = $5
+                          AND status = 'reserved'
+                        RETURNING claim_epoch"#,
+                )
+                .bind(org)
+                .bind(trade_key)
+                .bind(owner)
+                .bind(signature)
+                .bind(epoch)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Terminal failure: the attempt provably never broadcast. The trade key
+    /// becomes free for a retry. Same fencing rule as [`Self::complete`].
+    pub async fn abandon(&self, trade_key: &str, owner: &str, epoch: i64) -> RepoResult<bool> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let row: Option<(i64,)> = self
+            .db
+            .timed(
+                "broadcast_reservation_abandon",
+                sqlx::query_as(
+                    r#"UPDATE intent_broadcast_reservations
+                          SET status = 'abandoned', updated_at = now()
+                        WHERE organization_id = $1 AND trade_key = $2
+                          AND owner_id = $3 AND claim_epoch = $4
+                          AND status = 'reserved'
+                        RETURNING claim_epoch"#,
+                )
+                .bind(org)
+                .bind(trade_key)
+                .bind(owner)
+                .bind(epoch)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Close the LIVE reservation this owner created for `intent_id`. Used by
+    /// the production sink after the broadcast, where only the journal intent
+    /// id is available (the logical trade key is not re-derived). Returns
+    /// false when the caller was fenced out or the claim is already terminal.
+    pub async fn complete_by_intent(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        signature: &str,
+    ) -> RepoResult<bool> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let row: Option<(i64,)> = self
+            .db
+            .timed(
+                "broadcast_reservation_complete_by_intent",
+                sqlx::query_as(
+                    r#"UPDATE intent_broadcast_reservations
+                          SET status = 'linked', signature = $3, updated_at = now()
+                        WHERE organization_id = $1 AND intent_id = $2
+                          AND owner_id = $4 AND status = 'reserved'
+                        RETURNING claim_epoch"#,
+                )
+                .bind(org)
+                .bind(intent_id)
+                .bind(signature)
+                .bind(owner)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Free the live reservation for `intent_id` after a provably-never-sent
+    /// attempt. Same fencing rule as [`Self::complete_by_intent`].
+    pub async fn abandon_by_intent(&self, intent_id: &str, owner: &str) -> RepoResult<bool> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let row: Option<(i64,)> = self
+            .db
+            .timed(
+                "broadcast_reservation_abandon_by_intent",
+                sqlx::query_as(
+                    r#"UPDATE intent_broadcast_reservations
+                          SET status = 'abandoned', updated_at = now()
+                        WHERE organization_id = $1 AND intent_id = $2
+                          AND owner_id = $3 AND status = 'reserved'
+                        RETURNING claim_epoch"#,
+                )
+                .bind(org)
+                .bind(intent_id)
+                .bind(owner)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Current reservation row, if any (`status` is one of reserved/linked/
+    /// abandoned). Used by operator surfaces and tests.
+    pub async fn get(&self, trade_key: &str) -> RepoResult<Option<(String, i64, String)>> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let row: Option<(String, i64, String)> = self
+            .db
+            .timed(
+                "broadcast_reservation_get",
+                sqlx::query_as(
+                    "SELECT owner_id, claim_epoch, status \
+                       FROM intent_broadcast_reservations \
+                      WHERE organization_id = $1 AND trade_key = $2",
+                )
+                .bind(org)
+                .bind(trade_key)
+                .fetch_optional(self.db.pool()),
+            )
+            .await?;
+        Ok(row)
+    }
+
+    /// Operator-visible detail of every claim that needs a human decision:
+    /// `reserved` rows whose lease lapsed (the owner never linked or
+    /// abandoned) and `linked` rows that carry no signature (a completion
+    /// without proof of broadcast). Read-only.
+    /// Claims an operator must decide on, for ONE page (gap #78 follow-up).
+    ///
+    /// This is the read behind the operator sweep, so it carries the same two
+    /// obligations as every other recovery read in this repository:
+    ///
+    /// * **newest first.** It ordered `lease_until ASC` — oldest lapse first —
+    ///   so a deployment with more ambiguous claims than the page size showed
+    ///   the operator only its oldest, already-stale history and never the
+    ///   claim that had just lapsed. That is exactly the starvation
+    ///   `lapsed_page` was fixed to remove for its own readers; the sweep kept
+    ///   the old order.
+    /// * **say when it truncated.** The bare `LIMIT` gave no signal, so 100
+    ///   claims out of 5,000 was indistinguishable from "this is everything".
+    ///   `has_more` / `total_remaining` / `next_cursor` are returned so a caller
+    ///   can walk the rest and an operator can see that a walk is needed.
+    pub async fn ambiguous_page(
+        &self,
+        limit: i64,
+        cursor: Option<(chrono::DateTime<chrono::Utc>, String)>,
+    ) -> RepoResult<AmbiguousReservationPage> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let page_size = limit.clamp(1, 1000);
+        let (cursor_at, cursor_key) = match cursor {
+            Some((at, key)) => (Some(at), Some(key)),
+            None => (None, None),
+        };
+        let rows: Vec<BroadcastReservationRow> = self
+            .db
+            .timed(
+                "broadcast_reservation_ambiguous_page",
+                sqlx::query_as(
+                    r#"SELECT trade_key, intent_id, module, symbol, side, owner_id,
+                              claim_epoch, status, signature, lease_until,
+                              takeover_count, created_at, updated_at,
+                              lease_until < now() AS lease_lapsed,
+                              EXTRACT(EPOCH FROM (now() - lease_until))::bigint AS lapsed_secs
+                         FROM intent_broadcast_reservations
+                        WHERE organization_id = $1
+                          AND ((status = 'reserved' AND lease_until < now())
+                               OR (status = 'linked' AND signature IS NULL))
+                          AND ($2::timestamptz IS NULL
+                               OR lease_until < $2
+                               OR (lease_until = $2 AND trade_key < $3))
+                        ORDER BY lease_until DESC, trade_key DESC
+                        LIMIT $4"#,
+                )
+                .bind(org)
+                .bind(cursor_at)
+                .bind(cursor_key)
+                .bind(page_size + 1)
+                .fetch_all(self.db.pool()),
+            )
+            .await?;
+        let total_remaining: i64 = self
+            .db
+            .timed(
+                "broadcast_reservation_ambiguous_remaining",
+                sqlx::query_scalar(
+                    "SELECT count(*) FROM intent_broadcast_reservations \
+                      WHERE organization_id = $1 \
+                        AND ((status = 'reserved' AND lease_until < now()) \
+                             OR (status = 'linked' AND signature IS NULL))",
+                )
+                .bind(org)
+                .fetch_one(self.db.pool()),
+            )
+            .await
+            .unwrap_or(0);
+        let mut items = rows;
+        let has_more = items.len() as i64 > page_size;
+        if has_more {
+            items.truncate(page_size as usize);
+        }
+        let next_cursor = items.last().map(|r| (r.lease_until, r.trade_key.clone()));
+        Ok(AmbiguousReservationPage {
+            items,
+            has_more,
+            total_remaining,
+            next_cursor,
+        })
+    }
+
+    /// First page of [`Self::ambiguous_page`], with the truncation logged. Kept
+    /// for existing callers; a caller that needs the whole set must walk
+    /// `ambiguous_page`.
+    pub async fn ambiguous(&self, limit: i64) -> RepoResult<Vec<BroadcastReservationRow>> {
+        let page = self.ambiguous_page(limit, None).await?;
+        if page.has_more {
+            tracing::warn!(
+                returned = page.items.len(),
+                remaining = page.total_remaining,
+                "ambiguous broadcast reservations TRUNCATED: walk ambiguous_page for the rest"
+            );
+        }
+        Ok(page.items)
+    }
+
+    /// Explicit operator decision on one ambiguous claim. `abandon` releases
+    /// the trade key so a retry may broadcast again; `link` records an
+    /// externally established signature. Both are CAS writes on the OWNER plus
+    /// `claim_epoch` the operator names, so a sweep can never mutate a claim
+    /// that changed hands after it was read. Returns false when the row no
+    /// longer matches (already terminal, taken over, or a different epoch).
+    pub async fn resolve_ambiguous(
+        &self,
+        trade_key: &str,
+        expected_owner: &str,
+        expected_epoch: i64,
+        decision: BroadcastAmbiguity,
+    ) -> RepoResult<bool> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let row: Option<(i64,)> = match decision {
+            BroadcastAmbiguity::Abandon => {
+                self.db
+                    .timed(
+                        "broadcast_reservation_resolve_abandon",
+                        sqlx::query_as(
+                            r#"UPDATE intent_broadcast_reservations
+                              SET status = 'abandoned', updated_at = now()
+                            WHERE organization_id = $1 AND trade_key = $2
+                              AND owner_id = $3 AND claim_epoch = $4
+                              AND status = 'reserved' AND lease_until < now()
+                            RETURNING claim_epoch"#,
+                        )
+                        .bind(org)
+                        .bind(trade_key)
+                        .bind(expected_owner)
+                        .bind(expected_epoch)
+                        .fetch_optional(self.db.pool()),
+                    )
+                    .await?
+            }
+            BroadcastAmbiguity::LinkUnder(signature) => {
+                self.db
+                    .timed(
+                        "broadcast_reservation_resolve_link",
+                        sqlx::query_as(
+                            r#"UPDATE intent_broadcast_reservations
+                              SET status = 'linked', signature = $5, updated_at = now()
+                            WHERE organization_id = $1 AND trade_key = $2
+                              AND owner_id = $3 AND claim_epoch = $4
+                              AND ((status = 'reserved' AND lease_until < now())
+                                   OR (status = 'linked' AND signature IS NULL))
+                            RETURNING claim_epoch"#,
+                        )
+                        .bind(org)
+                        .bind(trade_key)
+                        .bind(expected_owner)
+                        .bind(expected_epoch)
+                        .bind(signature)
+                        .fetch_optional(self.db.pool()),
+                    )
+                    .await?
+            }
+        };
+        Ok(row.is_some())
+    }
+
+    /// One PAGE of reserved-but-lease-lapsed claims: ambiguous attempts whose
+    /// owner never linked or abandoned them (crash between send and link).
+    ///
+    /// The operator view is answered by the DATABASE clock: a caller's own
+    /// `now()` is not consulted, so a skewed operator host cannot declare a
+    /// live reservation lapsed (or miss a lapsed one).
+    ///
+    /// Ordering is NEWEST LAPSE FIRST and the walk is a `(lease_until,
+    /// trade_key)` DESC keyset: an oldest-first `LIMIT` filled every page with
+    /// the same ancient rows, so a freshly lapsed — and therefore most
+    /// actionable — ambiguous attempt could never appear in the operator view
+    /// at all (gap #78). `has_more`/`total_remaining` make the cap visible.
+    pub async fn lapsed_page(
+        &self,
+        limit: i64,
+        cursor: Option<(chrono::DateTime<chrono::Utc>, String)>,
+    ) -> RepoResult<LapsedReservationPage> {
+        let org = crate::db::deployment_org::deployment_org_uuid(&self.db).await?;
+        let page_size = limit.clamp(1, 1000);
+        let (cursor_at, cursor_key) = match cursor {
+            Some((at, key)) => (Some(at), Some(key)),
+            None => (None, None),
+        };
+        let rows: Vec<(String, String, i64, chrono::DateTime<chrono::Utc>)> = self
+            .db
+            .timed(
+                "broadcast_reservation_lapsed_page",
+                sqlx::query_as(
+                    "SELECT trade_key, owner_id, claim_epoch, lease_until \
+                       FROM intent_broadcast_reservations \
+                      WHERE organization_id = $1 AND status = 'reserved' \
+                        AND lease_until <= now() \
+                        AND ($2::timestamptz IS NULL
+                             OR lease_until < $2
+                             OR (lease_until = $2 AND trade_key < $3)) \
+                      ORDER BY lease_until DESC, trade_key DESC LIMIT $4",
+                )
+                .bind(org)
+                .bind(cursor_at)
+                .bind(cursor_key.clone())
+                .bind(page_size + 1)
+                .fetch_all(self.db.pool()),
+            )
+            .await?;
+        let has_more = rows.len() as i64 > page_size;
+        let rows: Vec<(String, String, i64, chrono::DateTime<chrono::Utc>)> =
+            rows.into_iter().take(page_size as usize).collect();
+        let total_remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM intent_broadcast_reservations \
+              WHERE organization_id = $1 AND status = 'reserved' \
+                AND lease_until <= now() \
+                AND ($2::timestamptz IS NULL
+                     OR lease_until < $2
+                     OR (lease_until = $2 AND trade_key < $3))",
+        )
+        .bind(org)
+        .bind(cursor_at)
+        .bind(cursor_key)
+        .fetch_one(self.db.pool())
+        .await
+        .unwrap_or(0);
+        let next_cursor = rows.last().map(|(k, _, _, at)| (*at, k.clone()));
+        Ok(LapsedReservationPage {
+            items: rows
+                .into_iter()
+                .map(|(k, owner, epoch, _)| (k, owner, epoch))
+                .collect(),
+            has_more,
+            total_remaining,
+            next_cursor,
+        })
+    }
+
+    /// The FIRST PAGE of [`Self::lapsed_page`] (newest lapse first). A truncated
+    /// view is logged, never silent.
+    pub async fn list_lapsed(&self, limit: i64) -> RepoResult<Vec<(String, String, i64)>> {
+        let page = self.lapsed_page(limit, None).await?;
+        if page.has_more {
+            tracing::warn!(
+                returned = page.items.len(),
+                remaining = page.total_remaining,
+                "lapsed broadcast reservations TRUNCATED: walk lapsed_page for the rest"
+            );
+        }
+        Ok(page.items)
     }
 }
 

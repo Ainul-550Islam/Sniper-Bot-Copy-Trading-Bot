@@ -1,0 +1,40 @@
+Intent-journal identifier collision, 2026-11-09 in user timezone.
+Before fix: real PostgreSQL configured, test failed before INSERT because independent replica AppStates both generated intent-1. After fix: copy and sniper write-ahead attempts obtain UUID-v4-based ids from a shared core helper; two real-PostgreSQL tests pass. One demonstrates deliberate legacy-id aliasing can attach attempt B signature to A row; the other demonstrates two independent in-process AppStates create and link distinct rows. This does not test separate OS processes, live broadcasts, existing corrupt rows, or guarantee impossible UUID collision. The optional journal remains best effort and does not fail execution on sink errors.
+
+--- pre-fix ---
+    Finished `test` profile [unoptimized] target(s) in 30.25s
+     Running tests/intent_journal_identity_pg.rs (target/debug/deps/intent_journal_identity_pg-71393f34a013de3a)
+
+running 1 test
+test separate_replica_attempts_do_not_alias_in_intent_journal ... FAILED
+
+failures:
+
+---- separate_replica_attempts_do_not_alias_in_intent_journal stdout ----
+
+thread 'separate_replica_attempts_do_not_alias_in_intent_journal' (258294) panicked at crates/module-copy/tests/intent_journal_identity_pg.rs:37:5:
+assertion `left != right` failed: independent state counters must not alias journal attempts
+  left: "intent-1"
+ right: "intent-1"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    separate_replica_attempts_do_not_alias_in_intent_journal
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+error: test failed, to rerun pass `-p module-copy --test intent_journal_identity_pg`
+EXIT=101
+--- post-fix ---
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 2.68s
+     Running tests/intent_journal_identity_pg.rs (target/debug/deps/intent_journal_identity_pg-71393f34a013de3a)
+
+running 2 tests
+test colliding_legacy_attempt_can_link_the_wrong_journal_row ... ok
+test separate_replica_attempts_do_not_alias_in_intent_journal ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+EXIT=0

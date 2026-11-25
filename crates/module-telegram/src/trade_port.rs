@@ -29,6 +29,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bot_core::models::ExecutionMode;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Which side of the book a command targets.
@@ -98,6 +99,27 @@ impl OrderRequest {
     pub fn amount_lamports_or_zero(&self) -> u64 {
         self.amount_lamports.unwrap_or(0)
     }
+
+    /// Stable digest of every field that determines what this command is
+    /// authorized to do. A port must bind its idempotency receipt to this
+    /// digest: reusing one command id with a different amount, mint, action,
+    /// tenant, actor or tolerance is a conflict, not a harmless replay.
+    pub fn payload_fingerprint(&self) -> String {
+        let canonical = serde_json::to_vec(&(
+            self.command_id.to_string(),
+            self.idempotency_key.to_string(),
+            &self.organization_id,
+            self.chat_id,
+            self.user_id,
+            self.action.as_str(),
+            &self.mint,
+            self.amount_lamports,
+            self.percent_bps,
+            self.slippage_bps,
+        ))
+        .expect("primitive order fields are serializable");
+        hex::encode(Sha256::digest(canonical))
+    }
 }
 
 /// What the executing side reports back for a filled order.
@@ -133,6 +155,9 @@ pub enum PortError {
     RiskRejected(String),
     /// The port itself is unavailable (DB down, RPC down, …).
     Unavailable(String),
+    /// A command id was replayed with different order economics or identity.
+    /// The original receipt is never returned for a different payload.
+    PayloadMismatch,
 }
 
 impl PortError {
@@ -143,6 +168,7 @@ impl PortError {
             PortError::LiveGatesClosed => "live_gates_closed",
             PortError::RiskRejected(_) => "risk_rejected",
             PortError::Unavailable(_) => "port_unavailable",
+            PortError::PayloadMismatch => "payload_mismatch",
         }
     }
 
@@ -155,6 +181,7 @@ impl PortError {
             PortError::LiveGatesClosed => "live trading gates are not both open",
             PortError::RiskRejected(reason) => reason,
             PortError::Unavailable(reason) => reason,
+            PortError::PayloadMismatch => "command id reused with a different order payload",
         }
     }
 }
@@ -259,8 +286,8 @@ pub struct FakeTradePort {
     forced_error: Mutex<Option<PortError>>,
     /// Accepted orders in call order.
     orders: Mutex<Vec<OrderRequest>>,
-    /// Idempotency key → receipt of the first execution.
-    receipts: Mutex<HashMap<Uuid, ExecutionReceipt>>,
+    /// Idempotency key → (payload digest, receipt) of the first execution.
+    receipts: Mutex<HashMap<Uuid, (String, ExecutionReceipt)>>,
 }
 
 impl Default for FakeTradePort {
@@ -355,7 +382,7 @@ impl FakeTradePort {
             .lock()
             .expect("fake port receipts lock")
             .get(&idempotency_key)
-            .cloned()
+            .map(|(_, receipt)| receipt.clone())
     }
 
     fn record(&self, req: &OrderRequest) -> Result<ExecutionReceipt, PortError> {
@@ -370,6 +397,11 @@ impl FakeTradePort {
         {
             return Err(err);
         }
+        if req.command_id != req.idempotency_key {
+            return Err(PortError::RiskRejected(
+                "command id must equal idempotency key".into(),
+            ));
+        }
         let mode = *self.mode.lock().expect("fake port mode lock");
         if mode.live_but_gated() {
             return Err(PortError::LiveGatesClosed);
@@ -378,9 +410,15 @@ impl FakeTradePort {
             .lock()
             .expect("fake port orders lock")
             .push(req.clone());
+        let fingerprint = req.payload_fingerprint();
         let mut receipts = self.receipts.lock().expect("fake port receipts lock");
-        if let Some(existing) = receipts.get(&req.idempotency_key) {
-            // Idempotent replay: the venue path must not run twice.
+        if let Some((stored, existing)) = receipts.get(&req.idempotency_key) {
+            // An exactly identical replay returns the original receipt. Any
+            // changed immutable payload is a conflict, never a second order
+            // and never a replay of an unrelated order's receipt.
+            if *stored != fingerprint {
+                return Err(PortError::PayloadMismatch);
+            }
             return Ok(existing.clone());
         }
         let receipt = ExecutionReceipt::new(
@@ -392,7 +430,7 @@ impl FakeTradePort {
                 mode.mode.as_str()
             ),
         );
-        receipts.insert(req.idempotency_key, receipt.clone());
+        receipts.insert(req.idempotency_key, (fingerprint, receipt.clone()));
         Ok(receipt)
     }
 }
@@ -471,6 +509,39 @@ mod tests {
         assert!(!PortMode::paper().live_but_gated());
     }
 
+    #[test]
+    fn fingerprint_binds_all_money_and_identity_fields() {
+        let original = req(TradeAction::Buy);
+        assert_eq!(
+            original.payload_fingerprint(),
+            original.payload_fingerprint(),
+            "the same payload must produce one stable digest"
+        );
+        for mutate in [
+            1, // amount
+            2, // slippage
+            3, // mint
+            4, // organization
+            5, // actor
+            6, // command identity
+        ] {
+            let mut changed = original.clone();
+            match mutate {
+                1 => changed.amount_lamports = Some(11_000_000),
+                2 => changed.slippage_bps = 101,
+                3 => changed.mint = "AnotherMint111111111111111111111111111111".into(),
+                4 => changed.organization_id = "org-2".into(),
+                5 => changed.user_id = 8,
+                _ => changed.command_id = Uuid::from_u128(99),
+            }
+            assert_ne!(
+                original.payload_fingerprint(),
+                changed.payload_fingerprint(),
+                "mutation {mutate} must change the command fingerprint"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn dispatch_routes_on_action() {
         let port = FakeTradePort::new();
@@ -485,6 +556,23 @@ mod tests {
         assert_eq!(port.accepted_order_count(), 2);
         assert_eq!(port.accepted_orders()[0].action, TradeAction::Buy);
         assert_eq!(port.accepted_orders()[1].action, TradeAction::Sell);
+    }
+
+    #[tokio::test]
+    async fn same_command_id_with_different_payload_is_refused() {
+        let port = FakeTradePort::new();
+        let first = req(TradeAction::Buy);
+        let first_receipt = port.place(&first).await.expect("first order");
+        let mut changed = first.clone();
+        changed.mint = "DifferentMint1111111111111111111111111111111".into();
+        assert_eq!(
+            port.place(&changed).await,
+            Err(PortError::PayloadMismatch),
+            "reusing a command id for different money-moving payload must fail closed"
+        );
+        assert_eq!(port.accepted_order_count(), 1);
+        assert_eq!(port.receipt_for(first.idempotency_key), Some(first_receipt));
+        assert_eq!(port.call_count(), 2, "the refused replay is still observed");
     }
 
     #[tokio::test]
@@ -515,13 +603,18 @@ mod tests {
         );
         port.set_mode(PortMode::new(ExecutionMode::Live, true));
         assert!(port.place_buy(&req(TradeAction::Buy)).await.is_ok());
+        let sell = OrderRequest {
+            command_id: Uuid::from_u128(2),
+            idempotency_key: Uuid::from_u128(2),
+            ..req(TradeAction::Sell)
+        };
         port.fail_with(PortError::RiskRejected("max exposure".into()));
         assert_eq!(
-            port.place_sell(&req(TradeAction::Sell)).await,
+            port.place_sell(&sell).await,
             Err(PortError::RiskRejected("max exposure".into()))
         );
         port.clear_failure();
-        assert!(port.place_sell(&req(TradeAction::Sell)).await.is_ok());
+        assert!(port.place_sell(&sell).await.is_ok());
     }
 
     #[tokio::test]
@@ -542,6 +635,7 @@ mod tests {
             PortError::Unavailable("x".into()).code(),
             "port_unavailable"
         );
+        assert_eq!(PortError::PayloadMismatch.code(), "payload_mismatch");
         assert_eq!(req(TradeAction::Sell).amount_lamports_or_zero(), 0);
         assert_eq!(req(TradeAction::Buy).amount_lamports_or_zero(), 10_000_000);
     }

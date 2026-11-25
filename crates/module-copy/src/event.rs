@@ -18,7 +18,7 @@
 //!   stage has to defend against NaN sizes, empty mints or future timestamps.
 //!
 //! The event, the stage vocabulary ([`CopyStage`], 15 stages), the rejection
-//! vocabulary ([`RejectReason`], 29 reasons) and the [`CopyOutcome`] are pure
+//! vocabulary ([`RejectReason`], 30 reasons) and the [`CopyOutcome`] are pure
 //! data. The second half of this file is [`CopyBot::process_event`], the
 //! staged pipeline that walks one event through them:
 //!
@@ -293,6 +293,21 @@ impl LeaderTradeEvent {
         )
     }
 
+    /// The dedup key a TENANT-scoped bot claims: the same external leader
+    /// trade reaching two tenants is two independent mirrors, so the shared
+    /// pipeline's dedup namespace must never collapse them. The tenant id
+    /// prefixes the durable key (`tenant:{org}:copy:…`) while the plain
+    /// [`LeaderTradeEvent::dedup_key`] stays the operator/single-tenant key.
+    ///
+    /// Without this, two tenant executors behind one `AppState` (or one
+    /// shared Redis/Postgres dedup facade) reject the second tenant as a
+    /// duplicate of the first — see `shared_app_state_currently_causes_
+    /// cross_tenant_dedup_collision`'s replacement in
+    /// `crates/module-copy/tests/tenant_execution.rs`.
+    pub fn tenant_dedup_key(&self, organization_id: &str) -> String {
+        format!("tenant:{}:{}", organization_id.trim(), self.dedup_key())
+    }
+
     /// `buy` for a leader purchase, `sell` for a leader sale.
     pub fn side_str(&self) -> &'static str {
         match self.side {
@@ -509,6 +524,8 @@ pub enum RejectReason {
     InvalidEvent,
     /// The authoritative dedup already saw this event.
     DuplicateEvent,
+    /// Clustered execution cannot obtain a shared dedup decision.
+    DedupUnavailable,
     /// `copy.strict_ordering` and the event is behind the leader's cursor.
     OutOfOrder,
     /// The leader is not in the registry.
@@ -571,6 +588,7 @@ impl RejectReason {
         match self {
             RejectReason::InvalidEvent => "INVALID_EVENT",
             RejectReason::DuplicateEvent => "DUPLICATE_EVENT",
+            RejectReason::DedupUnavailable => "DEDUP_UNAVAILABLE",
             RejectReason::OutOfOrder => "OUT_OF_ORDER",
             RejectReason::LeaderUnknown => "LEADER_UNKNOWN",
             RejectReason::LeaderPaused => "LEADER_PAUSED",
@@ -641,9 +659,10 @@ impl RejectReason {
     }
 
     /// Every reason (dashboards, tests).
-    pub const ALL: [RejectReason; 29] = [
+    pub const ALL: [RejectReason; 30] = [
         RejectReason::InvalidEvent,
         RejectReason::DuplicateEvent,
+        RejectReason::DedupUnavailable,
         RejectReason::OutOfOrder,
         RejectReason::LeaderUnknown,
         RejectReason::LeaderPaused,
@@ -731,6 +750,7 @@ impl CopyOutcome {
         let stage = if rejection.reason == RejectReason::ExecutionFailed
             || rejection.reason == RejectReason::BalanceUnavailable
             || rejection.reason == RejectReason::OwnershipUnavailable
+            || rejection.reason == RejectReason::DedupUnavailable
         {
             CopyStage::Failed
         } else {
@@ -828,7 +848,40 @@ impl CopyBot {
         metrics::count_stage(CopyStage::LeaderResolved);
 
         // ---- 3. the one authoritative dedup --------------------------------
-        if event_dedup::claim(&self.state, event).await == DedupOutcome::Duplicate {
+        // A lease prevents overlapping holders, not sequential replay after
+        // release. For configured clustered simulate/live execution, require
+        // an authoritative shared dedup decision and never use L1 fallback.
+        // A tenant-bound bot owns its own dedup namespace: two tenants
+        // mirroring the SAME leader trade are two independent decisions, not
+        // duplicates of each other.
+        let tenant_key = self
+            .tenant
+            .as_ref()
+            .map(|ctx| event.tenant_dedup_key(&ctx.organization_id().to_string()));
+        let dedup = if cfg.ha.ha_mode().is_clustered()
+            && cfg.execution.mode != bot_core::models::ExecutionMode::Paper
+        {
+            match event_dedup::claim_shared_for(&self.state, event, tenant_key.as_deref()).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return self
+                        .finish_rejected(
+                            event,
+                            Some(&rule),
+                            Rejection::new(
+                                RejectReason::DedupUnavailable,
+                                CopyStage::LeaderResolved,
+                                error.to_string(),
+                            ),
+                            &mut tl,
+                        )
+                        .await;
+                }
+            }
+        } else {
+            event_dedup::claim_for(&self.state, event, tenant_key.as_deref()).await
+        };
+        if dedup == DedupOutcome::Duplicate {
             debug!(event = %event.event_id, source = event.source.as_str(), "duplicate leader event");
             return self
                 .finish_rejected(
@@ -837,7 +890,10 @@ impl CopyBot {
                     Rejection::new(
                         RejectReason::DuplicateEvent,
                         CopyStage::LeaderResolved,
-                        format!("already decided (dedup key {})", event.dedup_key()),
+                        format!(
+                            "already decided (dedup key {})",
+                            tenant_key.as_deref().unwrap_or(&event.dedup_key())
+                        ),
                     ),
                     &mut tl,
                 )
@@ -1144,6 +1200,7 @@ impl CopyBot {
                 slippage_pct,
                 slippage_bps,
                 &decision,
+                cfg.execution.mode,
                 &mut permit,
             )
             .await;
@@ -1164,6 +1221,23 @@ impl CopyBot {
                     &mut tl,
                 )
                 .await
+            }
+            Ok(report) if report.ambiguous => {
+                tl.mark("ambiguous");
+                metrics::count_stage(CopyStage::Submitted);
+                metrics::count_stage(CopyStage::Ambiguous);
+                let outcome = CopyOutcome {
+                    event_id: event.event_id.clone(),
+                    stage: CopyStage::Ambiguous,
+                    rejection: None,
+                    intent_id: Some(report.intent_id),
+                    position_id: None,
+                    requested_sol: Some(requested),
+                    sized_sol: Some(sized),
+                    signature: report.signature,
+                    total_ms: tl.total_ms(),
+                };
+                self.finish(event, Some(&rule), outcome, &tl, "entry").await
             }
             Ok(report) if !report.filled => {
                 self.state.note_failed_entry(&event.mint).await;
@@ -1238,6 +1312,56 @@ impl CopyBot {
         position: Position,
         tl: &mut LatencyTimeline,
     ) -> CopyOutcome {
+        if self.executor.policy().mode == bot_core::models::ExecutionMode::Live
+            || self.state.execution_mode().await == bot_core::models::ExecutionMode::Live
+        {
+            let refusal = if self
+                .unjournaled_ambiguity
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                Some("copy safety latch set after an unresolved outcome; refusing live mirrored exit")
+            } else {
+                let cfg = self.state.config_snapshot().await;
+                let lookback = cfg.copy.recovery_lookback_hours.max(1);
+                match self
+                    .store
+                    .events_since(Utc::now() - Duration::hours(lookback), 10_000)
+                    .await
+                {
+                    None => Some("copy journal unavailable; refusing live mirrored exit"),
+                    Some(events) if events.len() >= 10_000 => {
+                        Some("copy journal scan limit reached; refusing live mirrored exit")
+                    }
+                    Some(events)
+                        if events.iter().any(|e| {
+                            e.side == "sell"
+                                && e.stage == "AMBIGUOUS"
+                                && (e.position_id.as_deref() == Some(position.id.as_str())
+                                    || e.position_id.is_none())
+                        }) =>
+                    {
+                        Some(
+                            "unresolved copy exit requires reconciliation before another live exit",
+                        )
+                    }
+                    Some(_) => None,
+                }
+            };
+            if let Some(reason) = refusal {
+                return self
+                    .finish_rejected(
+                        event,
+                        Some(rule),
+                        Rejection::new(
+                            RejectReason::ExecutionFailed,
+                            CopyStage::PolicyPassed,
+                            reason.to_string(),
+                        ),
+                        tl,
+                    )
+                    .await;
+            }
+        }
         let label = crate::leader::label_for(rule);
         info!(
             wallet = %label,
@@ -1251,7 +1375,7 @@ impl CopyBot {
         // stays under the sweeper's TP/SL/trailing management meanwhile.
         let mut permit = match bot_core::ownership::Permit::acquire(
             self.ownership.as_deref(),
-            format!("exit:{}:mirror_exit", position.id),
+            crate::intent::exit_claim_id(&position.id),
             "exit",
             "copy",
             "mirror_exit",
@@ -1328,7 +1452,40 @@ impl CopyBot {
                 )
                 .await
             }
-            Ok(()) => {
+            Ok(crate::exit::ExitOutcome::Ambiguous {
+                intent_id,
+                signature,
+            }) => {
+                tl.mark("ambiguous");
+                metrics::count_stage(CopyStage::Submitted);
+                metrics::count_stage(CopyStage::Ambiguous);
+                let outcome = CopyOutcome {
+                    event_id: event.event_id.clone(),
+                    stage: CopyStage::Ambiguous,
+                    rejection: None,
+                    intent_id: Some(intent_id),
+                    position_id: Some(position.id.clone()),
+                    requested_sol: None,
+                    sized_sol: None,
+                    signature,
+                    total_ms: tl.total_ms(),
+                };
+                self.finish(event, Some(rule), outcome, tl, "exit").await
+            }
+            Ok(crate::exit::ExitOutcome::Noop) => {
+                self.finish_rejected(
+                    event,
+                    Some(rule),
+                    Rejection::new(
+                        RejectReason::ExecutionFailed,
+                        CopyStage::Submitted,
+                        "mirrored exit had no sellable quantity".to_string(),
+                    ),
+                    tl,
+                )
+                .await
+            }
+            Ok(crate::exit::ExitOutcome::Filled) => {
                 tl.mark("filled");
                 metrics::count_stage(CopyStage::Submitted);
                 metrics::count_stage(CopyStage::ExitMirrored);
@@ -1403,17 +1560,35 @@ impl CopyBot {
                     reg.note_rejected(&event.leader, r.reason.as_str());
                 }
             }
-            // Duplicates and unknown leaders are not journaled: the first
-            // delivery already is, and an unknown leader has no row.
+            // A duplicate belongs to the winning delivery. An unavailable
+            // shared dedup decision is also not authoritative: another replica
+            // may already be processing this event. Journaling it could replace
+            // that replica's outcome and seed a false decision on recovery.
+            // Keep rejection metrics and audit, but do not upsert copy_events.
             if outcome
                 .rejection
                 .as_ref()
-                .map(|r| r.reason != RejectReason::DuplicateEvent)
+                .map(|r| {
+                    !matches!(
+                        r.reason,
+                        RejectReason::DuplicateEvent | RejectReason::DedupUnavailable
+                    )
+                })
                 .unwrap_or(true)
             {
                 let rec = crate::mirror::journal_record(event, &outcome);
                 if !self.store.record_event(rec).await {
                     metrics::count_journal_error("record_event");
+                    // Ambiguous outcomes represent a live broadcast regardless
+                    // of a later kill-switch or config-mode transition.
+                    if outcome.stage == CopyStage::Ambiguous {
+                        self.unjournaled_ambiguity
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        self.state.record_error(
+                            BotModule::Copy,
+                            "live ambiguous copy outcome was not journaled; live buys and reconciliation auto-exit disabled for this bot",
+                        ).await;
+                    }
                 }
                 self.persist_leader(&event.leader).await;
             }

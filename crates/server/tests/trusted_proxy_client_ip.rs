@@ -41,6 +41,7 @@ fn state(rpm: u32, trusted: &[&str]) -> ApiState {
         .unwrap(),
         db: None,
         journal: None,
+        chain_probe: None,
         serve_dashboard: false,
         health: Arc::new(HealthRegistry::new()),
         metrics_enabled: false,
@@ -205,8 +206,11 @@ async fn trusted_ipv6_proxy_uses_the_rightmost_untrusted_client_for_rate_limits(
     );
 }
 
+/// The durable allowlist path needs a real database and therefore runs when
+/// `POSTGRES_URL` is set (gap #31). Without it, the test announces itself as
+/// NOT_RUN — loudly, and fatally under `REQUIRE_POSTGRES=1` — instead of being
+/// parked behind `#[ignore]`, where no ordinary run could ever reach it.
 #[tokio::test]
-#[ignore = "requires real PostgreSQL: set POSTGRES_URL and run this test with --ignored"]
 async fn router_enforces_durable_allowlist_against_spoofed_headers() {
     use bot_core::config::DatabaseConfig;
     use bot_core::db::Database;
@@ -215,7 +219,9 @@ async fn router_enforces_durable_allowlist_against_spoofed_headers() {
     use chrono::Utc;
     use sniper_suite::saas::api_keys::build_api_key;
 
-    let url = std::env::var("POSTGRES_URL").expect("POSTGRES_URL is required, never silently skip");
+    let Some(url) = postgres_or_skip("trusted_proxy_client_ip::durable_allowlist") else {
+        return;
+    };
     let db = Arc::new(
         Database::connect(&DatabaseConfig::default(), &url)
             .await
@@ -369,4 +375,22 @@ async fn router_enforces_durable_allowlist_against_spoofed_headers() {
         .execute(db.pool())
         .await
         .unwrap();
+}
+
+/// `Some(url)` when a database is configured, `None` (with a loud NOT_RUN and a
+/// failure under `REQUIRE_POSTGRES=1`) when it is not. Same contract the rest of
+/// the database-backed suites use, so "absent service" can never be mistaken
+/// for "passing test".
+fn postgres_or_skip(what: &str) -> Option<String> {
+    match std::env::var("POSTGRES_URL") {
+        Ok(url) if !url.trim().is_empty() => Some(url),
+        _ => {
+            eprintln!("NOT_RUN: {what} — POSTGRES_URL missing");
+            assert!(
+                std::env::var("REQUIRE_POSTGRES").as_deref() != Ok("1"),
+                "{what} requires POSTGRES_URL and REQUIRE_POSTGRES=1 is set"
+            );
+            None
+        }
+    }
 }

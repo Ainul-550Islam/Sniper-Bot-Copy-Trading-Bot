@@ -1,0 +1,13 @@
+=== RED: a 404 from the venue is read as a proven non-send ===
+-- injected: VenueStateCheck::abandon_allowed() is true on Absent --
+thread 'venue_state::tests::a_404_is_absent_but_authorises_nothing' (3641144) panicked at crates/module-polymarket/src/venue_state.rs:265:9:
+absence is not proof of a non-send
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 184 filtered out; finished in 0.00s
+unit_red_exit=101 (see test result)
+test a_venue_404_is_absent_and_authorises_nothing ... FAILED
+test a_venue_error_is_unknown_never_absent ... ok
+---- a_venue_404_is_absent_and_authorises_nothing stdout ----
+thread 'a_venue_404_is_absent_and_authorises_nothing' (3641309) panicked at crates/server/tests/polymarket_venue_state_check.rs:140:5:
+assertion failed: !check.link_allowed() && !check.abandon_allowed()
+    a_venue_404_is_absent_and_authorises_nothing
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s

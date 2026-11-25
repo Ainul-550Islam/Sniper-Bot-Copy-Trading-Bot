@@ -30,7 +30,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use super::audit;
-use super::cursor::{CursorAdvance, FeedCursor, FeedId, GapStatus};
+use super::cursor::{self, CursorAdvance, CursorWrite, FeedCursor, FeedId, GapStatus};
 use super::lease::{FenceError, Lease, LeaseDecision, LeaseRequest, LeaseRole};
 use super::metrics;
 use super::store::{HaStore, MemoryHaStore, RecoveryRecord};
@@ -132,9 +132,27 @@ pub struct LeaseGuard {
     role: LeaseRole,
     holder: String,
     generation: i64,
+    /// Tripped when this guard loses ownership (renew refusal, fence failure,
+    /// release, or a peer taking the role). A job holding the guard can
+    /// `select!` on it and stop instead of running past its lease.
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl LeaseGuard {
+    /// A token that fires the moment this guard is no longer authoritative.
+    ///
+    /// Long-running work selects on it together with its own shutdown signal:
+    /// a lease that expires or is taken over mid-job cancels the work instead
+    /// of letting it mutate shared state with a stale generation.
+    pub fn cancellation(&self) -> tokio_util::sync::CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// Has ownership already been cancelled for this guard?
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
     /// The role this guard owns.
     pub fn role(&self) -> &LeaseRole {
         &self.role
@@ -434,6 +452,7 @@ impl HaRuntime {
                     role: role.clone(),
                     holder: self.worker_id.clone(),
                     generation: lease.generation,
+                    cancel: tokio_util::sync::CancellationToken::new(),
                 };
                 self.inner
                     .write()
@@ -486,13 +505,12 @@ impl HaRuntime {
                 true
             }
             Ok(false) => {
+                guard.cancel.cancel();
                 metrics::count_lease_op(&guard.role, "renew", "lost");
+                // Only drop the cache entry if it is still THIS guard: a stale
+                // guard must never evict the lease a newer holder cached.
+                self.forget_lease_if(&guard.role, guard.generation).await;
                 metrics::set_lease_held(&guard.role, false);
-                self.inner
-                    .write()
-                    .await
-                    .leases
-                    .remove(&guard.role.as_string());
                 audit::lease_lost(
                     &self.bus,
                     &guard.role,
@@ -504,6 +522,7 @@ impl HaRuntime {
                 false
             }
             Err(e) => {
+                guard.cancel.cancel();
                 metrics::count_lease_op(&guard.role, "renew", "error");
                 warn!(role = %guard.role, error = %e, "lease renewal failed");
                 false
@@ -543,6 +562,7 @@ impl HaRuntime {
                         actual,
                     },
                 };
+                guard.cancel.cancel();
                 metrics::count_lease_op(&guard.role, "verify", "lost");
                 metrics::count_fenced(guard.role.kind(), err.reason());
                 metrics::set_lease_held(&guard.role, false);
@@ -578,8 +598,115 @@ impl HaRuntime {
         Ok(work.await)
     }
 
+    /// Drop the cached lease for `role` only when it is still `generation`.
+    async fn forget_lease_if(&self, role: &LeaseRole, generation: i64) {
+        let mut inner = self.inner.write().await;
+        if inner
+            .leases
+            .get(&role.as_string())
+            .map(|l| l.generation == generation)
+            .unwrap_or(false)
+        {
+            inner.leases.remove(&role.as_string());
+        }
+    }
+
+    /// Re-verify ownership immediately before handing off to the work and
+    /// refuse when the lease has expired or been taken over.
+    ///
+    /// `fence` alone cannot answer this: a worker can be the recorded holder
+    /// of a lease that has already EXPIRED, and the next tick would then run a
+    /// job whose writes a new owner may already be making. This refreshes the
+    /// lease with the store clock and returns `Expired`/`Fenced` when the job
+    /// must not run.
+    pub async fn refresh_before_work(&self, guard: &LeaseGuard) -> Result<(), FenceError> {
+        let store = self.store().await;
+        // Renew: a compare-and-set on (holder, generation). `false` means the
+        // row is gone, expired without us, released, or taken over.
+        let settings = self.settings().await;
+        match store
+            .renew_lease(
+                &guard.role,
+                &guard.holder,
+                guard.generation,
+                settings.lease_ttl,
+            )
+            .await
+        {
+            Ok(true) => {
+                metrics::count_lease_op(&guard.role, "refresh", "ok");
+                Ok(())
+            }
+            Ok(false) => {
+                guard.cancel.cancel();
+                metrics::count_lease_op(&guard.role, "refresh", "lost");
+                metrics::count_fenced(guard.role.kind(), "expired_before_work");
+                audit::lease_lost(
+                    &self.bus,
+                    &guard.role,
+                    &guard.holder,
+                    guard.generation,
+                    "refused before work: the lease expired or was taken over",
+                );
+                let err = FenceError::Expired {
+                    role: guard.role.as_string(),
+                    presented: guard.generation,
+                };
+                self.forget_lease_if(&guard.role, guard.generation).await;
+                Err(err)
+            }
+            Err(e) => {
+                guard.cancel.cancel();
+                metrics::count_lease_op(&guard.role, "refresh", "error");
+                Err(FenceError::StoreUnavailable {
+                    role: guard.role.as_string(),
+                    detail: e.to_string(),
+                })
+            }
+        }
+    }
+
+    /// Drive one guard's cancellation from the store: renew on `period`, and
+    /// trip the guard's token the moment ownership is lost, so any work
+    /// `select!`ing on it stops instead of running past the lease.
+    ///
+    /// Returns when cancelled, when the role is lost, or when `shutdown` fires.
+    pub async fn supervise_guard(
+        &self,
+        guard: &LeaseGuard,
+        period: ChronoDuration,
+        shutdown: Option<&tokio_util::sync::CancellationToken>,
+    ) {
+        let token = guard.cancellation();
+        let period = period.to_std().unwrap_or(std::time::Duration::from_secs(5));
+        let mut ticker = tokio::time::interval(period.max(std::time::Duration::from_secs(1)));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let stop = async {
+                match shutdown {
+                    Some(s) => {
+                        s.cancelled().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                _ = token.cancelled() => return,
+                _ = stop => return,
+                _ = ticker.tick() => {
+                    if !self.renew(guard).await {
+                        // `renew` already trips the token on refusal/error.
+                        guard.cancel.cancel();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     /// Release a lease cleanly (graceful shutdown, role handover).
     pub async fn release(&self, guard: &LeaseGuard) -> bool {
+        guard.cancel.cancel();
         let store = self.store().await;
         let ok = store
             .release_lease(&guard.role, &guard.holder, guard.generation)
@@ -587,11 +714,7 @@ impl HaRuntime {
             .unwrap_or(false);
         metrics::count_lease_op(&guard.role, "release", if ok { "ok" } else { "lost" });
         metrics::set_lease_held(&guard.role, false);
-        self.inner
-            .write()
-            .await
-            .leases
-            .remove(&guard.role.as_string());
+        self.forget_lease_if(&guard.role, guard.generation).await;
         if ok {
             audit::lease_released(&self.bus, &guard.role, &guard.holder, guard.generation);
         }
@@ -630,8 +753,60 @@ impl HaRuntime {
         cursor
     }
 
-    /// Offer a sequenced item to a cursor. Persists the cursor, records and
-    /// audits any gap, and returns what the caller should do.
+    /// The fencing token this runtime presents on cursor writes:
+    /// `<holder>@<generation>` of the newest lease it holds, empty when it
+    /// holds none (single-process mode, or between takeovers).
+    ///
+    /// Cursor writes are NOT guarded by a role lease the way a job is: the
+    /// advance has to happen while the caller's work runs, not inside a
+    /// lease-checked critical section. What protects the row instead is the
+    /// fencing token — a stale generation can never move it forward — plus
+    /// the `pending` acknowledgement below.
+    async fn cursor_fence(&self) -> String {
+        let inner = self.inner.read().await;
+        inner
+            .leases
+            .values()
+            .max_by_key(|l| l.generation)
+            .map(|l| format!("{}@{}", l.holder, l.generation))
+            .unwrap_or_default()
+    }
+
+    /// Does this runtime still own the durable cursor row?
+    ///
+    /// Used before re-delivering an unacknowledged advance: handing an item
+    /// to a caller that has already lost the feed lease would let two
+    /// runtimes process the same feed. `None` = nothing to compare (unfenced
+    /// single-process mode, or a row this runtime wrote without a lease).
+    async fn cursor_ownership(&self, cursor: &FeedCursor) -> Option<CursorWrite> {
+        if cursor.fence.is_empty() {
+            return None;
+        }
+        let mine = self.cursor_fence().await;
+        if mine.is_empty() {
+            return Some(CursorWrite::Fenced {
+                actual: cursor.fence.clone(),
+                presented: "(unfenced)".into(),
+            });
+        }
+        if cursor::fence_generation(&mine) < cursor::fence_generation(&cursor.fence) {
+            return Some(CursorWrite::Fenced {
+                actual: cursor.fence.clone(),
+                presented: mine,
+            });
+        }
+        None
+    }
+
+    /// Offer a sequenced item to a cursor.
+    ///
+    /// The durable advance is written as **pending**: the caller has not run
+    /// the side effect yet, so a crash between here and
+    /// [`HaRuntime::acknowledge`] replays the item instead of skipping it.
+    /// A refused write (fenced generation, or an unacknowledged advance that
+    /// would be overwritten) is returned as [`CursorAdvance::Refused`] and
+    /// the caller must NOT process the item — believing an advance that did
+    /// not land is exactly the failure this prevents.
     pub async fn offer(
         &self,
         feed: FeedId,
@@ -640,6 +815,34 @@ impl HaRuntime {
         event_at: Option<chrono::DateTime<Utc>>,
     ) -> CursorAdvance {
         let mut cursor = self.cursor(feed, scope).await;
+        // Crash between the durable advance and the side effect: the cursor
+        // sits at exactly this position with `pending = true`. That is NOT a
+        // duplicate — nothing was confirmed — so the item is re-delivered.
+        // (At-least-once: the feed's own journal is the money-level dedup.)
+        if cursor.pending && cursor.position == Some(position) {
+            if let Some(verdict) = self.cursor_ownership(&cursor).await {
+                metrics::count_cursor_write(feed, verdict.as_str());
+                return CursorAdvance::Refused {
+                    reason: verdict.as_str().to_string(),
+                    detail: verdict.to_string(),
+                };
+            }
+            metrics::count_replay_event(feed, "pending_replay");
+            audit::cursor_replay_pending(&self.bus, feed.as_str(), scope, Some(position), None);
+            warn!(feed = %feed, position, "re-delivering an unacknowledged advance");
+            return CursorAdvance::Advanced;
+        }
+        // A LIVE advance must also be fenced: a worker that lost the feed
+        // lease cannot re-take the row merely because the row is not pending.
+        if cursor.position.is_some() && !cursor.pending {
+            if let Some(verdict) = self.cursor_ownership(&cursor).await {
+                metrics::count_cursor_write(feed, verdict.as_str());
+                return CursorAdvance::Refused {
+                    reason: verdict.as_str().to_string(),
+                    detail: verdict.to_string(),
+                };
+            }
+        }
         let advance = cursor.offer(position, event_at, &self.worker_id, Utc::now());
         metrics::count_replay_event(feed, advance.as_str());
         if let CursorAdvance::Gap(gap) = &advance {
@@ -652,18 +855,26 @@ impl HaRuntime {
             }
         }
         if advance.should_process() {
-            self.persist_cursor(&cursor).await;
+            cursor.fence = self.cursor_fence().await;
+            let written = self.persist_cursor(&cursor).await;
+            if let Some(verdict) = written {
+                // The advance did not land: another worker owns this row, or
+                // our own earlier advance is still unacknowledged. Do not
+                // process — a replay later is safe, a skipped event is not.
+                self.forget_cached_cursor(&cursor.key()).await;
+                return CursorAdvance::Refused {
+                    reason: verdict.as_str().to_string(),
+                    detail: verdict.to_string(),
+                };
+            }
         }
-        self.inner
-            .write()
-            .await
-            .cursors
-            .insert(cursor.key(), cursor.clone());
+        self.cache_cursor(cursor.clone()).await;
         metrics::set_cursor(feed, cursor.lag_secs(Utc::now()), cursor.position);
         advance
     }
 
-    /// Offer an opaque (signature-style) item to a cursor.
+    /// Offer an opaque (signature-style) item to a cursor. Same pending /
+    /// fenced-write semantics as [`HaRuntime::offer`].
     pub async fn offer_token(
         &self,
         feed: FeedId,
@@ -672,24 +883,138 @@ impl HaRuntime {
         event_at: Option<chrono::DateTime<Utc>>,
     ) -> CursorAdvance {
         let mut cursor = self.cursor(feed, scope).await;
+        if cursor.pending && cursor.token.as_deref() == Some(token) {
+            if let Some(verdict) = self.cursor_ownership(&cursor).await {
+                metrics::count_cursor_write(feed, verdict.as_str());
+                return CursorAdvance::Refused {
+                    reason: verdict.as_str().to_string(),
+                    detail: verdict.to_string(),
+                };
+            }
+            metrics::count_replay_event(feed, "pending_replay");
+            audit::cursor_replay_pending(&self.bus, feed.as_str(), scope, None, Some(token));
+            warn!(feed = %feed, "re-delivering an unacknowledged advance");
+            return CursorAdvance::Advanced;
+        }
+        if cursor.token.is_some() && !cursor.pending {
+            if let Some(verdict) = self.cursor_ownership(&cursor).await {
+                metrics::count_cursor_write(feed, verdict.as_str());
+                return CursorAdvance::Refused {
+                    reason: verdict.as_str().to_string(),
+                    detail: verdict.to_string(),
+                };
+            }
+        }
         let advance = cursor.offer_token(token, event_at, &self.worker_id, Utc::now());
         metrics::count_replay_event(feed, advance.as_str());
         if advance.should_process() {
-            self.persist_cursor(&cursor).await;
+            cursor.fence = self.cursor_fence().await;
+            if let Some(verdict) = self.persist_cursor(&cursor).await {
+                self.forget_cached_cursor(&cursor.key()).await;
+                return CursorAdvance::Refused {
+                    reason: verdict.as_str().to_string(),
+                    detail: verdict.to_string(),
+                };
+            }
         }
-        self.inner
-            .write()
-            .await
-            .cursors
-            .insert(cursor.key(), cursor.clone());
+        self.cache_cursor(cursor.clone()).await;
         metrics::set_cursor(feed, cursor.lag_secs(Utc::now()), cursor.position);
         advance
     }
 
-    async fn persist_cursor(&self, cursor: &FeedCursor) {
+    /// Confirm that the work for the advance at `position`/`token` completed.
+    ///
+    /// Until this returns `true` the durable cursor stays `pending` and any
+    /// restart replays from here. `false` means there was nothing to
+    /// acknowledge (already acknowledged, fenced by a newer generation, or
+    /// the position moved on) — the caller should not treat it as success.
+    pub async fn acknowledge(
+        &self,
+        feed: FeedId,
+        scope: &str,
+        position: Option<u64>,
+        token: Option<&str>,
+    ) -> bool {
+        let key = if scope.is_empty() {
+            feed.as_str().to_string()
+        } else {
+            format!("{}:{}", feed.as_str(), scope)
+        };
         let store = self.store().await;
-        if let Err(e) = store.save_cursor(cursor).await {
-            debug!(cursor = %cursor.key(), error = %e, "cursor could not be persisted");
+        let fence = self.cursor_fence().await;
+        let ok = match store
+            .acknowledge_cursor(&key, position, token, &fence)
+            .await
+        {
+            Ok(ok) => ok,
+            Err(e) => {
+                warn!(cursor = %key, error = %e, "cursor acknowledgement failed");
+                false
+            }
+        };
+        if ok {
+            // Keep the local copy in step with the durable row.
+            let mut inner = self.inner.write().await;
+            if let Some(c) = inner.cursors.get_mut(&key) {
+                c.acknowledge(position, token);
+                if !fence.is_empty() {
+                    c.fence = fence;
+                }
+            }
+        }
+        if ok {
+            metrics::count_cursor_write(feed, "acknowledged");
+            audit::cursor_acknowledged(&self.bus, feed.as_str(), scope, position, token);
+        }
+        ok
+    }
+
+    /// Cursors whose advance was written but never acknowledged — the exact
+    /// replay set after a crash or a takeover. Empty for a clean shutdown
+    /// (shutdown acknowledges everything it persisted).
+    pub async fn pending_cursors(&self) -> Vec<FeedCursor> {
+        let store = self.store().await;
+        store.pending_cursors(1000).await.unwrap_or_default()
+    }
+
+    async fn cache_cursor(&self, cursor: FeedCursor) {
+        self.inner
+            .write()
+            .await
+            .cursors
+            .insert(cursor.key(), cursor);
+    }
+
+    /// Drop a cached cursor after a refused write so the next read reloads
+    /// the durable truth instead of this process's belief.
+    async fn forget_cached_cursor(&self, key: &str) {
+        self.inner.write().await.cursors.remove(key);
+    }
+
+    /// Persist a cursor; `Some(verdict)` means the store refused it.
+    async fn persist_cursor(&self, cursor: &FeedCursor) -> Option<CursorWrite> {
+        let store = self.store().await;
+        match store.save_cursor(cursor).await {
+            Ok(CursorWrite::Accepted) => {
+                metrics::count_cursor_write(cursor.feed, "accepted");
+                None
+            }
+            Ok(refused) => {
+                metrics::count_cursor_write(cursor.feed, refused.as_str());
+                warn!(
+                    cursor = %cursor.key(),
+                    verdict = refused.as_str(),
+                    detail = %refused,
+                    "cursor write refused"
+                );
+                audit::cursor_write_refused(&self.bus, &cursor.key(), &refused.to_string());
+                Some(refused.clone())
+            }
+            Err(e) => {
+                metrics::count_cursor_write(cursor.feed, "error");
+                warn!(cursor = %cursor.key(), error = %e, "cursor could not be persisted");
+                None
+            }
         }
     }
 
@@ -697,7 +1022,14 @@ impl HaRuntime {
     pub async fn replay_from(&self, feed: FeedId, scope: &str, position: Option<u64>) {
         let mut cursor = self.cursor(feed, scope).await;
         cursor.rewind_to(position, Utc::now());
-        self.persist_cursor(&cursor).await;
+        cursor.fence = self.cursor_fence().await;
+        if self.persist_cursor(&cursor).await.is_some() {
+            // The rewind did not land; reload the durable truth instead of
+            // caching a position this worker does not own.
+            self.forget_cached_cursor(&cursor.key()).await;
+            warn!(feed = %feed, scope, "cursor rewind refused by the store");
+            return;
+        }
         self.inner
             .write()
             .await
@@ -889,12 +1221,16 @@ impl HaRuntime {
         let _ = self.set_state(WorkerState::Draining, reason).await;
         self.refresh_readiness().await;
 
-        // 1. Persist every cursor we advanced.
+        // 1. Persist every cursor we advanced, fenced by our own generation
+        //    so a stale runtime cannot overwrite a newer worker's progress on
+        //    the way out (the pre-fix code wrote blind upserts here).
+        let fence = self.cursor_fence().await;
         let cursors: Vec<FeedCursor> = self.inner.read().await.cursors.values().cloned().collect();
         let mut persisted = 0usize;
         for c in &cursors {
-            let store = self.store().await;
-            if store.save_cursor(c).await.is_ok() {
+            let mut c = c.clone();
+            c.fence.clone_from(&fence);
+            if self.persist_cursor(&c).await.is_none() {
                 persisted += 1;
             }
         }
@@ -923,6 +1259,7 @@ impl HaRuntime {
                 role,
                 holder: self.worker_id.clone(),
                 generation,
+                cancel: tokio_util::sync::CancellationToken::new(),
             };
             if self.release(&guard).await {
                 released += 1;
@@ -1012,6 +1349,7 @@ mod tests {
             role: role.clone(),
             holder: "w-b".into(),
             generation: guard.generation() - 1,
+            cancel: tokio_util::sync::CancellationToken::new(),
         };
         let err = b.fence(&stale).await.unwrap_err();
         assert_eq!(err.reason(), "fenced");
@@ -1100,6 +1438,7 @@ mod tests {
             role: role.clone(),
             holder: "w1".into(),
             generation: 1,
+            cancel: tokio_util::sync::CancellationToken::new(),
         };
         assert!(rt.fence(&g).await.is_err());
         let r = rt.refresh_readiness().await;
@@ -1115,12 +1454,29 @@ mod tests {
             rt.offer(FeedId::PolymarketUser, "", 1, None).await,
             CursorAdvance::Advanced
         );
+        // Until the side effect is confirmed the advance stays replayable —
+        // that is the crash guarantee — so a repeat is re-delivered, not
+        // suppressed.
         assert_eq!(
             rt.offer(FeedId::PolymarketUser, "", 1, None).await,
-            CursorAdvance::Duplicate
+            CursorAdvance::Advanced,
+            "an unacknowledged advance is re-delivered"
+        );
+        assert!(
+            rt.acknowledge(FeedId::PolymarketUser, "", Some(1), None)
+                .await
+        );
+        assert_eq!(
+            rt.offer(FeedId::PolymarketUser, "", 1, None).await,
+            CursorAdvance::Duplicate,
+            "an acknowledged position is never processed twice"
         );
         let adv = rt.offer(FeedId::PolymarketUser, "", 4, None).await;
         assert!(matches!(adv, CursorAdvance::Gap(_)));
+        assert!(
+            rt.acknowledge(FeedId::PolymarketUser, "", Some(4), None)
+                .await
+        );
         assert_eq!(store.gaps(true, 10).await.unwrap().len(), 1);
         // The cursor survives a "restart": a new runtime loads it.
         let rt2 = runtime("w2", store.clone(), vec![]).await;
@@ -1142,6 +1498,216 @@ mod tests {
             rt2.resolve_gap(FeedId::PolymarketUser, "", 2, GapStatus::Backfilled)
                 .await
         );
+    }
+
+    /// HA cursor fencing at runtime level: a stale generation's write is
+    /// REFUSED (and the caller refuses to process), while a takeover replays
+    /// the unacknowledged advance instead of skipping it.
+    #[tokio::test]
+    async fn a_stale_generation_cannot_advance_a_cursor_and_a_takeover_replays() {
+        let store = Arc::new(MemoryHaStore::new());
+        let role = LeaseRole::Feed("polymarket_user".into());
+
+        // w1 takes the feed lease at generation 1 and advances the cursor.
+        let w1 = runtime("w1", store.clone(), vec![]).await;
+        w1.register("h", 1, "v").await.unwrap();
+        let g1 = w1.acquire(role.clone()).await.unwrap().unwrap();
+        assert_eq!(
+            w1.offer(FeedId::PolymarketUser, "", 10, None).await,
+            CursorAdvance::Advanced
+        );
+        // The write lands fenced by this worker's generation.
+        let row = store
+            .load_cursor("polymarket_user")
+            .await
+            .unwrap()
+            .expect("durable");
+        assert_eq!(row.fence, "w1@1");
+        assert!(row.pending);
+
+        // Lease expires; w2 takes over at generation 2 and acknowledges 10.
+        store.advance_clock(ChronoDuration::seconds(120));
+        let w2 = runtime("w2", store.clone(), vec![]).await;
+        w2.register("h", 2, "v").await.unwrap();
+        assert!(w2.acquire(role.clone()).await.unwrap().is_some());
+        assert_eq!(
+            w2.offer(FeedId::PolymarketUser, "", 10, None).await,
+            CursorAdvance::Advanced,
+            "the unacknowledged advance is re-delivered to the new owner"
+        );
+        assert!(
+            w2.acknowledge(FeedId::PolymarketUser, "", Some(10), None)
+                .await
+        );
+
+        // The stalled w1 comes back and tries to keep advancing a feed it no
+        // longer owns: the store refuses the write (generation 1 < 2) and w1
+        // is told not to process.
+        let adv = w1.offer(FeedId::PolymarketUser, "", 11, None).await;
+        match &adv {
+            CursorAdvance::Refused { reason, .. } => assert_eq!(reason, "fenced"),
+            other => panic!("a stale write must be refused, got {other:?}"),
+        }
+        assert!(
+            !adv.should_process(),
+            "a refused advance is never processed"
+        );
+        // Its rewind and its graceful shutdown must not overwrite either.
+        w1.replay_from(FeedId::PolymarketUser, "", Some(1)).await;
+        w1.shutdown("stale").await;
+        assert_eq!(
+            store
+                .load_cursor("polymarket_user")
+                .await
+                .unwrap()
+                .unwrap()
+                .position,
+            Some(10),
+            "the newer owner's position is untouched"
+        );
+
+        // A brand-new worker (generation 3) at a higher generation wins and
+        // can continue the feed.
+        store.advance_clock(ChronoDuration::seconds(120));
+        let w3 = runtime("w3", store.clone(), vec![]).await;
+        w3.register("h", 3, "v").await.unwrap();
+        assert!(w3.acquire(role).await.unwrap().is_some());
+        assert_eq!(
+            w3.offer(FeedId::PolymarketUser, "", 11, None).await,
+            CursorAdvance::Advanced
+        );
+        assert!(
+            w3.acknowledge(FeedId::PolymarketUser, "", Some(11), None)
+                .await
+        );
+        let row = store.load_cursor("polymarket_user").await.unwrap().unwrap();
+        assert_eq!(row.fence, "w3@3");
+        assert_eq!(row.position, Some(11));
+        assert!(!row.pending);
+        assert!(
+            g1.generation
+                < row
+                    .fence
+                    .rsplit_once('@')
+                    .unwrap()
+                    .1
+                    .parse::<i64>()
+                    .unwrap()
+        );
+    }
+
+    /// A pre-work fence is not enough: the recorded holder of an EXPIRED lease
+    /// must be refused before the job hands off, and the guard must be
+    /// cancelled so work already running stops.
+    #[tokio::test]
+    async fn an_expired_lease_is_refused_before_the_work_and_cancels_the_job() {
+        let store = Arc::new(MemoryHaStore::new());
+        let rt = runtime("w1", store.clone(), vec![]).await;
+        rt.register("h", 1, "v").await.unwrap();
+        let role = LeaseRole::Reconciliation;
+        let g = rt.acquire(role.clone()).await.unwrap().unwrap();
+        assert!(!g.is_cancelled());
+        // Fresh lease: the job may run.
+        assert!(rt.refresh_before_work(&g).await.is_ok());
+
+        // The lease expires and nobody renews it. The worker is STILL the
+        // recorded holder, so a plain fence would wrongly pass…
+        store.advance_clock(ChronoDuration::seconds(600));
+        assert!(
+            rt.fence(&g).await.is_err(),
+            "the store already refuses the stale generation"
+        );
+
+        // …and the pre-work refresh refuses it deterministically as Expired,
+        // tripping the cancellation token.
+        let err = rt.refresh_before_work(&g).await.expect_err("must refuse");
+        assert_eq!(err.reason(), "expired");
+        assert!(g.is_cancelled(), "the job's cancellation token fired");
+        assert!(g.cancellation().is_cancelled());
+
+        // A job that select!s on the token stops instead of finishing.
+        let token = g.cancellation();
+        let outcome = tokio::select! {
+            _ = token.cancelled() => "cancelled",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => "ran",
+        };
+        assert_eq!(outcome, "cancelled");
+    }
+
+    /// The supervisor renews while the job runs and cancels the guard the
+    /// moment the role is taken over — the "job outlives the TTL" case.
+    #[tokio::test]
+    async fn the_supervisor_renews_during_work_and_cancels_on_takeover() {
+        let store = Arc::new(MemoryHaStore::new());
+        let w1 = runtime("w1", store.clone(), vec![]).await;
+        w1.register("h", 1, "v").await.unwrap();
+        let role = LeaseRole::AccountingMaintenance;
+        let g = w1.acquire(role.clone()).await.unwrap().unwrap();
+
+        // Supervise with a 50ms period.
+        let token = g.cancellation();
+        let supervisor = {
+            let w1 = w1.clone();
+            let g = g.clone();
+            tokio::spawn(async move {
+                w1.supervise_guard(&g, ChronoDuration::milliseconds(50), None)
+                    .await;
+            })
+        };
+        // While supervised, the lease keeps being renewed: advancing the clock
+        // less than the TTL never loses it.
+        for _ in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            store.advance_clock(ChronoDuration::seconds(10));
+        }
+        assert!(!token.is_cancelled(), "supervised renewal keeps the lease");
+        assert!(w1.renew(&g).await, "the lease is still ours");
+
+        // Now the lease is force-expired and taken over by another worker.
+        store.advance_clock(ChronoDuration::seconds(600));
+        let w2 = runtime("w2", store.clone(), vec![]).await;
+        w2.register("h", 2, "v").await.unwrap();
+        assert!(w2.acquire(role).await.unwrap().is_some(), "takeover");
+
+        // The supervisor's next tick cannot renew, so the token fires and the
+        // supervisor exits instead of renewing someone else's lease.
+        tokio::time::timeout(std::time::Duration::from_secs(2), token.cancelled())
+            .await
+            .expect("takeover must cancel the old guard");
+        tokio::time::timeout(std::time::Duration::from_secs(2), supervisor)
+            .await
+            .expect("the supervisor stops after losing the role")
+            .unwrap();
+    }
+
+    /// A stale guard must never evict a NEWER lease cached for the same role.
+    #[tokio::test]
+    async fn a_stale_guard_does_not_remove_the_newer_cached_lease() {
+        let store = Arc::new(MemoryHaStore::new());
+        let rt = runtime("w1", store.clone(), vec![]).await;
+        rt.register("h", 1, "v").await.unwrap();
+        let role = LeaseRole::StateSync;
+        let old = rt.acquire(role.clone()).await.unwrap().unwrap();
+
+        // The lease expires; a second worker takes over…
+        store.advance_clock(ChronoDuration::seconds(600));
+        let other = runtime("w2", store.clone(), vec![]).await;
+        other.register("h", 2, "v").await.unwrap();
+        assert!(other.acquire(role.clone()).await.unwrap().is_some());
+        // …and this worker re-acquires it at a NEWER generation.
+        store.advance_clock(ChronoDuration::seconds(600));
+        let new = rt.acquire(role.clone()).await.unwrap().unwrap();
+        assert!(new.generation() > old.generation());
+
+        // Releasing the OLD guard must not drop the new one from the cache.
+        rt.release(&old).await;
+        assert!(
+            rt.held_roles().await.contains(&role.as_string()),
+            "the newer cached lease survived the stale release"
+        );
+        // The stale generation is still fenced by the store.
+        assert!(rt.fence(&old).await.is_err());
+        assert!(rt.fence(&new).await.is_ok());
     }
 
     #[tokio::test]

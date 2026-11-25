@@ -183,3 +183,14 @@ pub fn publish_portfolio(view: &PortfolioView) {
         }
     }
 }
+
+/// Count one journal-repair attempt by outcome (`repaired` / `rejected`).
+pub(crate) fn count_journal_repair(outcome: &str) {
+    metrics::global()
+        .counter(
+            "global_ledger_journal_repairs_total",
+            "Book rebuilds from the durable journal after a proven conflict.",
+            &[("outcome", outcome)],
+        )
+        .inc();
+}

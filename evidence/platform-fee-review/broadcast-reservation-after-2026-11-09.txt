@@ -1,0 +1,57 @@
+=== core reservation repo (PostgreSQL, non-RLS) ===
+    Finished `test` profile [unoptimized] target(s) in 29.54s
+     Running tests/db_integration.rs (target/debug/deps/db_integration-294951a23b5cae21)
+
+running 3 tests
+test broadcast_reservation_abandon_frees_the_key_for_a_retry ... ok
+test broadcast_reservation_grants_exactly_one_owner_and_fences_the_stale_one ... ok
+test broadcast_reservation_takeover_bumps_the_epoch_and_fences_the_old_owner ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 1.76s
+
+core_reservation_exit=0
+=== production DbIntentSink + real RLS deployment (PostgreSQL) ===
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 4m 41s
+     Running tests/intent_reservation_rls_postgres.rs (target/debug/deps/intent_reservation_rls_postgres-f1e1f6db54d800f6)
+
+running 1 test
+test production_rls_sink_reserves_durably_and_refuses_a_second_attempt ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+server_rls_reservation_exit=0
+=== fail-closed sink regression (non-RLS database) ===
+    Finished `test` profile [unoptimized] target(s) in 6.67s
+     Running tests/intent_reservation_postgres.rs (target/debug/deps/intent_reservation_postgres-a983d3225a2c42fc)
+
+running 1 test
+test production_reservation_failure_aborts_before_broadcast_future ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+server_failclosed_exit=0
+=== copy + sniper module suites after key wiring ===
+
+test result: ok. 79 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+module_copy_exit=0
+
+test result: ok. 209 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+module_sniper_exit=0
+=== core recovery + pre-broadcast gate ===
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 685 filtered out; finished in 0.01s
+
+core_recovery_exit=0
+=== affected clippy (-D warnings) ===
+    Checking module-polymarket v0.1.0 (/home/user/repo/crates/module-polymarket)
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 4m 36s
+clippy_exit=0
+=== fmt + diff ===
+fmt_exit=0
+diff_check_exit=0

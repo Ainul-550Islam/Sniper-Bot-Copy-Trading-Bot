@@ -1,0 +1,34 @@
+=== GREEN: two-replica fault injection (duplicate attempt + crash between send and link) ===
+--- core reservation repo (DB integration) ---
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 2.11s
+
+db_integration_exit=0
+--- real-RLS production sink ---
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+rls_pg_exit=0
+--- NEW two-replica fault injection ---
+test two_replicas_never_both_broadcast_and_a_crashed_owner_fences_out ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.07s
+
+fault_injection_exit=0
+--- server recon (sink) ---
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 989 filtered out; finished in 0.00s
+
+server_recon_exit=0
+--- ambiguous sweep PG ---
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.10s
+
+pg_sweep_exit=0
+--- clippy / fmt / diff ---
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 3m 32s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0

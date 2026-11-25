@@ -1,0 +1,215 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 43.30s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 17 tests
+test accounting::ledger::tests::concurrent_identical_events_yield_one_mutation ... ok
+test accounting::ledger::tests::arithmetic_overflow_is_rejected_before_it_corrupts_the_book ... ok
+test accounting::ledger::tests::detected_pending_conflict_blocks_further_local_booking ... ok
+test accounting::ledger::tests::conflict_discovered_during_submission_refuses_that_submission ... ok
+test accounting::ledger::tests::hydrate_rejects_same_event_id_with_changed_economics ... ok
+test accounting::ledger::tests::hydrate_reports_rows_whose_durable_id_does_not_match_the_event ... ok
+test accounting::ledger::tests::journal_that_already_holds_the_fact_makes_it_a_duplicate ... ok
+test accounting::ledger::tests::local_retry_rejects_changed_economics_without_double_booking ... ok
+test accounting::ledger::tests::malformed_events_change_nothing ... ok
+test accounting::ledger::tests::pending_conflict_with_other_replica_stays_unresolved ... ok
+test accounting::ledger::tests::pending_journal_events_cannot_be_overtaken_by_new_submissions ... ok
+test accounting::ledger::tests::realized_series_overflow_is_rejected_before_journaling ... ok
+test accounting::ledger::tests::realized_series_tracks_day_totals_and_peak ... ok
+test accounting::ledger::tests::recovery_replays_append_order_not_out_of_order_fact_timestamps ... ok
+test accounting::ledger::tests::standalone_fee_quote_amount_counts_as_realized_loss ... ok
+test accounting::ledger::tests::the_same_fact_is_booked_exactly_once ... ok
+test accounting::ledger::tests::unavailable_journal_parks_the_event_and_flushes_later ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 672 filtered out; finished in 0.02s
+
+    Finished `test` profile [unoptimized] target(s) in 1.11s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 3 tests
+test accounting::recovery::tests::gaps_are_reported_never_synthesised ... ok
+test accounting::recovery::tests::unavailable_journal_is_reported ... ok
+test accounting::recovery::tests::restart_rebuilds_the_book_once_and_refuses_replays ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 686 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.47s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 9 tests
+test authorization::tests::an_allow_here_cannot_bypass_the_task5_global_risk_engine ... ok
+test config::tests::global_risk_drawdown_limit_takes_the_tighter_of_abs_and_pct ... ok
+test config::tests::global_risk_defaults_are_off_and_validate ... ok
+test config::tests::global_risk_rejects_bad_limits_rates_and_venues ... ok
+test global_risk::decision::tests::decision_ids_are_deterministic ... ok
+test global_risk::kill_switch::tests::config_pins_and_runtime_toggles_compose ... ok
+test global_risk::decision::tests::reason_labels_round_trip_and_classify ... ok
+test global_risk::kill_switch::tests::scope_text_round_trips ... ok
+test global_risk::kill_switch::tests::restore_only_brings_back_engaged_switches ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 680 filtered out; finished in 0.00s
+
+    Checking serde_core v1.0.229
+    Checking serde v1.0.229
+    Checking subtle v2.6.1
+    Checking crypto-common v0.1.6
+    Checking digest v0.10.7
+    Checking sha2 v0.10.9
+    Checking solana-hash v2.3.0
+    Checking solana-sha256-hasher v2.3.0
+    Checking curve25519-dalek v4.1.3
+    Checking solana-pubkey v2.4.0
+    Checking serde_json v1.0.154
+    Checking bincode v1.3.3
+    Checking solana-instruction v2.3.3
+    Checking solana-sdk-ids v2.2.1
+    Checking solana-sysvar-id v2.2.1
+    Checking solana-system-interface v1.0.0
+    Checking bitflags v2.13.2
+    Checking byteorder v1.5.0
+    Checking solana-epoch-schedule v2.2.1
+    Checking curve25519-dalek v3.2.0
+    Checking solana-program-error v2.2.2
+    Checking ed25519-dalek v1.0.1
+    Checking solana-transaction-error v2.2.1
+    Checking smallvec v1.16.4
+    Checking solana-account-info v2.3.0
+    Checking solana-clock v2.2.3
+    Checking hybrid-array v0.4.15
+    Checking serde-big-array v0.5.1
+    Checking solana-signature v2.3.0
+    Checking ctutils v0.4.7
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking solana-fee-calculator v2.2.1
+    Checking solana-slot-hashes v2.2.1
+    Checking solana-serialize-utils v2.2.1
+    Checking hmac v0.12.1
+    Checking either v1.19.0
+    Checking serde_bytes v0.11.19
+    Checking digest v0.11.3
+    Checking bv v0.11.1
+    Checking solana-cpi v2.2.1
+    Checking solana-rent v2.2.1
+    Checking crypto-mac v0.8.0
+    Checking blake3 v1.8.7
+    Checking hmac v0.8.1
+    Checking solana-stake-interface v1.2.1
+    Checking solana-slot-history v2.2.1
+    Checking solana-instructions-sysvar v2.2.2
+    Checking solana-signer v2.2.1
+    Checking solana-program-entrypoint v2.3.0
+    Checking parking_lot_core v0.9.12
+    Checking solana-last-restart-slot v2.2.1
+    Checking solana-epoch-rewards v2.2.1
+    Checking solana-short-vec v2.2.1
+    Checking sha3 v0.10.9
+    Checking solana-sysvar v2.3.0
+    Checking libsecp256k1-core v0.2.2
+    Checking parking_lot v0.12.5
+    Checking hmac-drbg v0.3.0
+    Checking solana-feature-set v2.2.5
+    Checking solana-bincode v2.2.1
+    Checking libsecp256k1 v0.6.0
+    Checking solana-message v2.4.0
+    Checking solana-account v2.2.1
+    Checking pbkdf2 v0.11.0
+    Checking tokio v1.54.1
+    Checking solana-seed-phrase v2.2.1
+    Checking icu_normalizer v2.4.0
+    Checking openssl-sys v0.9.117
+    Checking ed25519-dalek-bip32 v0.2.0
+    Checking futures-channel v0.3.34
+    Checking slab v0.4.12
+    Checking regex-syntax v0.8.11
+    Checking chrono v0.4.45
+    Checking regex-automata v0.4.18
+    Checking futures-util v0.3.34
+    Checking openssl v0.10.81
+    Checking ark-serialize v0.4.2
+    Checking solana-keypair v2.2.3
+    Checking idna_adapter v1.2.2
+    Checking itertools v0.10.5
+    Checking ring v0.17.14
+    Checking ark-ff v0.4.2
+    Checking idna v1.1.0
+    Checking solana-secp256r1-program v2.2.4
+    Checking regex v1.13.1
+    Checking solana-secp256k1-program v2.2.3
+    Checking solana-ed25519-program v2.2.3
+    Checking form_urlencoded v1.2.2
+    Checking env_logger v0.9.3
+    Checking url v2.5.8
+    Checking solana-precompiles v2.2.2
+    Checking ark-poly v0.4.2
+    Checking rustls-webpki v0.103.16
+    Checking getrandom v0.4.3
+    Checking solana-nonce v2.2.1
+    Checking tracing-core v0.1.36
+    Checking solana-hard-forks v2.2.1
+    Checking solana-shred-version v2.2.1
+    Checking tracing v0.1.44
+    Checking uuid v1.29.0
+    Checking rustls v0.23.46
+    Checking solana-logger v2.3.1
+    Checking ark-ec v0.4.2
+    Checking serde_with v3.24.0
+    Checking solana-transaction v2.2.3
+    Checking tokio-stream v0.1.19
+    Checking futures-intrusive v0.5.0
+    Checking solana-keccak-hasher v2.2.1
+    Checking solana-address-lookup-table-interface v2.2.2
+    Checking solana-cluster-type v2.2.1
+    Checking solana-serde-varint v2.2.2
+    Checking solana-inflation v2.2.1
+    Checking solana-poh-config v2.2.1
+    Checking solana-genesis-config v2.3.0
+    Checking solana-vote-interface v2.2.6
+    Checking solana-packet v2.2.1
+    Checking solana-example-mocks v2.2.1
+    Checking sqlx-core v0.8.6
+    Checking ark-bn254 v0.4.0
+    Checking futures-executor v0.3.34
+    Checking tokio-util v0.7.20
+    Checking solana-secp256k1-recover v2.2.1
+    Checking solana-feature-gate-interface v2.2.2
+    Checking solana-blake3-hasher v2.2.1
+    Checking solana-loader-v4-interface v2.2.1
+    Checking solana-loader-v3-interface v5.0.0
+    Checking solana-loader-v2-interface v2.2.1
+    Checking hkdf v0.12.4
+    Checking solana-program-pack v2.2.1
+    Checking solana-stable-layout v2.2.1
+    Checking md-5 v0.10.6
+    Checking solana-commitment-config v2.2.1
+    Checking solana-reward-info v2.2.1
+    Checking toml_datetime v0.6.11
+    Checking solana-epoch-info v2.2.1
+    Checking serde_spanned v0.6.9
+    Checking solana-program v2.3.0
+    Checking solana-bn254 v2.2.2
+    Checking toml_edit v0.22.27
+    Checking sqlx-postgres v0.8.6
+    Checking solana-epoch-rewards-hasher v2.2.1
+    Checking solana-client-traits v2.2.1
+    Checking solana-rent-debits v2.2.1
+    Checking combine v4.6.9
+    Checking futures v0.3.34
+    Checking solana-offchain-message v2.2.1
+    Checking solana-rent-collector v2.3.0
+    Checking solana-fee-structure v2.3.0
+    Checking solana-system-transaction v2.2.1
+    Checking solana-nonce-account v2.2.1
+    Checking solana-quic-definitions v2.3.1
+    Checking solana-transaction-context v2.3.13
+    Checking solana-reserved-account-keys v2.2.2
+    Checking solana-presigner v2.2.1
+    Checking itertools v0.13.0
+    Checking solana-compute-budget-interface v2.2.2
+    Checking solana-serde v2.2.1
+    Checking solana-sdk v2.3.1
+    Checking redis v0.27.6
+    Checking sqlx v0.8.6
+    Checking toml v0.8.23
+    Checking bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `dev` profile [unoptimized] target(s) in 1m 58s

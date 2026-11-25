@@ -1,0 +1,65 @@
+# A stale replica now posts a sell at the COMMITTED cost (2026-11-09)
+
+Closes the only `#[ignore]` left in `crates/` and the row that was parked as
+"OPEN — defect REPRODUCED by a real witness; fix pending".
+
+## The defect
+
+`GlobalLedger::submit` priced a sell with `inner.book.cost_of_slice(&event)` — the LOCAL
+book of that replica. Replica B never saw the opening buy, so its book had no position and
+`cost_of_slice` returned 0. The sell was then journaled with:
+
+  inventory credit  = 0        (nothing removed at cost)
+  realized PnL      = proceeds (the whole sale counted as profit)
+
+The witness (`accounting_replica_order::stale_replica_sell_posting_uses_committed_inventory_cost`)
+ran with no database at all and failed in 0.00 s:
+  "a shared-journal sell must credit the committed 0.5 SOL cost, got -0"
+
+## The fix — price from what the journal COMMITTED
+
+1. `GlobalLedger::committed_slice_cost(...)`: if this replica has applied nothing for the
+   position, or the journal holds history older than what this replica knows, the slice is
+   priced from the journal instead of the local book. Cost-free when the local book already
+   covers the position's history (the replay reproduces it).
+2. `GlobalLedger::journal_slice_cost(...)`: replays the position's committed events in
+   journal order and applies them from their RECORDED POSTINGS
+   (`PositionBook::apply_committed`) rather than recomputing a local cost — that is what
+   makes it correct on a replica that never saw the buy.
+3. `PositionBook::apply_committed(event, id, &Entry)`: inventory movement and realized
+   result come FROM the committed postings (`inventory` credit = cost of the slice).
+   Cash-only events delegate to `apply` — they are fully determined by the event.
+4. `LedgerStore::load_entry(&event_id) -> Option<Option<Entry>>`: new trait method with a
+   conservative default (`None` = cannot answer). Implemented for `MemoryLedgerStore` and,
+   over `ledger_postings`, for the server's `DbLedgerStore`
+   (`AccountingRepo::load_entry`, `ORDER BY seq`, unknown account/side or negative seq
+   decoded as a hard error).
+5. `submit` and `hydrate` both use it, so the live path and the replay path agree.
+
+Fail-closed by construction: if the journal is unavailable, a committed posting cannot be
+decoded, or a history row is invalid, the LOCAL cost is used and a `warn!` names the event.
+A missing cost is never silently zero — it is either committed or reported.
+
+No schema change: `ledger_postings` already had the committed amounts.
+
+## Witness + RED
+
+* The parked test is now a normal test (no `#[ignore]`). GREEN:
+  `cargo test -p bot-core --test accounting_replica_order` → 1 passed, 0 failed.
+* RED is the test itself, as recorded: before this change it failed with
+  `got -0` against the expected `-0.5`. It cannot regress silently now because it runs in
+  every sweep.
+* Regression surface re-run: core `--lib accounting` 59/59, core
+  `global_risk_accounting` 29/29, `accounting_retry_postgres` 1/1 (real PostgreSQL),
+  server `--lib accounting` 1/1.
+
+## What this does not establish
+
+* The replay is O(history of that position) per sell when a replica is behind. That is the
+  price of correctness here; a materialised committed-cost column would be the perf
+  follow-up, and it would need a migration this change deliberately avoided.
+* `load_entry` has a conservative default, so a third-party `LedgerStore` implementation
+  that does not implement it keeps the OLD (local-book) behaviour rather than failing —
+  visible as the `warn!`, not silent. Both in-repo stores implement it.
+* Only the cost of a sell is taken from the journal. Other cross-replica divergences
+  (fee attribution, reconciliation aggregation scope) remain separate ledger rows.

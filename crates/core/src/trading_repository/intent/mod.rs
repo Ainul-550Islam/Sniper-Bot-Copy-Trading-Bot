@@ -8,5 +8,5 @@ pub mod write;
 
 pub use model::TenantIntent;
 pub use read::TenantIntentRead;
-pub use recovery::{TenantRecoveryItem, TenantRecoveryRepo};
+pub use recovery::{TenantRecoveryItem, TenantRecoveryPage, TenantRecoveryRepo, RECOVERY_PAGE_MAX};
 pub use write::TenantIntentWrite;

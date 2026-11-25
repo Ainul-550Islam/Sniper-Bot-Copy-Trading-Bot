@@ -63,6 +63,26 @@ impl LedgerStore for DbLedgerStore {
         }
     }
 
+    async fn load_event(&self, event_id: &str) -> Option<Option<StoredEvent>> {
+        match self.repo().load_event(event_id).await {
+            Ok(event) => Some(event),
+            Err(error) => {
+                warn!(%error, event_id, "ledger event lookup failed");
+                None
+            }
+        }
+    }
+
+    async fn load_entry(&self, event_id: &str) -> Option<Option<Entry>> {
+        match self.repo().load_entry(event_id).await {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                warn!(%error, event_id, "ledger postings lookup failed");
+                None
+            }
+        }
+    }
+
     async fn load_events(&self) -> Option<Vec<StoredEvent>> {
         let repo = self.repo();
         match repo.load_events().await {
@@ -348,6 +368,39 @@ impl RiskStore for DbRiskStore {
     }
 }
 
+/// Deployment-wide halt for a PROVEN accounting conflict.
+///
+/// The ledger conflict is process-local; without this, replica B keeps taking
+/// entries off replica A's divergent book. Engaging the deployment kill
+/// switch is the safe direction (kill-ON applies immediately everywhere), so
+/// the cluster stops instead of one process. The operator release path is
+/// unchanged: repair the ledger (`POST /api/accounting/conflict/repair`), then
+/// release the kill switch deliberately.
+struct ClusterConflictHalt {
+    state: Shared,
+}
+
+#[async_trait::async_trait]
+impl bot_core::accounting::ConflictHalt for ClusterConflictHalt {
+    async fn halt(&self, conflict: &str) -> bool {
+        let engaged = self.state.publish_accounting_conflict(conflict).await;
+        bot_core::obs::metrics::global()
+            .counter(
+                "bot_accounting_conflict_cluster_halts_total",
+                "Deployment-wide kill-switch engagements caused by a proven ledger conflict.",
+                &[("outcome", if engaged { "engaged" } else { "already_held" })],
+            )
+            .inc();
+        if engaged {
+            warn!(
+                conflict,
+                "proven accounting conflict escalated to the deployment kill switch"
+            );
+        }
+        engaged
+    }
+}
+
 /// Install the durable stores when a database is attached. Must run before
 /// [`recover`] and before any module starts.
 pub async fn attach(state: &Shared, db: Option<&Arc<Database>>) {
@@ -365,6 +418,13 @@ pub async fn attach(state: &Shared, db: Option<&Arc<Database>>) {
     } else {
         info!("global ledger + risk journals in memory (no database configured)");
     }
+    // A proven ledger conflict must not stay inside one replica.
+    state
+        .ledger()
+        .attach_conflict_halt(Arc::new(ClusterConflictHalt {
+            state: state.clone(),
+        }))
+        .await;
 }
 
 /// Startup recovery of the global layer (after the persistence layer
@@ -416,6 +476,32 @@ pub async fn maintenance_tick(state: &Shared) {
     let flushed = ledger.flush_pending().await;
     if flushed > 0 {
         info!(flushed, "pending ledger events reached the journal");
+    }
+    // A proven journal-vs-book conflict blocks every entry decision. Try the
+    // deterministic repair (rebuild from the durable journal) once per tick: a
+    // refused repair leaves the fence set, so this can never mask a conflict,
+    // and a successful one is logged + metered for the audit trail.
+    if let Some(conflict) = ledger.journal_conflict().await {
+        let repair = ledger.reconcile_from_journal().await;
+        if repair.repaired {
+            warn!(
+                conflict = %conflict,
+                replayed = repair.replayed_events,
+                discarded_pending = repair.discarded_pending_events,
+                "ledger conflict repaired from the durable journal; trading may resume"
+            );
+        } else {
+            warn!(
+                conflict = %conflict,
+                reason = %repair.reason,
+                "ledger conflict NOT repaired; entries stay fail-closed pending operator action"
+            );
+        }
+        bot_core::accounting::audit::recovery(
+            &state.events,
+            "journal_conflict_repair",
+            &repair.summary(),
+        );
     }
     // The four record layers the accounting reconciliation compares
     // (TASK 5 §5): OMS orders (intent), module trades (fills), the ledger

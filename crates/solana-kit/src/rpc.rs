@@ -325,6 +325,10 @@ impl Rpc {
         let policy = *self.pool.retry();
         let max_attempts = policy.max_attempts();
         let mut attempt = 0u32;
+        // A later provider's rejection cannot undo an earlier uncertain send.
+        // Only sendTransaction needs aggregate delivery semantics; read RPCs
+        // should continue reporting their final provider's error class.
+        let mut uncertain_send = false;
         let mut tried: Vec<usize> = Vec::with_capacity(2);
         loop {
             let idx = match self.pool.route(self.origin, &tried) {
@@ -376,6 +380,18 @@ impl Rpc {
                     ),
                 ),
             };
+            if what == "sendTransaction"
+                && matches!(
+                    class,
+                    RpcErrorClass::Timeout
+                        | RpcErrorClass::Transport
+                        | RpcErrorClass::Unavailable
+                        | RpcErrorClass::RateLimited { .. }
+                )
+            {
+                // Gateways can respond with 5xx or 429 after forwarding.
+                uncertain_send = true;
+            }
             self.pool.record_failure(idx, class, &raw_msg);
             let message = self.pool.sanitize(&raw_msg);
             attempt += 1;
@@ -400,9 +416,19 @@ impl Rpc {
                     ],
                 )
                 .inc();
+                let final_class = if uncertain_send && !class.ambiguous() {
+                    RpcErrorClass::Transport
+                } else {
+                    class
+                };
+                let detail = if uncertain_send && !class.ambiguous() {
+                    format!("{what}: prior or final delivery uncertain; last response: {message}")
+                } else {
+                    format!("{what}: {message}")
+                };
                 return Err(RpcFailure {
-                    class,
-                    message: format!("{what}: {message}"),
+                    class: final_class,
+                    message: detail,
                     attempts: attempt,
                     provider: provider.label().to_string(),
                 });
@@ -701,9 +727,35 @@ impl Rpc {
         limit: usize,
         before: Option<Signature>,
     ) -> BotResult<Vec<SignatureInfo>> {
+        self.signatures_for_address_range(address, limit, before, None)
+            .await
+    }
+
+    /// Newest signatures back to (but excluding) `until`. Unlike `before`,
+    /// an `until` cursor asks for transactions newer than the saved signature.
+    pub async fn signatures_for_address_until(
+        &self,
+        address: &Pubkey,
+        limit: usize,
+        until: Option<Signature>,
+    ) -> BotResult<Vec<SignatureInfo>> {
+        self.signatures_for_address_range(address, limit, None, until)
+            .await
+    }
+
+    /// One newest-first page, bounded by exclusive `before` and `until`
+    /// signatures. `before` moves to older pages; `until` is the saved lower
+    /// boundary. The provider may still truncate or omit history.
+    pub async fn signatures_for_address_range(
+        &self,
+        address: &Pubkey,
+        limit: usize,
+        before: Option<Signature>,
+        until: Option<Signature>,
+    ) -> BotResult<Vec<SignatureInfo>> {
         let config = RpcSignaturesForAddressConfig {
             before: before.map(|s| s.to_string()),
-            until: None,
+            until: until.map(|s| s.to_string()),
             limit: Some(limit.clamp(1, 1000)),
             commitment: Some(self.commitment),
             min_context_slot: None,
@@ -713,11 +765,15 @@ impl Rpc {
                 c.get_signatures_for_address_with_config(address, to_get_confirmed(&config))
             })
             .await?;
-        Ok(raw
-            .into_iter()
-            .filter_map(|s| {
-                let signature = s.signature.parse::<Signature>().ok()?;
-                Some(SignatureInfo {
+        // A malformed signature must not turn a full provider page into an
+        // apparently short page: a polling consumer could mistake that for
+        // the end of history and advance its cursor over unseen entries.
+        raw.into_iter()
+            .map(|s| {
+                let signature = s.signature.parse::<Signature>().map_err(|_| {
+                    BotError::rpc("getSignaturesForAddress returned a malformed signature")
+                })?;
+                Ok(SignatureInfo {
                     signature,
                     slot: s.slot,
                     err: s.err.as_ref().map(|e| e.to_string()),
@@ -725,7 +781,7 @@ impl Rpc {
                     memo: s.memo,
                 })
             })
-            .collect())
+            .collect()
     }
 
     /// Full transaction with base64 encoding + versioned-transaction support.
@@ -826,10 +882,26 @@ impl Rpc {
             max_retries: Some(0),
             min_context_slot: None,
         };
-        self.retry_classified("sendTransaction", |c| {
-            c.send_transaction_with_config(tx, config)
-        })
-        .await
+        let returned = self
+            .retry_classified("sendTransaction", |c| {
+                c.send_transaction_with_config(tx, config)
+            })
+            .await?;
+        // The endpoint cannot choose the identity of the transaction we
+        // signed. If it returns a different signature, our bytes may still
+        // have been forwarded: do not confirm a foreign transaction or mark
+        // our own attempt as a definite failure.
+        if tx.signatures.first() != Some(&returned) {
+            return Err(RpcFailure {
+                class: RpcErrorClass::Transport,
+                message: "sendTransaction: response signature differs from signed transaction; delivery uncertain".into(),
+                // The generic retry helper does not expose success metadata.
+                // One is a lower bound; the responding provider is unknown.
+                attempts: 1,
+                provider: "unknown".into(),
+            });
+        }
+        Ok(returned)
     }
 
     /// Poll until the signature is confirmed/finalised or the deadline passes.
@@ -862,7 +934,17 @@ impl Rpc {
                 return Ok(ConfirmOutcome::Timeout);
             }
             match self.get_transaction(signature).await {
-                Ok(Some(tx)) => return Ok(outcome_from_transaction(&tx)),
+                Ok(Some(tx))
+                    if transaction_matches_signature(&tx, signature)
+                        && tx.transaction.meta.is_some() =>
+                {
+                    return Ok(outcome_from_transaction(&tx));
+                }
+                Ok(Some(_)) => {
+                    // Missing metadata, invalid bytes/signatures or a mismatched
+                    // identity is not evidence of success or expiry.
+                    tokio::time::sleep(poll).await;
+                }
                 Ok(None) => {
                     if let Some(lvbh) = last_valid_block_height {
                         let due = last_height_check
@@ -875,13 +957,32 @@ impl Rpc {
                                     // Double-check: the tx may have landed in
                                     // one of the last valid blocks and only
                                     // just become visible.
-                                    if let Ok(Some(tx)) = self.get_transaction(signature).await {
-                                        return Ok(outcome_from_transaction(&tx));
+                                    match self.get_transaction(signature).await {
+                                        Ok(Some(tx))
+                                            if transaction_matches_signature(&tx, signature)
+                                                && tx.transaction.meta.is_some() =>
+                                        {
+                                            return Ok(outcome_from_transaction(&tx));
+                                        }
+                                        Ok(Some(_)) => {
+                                            // Seen without metadata: never call it expired.
+                                            tokio::time::sleep(poll).await;
+                                            continue;
+                                        }
+                                        Ok(None) => {
+                                            return Ok(ConfirmOutcome::Expired {
+                                                last_valid_block_height: lvbh,
+                                                block_height: height,
+                                            });
+                                        }
+                                        Err(error) => {
+                                            // An unavailable second observation is not a
+                                            // negative observation. Preserve ambiguity.
+                                            debug!(%error, "expiry double-check failed");
+                                            tokio::time::sleep(poll).await;
+                                            continue;
+                                        }
                                     }
-                                    return Ok(ConfirmOutcome::Expired {
-                                        last_valid_block_height: lvbh,
-                                        block_height: height,
-                                    });
                                 }
                             }
                         }
@@ -1031,22 +1132,40 @@ impl Rpc {
 }
 
 /// Map a fetched transaction onto the confirmation outcome.
+fn transaction_matches_signature(
+    tx: &EncodedConfirmedTransactionWithStatusMeta,
+    signature: &Signature,
+) -> bool {
+    let Some(decoded) = tx.transaction.transaction.decode() else {
+        return false;
+    };
+    decoded.sanitize().is_ok()
+        && decoded.signatures.first() == Some(signature)
+        && decoded.verify_and_hash_message().is_ok()
+}
+
 fn outcome_from_transaction(tx: &EncodedConfirmedTransactionWithStatusMeta) -> ConfirmOutcome {
-    let err = tx
-        .transaction
-        .meta
-        .as_ref()
-        .and_then(|m| m.err.as_ref().map(|e| e.to_string()));
-    let logs = match tx.transaction.meta.as_ref().map(|m| m.log_messages.clone()) {
-        Some(solana_transaction_status::option_serializer::OptionSerializer::Some(l)) => l,
+    // An observed transaction with absent execution metadata does not prove
+    // successful execution. Leave it ambiguous for later reconciliation.
+    let Some(meta) = tx.transaction.meta.as_ref() else {
+        return ConfirmOutcome::Timeout;
+    };
+    let logs = match &meta.log_messages {
+        solana_transaction_status::option_serializer::OptionSerializer::Some(logs) => logs.clone(),
         _ => Vec::new(),
     };
+    // `status` is deprecated upstream but a contradictory error must never
+    // be interpreted as success. Either error indication fails closed.
+    let err = meta.err.as_ref().or_else(|| meta.status.as_ref().err());
     match err {
-        Some(e) => ConfirmOutcome::Failed { error: e, logs },
+        Some(error) => ConfirmOutcome::Failed {
+            error: error.to_string(),
+            logs,
+        },
         None => ConfirmOutcome::Confirmed {
             slot: tx.slot,
             logs,
-            fee: tx.transaction.meta.as_ref().map(|m| m.fee).unwrap_or(0),
+            fee: meta.fee,
         },
     }
 }
@@ -1310,6 +1429,41 @@ mod tests {
     }
 
     #[test]
+    fn missing_transaction_metadata_is_never_a_confirmed_fill() {
+        let tx: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_value(json!({
+            "slot": 123,
+            "transaction": ["", "base64"],
+            "meta": null,
+            "blockTime": null
+        }))
+        .unwrap();
+        let outcome = outcome_from_transaction(&tx);
+        assert!(matches!(outcome, ConfirmOutcome::Timeout), "{outcome:?}");
+        assert!(outcome.is_ambiguous());
+    }
+
+    #[test]
+    fn contradictory_transaction_status_is_not_success() {
+        let tx: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_value(json!({
+            "slot": 123,
+            "transaction": ["", "base64"],
+            "meta": {
+                "err": null,
+                "status": {"Err": {"InstructionError": [0, {"Custom": 1}]}},
+                "fee": 5000,
+                "preBalances": [],
+                "postBalances": []
+            },
+            "blockTime": null
+        }))
+        .unwrap();
+        assert!(matches!(
+            outcome_from_transaction(&tx),
+            ConfirmOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
     fn confirm_outcome_summary_is_human_readable() {
         assert!(ConfirmOutcome::Confirmed {
             slot: 5,
@@ -1484,6 +1638,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_retry_preserves_ambiguous_first_provider_after_blockhash_rejection() {
+        let dead = spawn_black_hole().await;
+        let (reject, hits) = spawn_scripted(vec![(
+            "200 OK",
+            r#"{"jsonrpc":"2.0","error":{"code":-32002,"message":"BlockhashNotFound"},"id":1}"#,
+        )])
+        .await;
+        let rpc = Rpc::with_urls(
+            dead,
+            String::new(),
+            vec![reject],
+            CommitmentConfig::confirmed(),
+            2,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let error = rpc
+            .send_transaction_classified(&VersionedTransaction::default())
+            .await
+            .unwrap_err();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(error.attempts, 2);
+        assert_eq!(error.class, RpcErrorClass::Transport);
+        assert!(error.message.contains("delivery uncertain"));
+    }
+
+    #[tokio::test]
+    async fn send_rejects_mismatched_response_signature_as_ambiguous() {
+        let expected = Signature::from([1u8; 64]);
+        let returned = Signature::from([2u8; 64]);
+        let body: &'static str = Box::leak(
+            format!(r#"{{"jsonrpc":"2.0","result":"{returned}","id":1}}"#).into_boxed_str(),
+        );
+        let (url, hits) = spawn_scripted(vec![("200 OK", body)]).await;
+        let rpc = Rpc::with_urls(
+            url,
+            String::new(),
+            Vec::new(),
+            CommitmentConfig::confirmed(),
+            0,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let tx = VersionedTransaction {
+            signatures: vec![expected],
+            ..VersionedTransaction::default()
+        };
+        let error = rpc.send_transaction_classified(&tx).await.unwrap_err();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(error.class, RpcErrorClass::Transport);
+        assert!(
+            error.message.contains("mismatched signature")
+                || error.message.contains("signature differs"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_accepts_matching_response_signature() {
+        let expected = Signature::from([3u8; 64]);
+        let body: &'static str = Box::leak(
+            format!(r#"{{"jsonrpc":"2.0","result":"{expected}","id":1}}"#).into_boxed_str(),
+        );
+        let (url, _) = spawn_scripted(vec![("200 OK", body)]).await;
+        let rpc = Rpc::with_urls(
+            url,
+            String::new(),
+            Vec::new(),
+            CommitmentConfig::confirmed(),
+            0,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let tx = VersionedTransaction {
+            signatures: vec![expected],
+            ..VersionedTransaction::default()
+        };
+        assert_eq!(
+            rpc.send_transaction_classified(&tx).await.unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn send_http_rate_limit_is_uncertain_not_definite_rejection() {
+        let (url, _) = spawn_scripted(vec![("429 Too Many Requests", "{}")]).await;
+        let rpc = Rpc::with_urls(
+            url,
+            String::new(),
+            Vec::new(),
+            CommitmentConfig::confirmed(),
+            0,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let error = rpc
+            .send_transaction_classified(&VersionedTransaction::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.class, RpcErrorClass::Transport);
+        assert!(error.message.contains("delivery uncertain"));
+    }
+
+    #[tokio::test]
     async fn permanent_errors_are_not_retried() {
         let (url, hits) = spawn_scripted(vec![(
             "200 OK",
@@ -1557,6 +1815,151 @@ mod tests {
             .unwrap();
         assert!(refreshed.fetched_at > first.fetched_at);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn confirmation_retries_when_metadata_is_initially_missing() {
+        use solana_sdk::{
+            signature::{Keypair, Signer},
+            transaction::Transaction,
+        };
+        let payer = Keypair::new();
+        let ix = solana_system_interface::instruction::transfer(
+            &payer.pubkey(),
+            &Pubkey::new_unique(),
+            1,
+        );
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&payer.pubkey()),
+            &[&payer],
+            Hash::new_unique(),
+        );
+        let signature = tx.signatures[0];
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&tx).unwrap());
+        let reply = |meta| {
+            json!({"jsonrpc":"2.0","result":{"slot":55,"transaction":[encoded,"base64"],"meta":meta,"blockTime":null},"id":1}).to_string()
+        };
+        let missing: &'static str = Box::leak(reply(serde_json::Value::Null).into_boxed_str());
+        let success: &'static str = Box::leak(reply(json!({"err":null,"status":{"Ok":null},"fee":5000,"preBalances":[],"postBalances":[]})).into_boxed_str());
+        let (url, hits) = spawn_scripted(vec![("200 OK", missing), ("200 OK", success)]).await;
+        let rpc = Rpc::with_urls(
+            url,
+            String::new(),
+            Vec::new(),
+            CommitmentConfig::confirmed(),
+            0,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let outcome = rpc
+            .confirm(
+                &signature,
+                Duration::from_secs(2),
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ConfirmOutcome::Confirmed { slot: 55, .. }),
+            "{outcome:?}"
+        );
+        assert!(hits.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn confirmation_rejects_unrelated_or_tampered_rpc_transaction() {
+        use solana_sdk::{
+            signature::{Keypair, Signer},
+            transaction::Transaction,
+        };
+        let payer = Keypair::new();
+        let ix = solana_system_interface::instruction::transfer(
+            &payer.pubkey(),
+            &Pubkey::new_unique(),
+            1,
+        );
+        let signed = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&payer.pubkey()),
+            &[&payer],
+            Hash::new_unique(),
+        );
+        let signature = signed.signatures[0];
+        let reply = |tx: &Transaction| {
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(bincode::serialize(tx).unwrap());
+            Box::leak(json!({"jsonrpc":"2.0","result":{"slot":55,"transaction":[encoded,"base64"],"meta":{"err":null,"status":{"Ok":null},"fee":5000,"preBalances":[],"postBalances":[]},"blockTime":null},"id":1}).to_string().into_boxed_str()) as &'static str
+        };
+        let (url, _) = spawn_scripted(vec![("200 OK", reply(&signed))]).await;
+        let rpc = Rpc::with_urls(
+            url,
+            String::new(),
+            Vec::new(),
+            CommitmentConfig::confirmed(),
+            0,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let outcome = rpc
+            .confirm(
+                &Signature::default(),
+                Duration::from_millis(100),
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ConfirmOutcome::Timeout), "{outcome:?}");
+        let mut tampered = signed;
+        tampered.message.instructions[0].data[4] ^= 1;
+        let (url, _) = spawn_scripted(vec![("200 OK", reply(&tampered))]).await;
+        let rpc = Rpc::with_urls(
+            url,
+            String::new(),
+            Vec::new(),
+            CommitmentConfig::confirmed(),
+            0,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let outcome = rpc
+            .confirm(
+                &signature,
+                Duration::from_millis(100),
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ConfirmOutcome::Timeout), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn failed_expiry_double_check_remains_ambiguous() {
+        let (url, _) = spawn_scripted(vec![
+            ("200 OK", r#"{"jsonrpc":"2.0","result":null,"id":1}"#),
+            ("200 OK", r#"{"jsonrpc":"2.0","result":1000,"id":1}"#),
+            ("200 OK", r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"provider temporarily unavailable"},"id":1}"#),
+        ]).await;
+        let rpc = Rpc::with_urls(
+            url,
+            String::new(),
+            Vec::new(),
+            CommitmentConfig::confirmed(),
+            0,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let outcome = rpc
+            .confirm_tracked(
+                &Signature::default(),
+                Some(900),
+                Duration::from_millis(200),
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ConfirmOutcome::Timeout), "{outcome:?}");
     }
 
     #[tokio::test]

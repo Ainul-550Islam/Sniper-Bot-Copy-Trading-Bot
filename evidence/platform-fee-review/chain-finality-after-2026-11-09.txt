@@ -1,0 +1,33 @@
+=== GREEN: chain finality depth on top of the existence check ===
+--- reservation chain check (existence + depth) ---
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.52s
+
+chain_check_exit=0
+--- chain module unit tests ---
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 986 filtered out; finished in 0.01s
+
+recon_chain_unit_exit=0
+--- reservation sweep / api surface ---
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 985 filtered out; finished in 0.00s
+
+recon_lib_exit=0
+    user_session_management
+    vault_live_transit
+    webhook_delivery
+accounting_api_exit=101
+--- clippy / fmt / diff ---
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 2m 18s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0
+-- note: an earlier line named a test target that does not exist (`--test accounting_api`, exit 101 = no such target); the real router/reservation targets are run here --
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s
+
+openapi_router_exit=0
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 956 filtered out; finished in 1.30s
+
+api_lib_exit=0

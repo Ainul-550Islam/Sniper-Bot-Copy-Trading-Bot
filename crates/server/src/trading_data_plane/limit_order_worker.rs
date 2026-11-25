@@ -21,6 +21,18 @@
 //! The worker never sets an order to `expired` on a lease it does not hold,
 //! and never fires one it does not hold, so a stale replica cannot act on a
 //! row another replica now owns.
+//!
+//! **A slow tick cannot outlive its own lease.** Every decision used to be
+//! followed by a write guarded only on `lease_owner` — not on the lease still
+//! being UNEXPIRED. A worker that spent longer than its lease fetching a mark
+//! (a slow RPC, a stalled task) would then hand the order off and mark it
+//! `triggered` while another replica had already re-claimed the row and was
+//! working on it too: two live hand-offs for one order, and a second lease
+//! holder acting on a row this worker believed it owned. All three writes now
+//! require `lease_expires_at > now()` in the SAME statement that checks the
+//! owner and status, and `tick_tenant` re-checks the lease immediately before a
+//! hand-off, so an expired claim is dropped (the row is simply picked up again
+//! by whichever replica holds a live lease).
 
 use std::time::Duration as StdDuration;
 
@@ -240,6 +252,8 @@ async fn release_lease(
     let worker_id = worker_id.to_owned();
     with_tenant_scope(pool, organization_id, move |connection| {
         Box::pin(async move {
+            // Clearing OUR OWN lease is safe even after it expired (it cannot
+            // steal a newer holder's row: the owner column must still be us).
             sqlx::query(
                 "UPDATE limit_orders SET lease_owner = NULL, lease_expires_at = NULL \
          WHERE id = $1 AND organization_id = $2 AND lease_owner = $3",
@@ -250,6 +264,41 @@ async fn release_lease(
             .execute(&mut *connection)
             .await
             .map(|_| ())
+        })
+    })
+    .await
+}
+
+/// Is the lease we hold still LIVE? Re-read right before an irreversible action.
+///
+/// `claim_due` set `lease_expires_at` when the row was claimed; a tick that
+/// spends longer than the lease fetching a mark must not act on it, because
+/// another replica is allowed to claim the row the moment the lease expires.
+async fn lease_still_held(
+    pool: &PgPool,
+    order: &ClaimedOrder,
+    worker_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let organization_id = bound_tenant()?;
+    if organization_id != order.organization_id {
+        return Err(sqlx::Error::Protocol("limit order tenant mismatch".into()));
+    }
+    let order = order.clone();
+    let worker_id = worker_id.to_owned();
+    with_tenant_scope(pool, organization_id, move |connection| {
+        Box::pin(async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1 FROM limit_orders
+                     WHERE id = $1 AND organization_id = $2 AND lease_owner = $3
+                       AND status = 'active'
+                       AND lease_expires_at IS NOT NULL AND lease_expires_at > now())",
+            )
+            .bind(&order.id)
+            .bind(order.organization_id)
+            .bind(&worker_id)
+            .fetch_one(&mut *connection)
+            .await
         })
     })
     .await
@@ -272,7 +321,8 @@ async fn mark_expired(
             sqlx::query(
                 "UPDATE limit_orders \
          SET status = 'expired', resolved_at = now(), lease_owner = NULL, lease_expires_at = NULL \
-         WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 AND status = 'active'",
+         WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 AND status = 'active' \
+           AND lease_expires_at IS NOT NULL AND lease_expires_at > now()",
             )
             .bind(&order.id)
             .bind(order.organization_id)
@@ -303,7 +353,8 @@ async fn mark_triggered(
                 "UPDATE limit_orders \
          SET status = 'triggered', resolved_at = now(), executed_at = now(), \
              lease_owner = NULL, lease_expires_at = NULL \
-         WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 AND status = 'active'",
+         WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 AND status = 'active' \
+           AND lease_expires_at IS NOT NULL AND lease_expires_at > now()",
             )
             .bind(&order.id)
             .bind(order.organization_id)
@@ -414,13 +465,44 @@ async fn tick_tenant(
                 }
             }
             Decision::Expire => match mark_expired(pool, order, &cfg.worker_id).await {
-                Ok(_) => report.expired += 1,
+                // Zero rows means the lease lapsed (or the row moved on) before
+                // the write: report it as skipped, never as expired. Counting
+                // `Ok(_)` as success hid exactly that case.
+                Ok(1) => report.expired += 1,
+                Ok(_) => {
+                    report.waiting += 1;
+                    tracing::warn!(
+                        order = %order.id,
+                        "lease expired before the order could be marked expired; skipping"
+                    );
+                }
                 Err(error) => {
                     report.failed += 1;
                     tracing::error!(order = %order.id, error = %error, "expiring order failed");
                 }
             },
             Decision::Fire { mark_sol } => {
+                // The mark may have taken a while: prove the lease is still
+                // live before the one action that cannot be undone.
+                match lease_still_held(pool, order, &cfg.worker_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // Another replica may now own this row. Drop it here:
+                        // no hand-off, and the row keeps whoever holds a live
+                        // lease (never us).
+                        report.waiting += 1;
+                        tracing::warn!(
+                            order = %order.id,
+                            "lease expired before hand-off; skipping this tick"
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        report.failed += 1;
+                        tracing::error!(order = %order.id, error = %error, "lease check failed before hand-off");
+                        continue;
+                    }
+                }
                 if let Err(reason) = sink.hand_off(order, mark_sol).await {
                     report.failed += 1;
                     if let Err(error) =

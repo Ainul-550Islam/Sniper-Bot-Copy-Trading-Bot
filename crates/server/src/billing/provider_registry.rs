@@ -146,19 +146,29 @@ mod tests {
         }
     }
 
+    /// The registry is where "which provider may we actually bill through" is
+    /// decided, so its resolution is checked on every run instead of behind
+    /// `#[ignore]`: unconfigured must be an explicit error, never a fallback.
     #[test]
-    #[ignore]
-    fn live_stripe_requires_real_keys() {
-        let live = std::env::var("LIVE_BILLING").unwrap_or_default() == "1"
-            && std::env::var("STRIPE_API_KEY")
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
-        assert!(
-            live,
-            "live registry test requires LIVE_BILLING=1 and STRIPE_API_KEY"
-        );
-        let adapter =
-            registry_for(BillingProviderKind::Stripe).expect("live stripe must be configured");
-        assert_eq!(adapter.provider_name(), "stripe");
+    fn registry_resolves_stripe_only_when_configured() {
+        let key = std::env::var("STRIPE_API_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        match key {
+            Some(_) => {
+                let adapter = registry_for(BillingProviderKind::Stripe)
+                    .expect("a configured stripe key must resolve in the registry");
+                assert_eq!(adapter.provider_name(), "stripe");
+            }
+            None => {
+                assert!(
+                    matches!(
+                        registry_for(BillingProviderKind::Stripe),
+                        Err(RegistryError::NotConfigured(_))
+                    ),
+                    "the registry must refuse stripe loudly when nothing is configured"
+                );
+            }
+        }
     }
 }

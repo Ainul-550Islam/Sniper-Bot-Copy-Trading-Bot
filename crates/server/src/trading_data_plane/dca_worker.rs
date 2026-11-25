@@ -124,8 +124,15 @@ pub async fn claim_due(
 
 /// Record the due slot as one atomic unit under the lease we hold.
 ///
-/// The lease owner check is repeated inside every write, so a replica whose
-/// lease expired mid-tick writes nothing.
+/// Every write repeats the FULL fence: the lease owner, `status = 'active'` and
+/// an unexpired lease, all in the same statement. Requiring the owner alone was
+/// not enough — a worker that was still busy when the operator paused or
+/// cancelled the schedule (`dca::transition` refuses to write while a LIVE lease
+/// exists, so the transition lands in exactly this window) used to record an
+/// intent and charge the budget anyway, and a worker whose lease had lapsed kept
+/// matching its own stale owner row and could still mark the schedule
+/// `completed`. With the fence, both fall through to
+/// [`RunOutcome::AlreadyRecorded`]: nothing is written and nothing is charged.
 pub async fn record_slot(
     pool: &PgPool,
     schedule: &DueSchedule,
@@ -140,16 +147,26 @@ pub async fn record_slot(
     with_tenant_scope(pool, organization_id, move |connection| Box::pin(async move {
     let remaining = (schedule.budget_sol - schedule.spent_sol).max(0.0);
     if remaining <= 0.0 {
-        sqlx::query(
+        // Only OUR live lease may close the schedule. A zero-row write means the
+        // row is paused/cancelled or the lease lapsed, so nothing was closed and
+        // the honest outcome is "nothing recorded", not "budget exhausted".
+        let closed = sqlx::query(
             "UPDATE dca_schedules SET status = 'completed', lease_owner = NULL, lease_expires_at = NULL \
-             WHERE id = $1 AND organization_id = $2 AND lease_owner = $3",
+             WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 \
+               AND status = 'active' AND lease_expires_at IS NOT NULL \
+               AND lease_expires_at > now()",
         )
         .bind(&schedule.id)
         .bind(schedule.organization_id)
         .bind(worker_id)
         .execute(&mut *connection)
-        .await?;
-        return Ok(RunOutcome::BudgetExhausted);
+        .await?
+        .rows_affected();
+        return Ok(if closed == 1 {
+            RunOutcome::BudgetExhausted
+        } else {
+            RunOutcome::AlreadyRecorded
+        });
     }
 
     // One statement: intent insert + spend + clock advance. If the insert hits
@@ -161,6 +178,8 @@ pub async fn record_slot(
                     LEAST(d.amount_per_run_sol, d.budget_sol - d.spent_sol), 'intent' \
              FROM dca_schedules d \
              WHERE d.id = $1 AND d.organization_id = $2 AND d.lease_owner = $3 \
+               AND d.status = 'active' \
+               AND d.lease_expires_at IS NOT NULL AND d.lease_expires_at > now() \
                AND d.budget_sol - d.spent_sol > 0 \
              ON CONFLICT (schedule_id, slot_at) DO NOTHING \
              RETURNING amount_sol) \
@@ -174,7 +193,8 @@ pub async fn record_slot(
                            THEN 'completed' ELSE d.status END, \
              lease_owner = NULL, lease_expires_at = NULL, attempts = 0 \
          FROM ins \
-         WHERE d.id = $1 AND d.lease_owner = $3 \
+         WHERE d.id = $1 AND d.lease_owner = $3 AND d.status = 'active' \
+           AND d.lease_expires_at IS NOT NULL AND d.lease_expires_at > now() \
          RETURNING ins.amount_sol::float8 AS amount_sol, d.status",
     )
     .bind(&schedule.id)
@@ -189,9 +209,15 @@ pub async fn record_slot(
             completed: row.get::<String, _>("status") == "completed",
         }),
         None => {
+            // Nothing to record: the slot lost the race, the schedule was
+            // paused/cancelled, or our lease lapsed. Release the lease only if
+            // we still hold a LIVE one — a stale owner row must be left to the
+            // replica that owns it now.
             sqlx::query(
                 "UPDATE dca_schedules SET lease_owner = NULL, lease_expires_at = NULL \
-                 WHERE id = $1 AND organization_id = $2 AND lease_owner = $3",
+                 WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 \
+                   AND status = 'active' AND lease_expires_at IS NOT NULL \
+                   AND lease_expires_at > now()",
             )
             .bind(&schedule.id)
             .bind(schedule.organization_id)
@@ -205,6 +231,11 @@ pub async fn record_slot(
 }
 
 /// Record a failed tick for one schedule and release the lease.
+///
+/// Same fence as every other write: only the holder of a LIVE lease on an
+/// `active` schedule may count an attempt. Note that an expired lease is
+/// therefore never charged — the replica that holds the row now owns its
+/// attempt count, and `claim_due` already refuses rows at `MAX_ATTEMPTS`.
 pub async fn record_failure(
     pool: &PgPool,
     schedule: &DueSchedule,
@@ -224,7 +255,9 @@ pub async fn record_failure(
             sqlx::query(
                 "UPDATE dca_schedules SET attempts = attempts + 1, last_error = $4, \
              lease_owner = NULL, lease_expires_at = NULL \
-         WHERE id = $1 AND organization_id = $2 AND lease_owner = $3",
+         WHERE id = $1 AND organization_id = $2 AND lease_owner = $3 \
+           AND status = 'active' AND lease_expires_at IS NOT NULL \
+           AND lease_expires_at > now()",
             )
             .bind(&schedule.id)
             .bind(schedule.organization_id)

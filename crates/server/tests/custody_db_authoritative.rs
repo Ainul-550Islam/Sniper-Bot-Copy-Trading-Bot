@@ -68,6 +68,7 @@ async fn test_state(db: Arc<Database>) -> ApiState {
         trusted_proxies: Default::default(),
         db: Some(db),
         journal: None,
+        chain_probe: None,
         serve_dashboard: false,
         health: Arc::new(HealthRegistry::new()),
         metrics_enabled: false,

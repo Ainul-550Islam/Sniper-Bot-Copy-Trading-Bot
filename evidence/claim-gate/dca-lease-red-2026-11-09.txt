@@ -1,0 +1,16 @@
+=== RED: a paused/cancelled schedule and a lapsed DCA lease were still written ===
+-- injection: every DCA write fences on lease_owner only; the budget branch reports exhausted regardless of rows affected --
+test a_paused_or_expired_schedule_cannot_be_recorded_by_a_stale_worker ... FAILED
+
+failures:
+
+--
+thread 'a_paused_or_expired_schedule_cannot_be_recorded_by_a_stale_worker' (2260565) panicked at crates/server/tests/dca_lease_pg.rs:156:17:
+a paused schedule records nothing, got Recorded { amount_sol: 0.25, completed: false }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+--
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p sniper-suite --test dca_lease_pg`

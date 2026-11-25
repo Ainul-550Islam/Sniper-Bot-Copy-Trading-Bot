@@ -84,6 +84,13 @@ services:
       POSTGRES_APP_URL: postgres://sniper_app:${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
       POSTGRES_SYSTEM_URL: postgres://sniper_system:${POSTGRES_SYSTEM_PASSWORD:?set POSTGRES_SYSTEM_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
       POSTGRES_DDL_URL: postgres://${POSTGRES_USER:-sniper}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-sniper}
+    volumes:
+      # Same read-only config the bot uses: CONFIG_PATH above points inside the
+      # image, and config.toml is a local (gitignored) file, so without this
+      # mount the migration step reads a path that does not exist. The file is
+      # created by ./scripts/bootstrap-config.sh (make init) before the stack
+      # starts, which `make up` enforces.
+      - ./config.toml:/app/config.toml:ro
 
   redis:
     # redis:7-alpine — pinned by digest (P0 §7)

@@ -1,0 +1,19 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 50.98s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-1f0c8b6f1343d7af)
+
+running 1 test
+
+thread 'accounting::ledger::tests::detected_pending_conflict_blocks_further_local_booking' (555569) panicked at crates/core/src/accounting/ledger.rs:857:9:
+assertion failed: matches!(first.submit(later).await, Applied::Rejected(_))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test accounting::ledger::tests::detected_pending_conflict_blocks_further_local_booking ... FAILED
+
+failures:
+
+failures:
+    accounting::ledger::tests::detected_pending_conflict_blocks_further_local_booking
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 687 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p bot-core --lib`

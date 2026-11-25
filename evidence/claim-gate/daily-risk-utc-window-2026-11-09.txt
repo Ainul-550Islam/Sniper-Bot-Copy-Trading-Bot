@@ -1,0 +1,41 @@
+Daily risk UTC window real PostgreSQL regression, 2026-11-09 in user timezone.
+Before: cargo test -p bot-core --test positions_cross_tenant_pg daily_risk_pnl_excludes_future_utc_days --locked -j 1 -- --exact --nocapture with POSTGRES_URL configured. It failed as expected: today loss -5 plus future profit 100 yielded Known(95), incorrectly offsetting the loss.
+After: cargo test -p bot-core --test positions_cross_tenant_pg --locked -j 1 -- --test-threads=1 with POSTGRES_URL configured. Five tests passed; the new test checks future profit and future unknown PnL do not alter today result. The fix bounds closed_at to the half-open current UTC day, consistent with the completeness query. Full workspace post-fix: evidence/claim-gate/workspace-daily-risk-2026-11-09.txt.
+
+--- Before ---
+    Finished `test` profile [unoptimized] target(s) in 1m 43s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-f14adad0c49ec3b9)
+
+running 1 test
+
+thread 'daily_risk_pnl_excludes_future_utc_days' (156836) panicked at crates/core/tests/positions_cross_tenant_pg.rs:650:5:
+assertion `left == right` failed
+  left: Known(95.0)
+ right: Known(-5.0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test daily_risk_pnl_excludes_future_utc_days ... FAILED
+
+failures:
+
+failures:
+    daily_risk_pnl_excludes_future_utc_days
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.21s
+
+error: test failed, to rerun pass `-p bot-core --test positions_cross_tenant_pg`
+EXIT=101
+--- After ---
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 7.95s
+     Running tests/positions_cross_tenant_pg.rs (target/debug/deps/positions_cross_tenant_pg-f14adad0c49ec3b9)
+
+running 5 tests
+test cross_tenant_position_id_collision_cannot_mutate ... ok
+test daily_risk_pnl_excludes_future_utc_days ... ok
+test polymarket_risk_oracle_counts_orders_and_fails_closed_on_unprojected_fills ... ok
+test positions_trades_balances_isolation_and_pnl_exclusion ... ok
+test risk_exposure_fails_closed_when_positions_use_an_unexpected_quote_unit ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+EXIT=0

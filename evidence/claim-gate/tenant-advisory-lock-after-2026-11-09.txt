@@ -1,0 +1,25 @@
+=== GREEN: tenant advisory locks use the 64-bit two-key form (gap #69) ===
+
+-- tenant_advisory_lock_pg (real PostgreSQL, brute-forced 32-bit collision) --
+test the_two_key_lock_uses_the_full_64_bit_pair ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+-- consumers (recovery sweep, intent/journal PG suites) --
+intents_cross_tenant_pg: test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+execution_cross_tenant_pg: test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
+orders_cross_tenant_pg: test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+-- core lib (tenant_lock unit tests) --
+test db::tenant_lock::tests::lock_scope_builds_the_equivalent_query_scope ... ok
+test db::tenant_lock::tests::keys_are_tenant_and_purpose_scoped ... ok
+test db::tenant_lock::tests::the_first_key_is_derived_from_the_tenant_and_a_namespace_prefix ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 714 filtered out; finished in 0.00s
+test result: ok. 717 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.88s
+
+-- clippy -D warnings --
+    Checking bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `dev` profile [unoptimized] target(s) in 1m 42s
+
+-- fmt --
+fmt_exit=0
+diff_check_exit=0

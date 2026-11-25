@@ -1,0 +1,21 @@
+Manual source-reading log, 2026-11-09 in user timezone.
+Scope: every line of these five listed file versions was read during this pass. Read does not mean every behavior was tested, proven correct, or safe; other files remain unreviewed. The hashes identify the reviewed versions.
+
+6a4613df54405aec7d93a8e4fc41c5dc2b2784b1499d5b196dd77a271a5d9d5a  crates/core/src/db/claims.rs
+1091 crates/core/src/db/claims.rs
+9aec7b807fd9b12c21e1323eb9c9be8738a17e9d93d006ca52fff17830a28946  crates/module-copy/src/event_dedup.rs
+256 crates/module-copy/src/event_dedup.rs
+06e8c09de9b8d027c6fdfa842a0b12bbe618f27e7f82aad8b45f91e3285811eb  crates/module-copy/src/tenant_context.rs
+213 crates/module-copy/src/tenant_context.rs
+df21b7b356f29559c56b5d607709ef0ab6fcdcbe1de0b1d00a49c014a99297fd  crates/module-copy/src/tenant_state.rs
+233 crates/module-copy/src/tenant_state.rs
+f48b019c90d4ba5f159ee8bc8c5b2aa80bf50dc8ae91feef7bc5ad48825ef3ca  crates/module-copy/tests/two_replica_mirror.rs
+422 crates/module-copy/tests/two_replica_mirror.rs
+
+claims.rs: checked acquire, renew, verify, release, flags, risk queries and shape tests. The daily sum lacked an upper bound; real-Postgres failing and passing regression is recorded in daily-risk-utc-window-2026-11-09.txt. The Polymarket fill completeness check still has no upper bound on f.ts and can conservatively report incomplete for an unprojected future-dated fill. Not a complete concurrency proof.
+
+event_dedup.rs: checked key construction, local/shared claim, already_seen, seed and tests; tenant-scoping collision remains open, evidenced by tenant-shared-redis-witness-2026-11-09.txt.
+
+tenant_context.rs and tenant_state.rs: checked adapter, local keys, bounded state and tests; corrected overbroad comments. Underlying shared event/position paths remain open and are not guaranteed isolated by these local structs.
+
+two_replica_mirror.rs: read all test harness and assertions; deterministic notification gate checks connection count and claim lineage. Corrected comment to avoid saying a position assertion exists. The test does not establish live broadcasts or exactly-once after release.

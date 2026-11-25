@@ -1,0 +1,119 @@
+=== batch6 manifest contract ===
+   Compiling solana-rpc-client v2.3.13
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 4m 00s
+     Running tests/batch6_transaction_readiness.rs (target/debug/deps/batch6_transaction_readiness-a57bdce4531e7ab4)
+
+running 12 tests
+test api_compatibility_matrix_exists_and_lists_endpoints ... ok
+test api_matrix_covers_websocket_deprecated_query ... ok
+test env_registry_distinguishes_secret_vs_non_secret ... ok
+test env_registry_exists_and_covers_required_vars ... ok
+test evidence_crosswalk_exists_and_maps_claims ... ok
+test package_completeness_buyer_rules_and_manifest ... ok
+test all_25_batch6_docs_exist ... ok
+test sbom_license_crosswalk_files_exist ... ok
+test third_party_inventory_and_compliance_docs_crosswalk ... ok
+test webhook_matrix_distinguishes_fixture_vs_live ... ok
+test webhook_matrix_exists_and_covers_hmac_idempotency ... ok
+test release_manifest_counts_and_version_are_current ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+batch6_exit=0
+=== workspace clippy ===
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 2m 58s
+workspace_clippy_exit=0
+=== fmt + diff ===
+fmt_exit=0
+diff_check_exit=0
+=== make gates ===
+forbid-fake-data: no forbidden production literals found
+verify-migration-graph: 78 contiguous migrations; operator and tenant strategy tables are separated
+verify-script-modes: OK — every tracked *.sh has index mode 100755.
+PASS  required files present (70 checked)
+PASS  migrations contiguous 0001..0078 present
+PASS  version identity: VERSION == release-manifest.json == Cargo.toml (0.1.0)
+PASS  manifest docs_count (168) == actual docs/*.md (168)
+PASS  hygiene: no .env / logs / dumps / keypairs / pem files (build output present but correctly excluded: target/(generated, .gitignore'd, excluded from package) apps/control-plane/.next/(generated, .gitignore'd, excluded from package))
+PASS  junk path absent: .cargo/env
+PASS  junk path absent: .config/solana/install/config.yml
+PASS  junk path absent: run-part2.sh
+PASS  junk path absent: run-tests.out
+PASS  STATS control-plane page count matches 74
+PASS  all relative markdown links resolve (README.md + docs/*.md)
+PASS  no zero-width / bidi-override characters in markdown
+PASS  no tracked junk (toolchain, agent dumps, sandbox state, duplicate audits)
+PASS  single canonical SBOM: sbom.json is CycloneDX with components, no duplicate
+----------------------------------------
+tree: 53301 files (excluding .git), 14409827422 bytes
+verify-delivery: 14 PASS / 0 FAIL
+check-openapi-coverage: scope = /api/** (saas + tenant + operator)
+  registered scoped routes : 193
+  documented scoped paths  : 194
+check-openapi-coverage: OK — every scoped route is documented and every documented scoped path is routed.
+check-routes-vs-ui: declared server/UI route pairs are present
+check-routes-vs-ui: OpenAPI <-> frontend gate
+  frontend /api/ literals scanned : 185
+  scoped OpenAPI paths            : 187
+check-routes-vs-ui: OK — every frontend API path is documented and every
+  scoped OpenAPI path is referenced by the frontend (except the UI_EXEMPT list).
+scan-secrets: working-tree findings=0 ignored[xxxx-run]=0 ignored[ignore-word]=1
+[helm-image-contract] PASS — digest-only image contract holds (helm template: NOT_RUN, helm not installed)
+test_external_registry_tests_preserve_failure_status (test_ci_failure_contract.CiFailureContract.test_external_registry_tests_preserve_failure_status) ... ok
+test_release_jobs_do_not_silently_select_a_different_rust (test_ci_failure_contract.CiFailureContract.test_release_jobs_do_not_silently_select_a_different_rust) ... ok
+test_truthfulness_gate_accepts_a_fully_scanned_clean_tree (test_ci_failure_contract.CiFailureContract.test_truthfulness_gate_accepts_a_fully_scanned_clean_tree) ... ok
+test_truthfulness_gate_refuses_an_unscannable_production_target (test_ci_failure_contract.CiFailureContract.test_truthfulness_gate_refuses_an_unscannable_production_target) ... ok
+test_truthfulness_gate_still_rejects_a_forbidden_literal (test_ci_failure_contract.CiFailureContract.test_truthfulness_gate_still_rejects_a_forbidden_literal) ... ok
+test_every_local_cargo_patch_is_copied_into_rust_builder (test_container_build_contract.ContainerBuildContract.test_every_local_cargo_patch_is_copied_into_rust_builder) ... ok
+test_frontend_context_excludes_host_dependencies_and_secrets (test_container_build_contract.ContainerBuildContract.test_frontend_context_excludes_host_dependencies_and_secrets) ... ok
+test_frontend_runtime_uses_stable_numeric_identity (test_container_build_contract.ContainerBuildContract.test_frontend_runtime_uses_stable_numeric_identity) ... ok
+test_runtime_healthcheck_is_exec_form (test_container_build_contract.ContainerBuildContract.test_runtime_healthcheck_is_exec_form) ... ok
+test_rust_image_build_uses_the_committed_lockfile (test_container_build_contract.ContainerBuildContract.test_rust_image_build_uses_the_committed_lockfile) ... ok
+test_tls_bind_sources_resolve_from_the_base_compose_directory (test_container_build_contract.ContainerBuildContract.test_tls_bind_sources_resolve_from_the_base_compose_directory) ... ok
+test_playwright_reports_do_not_change_product_measurement (test_manifest_artifact_contract.ManifestArtifactContract.test_playwright_reports_do_not_change_product_measurement) ... ok
+test_playwright_test_results_do_not_change_product_measurement (test_manifest_artifact_contract.ManifestArtifactContract.test_playwright_test_results_do_not_change_product_measurement) ... ok
+test_real_source_is_still_measured (test_manifest_artifact_contract.ManifestArtifactContract.test_real_source_is_still_measured) ... ok
+test_one_shot_certificate_issuance_overrides_the_renewal_entrypoint (test_tls_bootstrap_contract.TlsBootstrapContract.test_one_shot_certificate_issuance_overrides_the_renewal_entrypoint) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.400s
+
+OK
+SKIP  hadolint not installed (set HADOLINT_BIN to run this section)
+SKIP  docker compose CLI not installed (set COMPOSE_BIN to run this section)
+== live registry manifest lookup
+library/debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251    digest   200  yes    OK
+library/nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10     digest   200  yes    OK
+library/node@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c      digest   200  yes    OK
+library/postgres:16-alpine                                                                tag      200  yes    OK
+library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea  digest   200  yes    OK
+library/redis:7-alpine                                                                    tag      200  yes    OK
+library/redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499     digest   200  yes    OK
+library/rust@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e      digest   200  yes    OK
+9 distinct image references (7 digest-pinned, 2 tag-only), 0 failure(s)
+NOTE: no image was built and no container was run — this verifies the base images against the live registries only.
+PASS  image digests resolve in the live registry
+----------------------------------------
+container_assets_live: PASS (no image built, no container run — by design)
+[claims-test] 1/2 — the real tree must pass the claim gate
+verify-marketing-claims: OK (buyer-facing scope) — no unsupported claims.
+[claims-test] real tree: OK
+[claims-test] 2/2 — the gate must reject a planted unsupported claim
+[claims-test] planted banned phrases rejected — the gate fails closed as required
+[claims-test] PASS — real tree clean and the gate is proven to reject violations
+  note: tests/release/stats_current.sh and manifest_current.sh are the
+        release step's job (they recheck docs/STATS.md and
+        release-manifest.json after scripts/generate-stats.sh /
+        update-release-manifest.sh run); tests/release/buyer_*.sh need the
+        generated buyer-release/ tree, which is not in this repository.
+  note: container_assets_live.sh uses hadolint + docker compose + the live
+        registry when they are installed and prints SKIP (not a failure)
+        for each section it cannot run. It never builds an image.
+make_gates_exit=0

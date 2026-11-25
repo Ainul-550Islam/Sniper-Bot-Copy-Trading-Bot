@@ -1,0 +1,32 @@
+COMMAND: cargo test -p solana-kit --lib confirmed_fee::tests --locked -j 1
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 16.58s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 3 tests
+test confirmed_fee::tests::refuses_missing_or_failed_execution_metadata ... ok
+test confirmed_fee::tests::rejects_tampered_transaction_even_when_primary_signature_is_unchanged ... ok
+test confirmed_fee::tests::verifies_exact_direct_transfer_and_rejects_mismatch ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 486 filtered out; finished in 0.00s
+
+COMMAND: cargo test -p module-copy --test copy_platform_fee --locked -j 1
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+   Compiling module-sniper v0.1.0 (/home/user/repo/crates/module-sniper)
+    Finished `test` profile [unoptimized] target(s) in 24.93s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-85ff6589a8b0fe0c)
+
+running 8 tests
+test buy_and_sell_prepare_atomic_sol_transfer_and_audit ... ok
+test built_signed_transaction_contains_fee_transfer_for_buy_and_sell ... ok
+test dust_and_disabled_are_audited_without_instruction ... ok
+test invalid_jupiter_account_is_audited_as_rejected_for_each_actor ... ok
+test invalid_vault_cannot_silently_drop_a_due_fee ... ok
+test jupiter_fee_account_must_be_initialized_wsol_token_account ... ok
+test real_copy_curve_pipeline_builds_fee_leg_for_buy_and_sell_on_mock_rpc ... ok
+test curve_pipeline_skips_disabled_and_dust_fees_without_fee_transfer ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+EXIT=0

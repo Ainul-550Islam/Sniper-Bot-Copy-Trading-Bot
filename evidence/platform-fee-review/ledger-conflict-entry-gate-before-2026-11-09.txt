@@ -1,0 +1,21 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 52.42s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-91f5a164e5b4183e)
+
+running 3 tests
+test global_risk::engine::ledger_conflict_tests::healthy_ledger_still_permits_entries_without_configured_limits ... ok
+test global_risk::engine::ledger_conflict_tests::an_unavailable_journal_alone_is_not_treated_as_a_proven_conflict ... ok
+
+thread 'global_risk::engine::ledger_conflict_tests::proven_journal_conflict_fails_closed_on_all_entry_paths' (597160) panicked at crates/core/src/global_risk/engine.rs:1276:9:
+ok
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test global_risk::engine::ledger_conflict_tests::proven_journal_conflict_fails_closed_on_all_entry_paths ... FAILED
+
+failures:
+
+failures:
+    global_risk::engine::ledger_conflict_tests::proven_journal_conflict_fails_closed_on_all_entry_paths
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 689 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p bot-core --lib`

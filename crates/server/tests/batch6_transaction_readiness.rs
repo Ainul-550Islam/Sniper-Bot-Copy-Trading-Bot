@@ -328,9 +328,13 @@ fn all_25_batch6_docs_exist() {
     // 2026-11-03: 167 -> 168 — EMAIL-DELIVERY.md documents the explicit
     // opt-in outbox dispatcher/provider setup; keep the test pin aligned
     // with the generated release-manifest docs_files count.
+    // 2026-11-09: 168 -> 169 — OPEN-REMAINING.md is the machine-generated,
+    // never-hand-edited list of every still-open item in
+    // GAP-MISSING-FILES.md, so the count of what is left cannot drift from
+    // the table it is derived from.
     assert_eq!(
-        count, 168,
-        "docs/*.md should equal the current document count (168)"
+        count, 169,
+        "docs/*.md should equal the current document count (169)"
     );
 }
 
@@ -364,6 +368,69 @@ fn release_manifest_counts_and_version_are_current() {
                 .unwrap_or(false)
         })
         .count();
+    // The remaining-work inventory must list EVERY row of the gap table:
+    // a row (whatever its status) that cannot be found in the inventory doc
+    // means work was silently dropped from the deliverable.
+    let gap = std::fs::read_to_string(format!("{root}/GAP-MISSING-FILES.md")).unwrap();
+    let inventory = std::fs::read_to_string(format!("{root}/docs/OPEN-REMAINING.md")).unwrap();
+    let csv = std::fs::read_to_string(format!("{root}/docs/GAP-INVENTORY.csv")).unwrap();
+    let mut counted = 0usize;
+    for line in gap.lines() {
+        let line = line.trim();
+        if !line.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<&str> = line
+            .trim_matches('|')
+            .split('|')
+            .map(|c| c.trim())
+            .collect();
+        if cells.len() < 2 {
+            continue;
+        }
+        let (name, status) = (cells[0], cells[1]);
+        if name.eq_ignore_ascii_case("area")
+            || name.eq_ignore_ascii_case("work item")
+            || status.eq_ignore_ascii_case("status")
+            || status.is_empty()
+            || status.chars().all(|c| c == '-' || c == ' ' || c == ':')
+        {
+            continue;
+        }
+        counted += 1;
+        assert!(
+            inventory.contains(name),
+            "gap row is missing from docs/OPEN-REMAINING.md: {name}"
+        );
+        assert!(
+            csv.contains(name),
+            "gap row is missing from docs/GAP-INVENTORY.csv: {name}"
+        );
+    }
+    // Every row lands in an explicit section, so the four buckets must add up.
+    let mut sections = 0usize;
+    for marker in [
+        "## ২. OPEN",
+        "## ৩. PARTIAL",
+        "## ৪. অন্যান্য",
+        "## ৭. পরিপূর্ণ সারণি",
+    ] {
+        assert!(
+            inventory.contains(marker),
+            "inventory lost the section marker {marker}"
+        );
+        sections += 1;
+    }
+    assert_eq!(sections, 4);
+    assert!(
+        counted >= 130,
+        "the gap table should hold every tracked item, found {counted}"
+    );
+    assert!(
+        inventory.contains(&format!("সব {counted} টি সারি")),
+        "the appendix must state the exact number of rows it lists"
+    );
+
     assert_eq!(v["docs_files"].as_u64().unwrap() as usize, docs);
     assert_eq!(v["rust_files"].as_u64().unwrap() as usize, rust);
     assert_eq!(v["migrations"].as_u64().unwrap() as usize, migrations);

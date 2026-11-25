@@ -1,0 +1,36 @@
+=== batch6 manifest contract ===
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+batch6_exit=0
+=== openapi artifact lockstep ===
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+openapi_artifact_exit=0
+=== workspace clippy -D warnings ===
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 4m 00s
+workspace_clippy_exit=0
+fmt_exit=0
+diff_check_exit=0
+=== make gates ===
+        generated buyer-release/ tree, which is not in this repository.
+  note: container_assets_live.sh uses hadolint + docker compose + the live
+        registry when they are installed and prints SKIP (not a failure)
+        for each section it cannot run. It never builds an image.
+make_gates_exit=0
+=== verify-delivery ===
+tree: 53579 files (excluding .git), 12786993954 bytes
+verify-delivery: 14 PASS / 0 FAIL
+verify_delivery_exit=0
+
+=== post-docs/manifest recheck ===
+batch6_exit=0 (12/12)
+make_gates_exit=0
+verify-delivery: 14 PASS / 0 FAIL
+verify_delivery_exit=0
+diff_check_exit=0
+snapshot_manifest=2049 files
+repo_recovery_patch=17487865 bytes (0 untracked)

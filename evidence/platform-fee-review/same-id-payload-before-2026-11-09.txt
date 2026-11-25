@@ -1,0 +1,12 @@
+=== RED: a same-id DIFFERENT-payload durable row is booked as a plain duplicate ===
+-- injected: the journal's 'already booked' answer is trusted without comparing payloads --
+test accounting::ledger::tests::a_durable_row_with_different_economics_names_the_diverging_fields ... FAILED
+test accounting::ledger::tests::direct_durable_payload_conflict_latches_the_local_fence ... FAILED
+test accounting::ledger::tests::journal_that_already_holds_the_fact_makes_it_a_duplicate ... FAILED
+test accounting::ledger::tests::the_conflict_report_carries_both_sides_and_the_latch_stays_set ... FAILED
+thread 'accounting::ledger::tests::a_durable_row_with_different_economics_names_the_diverging_fields' (3742689) panicked at crates/core/src/accounting/ledger.rs:1136:13:
+thread 'accounting::ledger::tests::direct_durable_payload_conflict_latches_the_local_fence' (3742697) panicked at crates/core/src/accounting/ledger.rs:1673:9:
+assertion failed: matches!(second.submit(conflicting).await, Applied::Rejected(_))
+thread 'accounting::ledger::tests::journal_that_already_holds_the_fact_makes_it_a_duplicate' (3742701) panicked at crates/core/src/accounting/ledger.rs:1707:9:
+assertion failed: matches!(second.submit(altered_replay).await, Applied::Rejected(_))
+thread 'accounting::ledger::tests::the_conflict_report_carries_both_sides_and_the_latch_stays_set' (3742711) panicked at crates/core/src/accounting/ledger.rs:1159:9:

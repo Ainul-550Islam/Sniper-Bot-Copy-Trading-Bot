@@ -427,11 +427,43 @@ impl TenantSniperExecutor {
         signers: Option<Arc<solana_kit::signer::SignerRegistry>>,
         execution: TenantExecutionContext,
     ) -> BotResult<Self> {
+        Self::new_with_fence(
+            state,
+            rpc,
+            wallet,
+            signers,
+            execution,
+            solana_kit::tenant_broadcast_guard::LivenessProbes::default(),
+        )
+        .await
+    }
+
+    /// Build with a LIVE runtime fence attached to the broadcast guard (see the
+    /// copy executor's twin). A runtime rotated after construction is refused at
+    /// the last gate instead of broadcasting its next entry or exit.
+    pub async fn new_with_fence(
+        state: Shared,
+        rpc: Rpc,
+        wallet: Arc<Wallet>,
+        signers: Option<Arc<solana_kit::signer::SignerRegistry>>,
+        execution: TenantExecutionContext,
+        liveness: solana_kit::tenant_broadcast_guard::LivenessProbes,
+    ) -> BotResult<Self> {
         let context = SniperTenantContext::adapt(execution.clone())
             .map_err(|e| BotError::invalid(e.to_string()))?;
         let signing = TenantSigningContext::new(execution);
-        let guard = TenantBroadcastGuard::new(signing.clone(), wallet.pubkey)
+        let mut guard = TenantBroadcastGuard::new(signing.clone(), wallet.pubkey)
             .map_err(|e| BotError::invalid(e.to_string()))?;
+        if !liveness.is_empty() {
+            guard = guard.with_liveness(liveness);
+        }
+        // Pin the signer key this executor can actually sign with, so a key
+        // rotated under an unchanged `key_ref` is caught at the next broadcast.
+        if let Some(registry) = signers.as_ref() {
+            if let Some(signer) = registry.get(signing.signer_identity()) {
+                guard = guard.with_expected_signer_key(signer.pubkey());
+            }
+        }
         let sniper = Sniper::new(state, rpc, wallet, signers)
             .await?
             .with_tenant_context(Arc::new(guard))?;
@@ -599,7 +631,7 @@ impl TenantSniperExecutor {
             if let Err(error) = persisted {
                 outcome.rejection = Some(crate::pipeline::Rejection::new(
                     crate::pipeline::RejectReason::ExecutionUnavailable,
-                    outcome.stage.clone(),
+                    outcome.stage,
                     format!("tenant position persistence failed: {error}"),
                 ));
                 self.sniper

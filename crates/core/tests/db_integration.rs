@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use bot_core::config::DatabaseConfig;
 use bot_core::db::repo::{
-    AuditRepo, CheckpointRepo, ConfigVersionRepo, DedupRepo, IdempotencyRepo, IntentRecord,
-    IntentRepo, OrderRepo, PositionRepo, ReconRepo, RiskEventRepo, SystemEventRepo, TradeRepo,
-    TransactionRepo, WalletRepo,
+    AuditRepo, BroadcastReservationRepo, CheckpointRepo, ConfigVersionRepo, DedupRepo,
+    IdempotencyRepo, IntentRecord, IntentRepo, OrderRepo, PositionRepo, ReconRepo, RiskEventRepo,
+    SystemEventRepo, TradeRepo, TransactionRepo, WalletRepo,
 };
 use bot_core::db::Database;
 use bot_core::models::{
@@ -174,6 +174,85 @@ async fn dedup_first_arrival_is_exactly_once_across_processes() {
     let idem = IdempotencyRepo::new(db.clone());
     assert!(idem.try_consume("webhook", &run).await.expect("consume"));
     assert!(!idem.try_consume("webhook", &run).await.expect("consume2"));
+}
+
+/// Gap: dedup TTL was advisory, not enforced.
+///
+/// `dedup_keys.expires_at` was only consulted by `cleanup_expired`, which runs on
+/// an hourly leased worker. Until that worker happened to run, `exists()` and a
+/// re-`mark()` treated an EXPIRED key as still seen, so a dedup window of 60 s
+/// behaved like "until the next hourly cleanup" — up to an hour. The TTL now
+/// gates the two read paths directly (and `mark` reclaims an expired row), so
+/// the window is the window; cleanup becomes pure garbage collection.
+///
+/// The cleanup assertion below is the other half: a key whose window expired is
+/// still READ as new, so cleanup deleting it (or not yet having deleted it) can
+/// never change a decision.
+#[tokio::test]
+async fn an_expired_dedup_key_stops_gating_reads_and_marks() {
+    let Some(db) = setup().await else { return };
+    let run = run_id();
+    let repo = DedupRepo::new(db.clone());
+
+    // A key with a live window is definitive.
+    assert!(repo
+        .mark("sig", &run, Duration::from_secs(3600))
+        .await
+        .expect("mark live"));
+    assert!(repo.exists("sig", &run).await.expect("exists live"));
+    assert!(
+        !repo
+            .mark("sig", &run, Duration::from_secs(3600))
+            .await
+            .expect("remark live"),
+        "a live key is still a duplicate"
+    );
+
+    // Age it past its window without running maintenance. No cleanup runs here:
+    // the row is physically present and expired at the same time.
+    sqlx::query(
+        "UPDATE dedup_keys SET expires_at = now() - INTERVAL '1 second' \
+          WHERE namespace = 'sig' AND key = $1",
+    )
+    .bind(&run)
+    .execute(db.pool())
+    .await
+    .expect("expire the row");
+
+    assert!(
+        !repo.exists("sig", &run).await.expect("exists expired"),
+        "an expired key must not be reported as seen"
+    );
+    assert!(
+        repo.mark("sig", &run, Duration::from_secs(3600))
+            .await
+            .expect("remark expired"),
+        "an expired key must be reclaimable, not a permanent duplicate"
+    );
+    // And the re-claim really reset the row (one row, not two).
+    let rows: Vec<(i64,)> =
+        sqlx::query_as("SELECT count(*) FROM dedup_keys WHERE namespace = 'sig' AND key = $1")
+            .bind(&run)
+            .fetch_all(db.pool())
+            .await
+            .expect("count");
+    assert_eq!(rows[0].0, 1, "reclaiming updates the row in place");
+
+    // clean neither decides anything.
+    assert!(repo
+        .mark("sig", &format!("{run}-zero"), Duration::ZERO)
+        .await
+        .expect("mark zero"));
+    assert!(
+        repo.exists("sig", &format!("{run}-zero"))
+            .await
+            .expect("exists zero"),
+        "a zero TTL means no expiry, and that is the only indefinite case"
+    );
+    repo.forget("sig", &run).await.expect("forget");
+    repo.forget("sig", &format!("{run}-zero"))
+        .await
+        .expect("forget zero");
 }
 
 #[tokio::test]
@@ -497,11 +576,24 @@ async fn reconciliation_queue_claim_backoff_and_giveup() {
     // Enqueue is idempotent.
     repo.enqueue("transaction", &run).await.expect("enqueue2");
 
-    let claimed = repo.claim_due(50).await.expect("claim");
+    // The reconciliation queue is DEPLOYMENT-WIDE, so a single `claim_due(50)`
+    // may legitimately return fifty older items and never reach this test's
+    // subject — that is queue order, not a defect. (The full workspace sweep hit
+    // exactly that: other suites' due items filled the page and this assertion
+    // failed on a database that was not empty.) Drain in bounded batches until
+    // the subject appears or the queue is empty; that is what "claimable" means.
+    let mut claimed = Vec::new();
+    for _ in 0..8 {
+        let batch = repo.claim_due(200).await.expect("claim");
+        claimed.extend(batch);
+        if claimed.iter().any(|i| i.subject == run) {
+            break;
+        }
+    }
     let mine = claimed.iter().find(|i| i.subject == run);
     assert!(mine.is_some(), "due item claimed");
     // Second claim while in_progress + not due: nothing for this subject.
-    let again = repo.claim_due(50).await.expect("claim2");
+    let again = repo.claim_due(200).await.expect("claim2");
     assert!(!again.iter().any(|i| i.subject == run));
 
     repo.fail("transaction", &run, "boom").await.expect("fail");
@@ -852,6 +944,153 @@ async fn startup_reconcile_reports_unresolved_claims() {
     assert!(report.total_unresolved() >= 1);
 }
 
+/// A recon pass over a REAL queue reports what it actually recorded.
+///
+/// The pass used to swallow queue-write failures, so an operator reading
+/// `resolved` could not tell "the venue confirmed it and the queue says so" from
+/// "the venue confirmed it and the write failed". With a healthy database the
+/// honest numbers are: the resolved claim counted once, nothing unrecorded, and
+/// the queue itself shows the claim resolved.
+#[tokio::test]
+async fn a_recon_pass_reports_what_it_actually_recorded() {
+    let Some(db) = setup().await else { return };
+    let run = run_id();
+    use bot_core::recovery::{ReconVerdict, RecoveryWorker, TruthSource};
+
+    struct Confirms;
+    #[async_trait::async_trait]
+    impl TruthSource for Confirms {
+        fn kind(&self) -> &str {
+            "transaction"
+        }
+        async fn resolve(&self, _subject: &str) -> ReconVerdict {
+            ReconVerdict::Resolved {
+                status: "confirmed".into(),
+            }
+        }
+    }
+
+    let recon = ReconRepo::new(db.clone());
+    let sig = format!("recon-recorded-{run}");
+    recon.enqueue("transaction", &sig).await.expect("enqueue");
+
+    let mut worker = RecoveryWorker::new(db.clone(), bot_core::lifecycle::Shutdown::new());
+    worker.register(std::sync::Arc::new(Confirms));
+
+    // `claim_due` is FIFO by `next_attempt_at`, so on the shared sweep database
+    // (which carries other suites' pending claims) a freshly enqueued claim is
+    // not in the first batch. Run passes until THIS subject is handled — that is
+    // what the worker does in production anyway.
+    let mut resolved_passes = 0usize;
+    let mut unrecorded = 0usize;
+    let mut claimed = 0usize;
+    for _ in 0..64 {
+        let stats = worker.run_once(16).await;
+        claimed += stats.claimed;
+        resolved_passes += stats.resolved;
+        unrecorded += stats.unrecorded;
+        if !recon
+            .is_active("transaction", &sig)
+            .await
+            .expect("is_active")
+        {
+            break;
+        }
+    }
+    assert!(claimed >= 1, "claims must be processed");
+    assert!(
+        resolved_passes >= 1,
+        "a confirmed claim is recorded as resolved"
+    );
+    assert_eq!(unrecorded, 0, "a healthy queue records every outcome");
+
+    // ITS OWN row: the queue agrees this subject is no longer active.
+    assert!(
+        !recon
+            .is_active("transaction", &sig)
+            .await
+            .expect("is_active"),
+        "the recorded claim must not still be active"
+    );
+    let row: (String, i32) = sqlx::query_as(
+        "SELECT status, attempts FROM reconciliation_state WHERE kind = 'transaction' AND subject = $1",
+    )
+    .bind(&sig)
+    .fetch_one(db.pool())
+    .await
+    .expect("row");
+    assert_eq!(row.0, "resolved", "the durable row says resolved");
+}
+
+/// A claim that exhausted its attempts while stuck in `in_progress` must end up
+/// visible in the operator queue, not invisible forever.
+///
+/// `claim_due` stops handing out a claim once `attempts >= max_attempts`. If a
+/// worker dies between claiming and recording — or the recording write fails —
+/// the row stays `in_progress`: not due (never claimed again) and not `failed`
+/// (never listed). Nothing but this sweep can surface it.
+#[tokio::test]
+async fn an_exhausted_claim_is_parked_for_the_operator() {
+    let Some(db) = setup().await else { return };
+    let run = run_id();
+    use bot_core::recovery::{startup_reconcile, RecoveryWorker};
+
+    let recon = ReconRepo::new(db.clone());
+    let subject = format!("exhausted-{run}");
+    recon
+        .enqueue("transaction", &subject)
+        .await
+        .expect("enqueue");
+    // Simulate the daemon dying after the claim reached its limit.
+    sqlx::query(
+        "UPDATE reconciliation_state
+            SET status = 'in_progress', attempts = max_attempts, last_error = NULL
+          WHERE kind = 'transaction' AND subject = $1",
+    )
+    .bind(&subject)
+    .execute(db.pool())
+    .await
+    .expect("stranded claim");
+
+    // Sanity: the row is stranded (in_progress) — i.e. it IS "active" to the
+    // operator surface, which is exactly why it was invisible.
+    assert!(
+        recon
+            .is_active("transaction", &subject)
+            .await
+            .expect("active"),
+        "sanity: a stranded claim is still in_progress"
+    );
+    let parked = recon
+        .park_exhausted_in_progress()
+        .await
+        .expect("park exhausted");
+    assert!(parked >= 1, "the stranded claim must be parked");
+
+    let status: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, last_error FROM reconciliation_state WHERE kind = 'transaction' AND subject = $1",
+    )
+    .bind(&subject)
+    .fetch_one(db.pool())
+    .await
+    .expect("row");
+    assert_eq!(status.0, "failed", "an exhausted claim is an operator item");
+    assert!(
+        status
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("without a recorded outcome"),
+        "the reason must say why, got {:?}",
+        status.1
+    );
+    // Idempotent: a second sweep parks nothing new for this row.
+    recon.park_exhausted_in_progress().await.expect("again");
+    let worker = RecoveryWorker::new(db.clone(), bot_core::lifecycle::Shutdown::new());
+    let report = startup_reconcile(&worker, 4, Duration::from_secs(1)).await;
+    assert!(report.passes >= 1);
+}
+
 // ---------------------------------------------------------------------------
 // Intent journal (write-ahead, crash point C) + cross-replica attempt truth
 // ---------------------------------------------------------------------------
@@ -927,7 +1166,19 @@ async fn intent_journal_lifecycle_and_orphan_sweep() {
         !orphans.iter().any(|o| o.intent_id == format!("i2-{run}")),
         "abandoned intents are not orphans"
     );
-    assert!(repo.list_orphaned(ancient, 500).await.unwrap().is_empty());
+    // Scoped to THIS run: `ancient` must have no orphan from this test. The sweep
+    // runs against one shared database, where pending intents from other tests
+    // legitimately exist — asserting the global list is empty was wrong and only
+    // passed while nothing else had left a pending intent behind.
+    assert!(
+        !repo
+            .list_orphaned(ancient, 500)
+            .await
+            .unwrap()
+            .iter()
+            .any(|o| o.intent_id.contains(&run)),
+        "no intent from this run predates the cutoff"
+    );
 
     // The sweep enqueues `intent` claims for orphans (never resubmits them).
     let swept = bot_core::recovery::sweep_orphan_intents(&db, Duration::from_secs(0)).await;
@@ -2050,4 +2301,218 @@ impl bot_core::accounting::LedgerStore for TestLedgerStore {
     ) -> Option<Vec<bot_core::accounting::AccountingFinding>> {
         self.0.recent_findings(limit as i64).await.ok()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Durable pre-broadcast reservations (0079) — exactly-one-owner semantics
+// ---------------------------------------------------------------------------
+
+fn reservation_intent(id: &str, trade_key: &str) -> IntentRecord {
+    IntentRecord {
+        intent_id: id.to_string(),
+        module: "copy".into(),
+        symbol: trade_key.to_string(),
+        wallet: "Wallet1111".into(),
+        side: "buy".into(),
+        qty: "1000".into(),
+        status: "pending".into(),
+        signature: None,
+        created_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn broadcast_reservation_grants_exactly_one_owner_and_fences_the_stale_one() {
+    let Some(db) = setup().await else { return };
+    let repo = BroadcastReservationRepo::new(db.clone());
+    let trade = format!("copy:wallet:mint-{}", run_id());
+    let rec_a = reservation_intent(&format!("{trade}#a"), &trade);
+
+    // First owner wins.
+    let a = repo
+        .reserve(&trade, "owner-a", &rec_a, 600)
+        .await
+        .expect("reserve must succeed");
+    assert!(a.fresh, "the first attempt must own the trade");
+    assert_eq!(a.epoch, 1);
+
+    // A second attempt for the SAME logical trade loses.
+    let rec_b = reservation_intent(&format!("{trade}#b"), &trade);
+    let b = repo
+        .reserve(&trade, "owner-b", &rec_b, 600)
+        .await
+        .expect("losing a reservation is not an error");
+    assert!(!b.fresh, "a live reservation must refuse a second owner");
+    assert_eq!(b.owner, "owner-a");
+    assert_eq!(b.epoch, 1);
+
+    // The holder can heartbeat; a stale epoch cannot.
+    assert!(repo
+        .heartbeat(&trade, "owner-a", 1, 600)
+        .await
+        .expect("heartbeat"));
+    assert!(!repo
+        .heartbeat(&trade, "owner-a", 99, 600)
+        .await
+        .expect("heartbeat"));
+
+    // Terminal completion by the true owner; a replay is a no-op.
+    assert!(repo
+        .complete(&trade, "SIG-1", "owner-a", 1)
+        .await
+        .expect("complete"));
+    assert!(!repo
+        .complete(&trade, "SIG-1", "owner-a", 1)
+        .await
+        .expect("complete replay"));
+    let (holder, epoch, status) = repo.get(&trade).await.unwrap().expect("row");
+    assert_eq!(
+        (holder.as_str(), epoch, status.as_str()),
+        ("owner-a", 1, "linked")
+    );
+
+    // A linked trade can never be re-reserved: the outcome is known.
+    let again = repo
+        .reserve(&trade, "owner-c", &reservation_intent("x", &trade), 600)
+        .await
+        .unwrap();
+    assert!(!again.fresh, "a linked trade must stay closed");
+}
+
+#[tokio::test]
+async fn broadcast_reservation_takeover_bumps_the_epoch_and_fences_the_old_owner() {
+    let Some(db) = setup().await else { return };
+    let repo = BroadcastReservationRepo::new(db.clone());
+    let trade = format!("copy:wallet:lapsed-{}", run_id());
+    // A reservation whose lease is already over (1 s lease, then wait it out).
+    let a = repo
+        .reserve(&trade, "owner-a", &reservation_intent("i-a", &trade), 1)
+        .await
+        .unwrap();
+    assert!(a.fresh);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(
+        repo.list_lapsed(10)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|(k, _, _)| k == &trade)
+            .count(),
+        1,
+        "the lapsed reservation must be visible to operators"
+    );
+
+    // Takeover by a second owner.
+    let b = repo
+        .reserve(&trade, "owner-b", &reservation_intent("i-b", &trade), 600)
+        .await
+        .unwrap();
+    assert!(b.fresh, "a lapsed lease must be takeable");
+    assert_eq!(b.epoch, 2, "takeover must bump the fencing token");
+    assert_eq!(b.owner, "owner-b");
+
+    // The previous owner is fenced out of every mutation.
+    assert!(!repo
+        .complete(&trade, "SIG-stale", "owner-a", 1)
+        .await
+        .unwrap());
+    assert!(!repo.abandon(&trade, "owner-a", 1).await.unwrap());
+    assert!(!repo.heartbeat(&trade, "owner-a", 1, 600).await.unwrap());
+    let (holder, epoch, status) = repo.get(&trade).await.unwrap().unwrap();
+    assert_eq!(
+        (holder.as_str(), epoch, status.as_str()),
+        ("owner-b", 2, "reserved")
+    );
+}
+
+/// Gap #78: the operator view of ambiguous broadcast attempts must SHOW the
+/// ones that just lapsed. The old oldest-first `LIMIT` filled the page with
+/// ancient rows, so a freshly lapsed (and most actionable) reservation was
+/// invisible no matter how often the operator asked.
+#[tokio::test]
+async fn lapsed_reservation_view_reaches_a_freshly_lapsed_attempt() {
+    let Some(db) = setup().await else { return };
+    let repo = BroadcastReservationRepo::new(db.clone());
+    // An "ancient" lapsed reservation, then the freshly lapsed one.
+    let old = format!("copy:wallet:ancient-{}", run_id());
+    let fresh = format!("copy:wallet:fresh-{}", run_id());
+    assert!(
+        repo.reserve(&old, "owner-a", &reservation_intent("i-old", &old), 1)
+            .await
+            .unwrap()
+            .fresh
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(
+        repo.reserve(&fresh, "owner-a", &reservation_intent("i-fresh", &fresh), 1)
+            .await
+            .unwrap()
+            .fresh
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    // A one-row page must deliver the NEWEST lapse, and the walk must reach
+    // every lapsed row — including the ancient one — without duplicates.
+    let page = repo.lapsed_page(1, None).await.expect("lapsed_page");
+    assert!(
+        page.items.len() <= 1,
+        "the page size is honoured, got {}",
+        page.items.len()
+    );
+    assert_eq!(
+        page.items.first().map(|(k, _, _)| k.clone()),
+        Some(fresh.clone()),
+        "the freshest lapse is what an operator sees first"
+    );
+    assert!(page.has_more, "an older lapsed row still exists");
+    assert!(page.total_remaining >= 2);
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = None;
+    for _ in 0..64 {
+        let page = repo.lapsed_page(2, cursor.clone()).await.expect("page");
+        if page.items.is_empty() {
+            break;
+        }
+        seen.extend(page.items.iter().map(|(k, _, _)| k.clone()));
+        cursor = page.next_cursor.clone();
+        if !page.has_more {
+            break;
+        }
+    }
+    assert!(seen.contains(&fresh), "the fresh attempt is reachable");
+    assert!(seen.contains(&old), "and so is the ancient one");
+    let mut deduped = seen.clone();
+    deduped.sort();
+    deduped.dedup();
+    assert_eq!(deduped.len(), seen.len(), "no row is served twice");
+}
+
+#[tokio::test]
+async fn broadcast_reservation_abandon_frees_the_key_for_a_retry() {
+    let Some(db) = setup().await else { return };
+    let repo = BroadcastReservationRepo::new(db.clone());
+    let trade = format!("copy:wallet:retry-{}", run_id());
+    let a = repo
+        .reserve(&trade, "owner-a", &reservation_intent("i-a", &trade), 600)
+        .await
+        .unwrap();
+    assert!(a.fresh);
+    assert!(repo.abandon(&trade, "owner-a", a.epoch).await.unwrap());
+    // A provably-never-broadcast attempt frees the key.
+    let b = repo
+        .reserve(&trade, "owner-b", &reservation_intent("i-b", &trade), 600)
+        .await
+        .unwrap();
+    assert!(b.fresh, "an abandoned reservation must allow a retry");
+    assert_eq!(
+        b.epoch,
+        a.epoch + 1,
+        "a re-opened key is a NEW claim with a higher fencing epoch"
+    );
+    // The abandoned owner is fenced out of the revived claim.
+    assert!(!repo
+        .complete(&trade, "SIG-late", "owner-a", a.epoch)
+        .await
+        .unwrap());
 }

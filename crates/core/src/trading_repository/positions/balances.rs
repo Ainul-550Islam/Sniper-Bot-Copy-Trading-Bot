@@ -64,7 +64,7 @@ impl TenantBalanceRepo {
         row.try_get::<i64, _>("id").map_err(RepositoryError::from)
     }
 
-    /// The LATEST snapshot per (address, asset) of the acting tenant —
+    /// The LATEST snapshot per (chain, address, asset) of the acting tenant —
     /// the reconciler's current-truth view. Never returns another
     /// tenant's rows.
     pub async fn latest_per_asset(
@@ -76,10 +76,10 @@ impl TenantBalanceRepo {
             .timed(
                 "tenant_balances_latest",
                 sqlx::query(
-                    r#"SELECT DISTINCT ON (address, asset) *
+                    r#"SELECT DISTINCT ON (chain, address, asset) *
                          FROM balance_snapshots
                         WHERE organization_id = $1
-                        ORDER BY address, asset, ts DESC"#,
+                        ORDER BY chain, address, asset, ts DESC, id DESC"#,
                 )
                 .bind(scope.organization_id().as_uuid())
                 .fetch_all(self.db.pool()),
@@ -124,7 +124,8 @@ impl TenantBalanceRepo {
 
     /// USD-equivalent aggregate of the acting tenant's latest
     /// snapshots (tenant-safe SUM — the constraint is in the SQL, not a
-    /// post-load filter).
+    /// post-load filter). Returns None for no snapshots or any unvalued
+    /// latest snapshot, rather than presenting a partial sum as a total.
     pub async fn total_usd_latest(
         &self,
         scope: &TradingQueryScope,
@@ -134,12 +135,14 @@ impl TenantBalanceRepo {
             .timed(
                 "tenant_balance_total_usd",
                 sqlx::query(
-                    r#"SELECT SUM(l.usd_value)::double precision AS total
+                    r#"SELECT CASE WHEN COUNT(*) = 0 OR BOOL_OR(l.usd_value IS NULL)
+                                      THEN NULL::double precision
+                                      ELSE SUM(l.usd_value)::double precision END AS total
                          FROM (
-                           SELECT DISTINCT ON (address, asset) usd_value
+                           SELECT DISTINCT ON (chain, address, asset) usd_value
                              FROM balance_snapshots
                             WHERE organization_id = $1
-                            ORDER BY address, asset, ts DESC
+                            ORDER BY chain, address, asset, ts DESC, id DESC
                          ) l"#,
                 )
                 .bind(scope.organization_id().as_uuid())

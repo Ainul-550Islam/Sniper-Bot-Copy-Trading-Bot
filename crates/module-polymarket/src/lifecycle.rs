@@ -182,7 +182,7 @@ impl PolyBot {
                 .await
             {
                 Some(p) => p.id,
-                None => self.state.next_id("p"),
+                None => self.state.next_persistent_id("p"),
             },
         };
         let rec = PolyFillRecord {
@@ -212,7 +212,7 @@ impl PolyBot {
         metrics::count_fill(source.as_str());
 
         let trade = Trade {
-            id: self.state.next_id("t"),
+            id: self.state.next_persistent_id("t"),
             ts: now,
             source: TradeSource::Polymarket,
             venue: Venue::PolymarketClob,
@@ -302,7 +302,9 @@ impl PolyBot {
         tracked.position_id = Some(position_id);
         // The global ledger is the only mutator of global accounting state;
         // the module hands over the typed event and keeps its own record.
-        self.state.ledger().submit(ledger_event).await;
+        self.state
+            .submit_ledger_event(BotModule::Polymarket, ledger_event)
+            .await;
         self.orders
             .record_execution(ExecutionRecord {
                 order_id: tracked.order_id.clone(),

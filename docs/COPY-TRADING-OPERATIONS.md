@@ -34,6 +34,21 @@ of profit.
    `copy_events`, `copy_links`) is used automatically; migration
    `0013_copy_trading` applies on connect (`auto_migrate`) or with your
    normal migration step.
+6. For `ha.mode = "active_active"` or `"active_passive"` with copy
+   simulate/live, configure shared event dedup: set
+   `[storage] dedup_backend = "postgres"` with `[database].enabled = true`,
+   or `dedup_backend = "redis"` with `[redis].enabled = true` and a nonzero
+   `redis.dedup_ttl_secs`. The `memory` default is not a clustered execution
+   arbiter. A missing, memory-only, or unavailable shared backend causes
+   `DEDUP_UNAVAILABLE` and stops that event before execution. Because no
+   shared decision is known, this outcome is not written to `copy_events`:
+   it must not replace another replica's result or become a false recovery
+   seed. Rejection metrics and the audit publication remain available; do not
+   assume the event journal records every such outage. The legacy
+   single-worker and paper paths retain their existing fallback behavior.
+   A shared mark can survive a pre-execution crash and suppress a redelivery;
+   verify the journal and reconcile before manual intervention. Redis eviction,
+   expiry or loss, and Postgres retention, limit dedup's replay window.
 
 Startup log lines to expect: `copy leader lifecycle` (one per configured
 wallet, `event=followed`), `copy dedup re-seeded from journal` (when the
@@ -192,11 +207,11 @@ Reconciliation never sells on a flag; the only selling path is
 
 | Failure | Behaviour |
 |---|---|
-| feed disconnects | the feed's own reconnect/backoff; duplicates on reconnect are `DUPLICATE_EVENT`; a replayed backlog older than `max_event_age_secs` is `STALE_EVENT` |
+| feed disconnects | feeds reconnect/backfill where supported; duplicate notifications can reach the pipeline and be `DUPLICATE_EVENT`; old events may be `STALE_EVENT`. Poll fetch/decode failures retain the cursor and can stall later events; Geyser backfill has no durable retry queue. Provider truncation and cursor advancement before a processing acknowledgement can still prevent replay. A batch reaching 100 full pages or repeating a page endpoint is not processed and its cursor stays unchanged, potentially stalling that wallet; check feed logs and reconcile, rather than assuming complete replay. |
 | RPC unhealthy | `BALANCE_UNAVAILABLE` (live) or `EXECUTION_FAILED` at curve load; the event is decided (not retried); the mint gets the failed-entry cooldown |
 | ownership store down | `OWNERSHIP_UNAVAILABLE` — fail closed, nothing sent |
-| Postgres down | journal writes fail (`copy_journal_errors_total`), trading continues; `load_leaders` / `events_since` answer `None` → recovery logs that it could not re-seed |
-| process crash | see COPY-TRADING-RECOVERY.md; nothing is ever resubmitted |
+| Postgres down | journal writes fail (`copy_journal_errors_total`); clustered simulate/live copy configured with PostgreSQL event dedup fails closed as `DEDUP_UNAVAILABLE`. Other configurations may retain L1 fallback; `load_leaders` / `events_since` answer `None` and recovery logs failed reseeding. |
+| process crash | see COPY-TRADING-RECOVERY.md; recovery itself does not broadcast. Redelivery behavior depends on retained dedup keys, journal and reconciliation; do not assume unconditional exactly-once execution. |
 | leader front-runs / dumps | not a system failure; your caps (`max_exposure_sol`, `copy_daily_loss_limit_quote`) bound the damage; the sweeper's stop loss applies |
 
 ---

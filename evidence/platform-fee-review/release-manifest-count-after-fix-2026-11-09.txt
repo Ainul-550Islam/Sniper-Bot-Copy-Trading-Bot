@@ -1,0 +1,19 @@
+   Compiling sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `test` profile [unoptimized] target(s) in 2.21s
+     Running tests/batch6_transaction_readiness.rs (target/debug/deps/batch6_transaction_readiness-a57bdce4531e7ab4)
+
+running 12 tests
+test api_compatibility_matrix_exists_and_lists_endpoints ... ok
+test api_matrix_covers_websocket_deprecated_query ... ok
+test env_registry_distinguishes_secret_vs_non_secret ... ok
+test env_registry_exists_and_covers_required_vars ... ok
+test evidence_crosswalk_exists_and_maps_claims ... ok
+test all_25_batch6_docs_exist ... ok
+test package_completeness_buyer_rules_and_manifest ... ok
+test release_manifest_counts_and_version_are_current ... ok
+test third_party_inventory_and_compliance_docs_crosswalk ... ok
+test webhook_matrix_distinguishes_fixture_vs_live ... ok
+test webhook_matrix_exists_and_covers_hmac_idempotency ... ok
+test sbom_license_crosswalk_files_exist ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

@@ -1,0 +1,14 @@
+Deterministic feed limitation reproduction, 2026-11-09 in user timezone.
+Command: cargo test -p module-copy --lib feeds::tests::null_fetch_currently_suppresses_retry_and_other_wallet --locked -j 1 -- --nocapture
+Mock RPC returns null for the first fetch. The same signature is then supplied again for the same and a second wallet. One request total, no emitted trade; the retries are suppressed. No service, live-chain, cursor or cross-process behavior is tested. This reproduces current undesirable behavior, not a fix.
+
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 1m 35s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-84834e0020a68c4b)
+
+running 1 test
+test feeds::tests::null_fetch_currently_suppresses_retry_and_other_wallet ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.01s
+
+EXIT=0

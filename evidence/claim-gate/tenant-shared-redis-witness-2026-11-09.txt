@@ -1,0 +1,36 @@
+Real Redis tenant event dedup collision witness, 2026-11-09 in user timezone.
+Command: REDIS_URL=redis://127.0.0.1:56379 REQUIRE_SERVICES=1 cargo test -p module-copy --test tenant_execution --locked -j 1 -- --test-threads=1
+A real local Redis 8 server was available; two independent AppState instances, independent Redis clients and tenant contexts follow the same leader and receive the same event. In paper and configured clustered-simulate pipeline branches the second tenant receives DUPLICATE_EVENT from shared pipeline dedup. The contexts are paper-issued; no transaction is sent. One OS process, not production server wiring, real Postgres backend, tenant journal, or live funded trading. This test intentionally asserts current defective behavior, not desired isolation. TTL keys are unique per run.
+
+    Finished `test` profile [unoptimized] target(s) in 5m 07s
+     Running tests/tenant_execution.rs (target/debug/deps/tenant_execution-eec7c191619e41fd)
+
+running 12 tests
+test a_tenant_copy_executor_denies_foreign_contexts ... ok
+test a_wallet_bound_to_another_tenant_cannot_drive_the_copy_executor ... ok
+test an_unbound_copy_bot_preserves_the_operator_behaviour ... ok
+test shared_app_state_currently_causes_cross_tenant_dedup_collision ... ok
+test shared_app_state_currently_projects_one_position_into_two_tenant_sinks ... ok
+test shared_redis_currently_causes_cross_tenant_dedup_collision ... ok
+test tenant_dedup_distinguishes_same_signature_mint_and_side ... ok
+test tenant_duplicate_does_not_overwrite_first_sink_outcome ... ok
+test tenant_unavailable_shared_dedup_retries_without_journaling ... ok
+test the_context_adapter_scopes_leader_and_event_keys_per_tenant ... ok
+test the_same_leader_trade_is_deduplicated_tenant_locally ... ok
+test two_tenants_seeing_the_same_leader_trade_both_process_it ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+EXIT=0
+
+Gate verification: env -u REDIS_URL -u REQUIRE_SERVICES cargo test -p module-copy --test tenant_execution shared_redis_currently_causes_cross_tenant_dedup_collision --locked -j 1 -- --exact --nocapture
+    Finished `test` profile [unoptimized] target(s) in 1.48s
+     Running tests/tenant_execution.rs (target/debug/deps/tenant_execution-eec7c191619e41fd)
+
+running 1 test
+SKIP: REDIS_URL is not set — real Redis tenant collision witness
+test shared_redis_currently_causes_cross_tenant_dedup_collision ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+EXIT=0

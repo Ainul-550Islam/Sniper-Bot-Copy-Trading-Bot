@@ -69,6 +69,11 @@ pub async fn list(State(state): State<ApiState>, headers: HeaderMap) -> Response
         .components
         .into_iter()
         .map(|component| {
+            // A health-registry sample proves the deployment reached the
+            // component a moment ago — it is NOT live-verification evidence of
+            // a trade, a fill or a provider contract. Only `sampled` is
+            // claimed; `live_verified` is left for the endpoints that actually
+            // carry a venue/chain proof, and never inferred from health alone.
             let status = if component.status.healthy && component.status.ready {
                 "connected"
             } else if component.status.ready {
@@ -77,9 +82,20 @@ pub async fn list(State(state): State<ApiState>, headers: HeaderMap) -> Response
                 "error"
             };
             let evidence_level = if component.status.healthy && component.status.ready {
-                "live_verified"
+                "sampled"
             } else {
                 "not_run"
+            };
+            let detail = if component.status.healthy && component.status.ready {
+                Some(format!(
+                    "{} (a health sample, not proof of a live trade or provider contract)",
+                    component
+                        .status
+                        .detail
+                        .unwrap_or_else(|| "healthy".to_string())
+                ))
+            } else {
+                component.status.detail
             };
             json!({
                 "id": slug(&component.name),
@@ -91,7 +107,8 @@ pub async fn list(State(state): State<ApiState>, headers: HeaderMap) -> Response
                 "evidence_level": evidence_level,
                 "last_health_check_at": Value::Null,
                 "latency_ms": Value::Null,
-                "detail": component.status.detail,
+                "evidence_level_meaning": "sampled = a health-registry sample within the registry interval; live_verified is never claimed by this endpoint",
+                "detail": detail,
             })
         })
         .collect();
@@ -110,4 +127,24 @@ pub async fn list(State(state): State<ApiState>, headers: HeaderMap) -> Response
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    /// A health sample is evidence of a sample — never of a live trade or a
+    /// provider contract. The vocabulary is asserted at the source so a future
+    /// edit cannot quietly restore `live_verified`.
+    #[test]
+    fn a_healthy_sample_is_never_labelled_live_verified() {
+        let source = include_str!("integrations.rs");
+        assert!(
+            !source.contains("\"live_verified\""),
+            "health sampling must never claim live verification"
+        );
+        assert!(source.contains("\"sampled\""), "the sample label must stay");
+        assert!(
+            source.contains("not proof of a live trade or provider contract"),
+            "the detail must say what the label means"
+        );
+    }
 }

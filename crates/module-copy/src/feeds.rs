@@ -13,32 +13,15 @@
 //!   [`decode_swap`]. Works on any RPC and yields exact amounts, at the cost
 //!   of a poll interval.
 //!
-//! All feeds push into one channel. Two different marks exist and they must
-//! never be confused (TASK 3 §03):
-//!
-//! * **Fetch suppression, here.** The polling and Geyser paths call
-//!   `AppState::mark_signature_seen` (namespace `sig`) once per transaction
-//!   they *decode*, so a signature that both the poll loop and the
-//!   post-reconnect backfill (or two feeds) discover is fetched and decoded
-//!   only once. This is an RPC-saving guard, not a trading decision: it says
-//!   nothing about whether the trade was mirrored.
-//! * **The one authoritative dedup, in the pipeline.** Every event a feed
-//!   hands over is marked seen exactly once — by `event_dedup::claim` inside
-//!   `CopyBot::process_event` — through `AppState::mark_copy_event_seen`
-//!   (the durable dedup facade, namespace `copy_event`, key
-//!   `copy:{signature}:{leader}:{mint}:{side}`). That mark is the decision
-//!   record; a redelivery of the same leader trade is refused as
-//!   `DUPLICATE_EVENT` there and nowhere else.
-//!
-//! The consumer (`lib.rs` run loop) therefore never re-marks the `sig`
-//! namespace: before TASK 3 it did, so every polled / Geyser event — already
-//! marked by its feed — was dropped as a duplicate before it could be
-//! mirrored (the PumpPortal feed, which does not pre-mark, was unaffected,
-//! which is why the regression went unnoticed). The PumpPortal path does not
-//! mark `sig` at all: PumpPortal delivers each trade once and its messages
-//! are not re-fetched.
+//! All feeds push into one channel. Polling and Geyser deliberately do not
+//! mark a signature as processed before the pipeline: an early shared mark
+//! could suppress another wallet, replica, or retry after a failed fetch.
+//! This may repeat RPC/decode work and hand duplicate trades to the channel.
+//! `CopyBot::process_event` applies its separate event-level dedup key
+//! (`copy:{signature}:{leader}:{mint}:{side}`); its retention and fallback
+//! limitations still apply. A channel send is not a durable processing ack.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -451,8 +434,8 @@ async fn run_poll(
     }
 
     // Warm-up (TASK 6 §4): resume from the DURABLE cursor when this wallet
-    // was polled before — a restart must not silently skip the trades that
-    // happened while the process was down. Only when no durable position
+    // was polled before, subject to provider history and handoff limits.
+    // Only when no durable position
     // exists do we seed with the current newest signature, so a brand-new
     // wallet does not replay its whole history.
     let mut cursors: HashMap<String, Option<Signature>> = HashMap::new();
@@ -492,27 +475,45 @@ async fn run_poll(
             continue;
         }
         for (wstr, wkey) in &tracked {
-            let before = cursors.get(wstr).copied().flatten();
-            let sigs = match rpc.signatures_for_address(wkey, sig_limit, before).await {
+            let until = cursors.get(wstr).copied().flatten();
+            // `before` pages toward older history. A saved newest signature
+            // is an exclusive `until` boundary when polling for newer trades.
+            let sigs = match poll_signature_batch(&rpc, wkey, sig_limit, until).await {
                 Ok(s) => s,
                 Err(e) => {
-                    debug!(wallet = %wstr, error = %e, "copy poll signatures failed");
+                    warn!(wallet = %wstr, error = %e, "copy poll batch incomplete; cursor unchanged");
                     continue;
                 }
             };
-            // Newest-first. Walk them, emitting decoded swaps.
-            for info in &sigs {
-                if emit_signature(&rpc, &state, &out, wkey, info).await == Emit::ConsumerGone {
-                    debug!("copy consumer gone; stopping poll forwarder");
-                    return;
+            // The provider supplies newest first; process older entries first
+            // so strict event ordering does not reject the rest of the batch.
+            let mut retry_batch = false;
+            for info in sigs.iter().rev() {
+                match emit_signature(&rpc, &state, &out, wkey, info).await {
+                    Emit::ConsumerGone => {
+                        debug!("copy consumer gone; stopping poll forwarder");
+                        return;
+                    }
+                    Emit::Retry => {
+                        warn!(wallet = %wstr, sig = %info.signature, "copy poll could not process signature; retaining cursor for retry");
+                        retry_batch = true;
+                        break;
+                    }
+                    Emit::Emitted | Emit::Skipped => {}
                 }
+            }
+            if retry_batch {
+                continue;
             }
             if let Some(newest) = sigs.first() {
                 cursors.insert(wstr.clone(), Some(newest.signature));
                 // TASK 6 — persist the position so a restart resumes here
                 // instead of at "now"; the offer also suppresses a repeated
-                // head and feeds the cursor-lag gauge.
-                state
+                // head and feeds the cursor-lag gauge. The advance is written
+                // PENDING and only acknowledged once this batch has been
+                // processed, so a crash mid-batch replays it instead of
+                // skipping it.
+                let advance = state
                     .ha()
                     .offer_token(
                         FeedId::CopyLogs,
@@ -523,9 +524,59 @@ async fn run_poll(
                             .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
                     )
                     .await;
+                if advance.should_process() {
+                    let _ = state
+                        .ha()
+                        .acknowledge(
+                            FeedId::CopyLogs,
+                            wstr,
+                            None,
+                            Some(&newest.signature.to_string()),
+                        )
+                        .await;
+                }
             }
         }
     }
+}
+
+// Bound memory and RPC work during a large outage. An incomplete scan must
+// not advance the saved cursor: doing so would silently skip the older pages.
+const MAX_POLL_SIGNATURE_PAGES: usize = 100;
+
+/// Gather a complete bounded window before processing it. The RPC boundary is
+/// exclusive. A full page requires another page even when it is the last one.
+/// A broken provider that repeats page tokens fails closed, as does the page
+/// cap; neither condition advances the caller's cursor.
+async fn poll_signature_batch(
+    rpc: &Rpc,
+    wallet: &Pubkey,
+    limit: usize,
+    until: Option<Signature>,
+) -> BotResult<Vec<SignatureInfo>> {
+    let limit = limit.clamp(1, 1000);
+    let mut before = None;
+    let mut seen_page_ends = HashSet::new();
+    let mut all = Vec::new();
+    for _ in 0..MAX_POLL_SIGNATURE_PAGES {
+        let page = rpc
+            .signatures_for_address_range(wallet, limit, before, until)
+            .await?;
+        let complete = page.len() < limit;
+        let next = page.last().map(|info| info.signature);
+        all.extend(page);
+        if complete {
+            return Ok(all);
+        }
+        let next = next.expect("a full page is nonempty");
+        if !seen_page_ends.insert(next) {
+            return Err(BotError::rpc("copy poll provider repeated a page cursor"));
+        }
+        before = Some(next);
+    }
+    Err(BotError::rpc(
+        "copy poll signature page cap reached; cursor retained",
+    ))
 }
 
 /// Outcome of [`emit_signature`].
@@ -533,17 +584,17 @@ async fn run_poll(
 enum Emit {
     /// A decoded swap was handed to the consumer.
     Emitted,
-    /// Failed tx, already seen, not a swap, or unreadable — nothing sent.
+    /// Failed on-chain transaction or decoded non-swap — nothing sent.
     Skipped,
+    /// Fetch, metadata or decode could not be resolved; retry the batch.
+    Retry,
     /// The consumer hung up.
     ConsumerGone,
 }
 
-/// Fetch, decode and emit ONE confirmed signature for `wkey` — shared by the
-/// poll loop and the post-reconnect backfill so both produce identical
-/// trades and go through the same fetch suppression (`sig` namespace). The
-/// emitted trade is NOT yet decided: the pipeline's authoritative dedup
-/// (`copy_event` namespace) marks it exactly once when it is processed.
+/// Fetch, decode and emit one confirmed signature for this wallet. Do not
+/// pre-mark a signature: a failed fetch or competing wallet must not prevent
+/// another attempt. Duplicate deliveries are filtered by the event pipeline.
 async fn emit_signature(
     rpc: &Rpc,
     state: &Shared,
@@ -554,22 +605,16 @@ async fn emit_signature(
     if info.err.is_some() {
         return Emit::Skipped; // failed transaction
     }
-    if !state.mark_signature_seen(&info.signature.to_string()).await {
-        // `false` = already fetched/decoded by this process (poll loop,
-        // backfill or another feed) — fetch suppression only; the
-        // pipeline's `copy_event` mark is untouched by this call.
-        return Emit::Skipped;
-    }
     let confirmed = match rpc.get_transaction(&info.signature).await {
         Ok(Some(c)) => c,
-        Ok(None) => return Emit::Skipped,
+        Ok(None) => return Emit::Retry,
         Err(e) => {
             debug!(sig = %info.signature, error = %e, "copy poll getTransaction failed");
-            return Emit::Skipped;
+            return Emit::Retry;
         }
     };
     let Some(meta) = confirmed.transaction.meta.clone() else {
-        return Emit::Skipped;
+        return Emit::Retry;
     };
     match decode_swap(
         wkey,
@@ -590,7 +635,7 @@ async fn emit_signature(
         Ok(None) => Emit::Skipped,
         Err(e) => {
             debug!(sig = %info.signature, error = %e, "copy decode failed");
-            Emit::Skipped
+            Emit::Retry
         }
     }
 }
@@ -604,10 +649,9 @@ const BACKFILL_SLACK: Duration = Duration::from_secs(5);
 /// every tracked wallet's recent signatures and emit the ones that landed
 /// inside the outage window. The window is bounded by `block_time` (never by
 /// a bare `limit`) so a long outage can never replay pre-startup history, and
-/// everything still goes through `mark_signature_seen` (fetch suppression),
-/// so a trade the socket did deliver is not decoded and handed over twice;
-/// should one slip through anyway, the pipeline's authoritative dedup
-/// refuses the second copy. Returns `false` when the consumer is gone.
+/// signatures can be emitted again and the event pipeline performs dedup.
+/// Fetch/decode failures are logged but this one-shot backfill has no durable
+/// retry queue. Returns `false` when the consumer is gone.
 async fn backfill_after_gap(
     rpc: &Rpc,
     state: &Shared,
@@ -636,6 +680,9 @@ async fn backfill_after_gap(
             match emit_signature(rpc, state, out, wkey, info).await {
                 Emit::Emitted => recovered += 1,
                 Emit::Skipped => {}
+                Emit::Retry => {
+                    warn!(wallet = %wstr, sig = %info.signature, "copy geyser backfill could not process signature; no durable retry queued")
+                }
                 Emit::ConsumerGone => return false,
             }
         }
@@ -661,9 +708,9 @@ async fn backfill_after_gap(
 /// they are processed, instead of being discovered by the poll loop one
 /// `poll_interval_ms` later. Notifications carry the full base64 transaction
 /// plus meta — the exact inputs [`decode_swap`] already consumes — so the
-/// decode path is shared with polling, including fetch suppression (a
-/// transaction already decoded by another feed is not decoded again). The
-/// once-only trading decision is the pipeline's `copy_event` mark.
+/// decode path is shared with polling. Duplicate notifications may be
+/// decoded again; the pipeline's `copy_event` mark filters repeats within
+/// its retention and backend guarantees.
 ///
 /// Failure policy: an endpoint that does not speak `transactionSubscribe`,
 /// or a stream that ends, degrades to [`run_poll`] — the copy feed must
@@ -758,11 +805,6 @@ async fn run_transaction_subscribe(
                 };
                 if !notif.succeeded() {
                     continue; // failed on chain — nothing to copy
-                }
-                if !state.mark_signature_seen(&notif.signature).await {
-                    // `false` = already decoded by another feed / the
-                    // backfill — fetch suppression only (see module docs).
-                    continue;
                 }
                 // The filter may match several tracked wallets (e.g. a
                 // whale-to-whale transfer); decode against each and emit
@@ -922,6 +964,459 @@ pub fn wallet_trade_from_decoded(swap: &DecodedSwap) -> WalletTrade {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A transient null must not mark this signature, suppress a retry, or
+    // prevent another tracked wallet from attempting its own perspective.
+    #[tokio::test]
+    async fn null_fetch_allows_retry_and_other_wallet() {
+        use bot_core::config::{AppConfig, Config};
+        use bot_core::state::AppState;
+        use solana_sdk::signature::Signature;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock listener");
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(_) => break,
+                };
+                let count = server_requests.clone();
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buf = [0_u8; 4096];
+                    loop {
+                        let n = stream.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        bytes.extend_from_slice(&buf[..n]);
+                        if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&bytes[..i]);
+                            let len = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            if bytes.len() >= i + 4 + len {
+                                let request: serde_json::Value =
+                                    serde_json::from_slice(&bytes[i + 4..i + 4 + len]).unwrap();
+                                assert_eq!(request["method"], "getTransaction");
+                                count.fetch_add(1, AtomicOrdering::SeqCst);
+                                let body = serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":null}).to_string();
+                                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                                stream.write_all(response.as_bytes()).await.unwrap();
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let mut cfg = Config::default();
+        cfg.network.rpc_url = format!("http://{addr}");
+        cfg.network.rpc_url_fallbacks.clear();
+        cfg.network.max_retries = 0;
+        cfg.network.request_timeout_ms = 5_000;
+        let rpc = Rpc::new(&cfg.network).unwrap();
+        let state = AppState::new(AppConfig {
+            raw: cfg,
+            source_path: None,
+            warnings: vec![],
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let info = SignatureInfo {
+            signature: Signature::new_unique(),
+            slot: 1,
+            err: None,
+            block_time: None,
+            memo: None,
+        };
+        let wallet_a = Pubkey::new_unique();
+        let wallet_b = Pubkey::new_unique();
+        assert_eq!(
+            emit_signature(&rpc, &state, &tx, &wallet_a, &info).await,
+            Emit::Retry
+        );
+        assert_eq!(
+            requests.load(AtomicOrdering::SeqCst),
+            1,
+            "first fetch got null"
+        );
+        assert_eq!(
+            emit_signature(&rpc, &state, &tx, &wallet_a, &info).await,
+            Emit::Retry
+        );
+        assert_eq!(
+            emit_signature(&rpc, &state, &tx, &wallet_b, &info).await,
+            Emit::Retry
+        );
+        assert_eq!(
+            requests.load(AtomicOrdering::SeqCst),
+            3,
+            "both retries must fetch the transaction"
+        );
+        assert!(rx.try_recv().is_err(), "nothing reached the event pipeline");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn poll_requests_newer_transactions_using_until_cursor() {
+        use bot_core::config::{AppConfig, Config};
+        use bot_core::state::AppState;
+        use solana_sdk::signature::Signature;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let old = Signature::new_unique();
+        let old_text = old.to_string();
+        let expected = old_text.clone();
+        let (seen_tx, seen_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut seen_tx = Some(seen_tx);
+            for round in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0_u8; 4096];
+                let request = loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "request ended before body");
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..i]);
+                        let len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= i + 4 + len {
+                            break serde_json::from_slice::<serde_json::Value>(
+                                &bytes[i + 4..i + 4 + len],
+                            )
+                            .unwrap();
+                        }
+                    }
+                };
+                assert_eq!(request["method"], "getSignaturesForAddress");
+                let result = if round == 0 {
+                    serde_json::json!([{ "signature": old_text, "slot": 10, "err": null,
+                        "memo": null, "blockTime": null, "confirmationStatus": "confirmed" }])
+                } else {
+                    seen_tx
+                        .take()
+                        .unwrap()
+                        .send(request["params"][1].clone())
+                        .unwrap();
+                    serde_json::json!([])
+                };
+                let body =
+                    serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result})
+                        .to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let mut cfg = Config::default();
+        cfg.copy.enabled = true;
+        cfg.network.rpc_url = format!("http://{addr}");
+        cfg.network.rpc_url_fallbacks.clear();
+        cfg.network.max_retries = 0;
+        cfg.network.request_timeout_ms = 5_000;
+        let rpc = Rpc::new(&cfg.network).unwrap();
+        let state = AppState::new(AppConfig {
+            raw: cfg,
+            source_path: None,
+            warnings: vec![],
+        });
+        let (tx, _rx) = mpsc::channel(4);
+        let poll = tokio::spawn(run_poll(
+            rpc,
+            vec![Pubkey::new_unique().to_string()],
+            tx,
+            state,
+            60_000,
+            10,
+        ));
+        let params = tokio::time::timeout(Duration::from_secs(15), seen_rx)
+            .await
+            .expect("poll did not issue request")
+            .expect("mock server failed");
+        assert_eq!(params["until"], expected);
+        assert!(
+            params.get("before").is_none_or(|v| v.is_null()),
+            "must not search older history: {params}"
+        );
+        poll.abort();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn poll_retries_null_fetch_without_advancing_cursor() {
+        use bot_core::config::{AppConfig, Config};
+        use bot_core::state::AppState;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let saved = Signature::new_unique();
+        let new = Signature::new_unique();
+        let (done_tx, done_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut seen_options = Vec::new();
+            for step in 0..5 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0_u8; 4096];
+                let request = loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..i]);
+                        let len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= i + 4 + len {
+                            break serde_json::from_slice::<serde_json::Value>(
+                                &bytes[i + 4..i + 4 + len],
+                            )
+                            .unwrap();
+                        }
+                    }
+                };
+                let result = if matches!(step, 0 | 1 | 3) {
+                    assert_eq!(request["method"], "getSignaturesForAddress");
+                    if step > 0 {
+                        seen_options.push(request["params"][1].clone());
+                    }
+                    let sig = if step == 0 { saved } else { new };
+                    serde_json::json!([{ "signature":sig.to_string(), "slot":11,
+                        "err":null, "memo":null, "blockTime":null, "confirmationStatus":"confirmed" }])
+                } else {
+                    assert_eq!(request["method"], "getTransaction");
+                    serde_json::Value::Null
+                };
+                let body =
+                    serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result})
+                        .to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            done_tx.send(seen_options).unwrap();
+        });
+        let mut cfg = Config::default();
+        cfg.copy.enabled = true;
+        cfg.network.rpc_url = format!("http://{address}");
+        cfg.network.rpc_url_fallbacks.clear();
+        cfg.network.max_retries = 0;
+        cfg.network.request_timeout_ms = 5_000;
+        let rpc = Rpc::new(&cfg.network).unwrap();
+        let state = AppState::new(AppConfig {
+            raw: cfg,
+            source_path: None,
+            warnings: vec![],
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let poll = tokio::spawn(run_poll(
+            rpc,
+            vec![Pubkey::new_unique().to_string()],
+            tx,
+            state,
+            1,
+            10,
+        ));
+        let opts = tokio::time::timeout(Duration::from_secs(15), done_rx)
+            .await
+            .expect("poll did not retry")
+            .expect("mock server failed");
+        assert_eq!(opts.len(), 2);
+        for options in opts {
+            assert_eq!(
+                options["until"],
+                saved.to_string(),
+                "failed fetch must not advance cursor"
+            );
+        }
+        assert!(rx.try_recv().is_err());
+        poll.abort();
+        server.await.unwrap();
+    }
+
+    async fn signature_page_server(
+        pages: Vec<Vec<String>>,
+    ) -> (String, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut options = Vec::new();
+            for page in pages {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0_u8; 4096];
+                let request = loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..i]);
+                        let len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= i + 4 + len {
+                            break serde_json::from_slice::<serde_json::Value>(
+                                &bytes[i + 4..i + 4 + len],
+                            )
+                            .unwrap();
+                        }
+                    }
+                };
+                assert_eq!(request["method"], "getSignaturesForAddress");
+                options.push(request["params"][1].clone());
+                let rows: Vec<_> = page
+                    .iter()
+                    .enumerate()
+                    .map(|(i, sig)| {
+                        serde_json::json!({
+                            "signature":sig.to_string(), "slot":100-i, "err":null, "memo":null,
+                            "blockTime":null, "confirmationStatus":"confirmed"
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":rows})
+                    .to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            options
+        });
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn poll_batch_paginates_to_saved_cursor_without_skipping_full_page() {
+        let signatures: Vec<Signature> = (0..4).map(|_| Signature::new_unique()).collect();
+        let until = Signature::new_unique();
+        let (url, server) = signature_page_server(vec![
+            signatures[..2].iter().map(ToString::to_string).collect(),
+            signatures[2..].iter().map(ToString::to_string).collect(),
+            vec![],
+        ])
+        .await;
+        let mut cfg = bot_core::config::Config::default();
+        cfg.network.rpc_url = url;
+        cfg.network.rpc_url_fallbacks.clear();
+        cfg.network.max_retries = 0;
+        cfg.network.request_timeout_ms = 5_000;
+        let rpc = Rpc::new(&cfg.network).unwrap();
+        let result = poll_signature_batch(&rpc, &Pubkey::new_unique(), 2, Some(until))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.iter().map(|i| i.signature).collect::<Vec<_>>(),
+            signatures
+        );
+        let opts = server.await.unwrap();
+        assert_eq!(
+            opts.len(),
+            3,
+            "a full last page still needs an empty terminator"
+        );
+        for opt in &opts {
+            assert_eq!(opt["until"], until.to_string());
+        }
+        assert!(opts[0].get("before").is_none_or(|v| v.is_null()));
+        assert_eq!(opts[1]["before"], signatures[1].to_string());
+        assert_eq!(opts[2]["before"], signatures[3].to_string());
+    }
+
+    #[tokio::test]
+    async fn poll_batch_repeated_provider_page_is_rejected() {
+        let sig = Signature::new_unique();
+        let (url, server) =
+            signature_page_server(vec![vec![sig.to_string()], vec![sig.to_string()]]).await;
+        let mut cfg = bot_core::config::Config::default();
+        cfg.network.rpc_url = url;
+        cfg.network.rpc_url_fallbacks.clear();
+        cfg.network.max_retries = 0;
+        cfg.network.request_timeout_ms = 5_000;
+        let rpc = Rpc::new(&cfg.network).unwrap();
+        let error = poll_signature_batch(&rpc, &Pubkey::new_unique(), 1, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("repeated a page cursor"));
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn poll_batch_rejects_malformed_signature_in_full_page() {
+        let valid = Signature::new_unique().to_string();
+        let (url, server) =
+            signature_page_server(vec![vec![valid, "invalid-signature".into()]]).await;
+        let mut cfg = bot_core::config::Config::default();
+        cfg.network.rpc_url = url;
+        cfg.network.rpc_url_fallbacks.clear();
+        cfg.network.max_retries = 0;
+        cfg.network.request_timeout_ms = 5_000;
+        let rpc = Rpc::new(&cfg.network).unwrap();
+        let error = poll_signature_batch(&rpc, &Pubkey::new_unique(), 2, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("malformed signature"));
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn poll_batch_page_cap_reports_incomplete_without_returning_a_partial_batch() {
+        let pages = (0..MAX_POLL_SIGNATURE_PAGES)
+            .map(|_| vec![Signature::new_unique().to_string()])
+            .collect();
+        let (url, server) = signature_page_server(pages).await;
+        let mut cfg = bot_core::config::Config::default();
+        cfg.network.rpc_url = url;
+        cfg.network.rpc_url_fallbacks.clear();
+        cfg.network.max_retries = 0;
+        cfg.network.request_timeout_ms = 5_000;
+        let rpc = Rpc::new(&cfg.network).unwrap();
+        let error = poll_signature_batch(&rpc, &Pubkey::new_unique(), 1, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("page cap reached"));
+        assert_eq!(server.await.unwrap().len(), MAX_POLL_SIGNATURE_PAGES);
+    }
 
     #[test]
     fn pumpportal_buy_maps_to_long_on_the_curve() {

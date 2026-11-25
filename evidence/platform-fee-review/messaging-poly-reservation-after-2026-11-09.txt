@@ -1,0 +1,52 @@
+=== GREEN: Telegram + Polymarket now behind the durable pre-broadcast reservation ===
+--- core recovery (claim lifecycle: release only on a proven non-send) ---
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 687 filtered out; finished in 0.00s
+
+core_recovery_exit=0
+--- module-polymarket (whole crate, incl. new reservation suite) ---
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+module_polymarket_exit=0
+--- Polymarket reservation suite (RED recorded separately) ---
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+poly_reservation_exit=0
+--- server telegram_trade_port ---
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 973 filtered out; finished in 0.01s
+
+telegram_port_exit=0
+--- server recon (production sink) ---
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 983 filtered out; finished in 0.00s
+
+server_recon_exit=0
+--- real RLS PostgreSQL: durable claim + release ---
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+rls_pg_exit=0
+--- module-copy / module-sniper / core DB integration (unchanged paths) ---
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+module_copy_exit=0
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+module_sniper_exit=0
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 1.52s
+
+db_integration_exit=0
+--- clippy / fmt / diff ---
+    Checking module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 3m 32s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0
+
+=== whole module-polymarket crate (15 targets) ===
+module_polymarket_passed=259 failed=0 ignored=4  (cargo test -p module-polymarket --locked, exit 0)

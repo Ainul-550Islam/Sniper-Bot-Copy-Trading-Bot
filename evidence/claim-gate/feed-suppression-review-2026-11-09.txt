@@ -1,0 +1,250 @@
+Static source review: copy feed suppression and recovery assumptions (2026-11-09).
+This is code inspection, not a reproduced live incident or an end-to-end feed test.
+
+1. Poll loop consumes signatures wallet-by-wallet and advances each cursor:
+   495	            let before = cursors.get(wstr).copied().flatten();
+   496	            let sigs = match rpc.signatures_for_address(wkey, sig_limit, before).await {
+   497	                Ok(s) => s,
+   498	                Err(e) => {
+   499	                    debug!(wallet = %wstr, error = %e, "copy poll signatures failed");
+   500	                    continue;
+   501	                }
+   502	            };
+   503	            // Newest-first. Walk them, emitting decoded swaps.
+   504	            for info in &sigs {
+   505	                if emit_signature(&rpc, &state, &out, wkey, info).await == Emit::ConsumerGone {
+   506	                    debug!("copy consumer gone; stopping poll forwarder");
+   507	                    return;
+   508	                }
+   509	            }
+   510	            if let Some(newest) = sigs.first() {
+   511	                cursors.insert(wstr.clone(), Some(newest.signature));
+   512	                // TASK 6 — persist the position so a restart resumes here
+   513	                // instead of at "now"; the offer also suppresses a repeated
+   514	                // head and feeds the cursor-lag gauge.
+   515	                state
+   516	                    .ha()
+   517	                    .offer_token(
+   518	                        FeedId::CopyLogs,
+   519	                        wstr,
+   520	                        &newest.signature.to_string(),
+   521	                        newest
+   522	                            .block_time
+   523	                            .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
+   524	                    )
+   525	                    .await;
+
+2. Fetch suppression is marked before RPC fetch, decode and channel send; failures skip:
+   547	async fn emit_signature(
+   548	    rpc: &Rpc,
+   549	    state: &Shared,
+   550	    out: &mpsc::Sender<WalletTrade>,
+   551	    wkey: &Pubkey,
+   552	    info: &SignatureInfo,
+   553	) -> Emit {
+   554	    if info.err.is_some() {
+   555	        return Emit::Skipped; // failed transaction
+   556	    }
+   557	    if !state.mark_signature_seen(&info.signature.to_string()).await {
+   558	        // `false` = already fetched/decoded by this process (poll loop,
+   559	        // backfill or another feed) — fetch suppression only; the
+   560	        // pipeline's `copy_event` mark is untouched by this call.
+   561	        return Emit::Skipped;
+   562	    }
+   563	    let confirmed = match rpc.get_transaction(&info.signature).await {
+   564	        Ok(Some(c)) => c,
+   565	        Ok(None) => return Emit::Skipped,
+   566	        Err(e) => {
+   567	            debug!(sig = %info.signature, error = %e, "copy poll getTransaction failed");
+   568	            return Emit::Skipped;
+   569	        }
+   570	    };
+   571	    let Some(meta) = confirmed.transaction.meta.clone() else {
+   572	        return Emit::Skipped;
+   573	    };
+   574	    match decode_swap(
+   575	        wkey,
+   576	        &info.signature.to_string(),
+   577	        confirmed.slot,
+   578	        confirmed.block_time,
+   579	        &confirmed.transaction.transaction,
+   580	        &meta,
+   581	    ) {
+   582	        Ok(Some(swap)) => {
+   583	            let trade = wallet_trade_from_decoded(&swap);
+   584	            state.heartbeat(BotModule::Copy).await;
+   585	            if out.send(trade).await.is_err() {
+   586	                return Emit::ConsumerGone;
+   587	            }
+   588	            Emit::Emitted
+   589	        }
+   590	        Ok(None) => Emit::Skipped,
+   591	        Err(e) => {
+   592	            debug!(sig = %info.signature, error = %e, "copy decode failed");
+   593	            Emit::Skipped
+   594	        }
+
+3. Geyser marks before decoding each tracked wallet:
+   754	                }
+   755	                let Some(notif) = parse_transaction_notification(&raw) else {
+   756	                    debug!(sig = %signature, "copy geyser: unparseable notification, skipping");
+   757	                    continue;
+   758	                };
+   759	                if !notif.succeeded() {
+   760	                    continue; // failed on chain — nothing to copy
+   761	                }
+   762	                if !state.mark_signature_seen(&notif.signature).await {
+   763	                    // `false` = already decoded by another feed / the
+   764	                    // backfill — fetch suppression only (see module docs).
+   765	                    continue;
+   766	                }
+   767	                // The filter may match several tracked wallets (e.g. a
+   768	                // whale-to-whale transfer); decode against each and emit
+   769	                // every perspective that is an actual swap.
+   770	                for (wstr, wkey) in &tracked {
+   771	                    match decode_swap(
+   772	                        wkey,
+   773	                        &notif.signature,
+   774	                        notif.slot,
+   775	                        notif.block_time,
+   776	                        &notif.transaction,
+   777	                        &notif.meta,
+   778	                    ) {
+   779	                        Ok(Some(swap)) => {
+   780	                            let trade = wallet_trade_from_decoded(&swap);
+   781	                            state.heartbeat(BotModule::Copy).await;
+   782	                            if out.send(trade).await.is_err() {
+   783	                                debug!("copy consumer gone; stopping geyser forwarder");
+   784	                                consumer_gone = true;
+   785	                                break;
+   786	                            }
+   787	                        }
+   788	                        Ok(None) => {}
+   789	                        Err(e) => {
+   790	                            debug!(sig = %notif.signature, wallet = %wstr, error = %e, "copy geyser decode failed")
+
+4. AppState routes the signature mark through the attached shared dedup facade:
+  1317
+  1318	    /// Returns `false` when this signature was already processed.
+  1319	    /// Routes through the durable dedup facade when one is attached.
+  1320	    pub async fn mark_signature_seen(&self, sig: &str) -> bool {
+  1321	        if let Some(d) = self.dedup.get() {
+  1322	            return d.mark("sig", sig).await;
+  1323	        }
+  1324	        let cap = self.config.read().await.storage.max_dedup_entries;
+  1325	        self.seen_signatures.write().await.insert(sig, cap)
+  1326	    }
+  1327
+  1328	    pub async fn forget_signature(&self, sig: &str) {
+  1329	        if let Some(d) = self.dedup.get() {
+  1330	            d.forget("sig", sig).await;
+  1331	            return;
+  1332	        }
+  1333	        self.seen_signatures.write().await.remove(sig);
+  1334	    }
+  1335
+  1336	    /// Returns `false` when the copy pipeline already decided on this
+  1337	    /// leader-trade event (Module 2's one authoritative dedup; key =
+  1338	    /// `LeaderTradeEvent::dedup_key`). Routes through the durable dedup
+
+5. The facade uses L1 then configured shared Redis/Postgres, with L1 fallback on errors:
+   113	            let set = map.entry(ns.to_string()).or_default();
+   114	            set.insert(key, self.cap)
+   115	        };
+   116	        if !l1_new {
+   117	            Self::meter(ns, "l1", "duplicate");
+   118	            return false;
+   119	        }
+   120	        match self.backend {
+   121	            DedupBackend::Memory => {
+   122	                Self::meter(ns, "l1", "new");
+   123	                true
+   124	            }
+   125	            DedupBackend::Redis => {
+   126	                let Some(redis) = &self.redis else {
+   127	                    Self::meter(ns, "l1", "new");
+   128	                    return true;
+   129	                };
+   130	                match redis
+   131	                    .set_nx_ttl(&Self::redis_key(ns, key), "1", self.ttl)
+   132	                    .await
+   133	                {
+   134	                    Ok(true) => {
+   135	                        Self::meter(ns, "redis", "new");
+   136	                        true
+   137	                    }
+   138	                    Ok(false) => {
+   139	                        // Seen before this process's lifetime (restart case).
+   140	                        Self::meter(ns, "redis", "duplicate");
+   141	                        false
+   142	                    }
+   143	                    Err(e) => {
+   144	                        Self::meter(ns, "redis", "degraded");
+   145	                        self.degraded(ns, &e.to_string());
+   146	                        true // L1 said new; keep trading.
+   147	                    }
+   148	                }
+   149	            }
+   150	            DedupBackend::Postgres => {
+   151	                let Some(db) = &self.db else {
+   152	                    Self::meter(ns, "l1", "new");
+   153	                    return true;
+   154	                };
+   155	                match DedupRepo::new(db.clone()).mark(ns, key, self.ttl).await {
+   156	                    Ok(true) => {
+   157	                        Self::meter(ns, "postgres", "new");
+   158	                        true
+   159	                    }
+   160	                    Ok(false) => {
+   161	                        Self::meter(ns, "postgres", "duplicate");
+   162	                        false
+   163	                    }
+   164	                    Err(e) => {
+   165	                        Self::meter(ns, "postgres", "degraded");
+   166	                        self.degraded(ns, &e.to_string());
+   167	                        true
+   168	                    }
+   169	                }
+   170	            }
+   171	        }
+   172	    }
+   173
+   174	    /// Atomic first-arrival check that requires a shared backend and never
+   175	    /// falls back to process-local memory. Used by clustered copy execution.
+
+6. Restart planner seeds every journaled event and newest per-leader cursor:
+   495	}
+   496
+   497	/// Pure planner. Deterministic for the same inputs.
+   498	pub fn plan_recovery(inputs: &RecoveryInputs) -> RecoveryPlan {
+   499	    let mut actions = Vec::new();
+   500
+   501	    // 1. Dedup keys of everything journaled.
+   502	    let keys: Vec<String> = inputs
+   503	        .journal
+   504	        .iter()
+   505	        .map(|e| key_from_parts(&e.signature, &e.leader, &e.mint, &e.side))
+   506	        .collect();
+   507	    if !keys.is_empty() {
+   508	        actions.push(RecoveryAction::SeedDedup { keys });
+   509	    }
+   510
+   511	    // 2. Ordering cursors: newest journaled slot per leader.
+   512	    let mut newest: HashMap<&str, (u64, &str)> = HashMap::new();
+   513	    for e in &inputs.journal {
+   514	        if e.slot == 0 {
+   515	            continue;
+   516	        }
+   517	        let entry = newest.entry(e.leader.as_str()).or_insert((0, ""));
+   518	        if e.slot > entry.0 {
+   519	            *entry = (e.slot, e.signature.as_str());
+   520	        }
+   521	    }
+   522	    let mut leaders: Vec<&str> = newest.keys().copied().collect();
+   523	    leaders.sort_unstable();
+   524	    for leader in leaders {
+   525	        let (slot, signature) = newest[leader];
+   526	        actions.push(RecoveryAction::SeedCursor {
+   527	            leader: leader.to_string(),
+   528	            slot,
+   529	            signature: signature.to_string(),

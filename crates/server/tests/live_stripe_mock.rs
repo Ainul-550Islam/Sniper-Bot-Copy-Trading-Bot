@@ -3,14 +3,15 @@
 //! `Idempotency-Key` propagation, real JSON decoding and real webhook HMAC
 //! verification.
 //!
-//! `#[ignore]`d by default: it needs a running `stripe-mock` (a Stripe-published
-//! binary, not something written here) and is pointed at it with
-//! `STRIPE_MOCK_URL`:
+//! The HTTP legs need a running `stripe-mock` (a Stripe-published binary, not
+//! something written here) and are pointed at it with `STRIPE_MOCK_URL`; without
+//! it they report SKIPPED and return, so no `#[ignore]` is needed (gap #31) and
+//! the opt-in refusal leg runs on every ordinary test run:
 //!
 //! ```text
 //! stripe-mock -http-port 12111 &
 //! STRIPE_MOCK_URL=http://127.0.0.1:12111 \
-//!   cargo test -p sniper-suite --test live_stripe_mock -- --ignored --nocapture --test-threads=1
+//!   cargo test -p sniper-suite --test live_stripe_mock -- --nocapture --test-threads=1
 //! ```
 //!
 //! What this proves: the adapter speaks the Checkout Sessions API shape Stripe
@@ -38,6 +39,13 @@ fn mock_base() -> Option<String> {
             eprintln!(
                 "SKIPPED: set STRIPE_MOCK_URL (e.g. http://127.0.0.1:12111) to run this test"
             );
+            // An absent mock must never be mistaken for a passing HTTP boundary.
+            // Anyone who actually needs the proof sets REQUIRE_STRIPE_MOCK=1 and
+            // gets a hard failure instead of a green "ok".
+            assert!(
+                std::env::var("REQUIRE_STRIPE_MOCK").as_deref() != Ok("1"),
+                "STRIPE_MOCK_URL is required and REQUIRE_STRIPE_MOCK=1 is set"
+            );
             None
         }
     }
@@ -56,7 +64,6 @@ fn intent() -> StripeCheckoutIntent {
 /// The opt-in gate must stay shut unless the operator opens it — even when a
 /// perfectly reachable provider is configured.
 #[tokio::test]
-#[ignore = "requires a running stripe-mock (STRIPE_MOCK_URL)"]
 async fn live_stripe_refuses_without_live_billing_opt_in() {
     let Some(base) = mock_base() else { return };
     std::env::remove_var("LIVE_BILLING");
@@ -77,7 +84,6 @@ async fn live_stripe_refuses_without_live_billing_opt_in() {
 /// A real `POST /v1/checkout/sessions` against stripe-mock, decoded by the
 /// adapter's own parser.
 #[tokio::test]
-#[ignore = "requires a running stripe-mock (STRIPE_MOCK_URL)"]
 async fn live_stripe_creates_a_checkout_session_over_http() {
     let Some(base) = mock_base() else { return };
     std::env::set_var("LIVE_BILLING", "1");
@@ -111,7 +117,6 @@ async fn live_stripe_creates_a_checkout_session_over_http() {
 /// Idempotency-Key must reach the provider; the same key twice must not error
 /// out (Stripe deduplicates), and a second, different key must still succeed.
 #[tokio::test]
-#[ignore = "requires a running stripe-mock (STRIPE_MOCK_URL)"]
 async fn live_stripe_propagates_idempotency_key() {
     let Some(base) = mock_base() else { return };
     std::env::set_var("LIVE_BILLING", "1");
@@ -140,7 +145,6 @@ async fn live_stripe_propagates_idempotency_key() {
 /// Webhook verification with a real HMAC over `{t}.{body}`, plus the rejection
 /// paths that must never be silently accepted.
 #[tokio::test]
-#[ignore = "requires a running stripe-mock (STRIPE_MOCK_URL) (only for the shared setup)"]
 async fn live_stripe_webhook_signature_round_trip() {
     use axum::http::{HeaderMap, HeaderValue};
     use hmac::{Hmac, Mac};

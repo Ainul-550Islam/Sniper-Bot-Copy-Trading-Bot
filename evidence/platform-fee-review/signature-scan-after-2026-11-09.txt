@@ -1,0 +1,36 @@
+=== GREEN: alternate-signature / duplicate detection over the chain check ===
+--- chain check + signature scan (mock node) ---
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.49s
+
+chain_check_exit=0
+--- chain module units ---
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 988 filtered out; finished in 0.01s
+
+chain_unit_exit=0
+--- api surface (scan + role gating) ---
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 956 filtered out; finished in 0.11s
+
+api_lib_exit=0
+--- openapi artifacts + router conformance ---
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+openapi_artifact_exit=0
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+
+openapi_router_exit=0
+--- clippy / fmt / diff ---
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#cloned_ref_to_slice_refs
+
+error: could not compile `sniper-suite` (test "reservation_chain_check") due to 3 previous errors
+clippy_exit=101
+fmt_exit=0
+diff_check_exit=0
+-- clippy recheck after fixing 3 cloned_ref_to_slice_refs lints in the new tests --
+    Finished `dev` profile [unoptimized] target(s) in 1.83s
+clippy_exit=0
+fmt_exit=0
+diff_check_exit=0
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.47s
+
+chain_check_exit=0

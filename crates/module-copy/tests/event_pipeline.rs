@@ -176,7 +176,7 @@ async fn live_terminal_states_filled_ambiguous_and_exit_mirrored() {
     assert_eq!(filled_rec.module, "copy");
 
     // 2. AMBIGUOUS — the node swallows the broadcast and never confirms it:
-    //    the position is booked, the intent parks, nothing is retried.
+    //    the intent parks without booking a position or fill.
     let m2 = w.new_token();
     w.node.set_send(SendBehaviour::Drop);
     w.node.confirm.store(false, Ordering::SeqCst);
@@ -184,7 +184,11 @@ async fn live_terminal_states_filled_ambiguous_and_exit_mirrored() {
     let out = w.process(&ambiguous_buy).await;
     assert_eq!(out.stage, CopyStage::Ambiguous, "{:?}", out.rejection);
     assert!(out.rejection.is_none());
-    assert!(out.opened());
+    assert!(
+        out.opened(),
+        "an ambiguous broadcast may still create exposure"
+    );
+    assert!(out.position_id.is_none());
     let ambiguous_intent = out.intent_id.clone().expect("intent id");
     assert_eq!(
         ambiguous_intent,
@@ -200,7 +204,7 @@ async fn live_terminal_states_filled_ambiguous_and_exit_mirrored() {
         .state
         .find_open(BotModule::Copy, &m2.to_string())
         .await
-        .is_some());
+        .is_none());
     assert_eq!(
         store.event(&ambiguous_buy.event_id).unwrap().stage,
         "AMBIGUOUS"
@@ -245,12 +249,12 @@ async fn live_terminal_states_filled_ambiguous_and_exit_mirrored() {
     let link = store.link(&filled_pos.id).unwrap();
     assert_eq!(link.status, "closed");
     assert_eq!(link.exit_event_id.as_deref(), Some(sell.event_id.as_str()));
-    // The ambiguous position is untouched by someone else's exit.
+    // The ambiguous buy did not create a speculative position.
     assert!(w
         .state
         .find_open(BotModule::Copy, &m2.to_string())
         .await
-        .is_some());
+        .is_none());
 
     // 4. REJECTED — a redelivery of the filled buy is a duplicate.
     let out = w.process(&buy).await;
@@ -299,13 +303,13 @@ async fn live_terminal_states_filled_ambiguous_and_exit_mirrored() {
             "missing {expected} in {actions:?}"
         );
     }
-    // Leader counters: two mirrors (filled + ambiguous); the execution
+    // Leader counters: only the confirmed mirror counts; the execution
     // failure is counted as a rejection, the duplicate redelivery is not
     // (its first delivery already was counted as the fill).
     let leaders = w.bot.leaders();
     let leaders = leaders.read().await;
     let l = leaders.get(LEADER).unwrap();
-    assert_eq!(l.stats.mirrored, 2);
+    assert_eq!(l.stats.mirrored, 1);
     assert_eq!(l.stats.rejected, 1);
     assert_eq!(l.stats.last_rejection.as_deref(), Some("EXECUTION_FAILED"));
     assert_eq!(l.stats.events_seen, 5);

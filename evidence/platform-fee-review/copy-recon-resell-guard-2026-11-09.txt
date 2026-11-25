@@ -1,0 +1,40 @@
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 3.66s
+     Running unittests src/lib.rs (target/debug/deps/module_copy-84834e0020a68c4b)
+
+running 5 tests
+test reconcile::tests::clean_book_has_no_findings ... ok
+test reconcile::tests::leader_exit_is_flagged_or_mirrored ... ok
+test reconcile::tests::link_and_quantity_drift ... ok
+test reconcile::tests::unresolved_exit_disables_reconciliation_auto_sell ... ok
+test reconcile::tests::orphans_and_ambiguous_entries ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 72 filtered out; finished in 0.00s
+
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 7.73s
+     Running tests/intent_execution.rs (target/debug/deps/intent_execution-2028dd78f0525f76)
+
+running 7 tests
+test ambiguous_broadcast_parks_without_booking_a_fill ... ok
+test ambiguous_exit_keeps_position_and_does_not_book_a_sell ... ok
+test live_mirror_confirms_through_the_executor_with_a_deterministic_intent ... ok
+test node_rejection_is_a_definite_failure_with_nothing_booked ... ok
+test pending_execution_cap_throttles_new_mirrors ... ok
+test simulation_failure_never_broadcasts_and_abandons_the_journal_entry ... ok
+test the_ledger_refuses_a_second_attempt_at_the_same_logical_trade ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.36s
+
+     Running tests/reconciliation.rs (target/debug/deps/reconciliation-be2b836a053003ff)
+
+running 7 tests
+test ambiguous_exit_does_not_auto_resell_after_execution_turns_confirmed ... ok
+test clean_state_reconciles_without_findings ... ok
+test leader_exit_seen_while_paused_is_flagged_then_mirrored_when_enabled ... ok
+test leader_rebuy_after_exit_cancels_the_finding ... ok
+test quantity_drift_orphans_and_ambiguous_entries_are_surfaced ... ok
+test sweeper_closed_positions_close_their_links ... ok
+test unfollowed_leader_with_open_position_is_flagged_not_sold ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s

@@ -1,0 +1,4 @@
+[manifest] product_files=1943 rust_files=811 docs_files=168 migrations=78 (high water 0078)
+[manifest] updated /home/user/repo/release-manifest.json
+[manifest] product_files=1944 rust_files=811 docs_files=168 migrations=78 (high water 0078)
+[manifest] updated /home/user/repo/release-manifest.json

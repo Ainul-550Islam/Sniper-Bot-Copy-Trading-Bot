@@ -1,0 +1,93 @@
+Ledger source and local static gate audit, 2026-11-09 (user timezone).
+These commands inspect the local tree and are not remote CI, Helm rendering, or proof of historical runs.
+
+$ git ls-files -- config.toml
+config.toml
+$ git ls-files -- docs/archive/AUDIT.md
+docs/archive/AUDIT.md
+$ git remote -v
+
+$ bash tests/release/stats_current.sh
+[stats-current] docs/STATS.md matches the tree
+[stats-current] 93 stat markers checked, all current
+[stats-current] PASS — STATS.md and all markers match the tree
+
+$ bash tests/release/manifest_current.sh
+[manifest-current] docs_files: OK (168)
+[manifest-current] rust_files: OK (791)
+[manifest-current] migrations: OK (75)
+[manifest-current] migration high-water: OK (0075)
+[manifest-current] version: OK (0.1.0)
+[manifest-current] PASS — manifest matches the tree
+
+$ bash tests/release/helm_image_contract.sh
+[helm-image-contract] PASS — digest-only image contract holds (helm template: NOT_RUN, helm not installed)
+
+$ bash scripts/verify-image-digests.sh
+== checked files ==
+  ./Dockerfile
+  ./apps/control-plane/Dockerfile
+  ./deploy/compose/docker-compose.backup.yml
+  ./deploy/compose/docker-compose.host-network.yml
+  ./deploy/compose/docker-compose.pitr.yml
+  ./deploy/compose/docker-compose.tls.yml
+  ./deploy/demo/docker-compose.demo.yml
+  ./deploy/helm/sniper-suite/Chart.yaml
+  ./deploy/helm/sniper-suite/templates/configmap.yaml
+  ./deploy/helm/sniper-suite/templates/deployment.yaml
+  ./deploy/helm/sniper-suite/templates/hpa.yaml
+  ./deploy/helm/sniper-suite/templates/ingress.yaml
+  ./deploy/helm/sniper-suite/templates/migration-job.yaml
+  ./deploy/helm/sniper-suite/templates/networkpolicy.yaml
+  ./deploy/helm/sniper-suite/templates/pvc.yaml
+  ./deploy/helm/sniper-suite/templates/secret.yaml
+  ./deploy/helm/sniper-suite/templates/service.yaml
+  ./deploy/helm/sniper-suite/templates/serviceaccount.yaml
+  ./deploy/helm/sniper-suite/values.yaml
+  ./docker-compose.test.yml
+  ./docker-compose.yml
+
+== 1. no mutable tag references ==
+  ok   every FROM and image: uses an immutable digest
+
+== 2. repo digests and the lock file agree ==
+  ok   every digest in use is recorded in the lock
+
+== 3. digest form ==
+  ok   all digests are well-formed
+
+IMAGE DIGEST PINNING: PASS
+
+$ sed -n 274,303p .github/workflows/ci.yml
+  integrity-gates:
+    name: Integrity gates (openapi / drift / stats / claims)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OpenAPI coverage (saas + tenant scope)
+        run: bash scripts/check-openapi-coverage.sh
+
+      - name: Protocol drift (static pins vs code)
+        run: bash scripts/check-protocol-drift.sh
+
+      - name: Statistics freshness (stats == tree, single source of truth)
+        run: bash tests/release/stats_current.sh
+
+      - name: Marketing claims (no claim without PASSED evidence)
+        run: bash scripts/verify-marketing-claims.sh
+
+      - name: Script exec bits (tracked *.sh must be 100755)
+        run: bash scripts/verify-script-modes.sh
+
+      - name: Secret scan (high-confidence patterns + tracked filenames)
+        run: bash scripts/scan-secrets.sh
+
+      - name: External validation honesty gate (no unbacked PASSED)
+        run: bash scripts/run-external-validation.sh all-safe
+
+  # ------------------------------------------------------------- deploy -----
+  # P0 §5/§6/§7 — the deployment configuration is CODE and is gated like
+
+$ git ls-files -- .cargo/bin

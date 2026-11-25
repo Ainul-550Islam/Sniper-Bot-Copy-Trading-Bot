@@ -1,0 +1,21 @@
+=== RED (before the fault-injection suite): a replica that LOSES the durable claim still broadcasts ===
+-- injected: DbIntentSink::reserve treats a lost claim as permission --
+
+failures:
+
+---- two_replicas_never_both_broadcast_and_a_crashed_owner_fences_out stdout ----
+
+thread 'two_replicas_never_both_broadcast_and_a_crashed_owner_fences_out' (3624484) panicked at crates/server/tests/multi_replica_fault_injection.rs:197:5:
+assertion `left != right` failed: exactly one replica may broadcast: a=Ok("SIG-A") b=Ok("SIG-B")
+  left: true
+ right: true
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    two_replicas_never_both_broadcast_and_a_crashed_owner_fences_out
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+error: test failed, to rerun pass `-p sniper-suite --test multi_replica_fault_injection`
+red_exit=101

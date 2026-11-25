@@ -1,0 +1,23 @@
+FF...
+======================================================================
+FAIL: test_external_registry_tests_preserve_failure_status (__main__.CiFailureContract.test_external_registry_tests_preserve_failure_status)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/user/repo/tests/release/test_ci_failure_contract.py", line 17, in test_external_registry_tests_preserve_failure_status
+    self.assertNotIn("||", command, "a failed registry test must fail the job, not print a success-path message")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: '||' unexpectedly found in 'cargo test --lib ops::external_validation -- --nocapture || echo "external validation defaults to NOT_EXECUTED — requires secrets"' : a failed registry test must fail the job, not print a success-path message
+
+======================================================================
+FAIL: test_release_jobs_do_not_silently_select_a_different_rust (__main__.CiFailureContract.test_release_jobs_do_not_silently_select_a_different_rust)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/user/repo/tests/release/test_ci_failure_contract.py", line 23, in test_release_jobs_do_not_silently_select_a_different_rust
+    self.assertFalse("uses: dtolnay/rust-toolchain@stable" in text, "CI must use the pinned Rust release, not rolling stable")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True is not false : CI must use the pinned Rust release, not rolling stable
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.056s
+
+FAILED (failures=2)

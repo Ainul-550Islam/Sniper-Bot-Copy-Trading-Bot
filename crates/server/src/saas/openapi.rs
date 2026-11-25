@@ -913,6 +913,40 @@ fn operator_schemas() -> Value {
                 "detail": { "type": "string" }
             }
         },
+        "AmbiguousBroadcastClaim": {
+            "type": "object",
+            "required": ["trade_key", "intent_id", "module", "symbol", "side", "owner", "epoch", "status", "lease_until", "lease_lapsed", "lapsed_secs", "takeover_count"],
+            "properties": {
+                "trade_key": { "type": "string" },
+                "intent_id": { "type": "string" },
+                "module": { "type": "string" },
+                "symbol": { "type": "string" },
+                "side": { "type": "string" },
+                "owner": { "type": "string" },
+                "epoch": { "type": "integer" },
+                "status": { "type": "string", "enum": ["reserved", "linked", "abandoned"] },
+                "signature": { "type": ["string", "null"] },
+                "lease_until": { "type": "string", "format": "date-time" },
+                "lease_lapsed": { "type": "boolean" },
+                "lapsed_secs": { "type": "integer" },
+                "takeover_count": { "type": "integer" }
+            }
+        },
+        "JournalRepair": {
+            "type": "object",
+            "required": ["repaired", "claimed_conflict", "conflict_cleared", "replayed_events", "unbacked_events", "dropped_events", "discarded_pending_events", "seen_findings", "reason"],
+            "properties": {
+                "repaired": { "type": "boolean" },
+                "claimed_conflict": { "type": ["string", "null"] },
+                "conflict_cleared": { "type": "boolean" },
+                "replayed_events": { "type": "integer" },
+                "unbacked_events": { "type": "integer" },
+                "dropped_events": { "type": "integer" },
+                "discarded_pending_events": { "type": "integer" },
+                "seen_findings": { "type": "integer" },
+                "reason": { "type": "string" }
+            }
+        },
         "ExecutionRecord": {
             "type": "object",
             "required": ["intent_id", "state"],
@@ -1531,6 +1565,203 @@ fn operator_paths() -> Value {
                 json!({
                     "101": { "description": "Switching Protocols to WebSocket connection" },
                     "401": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/accounting/reservations/chain-check": {
+            "parameters": [
+                { "name": "trade_key", "in": "query", "required": true, "schema": { "type": "string" } },
+                { "name": "signature", "in": "query", "required": false, "schema": { "type": "string" } },
+                { "name": "operator_asserts_never_sent", "in": "query", "required": false, "schema": { "type": "boolean" } }
+            ],
+            "get": operation(
+                "operator.reservationChainCheck",
+                "Chain-side existence of an ambiguous pre-broadcast attempt: `landed` (the node returned the transaction), `absent` (the node does not know it — NOT proof that nothing was sent) or `unknown` (the lookup failed). Reports which operator decision the evidence allows.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Chain existence report.", json!({
+                        "type": "object",
+                        "required": ["trade_key", "signature", "existence", "abandon_allowed", "link_allowed", "head_slot", "finality", "confirmations", "settled_allowed", "reason"],
+                        "properties": {
+                            "trade_key": { "type": "string" },
+                            "signature": { "type": "string" },
+                            "existence": { "type": "string", "enum": ["landed", "absent", "unknown"] },
+                            "slot": { "type": ["integer", "null"] },
+                            "block_time": { "type": ["integer", "null"] },
+                            "error": { "type": ["string", "null"] },
+                            "signer_balance_delta": { "type": ["integer", "null"] },
+                            "abandon_allowed": { "type": "boolean" },
+                            "link_allowed": { "type": "boolean" },
+                            "head_slot": { "type": ["integer", "null"], "description": "The node's slot at probe time." },
+                            "confirmations": { "type": ["integer", "null"], "description": "Slot distance between the transaction and the head, when both are known." },
+                            "finality": { "type": "string", "enum": ["unfinalized", "deeply_confirmed", "not_landed"], "description": "Depth bucket by slot distance — a reorganisation-risk statement, not a finality proof." },
+                            "settled_allowed": { "type": "boolean", "description": "True only for a deeply confirmed landing; economics may be booked only then." },
+                            "reason": { "type": "string" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/accounting/reservations/signature-scan": {
+            "parameters": [
+                { "name": "trade_key", "in": "query", "required": true, "schema": { "type": "string" } },
+                { "name": "signature", "in": "query", "required": false, "schema": { "type": "string" } },
+                { "name": "alternates", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Comma-separated alternate signatures the same attempt could have landed under (re-signed or fee-payer-swapped transactions land under a different signature)." },
+                { "name": "operator_asserts_never_sent", "in": "query", "required": false, "schema": { "type": "boolean" } }
+            ],
+            "get": operation(
+                "operator.reservationSignatureScan",
+                "Chain existence across EVERY signature an ambiguous attempt could have landed under. `duplicate_detected` means more than one of them is on chain: a duplicate send already happened, so nothing is freed and nothing is booked. No chain reader reports `unknown`, never `absent`.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Signature scan report.", json!({
+                        "type": "object",
+                        "required": ["trade_key", "reports", "landed_signatures", "duplicate_detected", "existence", "link_allowed", "abandon_allowed", "settled_allowed", "reason"],
+                        "properties": {
+                            "trade_key": { "type": "string" },
+                            "reports": { "type": "array", "items": { "type": "object" }, "description": "Per-signature chain existence reports, recorded signature first." },
+                            "landed_signatures": { "type": "array", "items": { "type": "string" } },
+                            "duplicate_detected": { "type": "boolean" },
+                            "existence": { "type": "string", "enum": ["landed", "absent", "unknown"] },
+                            "link_allowed": { "type": "boolean" },
+                            "abandon_allowed": { "type": "boolean" },
+                            "settled_allowed": { "type": "boolean" },
+                            "reason": { "type": "string" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/accounting/conflict": {
+            "get": operation(
+                "operator.ledgerConflictStatus",
+                "Whether a journal-vs-book accounting conflict is latched, how many events/pending rows the local book holds, and — for a same-ID conflict — both sides of the contested event with the diverging field names.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Ledger conflict status.", json!({
+                        "type": "object",
+                        "required": ["conflict", "pending", "events", "payload_mismatches"],
+                        "properties": {
+                            "conflict": { "type": "string", "nullable": true },
+                            "pending": { "type": "integer" },
+                            "events": { "type": "integer" },
+                            "payload_mismatches": {
+                                "type": "array",
+                                "description": "For a latched same-ID conflict: the contested event id, the local event, every durable row and the diverging field names. Empty when nothing is latched. Read-only.",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["event_id", "local", "durable", "differences"],
+                                    "properties": {
+                                        "event_id": { "type": "string" },
+                                        "local": { "type": ["string", "null"] },
+                                        "durable": { "type": "array", "items": { "type": "string" } },
+                                        "differences": { "type": "array", "items": { "type": "string" } }
+                                    }
+                                }
+                            }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref()
+                })
+            )
+        },
+        "/api/accounting/reservations/sweep": {
+            "parameters": [{ "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }],
+            "get": operation(
+                "operator.reservationSweep",
+                "Ambiguous durable pre-broadcast reservations: lapsed reserved claims whose owner never linked or abandoned them, and linked rows with no signature. Fails closed with 503 when the durable store cannot be read.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Ambiguous pre-broadcast reservations.", json!({
+                        "type": "object",
+                        "required": ["available", "lapsed", "linked_without_signature", "claims"],
+                        "properties": {
+                            "available": { "type": "boolean" },
+                            "reason": { "type": ["string", "null"] },
+                            "lapsed": { "type": "integer" },
+                            "linked_without_signature": { "type": "integer" },
+                            "claims": { "type": "array", "items": { "$ref": "#/components/schemas/AmbiguousBroadcastClaim" } }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref(), "503": error_ref()
+                })
+            ),
+            "post": operation(
+                "operator.resolveReservation",
+                "Resolve ONE ambiguous pre-broadcast reservation with an explicit operator decision (`abandon` frees the trade key for a retry, `link` records the on-chain signature). The owner and epoch read from the sweep are a fencing token; a claim that changed hands is refused with 409 and never overwritten.",
+                &["operator"],
+                true,
+                json!({
+                    "type": "object",
+                    "required": ["trade_key", "owner", "epoch", "decision"],
+                    "properties": {
+                        "trade_key": { "type": "string" },
+                        "owner": { "type": "string" },
+                        "epoch": { "type": "integer" },
+                        "decision": { "type": "string", "enum": ["abandon", "link"] },
+                        "signature": { "type": "string" },
+                        "operator_asserts_never_sent": { "type": "boolean", "description": "Explicit human claim that the attempt never left the process; required for an `abandon` whose signature the chain does not know." }
+                    }
+                }),
+                json!({
+                    "200": json_response("Decision applied.", json!({
+                        "type": "object",
+                        "required": ["ok", "resolved"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "resolved": { "type": "boolean" },
+                            "reason": { "type": ["string", "null"] }
+                        }
+                    })),
+                    "400": error_ref(),
+                    "401": error_ref(), "403": error_ref(), "429": error_ref(),
+                    "409": json_response("The claim no longer matches the owner/epoch read (already terminal or taken over).", json!({
+                        "type": "object",
+                        "required": ["ok", "resolved"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "resolved": { "type": "boolean" },
+                            "reason": { "type": ["string", "null"] }
+                        }
+                    })),
+                    "503": error_ref()
+                })
+            )
+        },
+        "/api/accounting/conflict/repair": {
+            "post": operation(
+                "operator.repairLedgerConflict",
+                "Rebuild the local book from the durable journal, clearing a latched conflict. The journal wins; local rows it does not back are dropped. Returns 409 when the repair is refused (unreadable journal or an unadjudicable pending booking) and the fail-closed fence stays set.",
+                &["operator"],
+                true,
+                json!(null),
+                json!({
+                    "200": json_response("Book repaired from the durable journal.", json!({
+                        "type": "object",
+                        "required": ["ok", "report"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "report": { "$ref": "#/components/schemas/JournalRepair" }
+                        }
+                    })),
+                    "401": error_ref(), "403": error_ref(), "409": json_response("Repair refused; the conflict fence stays set.", json!({
+                        "type": "object",
+                        "required": ["ok", "report"],
+                        "properties": {
+                            "ok": { "type": "boolean" },
+                            "report": { "$ref": "#/components/schemas/JournalRepair" }
+                        }
+                    })), "429": error_ref()
                 })
             )
         },

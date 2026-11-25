@@ -11,9 +11,8 @@
 //!   before the first mutation — an attribution record (actor/origin)
 //!   the repositories read for their audit columns;
 //! * the tenant advisory-lock entry point (`recovery sweep`,
-//!   `recon sweep` …) namespaced per (tenant, purpose), so two tenants
-//!   doing the same logical job never contend while two workers of one
-//!   tenant still serialize.
+//!   `recon sweep` …) hashes a (tenant, purpose) key. Equal keys serialize;
+//!   distinct tenant/purpose strings can still collide in 32-bit hash space.
 //!
 //! Commit and rollback are explicit; dropping the wrapper rolls back
 //! (sqlx discipline, unchanged).

@@ -48,6 +48,7 @@ fn state_with(saas: Arc<SaasStore>, db: Option<Arc<Database>>) -> ApiState {
         trusted_proxies: Default::default(),
         db,
         journal: None,
+        chain_probe: None,
         serve_dashboard: false,
         health: Arc::new(HealthRegistry::new()),
         metrics_enabled: false,
@@ -140,6 +141,15 @@ async fn setup_db() -> Option<Arc<Database>> {
     let cfg = DatabaseConfig {
         enabled: true,
         auto_migrate: true,
+        // The interleaving regression deliberately holds two advisory-lock
+        // transactions while login, reset and the observer each need a
+        // connection. The production-default eight-connection pool can
+        // exhaust before the controlled SQL gate is reached, turning a race
+        // proof into a PoolTimedOut false negative under a loaded runner.
+        max_connections: 24,
+        acquire_timeout_ms: 30_000,
+        statement_timeout_ms: 60_000,
+        query_timeout_ms: 60_000,
         ..Default::default()
     };
     let db = Database::connect(&cfg, &url).await.expect("connect");
@@ -652,7 +662,13 @@ async fn login_interleaved_with_password_reset_never_resurrects_stale_credential
     let login_email = email.clone();
     let login_task =
         tokio::spawn(async move { login(login_saas, &login_db, &login_email, OLD_PASSWORD).await });
-    let session_gate_reached = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    // Bounded by the OBSERVATION, not by a guess at machine speed. This file
+    // takes ~38 s alone and ~272 s inside the full workspace sweep, where the
+    // login's own round-trips (email lookup, argon2 verify, then the insert) run
+    // far slower than the 10 s this used to allow — it failed in the sweep and
+    // passed twice in isolation. A real regression shows up as the same
+    // statement taking longer than 60 s, which is still a hard failure.
+    let session_gate_reached = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let waiting: (bool,) = sqlx::query_as(
                 "SELECT EXISTS (
@@ -686,7 +702,7 @@ async fn login_interleaved_with_password_reset_never_resurrects_stale_credential
     // The buggy implementation reaches token consumption while login's
     // session insert is paused. The atomic implementation first locks the
     // user row, so reset must wait there. Observe the actual SQL lock point.
-    let phase = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    let phase = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let (phase,): (String,) = sqlx::query_as(
                 "SELECT CASE

@@ -15,6 +15,8 @@
 
 use std::collections::BTreeMap;
 
+use super::posting::{Account, Entry};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -342,6 +344,95 @@ impl PositionBook {
             EventSide::Sell => {
                 let q = event.quantity.min(pos.qty).max(0.0);
                 cost_of_slice = pos.avg_cost() * q;
+                let gross = event.quote_amount + event.fee;
+                realized_delta = gross - cost_of_slice;
+                pos.realized += realized_delta;
+                pos.cost_basis = (pos.cost_basis - cost_of_slice).max(0.0);
+                pos.qty = (pos.qty - q).max(0.0);
+                if pos.qty <= 1e-12 {
+                    pos.qty = 0.0;
+                    pos.cost_basis = 0.0;
+                }
+                pos.sold_quote += event.quote_amount;
+                pos.sold_qty += q;
+            }
+        }
+        pos.fees += event.fee;
+        if let Some(p) = event.price.filter(|p| p.is_finite() && *p > 0.0) {
+            pos.last_price = p;
+        } else if event.quantity > 0.0 && event.quote_amount > 0.0 {
+            pos.last_price = event.quote_amount / event.quantity;
+        }
+        pos.updated_at = event.ts.max(pos.updated_at);
+        pos.event_count = pos.event_count.saturating_add(1);
+        pos.last_event_id = event_id.to_string();
+        if let Some(id) = &event.position_id {
+            if !pos.position_ids.iter().any(|x| x == id) {
+                pos.position_ids.push(id.clone());
+            }
+        }
+        let qty_after = pos.qty;
+        let transition = match (qty_before > 1e-12, qty_after > 1e-12) {
+            (false, true) => "opened",
+            (true, true) if qty_after > qty_before => "increased",
+            (true, true) => "reduced",
+            (true, false) => "closed",
+            (false, false) => "closed",
+        };
+        BookEffect {
+            key,
+            qty_before,
+            qty_after,
+            realized_delta,
+            fee_delta: event.fee,
+            cost_of_slice,
+            transition,
+        }
+    }
+
+    /// Apply an event from its COMMITTED postings instead of recomputing them.
+    ///
+    /// A replica that did not see the opening buy cannot derive the cost of a
+    /// later sell; the journal can, because it recorded the postings at the time
+    /// the fact happened. This variant therefore takes the inventory movement and
+    /// the realized result FROM the entry, so the replay reproduces the committed
+    /// book exactly rather than inventing a local one.
+    pub fn apply_committed(
+        &mut self,
+        event: &AccountingEvent,
+        event_id: &str,
+        entry: &Entry,
+    ) -> BookEffect {
+        if !event.kind.moves_inventory() {
+            // Cash-only events are fully determined by the event itself.
+            return self.apply(event, event_id);
+        }
+        let key = PositionKey::of(event);
+        let pos = self
+            .positions
+            .entry(key.clone())
+            .or_insert_with(|| BookPosition::new(key.clone(), event.ts));
+        let qty_before = pos.qty;
+        let mut realized_delta = 0.0;
+        let mut cost_of_slice = 0.0;
+        match event.side.unwrap_or(EventSide::Buy) {
+            EventSide::Buy => {
+                // Inventory debited = base units received; cost paid = quote minus fee.
+                pos.qty += event.quantity;
+                pos.cost_basis += (event.quote_amount - event.fee).max(0.0);
+                pos.bought_quote += event.quote_amount;
+                pos.bought_qty += event.quantity;
+            }
+            EventSide::Sell => {
+                // Inventory credited to this event IS the committed cost of the slice.
+                let committed = entry
+                    .postings
+                    .iter()
+                    .filter(|p| p.event_id == event_id && p.account == Account::Inventory)
+                    .map(|p| p.amount)
+                    .sum::<f64>();
+                let q = event.quantity.min(pos.qty).max(0.0);
+                cost_of_slice = committed.max(0.0);
                 let gross = event.quote_amount + event.fee;
                 realized_delta = gross - cost_of_slice;
                 pos.realized += realized_delta;

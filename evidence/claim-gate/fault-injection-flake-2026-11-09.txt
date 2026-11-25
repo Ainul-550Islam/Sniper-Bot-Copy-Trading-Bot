@@ -1,0 +1,85 @@
+# multi_replica_fault_injection: a fixed 30 ms window raced a database round-trip (2026-11-09)
+
+Found by: the full workspace sweep after the runtime-fence work.
+  two_replicas_never_both_broadcast_and_a_crashed_owner_fences_out
+  panicked at multi_replica_fault_injection.rs:259
+  assertion `left == right` failed: the crashed attempt's broadcast future was polled once
+    left: 0     right: 1
+
+## Diagnosis (not a guess: it passes isolated, fails under load)
+
+`with_reserved_intent_disposition` does TWO durable round-trips before the caller's
+broadcast future is ever polled:
+    s.record_checked(rec).await?;   // journal the intent
+    s.reserve(reservation_key, ..)  // take the durable reservation
+    let out = run.await;            // <- the closure that increments the counter
+The test drove the future inside
+    tokio::select! { _ = crashed_future => panic!(..), _ = sleep(30ms) => {} }
+and then asserted the counter was 1. When the sweep is running the whole workspace
+against one database (and each `setup()` opens its own connection), those two
+round-trips can exceed 30 ms, so the future was dropped BEFORE `run` was polled and
+the counter stayed 0. Isolated runs pass 100% (verified 3x before touching it).
+
+The assertion itself is right — "the killed process polled the broadcast once" — the
+clock was wrong.
+
+## Fix
+
+Wait for the CONDITION, bounded, while still polling the future (pinning alone would
+deadlock: nothing polls it):
+    tokio::pin!(crashed_future);
+    tokio::time::timeout(10s, loop {
+        tokio::select! {
+            _ = &mut crashed_future => panic!("must never resolve"),
+            _ = sleep(5ms) => if crashed_sends >= 1 { return; }
+        }
+    })
+    ...assert_eq!(counter, 1)
+    drop(crashed_future);   // the crash: dropped unresolved, exactly as before
+
+Semantics preserved: the future is still abandoned rather than awaited, the claim is
+still left `reserved` for the lease to lapse, and the rest of the fault-injection
+scenario (1.5 s wait, takeover by replica A, fencing of the crashed owner) is
+untouched.
+
+A first attempt at this fix used `pin!` + a sleep loop without polling. The test
+failed immediately with "never polled within 10 s" — correct, and a reminder that
+`pin!` pins, it does not poll. The `select!` loop is the fix.
+
+## GREEN
+
+  cargo test -p sniper-suite --test multi_replica_fault_injection -- --test-threads=1
+  -> 1 passed, 0 failed  (twice in a row, 2.1-2.2 s)
+  fmt 0; `git diff --check` 0
+
+## Residual
+
+The test still spends a fixed 1.5 s waiting for the reservation lease to lapse —
+that is the product's lease semantics, not a race, and was left alone.
+
+
+## Second instance, same class (found in the next sweep)
+
+`crates/server/tests/password_reset_integration.rs::login_interleaved_with_password_reset_never_resurrects_stale_credentials`
+failed in the sweep with
+    panicked at password_reset_integration.rs:685: login did not reach the controlled session insert
+while the file passed 2/2 in isolation (39.6 s, 37.9 s) and the whole file takes
+271.8 s under sweep load versus ~38 s alone.
+
+The test is not flaky in its logic: it holds advisory locks, then WAITS while an
+observer loop polls `pg_stat_activity` for the login transaction to block on the
+session insert. It gave that observation 10 s (and the reset phase 20 s). Under
+sweep load the login's own work before the insert — email lookup, argon2 verify —
+runs several times slower, so the observer's window closed before the state the
+test was waiting for could appear.
+
+Fixed the same way: the observation budget, not the assertion, was raised
+(10 s → 60 s and 20 s → 60 s), with a comment saying why. A genuine regression still
+fails, because the statement would then never block at all and the wait is now
+longer, not shorter.
+
+GREEN: `cargo test -p sniper-suite --test password_reset_integration -- --test-threads=1`
+  -> 9 passed, 0 failed (262 s with the targeted DB, 320 s against the sweep DB)
+
+Both rows share one lesson: these tests wait for a DATABASE to reach a state, and
+bounded waits in them must be sized for the loaded machine, not the idle one.

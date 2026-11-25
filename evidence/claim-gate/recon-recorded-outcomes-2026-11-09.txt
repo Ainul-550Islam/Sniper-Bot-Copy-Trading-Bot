@@ -1,0 +1,172 @@
+# A recon verdict is not a recorded outcome (2026-11-09)
+
+Part of the row "Recovery worker errors and ambiguous intent", which recorded:
+"generic journal abandons all errors; queue finalization/read failures and
+position-correction persistence can be suppressed. Inspect call sites and reproduce
+before determining money-path impact."
+
+## What the source actually did
+
+`RecoveryWorker::run_batch` recorded every reconciliation verdict with
+
+    repo.resolve(&item.kind, &item.subject).await.ok();
+    repo.fail(&item.kind, &item.subject, &reason).await.ok();
+    repo.give_up(&item.kind, &item.subject, &reason).await.ok();
+
+and then incremented `stats.resolved` / `stats.retried` / `stats.given_up`
+unconditionally. The verdict is what EXTERNAL truth said; the queue write is what makes
+it durable. If the write failed, the operator was told the claim was handled, while the
+row still held its claim and would be looked up again after the lease. Nothing in the
+logs or the report said so. `Release` on the shutdown path was swallowed the same way.
+
+Money-path impact: none directly — this is the reconciliation queue, not a broadcast
+path — but it is an observability lie on the surface operators use to decide whether a
+restart is safe, so it is worth fixing before it hides a real stuck claim.
+
+## The fix
+
+* New seam `ReconQueueWrites` (resolve / fail / give_up / release) implemented by
+  `ReconRepo`; the worker's batch runs against the trait so the failure path is testable.
+* New `record_verdict(queue, item, verdict) -> RecordOutcome` — the decision that used to
+  be `.ok()`. `Recorded` only when the write returned `Ok`; otherwise `Unrecorded` and a
+  `warn!` naming kind, subject, verdict and the store error.
+* `ReconStats.unrecorded` and `StartupReconReport.unrecorded` count those cases, and both
+  the pass log and the startup log print them next to resolved/retried/given_up.
+* `release_claim` returns `bool` (did the release take?) and the shutdown path counts a
+  failure as `unrecorded`; the warn says the claim will lapse with its lease.
+* `resolved` / `given_up` / `retried` are incremented only alongside their outcome, so a
+  swallowed failure can no longer be reported as a handled claim.
+
+## Witnesses
+
+A. `bot-core recovery::tests::a_verdict_that_could_not_be_recorded_is_not_reported_as_resolved`
+   a queue whose every write fails: `Resolved` ⇒ `Unrecorded`; `Retry` and `GiveUp` ⇒
+   `Unrecorded`, each naming its own write (`fail order/subj-1: …`,
+   `give_up order/subj-1: …`); an ACCEPTING queue ⇒ `Recorded`; `release_claim` reports
+   false/true honestly.
+B. `bot-core tests/db_integration.rs::a_recon_pass_reports_what_it_actually_recorded`
+   REAL PostgreSQL: a claim is enqueued, a truth source confirms it, the pass reports
+   `resolved >= 1`, `unrecorded == 0`, AND the queue's own active counts show the claim is
+   no longer pending — the report and the durable state agree.
+
+## RED evidence
+
+Restoring the old behaviour inside `record_verdict` (`_ => RecordOutcome::Recorded`)
+fails witness A immediately:
+  assertion `left == right` failed: a failed queue write must not be reported as recorded
+    left: Recorded
+   right: Unrecorded
+
+## GREEN
+
+- `cargo test -p bot-core --lib -- recovery` → 18 passed, 0 failed
+- `cargo test -p bot-core --test db_integration -- --test-threads=1 recon` → 4 passed,
+  0 failed (real PostgreSQL), including the pre-existing startup-reconcile witnesses
+- clippy `-D warnings` clean (bot-core, sniper-suite); fmt 0; `git diff --check` 0
+
+## Still open on that row
+
+* `with_intent` (the generic journal) still maps EVERY error to `Retain`, i.e. "unknown,
+  leave it for the operator". That is the SAFE default for an arbitrary future (an error
+  may mean bytes already left the process), and the checked/reserved variants are what the
+  money paths use. Not changed here: deciding "this error proves a non-send" needs a typed
+  error, and inventing one from a string is how claims get freed wrongly.
+* Position-correction persistence (`is_active` DB errors → false, fill-history failures →
+  empty) is a separate item on the same source-review batch and is NOT covered here.
+
+## A second defect found while proving the first
+
+Investigating why the new witnesses passed alone but failed in the full sweep exposed a
+ROW-LEVEL lie in the same queue (visible in the sweep database):
+
+    select kind, status, attempts from reconciliation_state where status='in_progress';
+    intent | in_progress | 10        Last_error: "no truth source registered"
+    intent | in_progress | 10
+
+`claim_due` refuses to hand out a claim once `attempts >= max_attempts` — correct. But
+nothing moved such a row OUT of `in_progress`: it was not due (never claimed again) and
+not `failed` (never listed in the operator queue), so it was invisible forever. That is
+exactly the case where a worker dies between claiming and recording, or where the
+recording write fails (the bug fixed above): the claim silently rots.
+
+Fix: `ReconRepo::park_exhausted_in_progress()` parks `in_progress` rows whose
+`attempts >= max_attempts` into `failed`, setting
+`last_error = 'claim exhausted its attempts without a recorded outcome'` when the row had
+no reason yet. `RecoveryWorker::run_once` runs it before every batch, logs the parked
+count, and warns (without failing the pass) if the sweep itself cannot run.
+
+Witness: `db_integration::an_exhausted_claim_is_parked_for_the_operator` (real PostgreSQL)
+strands a claim at `attempts = max_attempts` in `in_progress`, proves it is still "active"
+to the operator surface, parks it, and asserts the row is now `failed` WITH the reason;
+a second sweep is idempotent and a following `startup_reconcile` still completes.
+
+## Two test defects found by the same sweep run (test-only, no product change)
+
+1. `an_exhausted_claim_is_parked_for_the_operator` began with `assert!(!is_active(..),
+   "sanity: the row is in_progress")` — an inverted sanity check (a stranded row IS
+   active). Fixed to assert the true direction.
+2. `a_recon_pass_reports_what_it_actually_recorded` asserted a global count
+   (`unresolved_counts(true)` for kind `transaction`, which on a shared sweep database
+   includes every other suite's pending claims) and ran ONE pass — but `claim_due` is FIFO
+   by `next_attempt_at`, so a freshly enqueued claim is not in the first batch when ~89
+   claims are pending. Now it runs passes until its OWN subject is handled and asserts on
+   that subject's row (`status = 'resolved'`). The pre-existing
+   `intent_journal_lifecycle_and_orphan_sweep` had the same class of assumption
+   (`list_orphaned(ancient, 500).is_empty()` globally); it is now scoped to its own run.
+
+Lesson (again): a witness must assert about ITS OWN row on a shared database. Global
+counts and single-pass assumptions pass on an empty database and lie on a used one.
+
+## A third defect: a correction that was never stored was reported as settled
+
+The same class as the first two, one layer down — the outcome was honestly recorded, but
+the CORRECTION it recorded had not reached the database.
+
+`ReconPolicy::settle_position_outcome` had two branches that rewrite a position from the
+authoritative fill history: the `MissingPosition` branch (on-chain balance zero, a
+confirmed exit fill exists → close the position and recompute its economics) and the
+fill-justified drift branch (book disagrees with fills → adopt the fill-derived truth).
+Both then did:
+
+    if let Err(e) = PositionRepo::new(db.clone()).upsert(&final_pos).await {
+        debug!(position = %subject, error = %e, "failed to persist corrected position");
+    }
+    ... ReconVerdict::Resolved { status: "corrected-closed" /* or "corrected-adopted" */ }
+
+A failed write was a `debug!` line and the verdict still said "settled". The row was left
+unchanged, so the next restart re-reads it and re-opens the position — the correction is
+lossy in exactly the moment it matters (the database is unhappy). This is the same lie as
+defect (a), stated in terms of position state instead of queue state.
+
+Fix: a `PositionTruthWriter` seam (`upsert_position`, `flag`) implemented for `Database`,
+threaded through `settle_position_outcome`/`flag_position`. Both correction branches now
+report a failed write at `warn!` (with `position = %subject`), append the risk event
+`recon_correction_failed` carrying `{position_id, error}`, and return
+
+    ReconVerdict::Retry { reason: "correction not persisted: {error}" }
+
+so the queue retries instead of recording a settled position whose correction was never
+stored. Contract: a correction is reported as settled ONLY after its `upsert` returned
+`Ok`.
+
+Witness: `sniper_suite::recon::tests::an_unpersisted_correction_is_not_reported_as_settled`
+drives `settle_position_outcome` with a scripted writer. Failing writer → `Retry` whose
+reason contains `correction not persisted`, exactly one upsert attempt, and the flags are
+`["recon_correction_failed"]`. Accepting writer on the same inputs → `Resolved { status:
+"corrected-closed" }`, one upsert, flags `["recon_correction"]`.
+
+RED (fix temporarily reverted to the `debug!`-only + `Resolved` shape):
+
+    thread 'recon::tests::an_unpersisted_correction_is_not_reported_as_settled' panicked at
+    crates/server/src/recon.rs:1812:22:
+    an unpersisted correction must be retried, got Resolved { status: "corrected-closed" }
+
+GREEN after restoring the fix:
+
+    test recon::tests::an_unpersisted_correction_is_not_reported_as_settled ... ok
+    test result: ok. 4 passed; 0 failed; 0 ignored   (recon:: module)
+    cargo clippy -p sniper-suite --lib --tests -- -D warnings → clean
+    cargo fmt --check → clean;  git diff --check → clean
+
+Remaining known gap in this area: `recovery::with_intent` maps errors to `Retain` by
+design (the intent journal keeps the attempt) — reviewed, NOT a defect.

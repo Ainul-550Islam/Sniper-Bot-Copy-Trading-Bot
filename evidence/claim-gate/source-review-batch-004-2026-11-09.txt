@@ -1,0 +1,4 @@
+Source reading batch 004, 2026-11-09.
+Complete server persistence pump file read in chunks and post-review version hash below; reading does not certify correctness.
+ff7ef9e72166f4f064c7bcb843e2b41ebf1f2d8f6466c9828525bcde7dda9ab2  crates/server/src/persist.rs
+Pump consumes best-effort broadcast; lag means events are lost to that consumer; no universal reconciliation proof established. on_fill logs database errors and continues OMS processing, without durable retry. Position write errors and startup recovery failures are logged and not propagated. Lifecycle sink awaits SQL calls but swallows errors; an absent Submitted row is not proof of no network send. JSONL pump is a separate consumer, may lag or fail; source append flushes but does not call sync_all. Misleading unconditional exactly-once, catch-up, crash-safe and write-ahead comments were corrected, and lag warning made accurate. No runtime fix or fault injection is claimed.

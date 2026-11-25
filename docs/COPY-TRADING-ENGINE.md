@@ -28,7 +28,7 @@ the sniper govern this module:
 | Rule | Where it holds |
 |---|---|
 | One authoritative risk decision | `bot_core::risk::RiskEngine` — `check_copy_coded` (copy-specific) + `check_entry` (generic + copy caps). `policy.rs` never sizes or decides risk. |
-| One authoritative dedup | `event_dedup::claim` → `AppState::mark_copy_event_seen` (namespace `copy_event`). The feeds' `mark_signature_seen` is fetch suppression only. |
+| One authoritative dedup | Event-level `copy_event` dedup: `event_dedup::claim_shared` for clustered simulate/live; `claim` for the other paths. Feed signatures are not pre-marked; duplicates may reach the pipeline. |
 | Never bypass the execution engine | Every buy/sell goes through `solana_kit::execute::Executor` with a deterministic intent id, the execution ledger, the fee policy and the write-ahead intent journal. |
 | Replays never trade | `EventSource::Replay` is refused at the policy stage (`REPLAY_ONLY`); nothing else in the crate can send a transaction for a replayed event. |
 | Paper by default | Unchanged: `execution.mode = "paper"` builds and books a paper fill; nothing is broadcast. |
@@ -44,16 +44,15 @@ dropped as a duplicate; only PumpPortal (which does not pre-mark) ever
 reached the mirror. The pipeline now has its own namespace
 (`AppState::seen_copy_events` / dedup facade namespace `copy_event`) keyed by
 the **event** (`copy:{signature}:{leader}:{mint}:{side}`), and `run()` no
-longer touches the `sig` namespace. The feeds' behaviour is unchanged: their
-`mark_signature_seen` remains fetch suppression (decode a transaction once),
-and every event they hand over is marked seen **exactly once** by
-`event_dedup::claim` inside the pipeline. Regression tests:
-`tests/dedup_ordering.rs::feed_signature_marks_never_starve_the_pipeline`,
-`tests/geyser_feed.rs::geyser_feed_pushes_a_whale_buy_into_the_copy_channel`
-(a Geyser-delivered trade is fresh for the pipeline after the feed's mark)
-and `tests/copy_feed.rs::copy_feed_subscribes_tracked_wallets_and_maps_trades`
-(PumpPortal deliveries are decided once, buy and sell of one mint are
-distinct events).
+longer touches the `sig` namespace. Poll and Geyser no longer pre-mark a
+signature before fetching/decoding/delivery: failed polling fetches retain the
+cursor for retry and repeated notifications may enter the channel. The event
+pipeline performs dedup, subject to its retention and fallback limitations;
+this change can increase RPC and decoding load. The one-shot Geyser backfill
+still has no durable retry queue, and a channel send is not a processing ack.
+Regression evidence: `evidence/claim-gate/feed-retry-fix-2026-11-09.txt`; the
+prior suppression bug is preserved as historical evidence in
+`evidence/claim-gate/feed-null-retry-2026-11-09.txt`.
 
 ---
 
@@ -402,7 +401,7 @@ and a copy cap above the generic cap.
 | `tests/leader_lifecycle.rs` | config seeding, hot-reload sync, journal + audit per transition, state gating in the pipeline, invalid transitions, counter restore |
 | `tests/event_pipeline.rs` | full paper pipeline (position, ledger, journal, link, events, audit, metrics), live terminal states in one flow (`FILLED`, `AMBIGUOUS`, `EXIT_MIRRORED` under the hardened exit id, `REJECTED`, `FAILED`; all 15 stage counters), malformed events, every policy reason, risk gates and labels, legacy `mirror_trade`, FAILED vs REJECTED |
 | `tests/dedup_ordering.rs` | cross-feed duplicates, the feed-mark regression, one signature → distinct events, advisory vs strict ordering, per-leader cursors, gaps, seeding |
-| `tests/geyser_feed.rs`, `tests/copy_feed.rs` (pre-existing) | feed behaviour unchanged, plus: a feed-delivered trade is fresh for the pipeline's `copy_event` mark exactly once (feed `sig` marks never drop events as duplicates) |
+| `tests/geyser_feed.rs`, `tests/copy_feed.rs` (pre-existing) | Geyser duplicate notifications reach the channel and the pipeline deduplicates them; PumpPortal mapping coverage |
 | `tests/policy_sizing.rs` | precedence table, sizing matrix and degenerate inputs, approved size → position, partial exits |
 | `tests/intent_execution.rs` | live mode through the executor (deterministic intent, journal record/link/abandon), ledger duplicate guard, simulation failure, ambiguous broadcast, node rejection, pending cap |
 | `tests/reconciliation.rs` | clean pass, sweeper-closed links, leader exit flagged then auto-mirrored, re-buy cancels, drift/orphans/ambiguous, unfollowed leader |

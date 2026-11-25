@@ -1,0 +1,25 @@
+=== final checks after worker claim clock (gap #14) ===
+
+-- batch6 (inventory guard) --
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+-- openapi artifact + router conformance --
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.55s
+
+-- clippy --workspace -D warnings --
+    Checking sniper-suite v0.1.0 (/home/user/repo/crates/server)
+    Finished `dev` profile [unoptimized] target(s) in 4m 48s
+
+-- fmt --
+fmt_exit=0
+diff_check_exit=0
+
+-- make gates --
+make_gates_exit=0
+
+-- verify delivery --
+PASS  single canonical SBOM: sbom.json is CycloneDX with components, no duplicate
+----------------------------------------
+tree: 59836 files (excluding .git), 11757188014 bytes
+verify-delivery: 14 PASS / 0 FAIL

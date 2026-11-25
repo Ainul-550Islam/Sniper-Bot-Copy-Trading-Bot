@@ -1,0 +1,57 @@
+   Compiling module-copy v0.1.0 (/home/user/repo/crates/module-copy)
+    Finished `test` profile [unoptimized] target(s) in 10.71s
+     Running tests/copy_platform_fee.rs (target/debug/deps/copy_platform_fee-570a5bc57b5a34ad)
+
+running 12 tests
+test built_signed_transaction_contains_fee_transfer_for_buy_and_sell ... ok
+test buy_and_sell_prepare_atomic_sol_transfer_and_audit ... ok
+test confirmed_curve_buy_and_sell_audit_verified_fee_leg ... ok
+test curve_pipeline_refuses_self_vault_before_buy_or_sell_broadcast ... ok
+test curve_pipeline_skips_disabled_and_dust_fees_without_fee_transfer ... ok
+test direct_fee_rejects_payer_as_vault_and_audits_the_reason ... ok
+test direct_verification_never_claims_unconfirmed_or_missing_transaction ... ok
+test dust_and_disabled_are_audited_without_instruction ... ok
+test invalid_jupiter_account_is_audited_as_rejected_for_each_actor ... ok
+test invalid_vault_cannot_silently_drop_a_due_fee ... ok
+test jupiter_fee_account_must_be_initialized_wsol_token_account ... ok
+test real_copy_curve_pipeline_builds_fee_leg_for_buy_and_sell_on_mock_rpc ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/event_pipeline.rs (target/debug/deps/event_pipeline-e91aa44bb54378be)
+
+running 7 tests
+test execution_failures_are_failed_not_rejected_and_note_the_mint ... ok
+test legacy_mirror_trade_door_runs_the_pipeline ... ok
+test live_terminal_states_filled_ambiguous_and_exit_mirrored ... ok
+test malformed_events_are_refused_at_the_door ... ok
+test paper_buy_walks_every_stage_and_books_a_linked_position ... ok
+test policy_rejections_name_their_rule ... ok
+test risk_gates_are_the_authority_and_are_labelled ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.88s
+
+     Running tests/intent_execution.rs (target/debug/deps/intent_execution-2028dd78f0525f76)
+
+running 7 tests
+test ambiguous_broadcast_parks_without_booking_a_fill ... ok
+test ambiguous_exit_keeps_position_and_does_not_book_a_sell ... ok
+test live_mirror_confirms_through_the_executor_with_a_deterministic_intent ... ok
+test node_rejection_is_a_definite_failure_with_nothing_booked ... ok
+test pending_execution_cap_throttles_new_mirrors ... ok
+test simulation_failure_never_broadcasts_and_abandons_the_journal_entry ... ok
+test the_ledger_refuses_a_second_attempt_at_the_same_logical_trade ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.37s
+
+     Running tests/reconciliation.rs (target/debug/deps/reconciliation-be2b836a053003ff)
+
+running 6 tests
+test clean_state_reconciles_without_findings ... ok
+test leader_exit_seen_while_paused_is_flagged_then_mirrored_when_enabled ... ok
+test leader_rebuy_after_exit_cancels_the_finding ... ok
+test quantity_drift_orphans_and_ambiguous_entries_are_surfaced ... ok
+test sweeper_closed_positions_close_their_links ... ok
+test unfollowed_leader_with_open_position_is_flagged_not_sold ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s

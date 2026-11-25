@@ -1,0 +1,152 @@
+=== GREEN: module-telegram ===
+   Compiling module-telegram v0.1.0 (/home/user/repo/crates/module-telegram)
+warning: value assigned to `changed` is never read
+   --> crates/module-telegram/src/trade_port.rs:520:27
+    |
+520 |         let mut changed = original.clone();
+    |                           ^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+529 |             changed = original.clone();
+    |             ------- `changed` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: `module-telegram` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 12.54s
+     Running unittests src/lib.rs (target/debug/deps/module_telegram-0dc6c484f52db19d)
+
+running 130 tests
+test alerts::gate_tests::everything_off_still_delivers_fatal_errors ... ok
+test alerts::gate_tests::config_gate_maps_flags_to_categories ... ok
+test api::tests::empty_token_is_rejected ... ok
+test api::tests::method_url_is_wellformed ... ok
+test api::tests::never_splits_a_multibyte_char ... ok
+test api::tests::short_message_is_one_chunk ... ok
+test api::tests::splits_a_long_single_line_by_chars ... ok
+test api::tests::splits_on_line_boundaries ... ok
+test callbacks::tests::env_loading_accepts_hex_and_rejects_junk ... ok
+test callbacks::tests::foreign_and_malformed_payloads_are_distinguished ... ok
+test callbacks::tests::keyboard_json_carries_both_buttons ... ok
+test callbacks::tests::payload_round_trips_and_fits_telegram_cap ... ok
+test callbacks::tests::swap_confirm_cancel_prefix_breaks_signature ... ok
+test callbacks::tests::tampered_payloads_fail_closed ... ok
+test callbacks::tests::wrong_secret_never_verifies ... ok
+test api::tests::error_strings_never_contain_the_bot_token ... ok
+test commands::audit::tests::broken_store_always_errors ... ok
+test commands::audit::tests::event_labels_round_trip ... ok
+test commands::audit::tests::detail_builder_only_accepts_whitelisted_keys ... ok
+test commands::audit::tests::scrub_keeps_short_alphanumeric_words ... ok
+test commands::audit::tests::memory_store_assigns_ids_and_filters_by_org ... ok
+test commands::audit::tests::scrub_removes_nonce_and_token_material ... ok
+test commands::audit::tests::the_builder_can_only_produce_whitelisted_keys ... ok
+test commands::buy::tests::accepts_a_minimal_buy ... ok
+test commands::buy::tests::accepts_explicit_slippage_inside_the_window ... ok
+test commands::buy::tests::rejects_bad_arguments ... ok
+test commands::buy::tests::slippage_window_comes_from_the_limits ... ok
+test commands::confirm::tests::short_ids_are_stable_and_truncated ... ok
+test commands::confirm::tests::ttl_constant_is_one_minute ... ok
+test commands::consent_cmd::tests::consent_errors_are_explained ... ok
+test commands::consent_cmd::tests::link_denials_carry_stable_codes ... ok
+test commands::consent_cmd::tests::phrase_hint_and_bounds_are_the_policy_values ... ok
+test commands::consent_cmd::tests::subcommands_parse ... ok
+test commands::limits::tests::configuration_is_validated ... ok
+test commands::limits::tests::applicable_caps_take_the_tighter_side ... ok
+test commands::limits::tests::durable_counter_is_the_second_half_of_the_check ... ok
+test commands::limits::tests::limiter_denies_after_capacity_and_recovers ... ok
+test commands::limits::tests::order_cap_is_a_hard_ceiling ... ok
+test commands::limits::tests::rolling_cap_boundaries ... ok
+test commands::limits::tests::spent_since_matches_the_ledger_view ... ok
+test commands::limits::tests::token_bucket_refills_over_the_window ... ok
+test commands::nonce::tests::generated_nonces_are_hex_and_long_enough ... ok
+test commands::nonce::tests::generated_nonces_do_not_repeat ... ok
+test commands::nonce::tests::hashing_is_stable_and_distinct ... ok
+test commands::nonce::tests::input_rehydration_is_strict ... ok
+test commands::nonce::tests::nonce_debug_is_redacted ... ok
+test commands::nonce::tests::verification_matches_only_the_same_nonce ... ok
+test commands::parse::tests::every_parse_error_has_a_message_and_a_code ... ok
+test commands::parse::tests::grant_args_reject_bad_numbers_and_missing_phrase ... ok
+test commands::parse::tests::grant_args_take_positional_numbers_then_the_phrase ... ok
+test commands::parse::tests::invalid_mints_are_rejected ... ok
+test commands::parse::tests::lamport_conversion_is_exact ... ok
+test commands::parse::tests::percent_conversion_table ... ok
+test commands::parse::tests::slippage_window_is_enforced_not_clamped ... ok
+test commands::parse::tests::ttl_window_is_enforced ... ok
+test commands::parse::tests::valid_mints_are_accepted_verbatim ... ok
+test commands::pending::tests::a_confirmed_command_is_only_replayed_after_the_grace_window ... ok
+test commands::pending::tests::broken_store_never_silently_succeeds ... ok
+test commands::pending::tests::machine_allows_only_the_documented_edges ... ok
+test commands::pending::tests::open_binds_parameters_and_stores_only_the_digest ... ok
+test commands::pending::tests::pending_cancel_expire_and_counters ... ok
+test commands::pending::tests::status_labels_round_trip ... ok
+test commands::pending::tests::transitions_are_compare_and_set ... ok
+test commands::reply::tests::escaping_covers_every_special ... ok
+test commands::reply::tests::every_template_renders_as_safe_markdown ... ok
+test commands::reply::tests::help_mentions_every_command ... ok
+test commands::reply::tests::parse_mode_is_markdown_v2 ... ok
+test commands::reply::tests::pending_reply_carries_the_nonce_and_the_ttl ... ok
+test commands::reply::tests::percent_formatting_is_exact ... ok
+test commands::reply::tests::sol_formatting_is_exact ... ok
+test commands::sell::tests::accepts_percent_and_all ... ok
+test commands::sell::tests::rejects_out_of_range_and_malformed_percentages ... ok
+test commands::tests::auth_by_chat ... ok
+test commands::tests::auth_by_user ... ok
+test commands::tests::auth_denied_when_no_allowlist ... ok
+test commands::tests::command_role_requirements ... ok
+test commands::tests::handle_refuses_insufficient_roles_loudly ... ok
+test commands::tests::honours_prefix ... ok
+test commands::tests::legacy_allowlist_is_owner_when_no_owners_configured ... ok
+test commands::tests::parses_basic_commands ... ok
+test commands::tests::parses_mode_with_and_without_arg ... ok
+test commands::tests::parses_on_off_targets ... ok
+test commands::tests::roles_split_when_owners_configured ... ok
+test commands::tests::strips_botname_suffix ... ok
+test commands::tests::unknown_command_carries_token ... ok
+test consent::model::tests::authorises_requires_active_scope ... ok
+test consent::model::tests::every_error_has_a_distinct_code ... ok
+test consent::model::tests::scope_labels_round_trip_through_sql_form ... ok
+test consent::model::tests::scope_rejects_garbage_and_empty ... ok
+test consent::model::tests::status_prefers_revocation_then_expiry ... ok
+test consent::policy::tests::bounds_validation_rejects_incoherent_config ... ok
+test consent::policy::tests::caps_never_exceed_org_limits_and_are_never_clamped ... ok
+test consent::policy::tests::daily_below_order_and_zero_order_are_rejected ... ok
+test consent::policy::tests::defaults_are_conservative_and_lower_than_the_org_ceiling ... ok
+test consent::policy::tests::defaults_shrink_to_a_tighter_org_limit ... ok
+test consent::policy::tests::effective_caps_take_the_tighter_side ... ok
+test consent::policy::tests::phrase_hash_is_stable_and_phrase_independent ... ok
+test consent::policy::tests::phrase_is_case_and_space_insensitive ... ok
+test consent::policy::tests::require_active_covers_every_refusal ... ok
+test consent::policy::tests::ttl_bounds_are_enforced ... ok
+test consent::policy::tests::wrong_phrase_is_rejected ... ok
+test consent::store::tests::broken_store_always_errors ... ok
+test consent::store::tests::insert_then_read_back ... ok
+test consent::store::tests::lapsed_consent_is_retired_by_the_next_grant ... ok
+test consent::store::tests::only_one_live_consent_per_chat ... ok
+test consent::store::tests::revoke_is_immediate_and_idempotent ... ok
+test consent::tests::the_public_surface_is_the_one_the_console_uses ... ok
+test tests::menu_has_the_core_commands ... ok
+test trade_port::tests::action_labels_round_trip ... ok
+test trade_port::tests::dispatch_routes_on_action ... ok
+test trade_port::tests::error_codes_are_stable ... ok
+test trade_port::tests::fingerprint_binds_all_money_and_identity_fields ... ok
+test trade_port::tests::halt_and_gates_and_forced_errors_are_reported ... ok
+test trade_port::tests::idempotent_replay_does_not_duplicate ... ok
+test trade_port::tests::live_gates_need_both_flags ... ok
+test trade_port::tests::missing_org_limits_fail_closed ... ok
+test trade_port::tests::same_command_id_with_different_payload_is_refused ... ok
+test trade_session::tests::alerts_only_bindings_refuse_trades ... ok
+test trade_session::tests::confirm_consumes_and_replays_are_rejected ... ok
+test trade_session::tests::confirmations_expire ... ok
+test trade_session::tests::intent_validation_fails_closed ... ok
+test trade_session::tests::limits_re_checked_at_tap_time ... ok
+test trade_session::tests::nonces_are_unique_and_wellformed ... ok
+test trade_session::tests::only_the_requester_can_confirm_or_cancel ... ok
+test trade_session::tests::per_trade_cap_and_rate_limits ... ok
+test trade_session::tests::prune_expired_keeps_live_confirmations ... ok
+test trade_session::tests::unbind_drops_pending_confirmations ... ok
+test trade_session::tests::unbound_chats_are_refused ... ok
+test trade_session::tests::unconfigured_executor_fails_closed_loudly ... ok
+test commands::limits::tests::limiter_evicts_idle_chats ... ok
+
+test result: ok. 130 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.60s
+
+module_telegram_green_exit=0

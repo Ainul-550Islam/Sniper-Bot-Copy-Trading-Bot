@@ -227,6 +227,168 @@ async fn ambiguous_submit_found_on_the_venue_is_resolved_and_booked_once() {
     );
 }
 
+/// A claim sink that grants and then releases, recording what it was asked.
+struct ClaimSink {
+    releases: std::sync::atomic::AtomicUsize,
+    /// Answer to `release_reservation`: `Some(true)` = freed.
+    answer: Option<bool>,
+}
+
+impl ClaimSink {
+    fn new(answer: Option<bool>) -> Arc<Self> {
+        Arc::new(Self {
+            releases: std::sync::atomic::AtomicUsize::new(0),
+            answer,
+        })
+    }
+    fn releases(&self) -> usize {
+        self.releases.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl bot_core::recovery::IntentSink for ClaimSink {
+    async fn record(&self, _rec: bot_core::db::repo::IntentRecord) {}
+    async fn link(&self, _i: &str, _s: &str) {}
+    async fn abandon(&self, _i: &str) {}
+    async fn release_reservation(&self, _key: &str, _non_send: bool) -> Option<bool> {
+        self.releases
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.answer
+    }
+}
+
+#[tokio::test]
+async fn an_ambiguous_submit_the_venue_never_acknowledged_settles_in_the_loop() {
+    // A POST that timed out (HTTP 500 → ambiguous) never reached the venue.
+    // Venue truth: nothing for the derived id and nothing open. The loop must
+    // settle the claim through the venue probe instead of waiting for the
+    // lease to lapse, and it must do that EXACTLY once.
+    let venue = mock_venue().await;
+    let (state, oms) = state_with_oms(live_config(&venue));
+    let store = Arc::new(MemoryPolyStore::new());
+    let sink = ClaimSink::new(Some(true));
+    let bot = live_bot(&state, store.clone())
+        .await
+        .with_intent_sink(sink.clone());
+    let cfg = poly_cfg(&state).await;
+
+    venue.set_post(PostBehaviour::ServerError);
+    let out = bot
+        .process_signal(
+            &signal(decision(), ExecutionMode::Live),
+            &market(),
+            &quotes(),
+            &cfg,
+        )
+        .await;
+    assert_eq!(
+        out.stage,
+        PolyStage::Ambiguous,
+        "the submit must stay ambiguous"
+    );
+    let venue_order_id = out.venue_order_id.clone().unwrap();
+    venue.set_open_orders(vec![]);
+
+    let findings = bot.reconcile_once(&cfg).await.unwrap();
+    let settled = findings
+        .iter()
+        .find(|f| f.venue_order_id.as_deref() == Some(venue_order_id.as_str()))
+        .expect("the loop must settle the claim");
+    assert_eq!(settled.kind, ReconKind::AmbiguousSubmitResolved);
+    assert_eq!(
+        settled.action, "claim_released_absent",
+        "the venue's absence frees the token again"
+    );
+    assert_eq!(sink.releases(), 1, "released exactly once");
+    assert!(
+        settled.detail.contains("never acknowledged it"),
+        "{}",
+        settled.detail
+    );
+
+    let t = bot
+        .tracked_orders()
+        .await
+        .into_iter()
+        .find(|t| t.venue_order_id == venue_order_id)
+        .expect("still tracked");
+    assert_eq!(
+        t.state,
+        LocalOrderState::Failed,
+        "a never-acknowledged non-send is a definite failure"
+    );
+    assert_eq!(
+        oms.get(out.order_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .status,
+        OrderStatus::Failed
+    );
+
+    // The venue was asked, and a second pass settles nothing again.
+    assert!(
+        venue.count("GET", "/clob/data/order") >= 1,
+        "the loop must consult the venue"
+    );
+    let again = bot.reconcile_once(&cfg).await.unwrap();
+    assert!(
+        !again.iter().any(
+            |f| f.venue_order_id.as_deref() == Some(venue_order_id.as_str())
+                && f.action.starts_with("held_")
+        ),
+        "an already-settled order is not re-settled: {again:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_ambiguous_submit_the_venue_holds_is_never_settled_as_a_non_send() {
+    // Same ambiguous submit, but the venue DOES hold the derived id: the loop
+    // must not treat it as a non-send, and must not close the order.
+    let venue = mock_venue().await;
+    let (state, _oms) = state_with_oms(live_config(&venue));
+    let store = Arc::new(MemoryPolyStore::new());
+    let sink = ClaimSink::new(Some(true));
+    let bot = live_bot(&state, store.clone())
+        .await
+        .with_intent_sink(sink.clone());
+    let cfg = poly_cfg(&state).await;
+
+    venue.set_post(PostBehaviour::ServerError);
+    let out = bot
+        .process_signal(
+            &signal(decision(), ExecutionMode::Live),
+            &market(),
+            &quotes(),
+            &cfg,
+        )
+        .await;
+    assert_eq!(out.stage, PolyStage::Ambiguous);
+    let venue_order_id = out.venue_order_id.clone().unwrap();
+    venue.set_open_orders(vec![]);
+    venue.set_order(&venue_order_id, "matched", 25.0, 25.0);
+
+    let findings = bot.reconcile_once(&cfg).await.unwrap();
+    let for_order: Vec<_> = findings
+        .iter()
+        .filter(|f| f.venue_order_id.as_deref() == Some(venue_order_id.as_str()))
+        .collect();
+    assert!(!for_order.is_empty(), "a finding for the ambiguous order");
+    assert!(
+        for_order.iter().all(|f| !f.action.contains("released")),
+        "a landed order must never release its claim: {for_order:?}"
+    );
+    assert!(
+        for_order.iter().any(|f| f.action == "held_landed"),
+        "the venue check must report the landing: {for_order:?}"
+    );
+    assert_eq!(
+        sink.releases(),
+        0,
+        "the sink must never be asked to release"
+    );
+}
+
 #[tokio::test]
 async fn matched_size_drift_is_booked_from_venue_truth() {
     let venue = mock_venue().await;

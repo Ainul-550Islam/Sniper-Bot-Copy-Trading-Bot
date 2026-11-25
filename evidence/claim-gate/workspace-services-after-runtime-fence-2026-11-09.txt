@@ -1,0 +1,30 @@
+# Full workspace sweeps — runtime fence, signer revocation, signer key rotation (2026-11-09)
+
+command: cargo test --workspace --all-targets --locked -- --test-threads=1
+db:      sniper_gate_ws_20261111f (fresh), redis 56379, REQUIRE_POSTGRES=1 REQUIRE_SERVICES=1
+
+1. /tmp/ws-31j.log — after the runtime-fence work
+   exit 0 — 203 targets, 5081 passed, 0 failed, 1 ignored
+2. /tmp/ws-31k.log — after "the fence is no longer opt-in"
+   exit 0 — 203 targets, 5082 passed, 0 failed, 1 ignored
+3. /tmp/ws-31l.log — after signer revocation at broadcast
+   exit 0 — 203 targets, 5086 passed, 0 failed, 1 ignored
+4. /tmp/ws-31m.log — after signing-key rotation under an unchanged reference
+   exit 0 — 203 targets, 5089 passed, 0 failed, 1 ignored
+
+The single remaining ignore is a known open defect:
+  accounting_replica_order::stale_replica_sell_posting_uses_committed_inventory_cost
+
+Also in this window: two test-only timing fixes (multi_replica fault injection's 30 ms
+window replaced by a bounded condition wait; password_reset interleave observation budgets
+10 s/20 s -> 60 s). No product code was changed by those two.
+
+5. /tmp/ws-31n.log — after the stale-replica committed-cost fix
+   exit 0 — 203 targets, 5090 passed, 0 failed, 0 IGNORED
+
+   That is the first sweep in this project with no ignored test at all: the former
+   `#[ignore]` in `crates/` (accounting_replica_order: stale replica sell posting) now
+   runs and passes, so every test in the workspace is either running or env-gated.
+
+6. /tmp/ws-31p.log — after honest recon recording + parking exhausted claims
+   exit 0 — 203 targets, 5093 passed, 0 failed, 0 ignored

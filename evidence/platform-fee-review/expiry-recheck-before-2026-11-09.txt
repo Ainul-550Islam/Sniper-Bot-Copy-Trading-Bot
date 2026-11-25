@@ -1,0 +1,23 @@
+   Compiling solana-kit v0.1.0 (/home/user/repo/crates/solana-kit)
+    Finished `test` profile [unoptimized] target(s) in 19.10s
+     Running unittests src/lib.rs (target/debug/deps/solana_kit-085b8d99aaa4d737)
+
+running 1 test
+test rpc::tests::failed_expiry_double_check_remains_ambiguous ... FAILED
+
+failures:
+
+---- rpc::tests::failed_expiry_double_check_remains_ambiguous stdout ----
+
+thread 'rpc::tests::failed_expiry_double_check_remains_ambiguous' (2821925) panicked at crates/solana-kit/src/rpc.rs:1642:9:
+Expired { last_valid_block_height: 900, block_height: 1000 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    rpc::tests::failed_expiry_double_check_remains_ambiguous
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 489 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p solana-kit --lib`
+EXIT=101

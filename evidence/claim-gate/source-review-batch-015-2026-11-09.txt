@@ -1,0 +1,14 @@
+Source review batch 015, 2026-11-09: eleven complete accounting file versions read:
+f205d1aa3e811bf214a7dcdd66134951ac26ea4795b28e0567fa740fd31a1ff6  crates/core/src/accounting/mod.rs
+d6ed5ad866fc38f45760461e7430efece7b33bc4ea4fbb141416ff02640392e1  crates/core/src/accounting/audit.rs
+e8f99b25596bc70c64b1dd43ccb9c81a0cc0b542db97b6a6aeab5a5263ce305f  crates/core/src/accounting/book.rs
+44542bf3e1a6cd2a0bcc374f5abfa760f351dbb0d7544019908bc352ebf1a342  crates/core/src/accounting/event.rs
+bc5ce624a61b0fc78de407e4b50a762b62797b427b4ad826b52a51c254eb74c8  crates/core/src/accounting/ledger.rs
+68955dde917c35c897c0e332377805a995ad5ec4755b7ff1f59b7c615a3b9c5b  crates/core/src/accounting/metrics.rs
+72925d02b0070e5883429e5d7fd8556458fb09b49a124c6a6735836bb2b789d2  crates/core/src/accounting/posting.rs
+8d3e998a0d2ae880d58a8b1c3f5e82d23962a2d488d7e18e9cb0c9989528f5c6  crates/core/src/accounting/reconcile.rs
+38ae0885e261e2fb196dc787ea49a0ef181845f845b349ebce1137f71b402a8c  crates/core/src/accounting/recovery.rs
+c22d2f8dde3d264cebb29cdd68c2432bc178118c9caef51b1708e920467a5b44  crates/core/src/accounting/store.rs
+6c816b4bfce30fd1313fd854ab492dcb1de34eb3432818cff0bab0fe29831117  crates/core/src/accounting/view.rs
+
+Source observations only pending reproductions: GlobalLedger::submit compares local ids only and silently returns Duplicate for changed economics despite canonical_events map (hydrate does check equality); durable duplicate lacks payload readback. During store outage multiple replicas can each apply the same id with different payloads; flush_pending treats Some(false) as success without comparison or rollback. Different replicas can compute sell cost_of_slice on stale independent books before recording to shared store; stored balanced postings may diverge from replayed book because recorded event is replayed using a different prior state. Store ordering by per-replica recorded_at (local clocks) is not a total causal commit order; refresh_from_store hydrates only unknown rows after previously applied rows rather than rebuilding in durable order. PositionBook oversell clamps quantity but credits all proceeds; accounting semantics should be reviewed with over-sell/out-of-order events. Reconciliation matches trades/orders by unscoped id/reference alone and aggregates asset quantities without wallet or quote; matching collision and offsetting discrepancies might hide issues. Drawdown sums separate per-asset historical peaks, which can occur at different times; risks conservatively overstating drawdown. All require targeted interleavings / production wiring; no claim of demonstrated incidents.

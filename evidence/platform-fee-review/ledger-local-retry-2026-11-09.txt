@@ -1,0 +1,21 @@
+   Compiling bot-core v0.1.0 (/home/user/repo/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 8.97s
+     Running unittests src/lib.rs (target/debug/deps/bot_core-91f5a164e5b4183e)
+
+running 14 tests
+test accounting::ledger::tests::arithmetic_overflow_is_rejected_before_it_corrupts_the_book ... ok
+test accounting::ledger::tests::concurrent_identical_events_yield_one_mutation ... ok
+test accounting::ledger::tests::hydrate_rejects_same_event_id_with_changed_economics ... ok
+test accounting::ledger::tests::hydrate_reports_rows_whose_durable_id_does_not_match_the_event ... ok
+test accounting::ledger::tests::local_retry_rejects_changed_economics_without_double_booking ... ok
+test accounting::ledger::tests::journal_that_already_holds_the_fact_makes_it_a_duplicate ... ok
+test accounting::ledger::tests::malformed_events_change_nothing ... ok
+test accounting::ledger::tests::realized_series_overflow_is_rejected_before_journaling ... ok
+test accounting::ledger::tests::pending_journal_events_cannot_be_overtaken_by_new_submissions ... ok
+test accounting::ledger::tests::realized_series_tracks_day_totals_and_peak ... ok
+test accounting::ledger::tests::recovery_replays_append_order_not_out_of_order_fact_timestamps ... ok
+test accounting::ledger::tests::standalone_fee_quote_amount_counts_as_realized_loss ... ok
+test accounting::ledger::tests::the_same_fact_is_booked_exactly_once ... ok
+test accounting::ledger::tests::unavailable_journal_parks_the_event_and_flushes_later ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 670 filtered out; finished in 0.00s

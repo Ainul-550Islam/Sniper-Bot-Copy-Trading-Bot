@@ -327,10 +327,31 @@ impl ModuleControlStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// The provenance tag written into `tenant_module_controls.reason` when a
+    /// row was created by the TENANT KILL SWITCH rather than by an operator
+    /// pausing one module.
+    pub const KILL_SWITCH_REASON_TAG: &'static str = "[tenant-kill-switch] ";
+
+    /// Does this override row belong to the tenant kill switch (as opposed to
+    /// an individual module pause)?
+    pub fn is_kill_switch_row(entry: &ModuleControlOverride) -> bool {
+        entry.reason.starts_with(Self::KILL_SWITCH_REASON_TAG)
+    }
+
     /// Atomically set or clear the tenant emergency stop across every
     /// trading module. A kill switch is a tenant control, not a process-wide
     /// flag: the database transaction makes all module overrides visible
     /// together on every replica.
+    ///
+    /// **Releasing the kill switch removes only what the kill switch wrote.**
+    /// It used to `DELETE … WHERE module = ANY(trading modules)` — the entire
+    /// tenant's trading controls — so a tenant that had paused ONE module for
+    /// a real reason, then hit the emergency stop, then released it, came back
+    /// with every module enabled: the individual pause was silently erased
+    /// (and re-enabling one module during a stop could clear its killed row).
+    /// Rows the kill switch created are tagged with [`Self::KILL_SWITCH_REASON_TAG`]
+    /// and are the only ones removed on release; an operator's own pause keeps
+    /// its reason text and survives.
     pub async fn set_trading_kill_switch(
         &self,
         org: OrganizationId,
@@ -344,17 +365,28 @@ impl ModuleControlStore {
             for module in BotModule::TRADING {
                 let key = (org, module);
                 if active {
-                    cache_put(
-                        key,
-                        ModuleControlOverride {
-                            enabled: false,
-                            reason: reason.to_string(),
-                            updated_at: now,
-                            updated_by: updated_by.to_string(),
-                            version: 0,
-                        },
-                    );
-                } else {
+                    // An existing INDIVIDUAL pause is already `disabled` and
+                    // keeps its own reason/actor: engaging the kill switch must
+                    // not rewrite provenance it did not create (that is what
+                    // made the pause disappear on release). Anything else
+                    // (no row, an explicit enable, or an earlier kill row) is
+                    // written as a kill-switch row.
+                    let keep = cache_get(&key)
+                        .is_some_and(|e| !e.enabled && !Self::is_kill_switch_row(&e));
+                    if !keep {
+                        cache_put(
+                            key,
+                            ModuleControlOverride {
+                                enabled: false,
+                                reason: format!("{}{reason}", Self::KILL_SWITCH_REASON_TAG),
+                                updated_at: now,
+                                updated_by: updated_by.to_string(),
+                                version: 0,
+                            },
+                        );
+                    }
+                } else if cache_get(&key).is_some_and(|e| Self::is_kill_switch_row(&e)) {
+                    // Only a row the kill switch wrote is released.
                     cache_remove(&key);
                 }
             }
@@ -377,14 +409,21 @@ impl ModuleControlStore {
                             updated_by = EXCLUDED.updated_by,
                             correlation_id = EXCLUDED.correlation_id,
                             updated_at = EXCLUDED.updated_at,
-                            version = tenant_module_controls.version + 1",
+                            version = tenant_module_controls.version + 1
+                      -- An existing INDIVIDUAL pause (disabled, any other
+                      -- reason) is left exactly as it is: the kill switch does
+                      -- not take ownership of a row it did not create, so the
+                      -- release below cannot delete it.
+                      WHERE NOT (tenant_module_controls.enabled = false
+                                 AND NOT starts_with(tenant_module_controls.reason, $7))",
                 )
                 .bind(org.0)
                 .bind(module.as_str())
-                .bind(reason)
+                .bind(format!("{}{reason}", Self::KILL_SWITCH_REASON_TAG))
                 .bind(updated_by)
                 .bind(correlation_id)
                 .bind(now)
+                .bind(Self::KILL_SWITCH_REASON_TAG)
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| {
@@ -394,15 +433,27 @@ impl ModuleControlStore {
                 })?;
             }
         } else {
+            // Only the rows the kill switch itself wrote: an operator's own
+            // pause (any other reason text) survives the release.
             sqlx::query(
-                "DELETE FROM tenant_module_controls WHERE organization_id = $1 AND module = ANY($2)",
+                "DELETE FROM tenant_module_controls
+                  WHERE organization_id = $1 AND module = ANY($2)
+                    AND starts_with(reason, $3)",
             )
             .bind(org.0)
-            .bind(BotModule::TRADING.iter().map(|module| module.as_str().to_string()).collect::<Vec<_>>())
+            .bind(
+                BotModule::TRADING
+                    .iter()
+                    .map(|module| module.as_str().to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .bind(Self::KILL_SWITCH_REASON_TAG)
             .execute(&mut *transaction)
             .await
             .map_err(|error| {
-                ControlStoreError::Backend(format!("kill switch resume could not be persisted: {error}"))
+                ControlStoreError::Backend(format!(
+                    "kill switch resume could not be persisted: {error}"
+                ))
             })?;
         }
         transaction.commit().await.map_err(|error| {
@@ -414,13 +465,19 @@ impl ModuleControlStore {
                     (org, module),
                     ModuleControlOverride {
                         enabled: false,
-                        reason: reason.to_string(),
+                        reason: format!("{}{reason}", Self::KILL_SWITCH_REASON_TAG),
                         updated_at: now,
                         updated_by: updated_by.to_string(),
                         version: 0,
                     },
                 );
             } else {
+                // Drop the cache entry only for a kill-switch row; the durable
+                // read decides for an operator's own pause. Forgetting a stale
+                // entry is always safe (it is a read-through cache).
+                if cache_get(&(org, module)).is_some_and(|e| !Self::is_kill_switch_row(&e)) {
+                    continue;
+                }
                 cache_remove(&(org, module));
             }
         }
@@ -447,6 +504,15 @@ impl ModuleControlStore {
 mod tests {
     use super::*;
 
+    /// The cache is process-global, so two tests that each `reset_cache()`
+    /// would stomp on each other when the harness runs them concurrently. Every
+    /// test in this module holds this ASYNC lock for its whole body (an async
+    /// lock, so holding it across `await` is correct rather than a deadlock).
+    fn serial() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        &LOCK
+    }
+
     fn store() -> ModuleControlStore {
         reset_cache();
         ModuleControlStore::new(None)
@@ -456,6 +522,7 @@ mod tests {
     /// honestly that it is not durable.
     #[tokio::test]
     async fn memory_mode_round_trips_and_admits_it_is_not_durable() {
+        let _serial = serial().lock().await;
         let s = store();
         let org = OrganizationId::new();
         assert!(!s.is_durable());
@@ -502,6 +569,7 @@ mod tests {
     /// must not leak across modules.
     #[tokio::test]
     async fn overrides_are_tenant_and_module_scoped() {
+        let _serial = serial().lock().await;
         let s = store();
         let a = OrganizationId::new();
         let b = OrganizationId::new();
@@ -541,5 +609,106 @@ mod tests {
                 .0,
             "disabled"
         );
+    }
+
+    /// Releasing the tenant kill switch must not erase an individual pause.
+    ///
+    /// The release used to delete EVERY trading override of the tenant, so an
+    /// operator who paused one module for a real reason, then hit the emergency
+    /// stop, then released it, found every module enabled again. The kill
+    /// switch now tags the rows it writes and removes only those.
+    #[tokio::test]
+    async fn releasing_the_kill_switch_keeps_an_individual_pause() {
+        let _serial = serial().lock().await;
+        let s = store();
+        let org = OrganizationId::new();
+        let now = Utc::now();
+
+        // 1. An operator pauses ONE module for a real reason.
+        s.apply_override(
+            org,
+            BotModule::Sniper,
+            false,
+            "manual: bad signals",
+            "alice",
+            "c1",
+            now,
+        )
+        .await
+        .expect("individual pause lands");
+        // 2. The tenant hits the emergency stop.
+        s.set_trading_kill_switch(org, true, "operator emergency", "bob", "c2", now)
+            .await
+            .expect("kill switch engages");
+        for module in BotModule::TRADING {
+            let (state, entry) = s.effective_state(org, module).await.expect("read");
+            assert_eq!(state, "disabled", "{} is killed", module.as_str());
+            let entry = entry.expect("entry");
+            if module == BotModule::Sniper {
+                assert!(
+                    !ModuleControlStore::is_kill_switch_row(&entry),
+                    "the operator's own pause keeps its provenance through the stop"
+                );
+                assert_eq!(entry.reason, "manual: bad signals");
+            } else {
+                assert!(
+                    ModuleControlStore::is_kill_switch_row(&entry),
+                    "{} was disabled BY the kill switch",
+                    module.as_str()
+                );
+            }
+        }
+        // 3. … and releases it.
+        s.set_trading_kill_switch(org, false, "operator resume", "bob", "c3", now)
+            .await
+            .expect("kill switch releases");
+
+        // The individual pause SURVIVES, with its own reason and actor.
+        let (state, entry) = s
+            .effective_state(org, BotModule::Sniper)
+            .await
+            .expect("read");
+        assert_eq!(
+            state, "disabled",
+            "a pre-existing individual pause must survive the kill-switch release"
+        );
+        let entry = entry.expect("the pause row is still there");
+        assert!(!ModuleControlStore::is_kill_switch_row(&entry));
+        assert_eq!(entry.reason, "manual: bad signals");
+        assert_eq!(entry.updated_by, "alice");
+
+        // The modules the kill switch alone had disabled are enabled again.
+        for module in [BotModule::Copy, BotModule::Polymarket] {
+            let (state, entry) = s.effective_state(org, module).await.expect("read");
+            assert_eq!(state, "enabled", "{} is released", module.as_str());
+            assert!(entry.is_none(), "the kill-switch row is gone");
+        }
+    }
+
+    /// Two tenants are independent, and a release for one never touches the
+    /// other's rows.
+    #[tokio::test]
+    async fn the_kill_switch_release_is_tenant_scoped() {
+        let _serial = serial().lock().await;
+        let s = store();
+        let a = OrganizationId::new();
+        let b = OrganizationId::new();
+        let now = Utc::now();
+        s.apply_override(b, BotModule::Sniper, false, "b pause", "bob", "c", now)
+            .await
+            .expect("B pause");
+        s.set_trading_kill_switch(a, true, "A emergency", "amy", "c", now)
+            .await
+            .expect("A kills");
+        s.set_trading_kill_switch(a, false, "A resume", "amy", "c", now)
+            .await
+            .expect("A resumes");
+        let (state, _) = s.effective_state(b, BotModule::Sniper).await.expect("read");
+        assert_eq!(
+            state, "disabled",
+            "B's own pause is untouched by A's release"
+        );
+        let (state, _) = s.effective_state(a, BotModule::Sniper).await.expect("read");
+        assert_eq!(state, "enabled", "A released its own switch");
     }
 }

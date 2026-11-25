@@ -69,7 +69,7 @@ impl std::fmt::Display for RepositoryError {
                 write!(f, "{what} not found for the acting tenant")
             }
             RepositoryError::Conflict(what) => {
-                write!(f, "{what} conflicts with an existing record of this tenant")
+                write!(f, "{what} conflicts with an existing record")
             }
             RepositoryError::StaleWrite(what) => {
                 write!(f, "{what} moved on before the write; re-read and retry")
@@ -84,7 +84,10 @@ impl std::error::Error for RepositoryError {}
 
 impl From<TimedDbError> for RepositoryError {
     fn from(e: TimedDbError) -> Self {
-        RepositoryError::Storage(e.to_string())
+        match e {
+            TimedDbError::Conflict(kind) => RepositoryError::Conflict(kind),
+            other => RepositoryError::Storage(other.to_string()),
+        }
     }
 }
 
@@ -131,6 +134,13 @@ mod tests {
         assert!(!RepositoryError::Conflict("k").is_retryable());
         assert!(!RepositoryError::StaleWrite("s").is_retryable());
         assert!(!RepositoryError::Validation("v").is_retryable());
+    }
+
+    #[test]
+    fn timed_db_conflict_is_not_retryable_storage() {
+        let err: RepositoryError = TimedDbError::Conflict("trade_id").into();
+        assert!(matches!(err, RepositoryError::Conflict("trade_id")));
+        assert!(!err.is_retryable());
     }
 
     #[test]
